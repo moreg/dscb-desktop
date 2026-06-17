@@ -1,7 +1,10 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
+import { ProjectService } from './data/project-service'
 import { registerLibraryIpc } from './ipc/library'
+import { registerProjectsIpc } from './ipc/projects'
+import { registerChaptersIpc } from './ipc/chapters'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -34,9 +37,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  const libraryFile = join(app.getPath('userData'), 'library.json')
-  const repo = new LibraryRepository(libraryFile)
-  registerLibraryIpc(repo)
+  const userData = app.getPath('userData')
+  const libraryFile = join(userData, 'library.json')
+  const projectsRoot = join(userData, 'projects')
+  const libraryRepo = new LibraryRepository(libraryFile)
+  const projectService = new ProjectService(projectsRoot, libraryRepo)
+
+  registerLibraryIpc(libraryRepo)
+  registerProjectsIpc(projectService)
+  registerChaptersIpc(projectService)
 
   createWindow()
 
