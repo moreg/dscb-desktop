@@ -19,3 +19,11 @@ export async function writeJsonAtomic(file: string, data: unknown): Promise<void
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8')
   await fs.rename(tmp, file)
 }
+
+export async function writeTextAtomic(file: string, text: string): Promise<void> {
+  const dir = path.dirname(file)
+  await fs.mkdir(dir, { recursive: true })
+  const tmp = `${file}.tmp`
+  await fs.writeFile(tmp, text, 'utf-8')
+  await fs.rename(tmp, file)
+}
