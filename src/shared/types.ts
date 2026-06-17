@@ -18,7 +18,64 @@ export interface CreateProjectInput {
   genre?: string
 }
 
+export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
+
+export interface ProjectData {
+  schemaVersion: number
+  updatedAt: string
+  id: string
+  name: string
+  genre?: string
+  description?: string
+  targetChapters?: number
+  chapterWordCount?: number
+  status?: string
+  createdAt: string
+}
+
+export interface ChapterMeta {
+  schemaVersion: number
+  updatedAt: string
+  chapterNumber: number
+  title: string
+  wordCount: number
+  status: ChapterStatus
+  synopsis?: string
+  hook?: string
+}
+
+export interface ChapterContent {
+  meta: ChapterMeta
+  content: string
+}
+
+export interface CreateProjectDataInput {
+  name: string
+  genre?: string
+  description?: string
+  targetChapters?: number
+  chapterWordCount?: number
+}
+
+export interface CreateChapterInput {
+  title: string
+}
+
+export interface UpdateChapterMetaInput {
+  title?: string
+  status?: ChapterStatus
+  synopsis?: string
+  hook?: string
+}
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
-  createProject: (input: CreateProjectInput) => Promise<ProjectMeta>
+  createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
+  getProject: (projectId: string) => Promise<ProjectData>
+  listChapters: (projectId: string) => Promise<ChapterMeta[]>
+  getChapter: (projectId: string, n: number) => Promise<ChapterContent>
+  createChapter: (projectId: string, input: CreateChapterInput) => Promise<ChapterMeta>
+  updateChapterContent: (projectId: string, n: number, content: string) => Promise<ChapterMeta>
+  updateChapterMeta: (projectId: string, n: number, patch: UpdateChapterMetaInput) => Promise<ChapterMeta>
+  deleteChapter: (projectId: string, n: number) => Promise<void>
 }
