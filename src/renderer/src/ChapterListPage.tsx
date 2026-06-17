@@ -5,9 +5,15 @@ interface Props {
   projectId: string
   onBack: () => void
   onOpenChapter: (n: number) => void
+  onOpenCharacters: () => void
 }
 
-export default function ChapterListPage({ projectId, onBack, onOpenChapter }: Props) {
+export default function ChapterListPage({
+  projectId,
+  onBack,
+  onOpenChapter,
+  onOpenCharacters
+}: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -32,7 +38,12 @@ export default function ChapterListPage({ projectId, onBack, onOpenChapter }: Pr
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button onClick={onBack}>← 返回项目列表</button>
-        <button onClick={createChapter}>+ 新建章节</button>
+        <div>
+          <button onClick={onOpenCharacters} style={{ marginRight: 8 }}>
+            📝 人物管理
+          </button>
+          <button onClick={createChapter}>+ 新建章节</button>
+        </div>
       </div>
       <h2>章节列表</h2>
       {loading ? (
