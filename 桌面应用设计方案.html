@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-writer 桌面应用 · 实现设计方案</title>
+<style>
+  :root{
+    --bg:#f8fafc; --surface:#ffffff; --surface-2:#f1f5f9;
+    --ink:#0f172a; --ink-2:#334155; --muted:#64748b; --line:#e2e8f0;
+    --indigo:#4f46e5; --indigo-2:#6366f1; --indigo-soft:#eef2ff;
+    --violet:#7c3aed; --violet-soft:#f5f3ff;
+    --emerald:#059669; --emerald-soft:#ecfdf5;
+    --rose:#e11d48; --rose-soft:#fff1f2;
+    --amber:#d97706; --amber-soft:#fffbeb;
+    --code-bg:#0f172a; --code-ink:#e2e8f0;
+    --mono:ui-monospace,"SF Mono","Cascadia Code","Consolas","JetBrains Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+    --radius:14px; --shadow:0 1px 2px rgba(15,23,42,.04),0 8px 24px -12px rgba(15,23,42,.12);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1.65;font-size:15.5px;-webkit-font-smoothing:antialiased}
+  a{color:var(--indigo);text-decoration:none}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:.12em .4em;border-radius:5px;color:var(--violet)}
+
+  /* ---------- 顶部导航 ---------- */
+  header.nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.82);backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--line)}
+  .nav-inner{max-width:1180px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:22px}
+  .brand{font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:9px;white-space:nowrap}
+  .brand .dot{width:11px;height:11px;border-radius:3px;background:linear-gradient(135deg,var(--indigo),var(--violet));box-shadow:0 0 0 4px var(--indigo-soft)}
+  .nav-links{display:flex;gap:4px;flex-wrap:wrap;margin-left:auto}
+  .nav-links a{color:var(--muted);font-size:13.5px;padding:6px 11px;border-radius:8px;transition:.15s;font-weight:500}
+  .nav-links a:hover{background:var(--surface-2);color:var(--ink)}
+  .nav-links a.active{background:var(--indigo-soft);color:var(--indigo)}
+
+  /* ---------- Hero ---------- */
+  .hero{background:
+      radial-gradient(1200px 480px at 80% -10%,rgba(124,58,237,.28),transparent),
+      radial-gradient(900px 500px at 0% 0%,rgba(79,70,229,.30),transparent),
+      linear-gradient(180deg,#0b1224,#0f172a);
+    color:#e2e8f0;padding:64px 24px 70px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:42px 42px;mask:radial-gradient(700px 300px at 50% 0%,#000,transparent);pointer-events:none}
+  .hero-inner{max-width:1180px;margin:0 auto;position:relative}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#a5b4fc;background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.3);padding:6px 12px;border-radius:999px}
+  h1.hero-title{font-size:42px;line-height:1.12;letter-spacing:-.02em;margin:18px 0 12px;font-weight:800;color:#fff;max-width:880px}
+  h1.hero-title em{font-style:normal;background:linear-gradient(120deg,#a5b4fc,#c4b5fd);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero-sub{font-size:17px;color:#94a3b8;max-width:720px}
+  .hero-meta{display:flex;gap:22px;flex-wrap:wrap;margin-top:24px;color:#94a3b8;font-size:13.5px}
+  .hero-meta span{display:inline-flex;align-items:center;gap:7px}
+  .hero-meta b{color:#cbd5e1;font-weight:600}
+
+  /* ---------- 决策徽章 ---------- */
+  .decisions{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:34px}
+  .decision{background:rgba(255,255,255,.05);border:1px solid rgba(148,163,184,.18);border-radius:var(--radius);padding:16px 16px 14px;backdrop-filter:blur(6px)}
+  .decision .k{font-size:11.5px;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px}
+  .decision .v{font-size:16px;font-weight:700;color:#fff;line-height:1.3}
+  .decision .v small{display:block;font-weight:500;color:#a5b4fc;font-size:12.5px;margin-top:3px}
+
+  /* ---------- 通用布局 ---------- */
+  main{max-width:1180px;margin:0 auto;padding:0 24px}
+  section{padding:56px 0;border-bottom:1px solid var(--line);scroll-margin-top:70px}
+  section:last-of-type{border-bottom:none}
+  .sec-head{margin-bottom:26px}
+  .sec-num{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--indigo);background:var(--indigo-soft);padding:3px 9px;border-radius:6px;display:inline-block;margin-bottom:12px}
+  h2{font-size:27px;letter-spacing:-.015em;margin:0 0 8px;font-weight:750}
+  .sec-desc{color:var(--muted);font-size:15px;max-width:780px;margin:0}
+  h3{font-size:18px;margin:30px 0 12px;font-weight:700;letter-spacing:-.01em}
+
+  /* ---------- 对比卡 ---------- */
+  .vs{display:grid;grid-template-columns:1fr 44px 1fr;gap:0;align-items:stretch}
+  .vs-col{border-radius:var(--radius);padding:22px;border:1px solid var(--line);background:var(--surface)}
+  .vs-col.from{background:linear-gradient(180deg,#fff,#fafbfc)}
+  .vs-col.to{background:linear-gradient(180deg,var(--indigo-soft),#faf5ff);border-color:#e0e7ff}
+  .vs-col h4{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .vs-col .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;letter-spacing:.03em}
+  .tag.old{background:#f1f5f9;color:var(--muted)}
+  .tag.new{background:var(--indigo);color:#fff}
+  .vs-col .stack{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);margin:8px 0 14px;min-height:18px}
+  .vs-col ul{margin:0;padding-left:18px;color:var(--ink-2);font-size:14px}
+  .vs-col li{margin:5px 0}
+  .vs-arrow{display:flex;align-items:center;justify-content:center;font-size:22px;color:var(--indigo)}
+
+  /* ---------- 架构图 ---------- */
+  .arch{display:flex;flex-direction:column;gap:0;align-items:center;margin-top:8px}
+  .layer{width:100%;border-radius:var(--radius);padding:18px 20px;border:1px solid var(--line);background:var(--surface);box-shadow:var(--shadow);position:relative}
+  .layer .lname{font-weight:700;font-size:15px;display:flex;align-items:center;gap:9px;margin-bottom:4px}
+  .layer .ldesc{color:var(--muted);font-size:13.5px;margin-bottom:12px}
+  .chip-row{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{font-size:12.5px;font-weight:500;padding:5px 11px;border-radius:7px;background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2)}
+  .chip.b-indigo{background:var(--indigo-soft);border-color:#c7d2fe;color:var(--indigo)}
+  .chip.b-emerald{background:var(--emerald-soft);border-color:#a7f3d0;color:var(--emerald)}
+  .chip.b-rose{background:var(--rose-soft);border-color:#fecdd3;color:var(--rose)}
+  .chip.b-violet{background:var(--violet-soft);border-color:#ddd6fe;color:var(--violet)}
+  .layer.frontend{background:linear-gradient(180deg,#eef2ff,#fff);border-color:#c7d2fe}
+  .layer.ipc{background:linear-gradient(180deg,#faf5ff,#fff);border-color:#ddd6fe;width:62%}
+  .layer.main{background:linear-gradient(180deg,#0f172a,#1e293b);color:#e2e8f0;border-color:#334155}
+  .layer.main .lname{color:#fff}
+  .layer.main .ldesc{color:#94a3b8}
+  .layer.main .chip{background:rgba(255,255,255,.06);border-color:rgba(148,163,184,.25);color:#cbd5e1}
+  .arch-note{display:block;text-align:center;color:var(--emerald);font-weight:600;font-size:13px;margin-top:14px}
+  .arrow-down{display:flex;flex-direction:column;align-items:center;height:42px;justify-content:center;color:var(--muted)}
+  .arrow-down .bar{width:2px;height:18px;background:var(--muted);opacity:.5}
+  .arrow-down .lbl{font-size:11px;font-family:var(--mono);color:var(--violet);margin:2px 0}
+  .arrow-down .tri{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:7px solid var(--muted);opacity:.5}
+
+  /* ---------- callout ---------- */
+  .callout{border-radius:var(--radius);padding:20px 22px;border:1px solid var(--line);background:linear-gradient(120deg,var(--indigo-soft),var(--violet-soft));margin:18px 0 26px;display:flex;gap:16px;align-items:flex-start}
+  .callout .ico{font-size:26px;line-height:1}
+  .callout h4{margin:0 0 4px;font-size:16px}
+  .callout p{margin:0;color:var(--ink-2);font-size:14.5px}
+
+  /* ---------- 目录树 ---------- */
+  .trees{display:grid;grid-template-columns:1fr 1.25fr;gap:18px}
+  .tree-card{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--surface);box-shadow:var(--shadow)}
+  .tree-card .th{padding:11px 16px;font-size:13px;font-weight:700;border-bottom:1px solid var(--line);background:var(--surface-2);display:flex;align-items:center;gap:8px;color:var(--ink-2)}
+  .tree-card .th .pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--indigo-soft);color:var(--indigo)}
+  pre.tree{margin:0;padding:16px 18px;font-family:var(--mono);font-size:12.7px;line-height:1.7;color:var(--ink-2);overflow-x:auto;white-space:pre}
+  .d-dir{color:var(--indigo);font-weight:600}
+  .d-md{color:var(--emerald)}
+  .d-json{color:var(--amber)}
+  .d-jsonl{color:#0891b2}
+  .d-cmt{color:#94a3b8;font-style:italic}
+  .d-root{color:var(--violet);font-weight:700}
+
+  /* ---------- 表格 ---------- */
+  .table-wrap{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--surface);box-shadow:var(--shadow)}
+  table{width:100%;border-collapse:collapse;font-size:13.6px}
+  thead th{background:var(--surface-2);text-align:left;padding:11px 14px;font-weight:700;color:var(--ink-2);border-bottom:1px solid var(--line);font-size:12.5px;letter-spacing:.02em;text-transform:uppercase}
+  tbody td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fafbff}
+  td code{white-space:nowrap}
+  .fmt{font-family:var(--mono);font-size:11.5px;font-weight:600;padding:2px 7px;border-radius:5px}
+  .fmt.md{background:var(--emerald-soft);color:var(--emerald)}
+  .fmt.json{background:var(--amber-soft);color:var(--amber)}
+  .fmt.jsonl{background:#cffafe;color:#0891b2}
+  .fmt.mem{background:#f1f5f9;color:var(--muted)}
+
+  /* ---------- 流程图 ---------- */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin:14px 0 4px}
+  .step{flex:1;min-width:108px;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:12px 12px;text-align:center;box-shadow:var(--shadow)}
+  .step .n{font-family:var(--mono);font-size:11px;color:var(--indigo);font-weight:700}
+  .step .t{font-size:13.5px;font-weight:600;margin:3px 0 2px}
+  .step .d{font-size:11.5px;color:var(--muted);line-height:1.4}
+  .step.verified{border-color:#a7f3d0;background:var(--emerald-soft)}
+  .step.verified .n{color:var(--emerald)}
+  .step.danger{border-color:#fecdd3;background:var(--rose-soft)}
+  .farrow{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:18px;padding:0 4px;min-width:14px}
+
+  /* ---------- 改造表 行内标签 ---------- */
+  .badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:5px;letter-spacing:.03em}
+  .badge.del{background:var(--rose-soft);color:var(--rose)}
+  .badge.add{background:var(--emerald-soft);color:var(--emerald)}
+  .badge.cut{background:var(--rose-soft);color:var(--rose)}
+  .badge.keep{background:var(--surface-2);color:var(--muted)}
+
+  /* ---------- 时间线 ---------- */
+  .timeline{position:relative;margin-top:18px;padding-left:8px}
+  .timeline::before{content:"";position:absolute;left:18px;top:6px;bottom:6px;width:2px;background:linear-gradient(180deg,var(--indigo),var(--violet),var(--line))}
+  .tl-item{position:relative;padding:0 0 22px 48px}
+  .tl-item::before{content:"";position:absolute;left:11px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid var(--indigo);box-shadow:0 0 0 4px var(--indigo-soft)}
+  .tl-item .ph{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--indigo)}
+  .tl-item h4{margin:2px 0 4px;font-size:15.5px}
+  .tl-item p{margin:0;color:var(--ink-2);font-size:13.8px}
+
+  /* ---------- LLM 链 ---------- */
+  .llm-chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px}
+  .node{padding:10px 14px;border-radius:10px;font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--surface)}
+  .node.render{background:var(--indigo-soft);border-color:#c7d2fe;color:var(--indigo)}
+  .node.ipc{background:var(--violet-soft);border-color:#ddd6fe;color:var(--violet)}
+  .node.main{background:#1e293b;color:#e2e8f0;border-color:#334155}
+  .node.cloud{background:var(--amber-soft);border-color:#fde68a;color:var(--amber)}
+  .node small{display:block;font-weight:500;font-size:11px;opacity:.85;margin-top:1px}
+
+  .secret{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+  .secret .box{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--surface)}
+  .secret .box h5{margin:0 0 6px;font-size:13.5px;display:flex;align-items:center;gap:7px}
+  .secret .box p{margin:0;font-size:13px;color:var(--ink-2)}
+
+  /* ---------- 页脚 ---------- */
+  footer{background:#0f172a;color:#94a3b8;padding:40px 24px;text-align:center;font-size:13.5px}
+  footer b{color:#cbd5e1}
+
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .note{font-size:13px;color:var(--muted);margin-top:10px}
+
+  @media(max-width:880px){
+    .decisions{grid-template-columns:1fr 1fr}
+    .vs{grid-template-columns:1fr;gap:0}
+    .vs-arrow{transform:rotate(90deg);height:36px}
+    .trees{grid-template-columns:1fr}
+    .grid-2,.secret{grid-template-columns:1fr}
+    .nav-links{display:none}
+    h1.hero-title{font-size:31px}
+    .layer.ipc{width:100%}
+  }
+  @media print{
+    header.nav{position:static;background:#fff}
+    .hero{color:#000;background:#fff;border-bottom:2px solid #000}
+    .hero *{color:#111!important}
+    section{break-inside:avoid;border-bottom:1px solid #ccc}
+    body{background:#fff}
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <div class="brand"><span class="dot"></span>ai-writer 桌面版</div>
+    <nav class="nav-links">
+      <a href="#overview">总览</a>
+      <a href="#arch">架构</a>
+      <a href="#storage">文件存储</a>
+      <a href="#mapping">表映射</a>
+      <a href="#repo">数据流</a>
+      <a href="#llm">LLM</a>
+      <a href="#writing">正文写作</a>
+      <a href="#migration">迁移</a>
+      <a href="#phases">实现阶段</a>
+      <a href="#risk">风险</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="hero-inner">
+    <span class="eyebrow">◆ 设计方案 · Implementation Design</span>
+    <h1 class="hero-title">把 ai-writer 变成桌面应用：<br>小说存<em>本地文件</em>，告别数据库</h1>
+    <p class="hero-sub">从 Python 全栈 Web 应用，重构为 Electron 桌面应用。存储由 SQLite 改为「一个项目 = 一个可携带的文件夹」。本页是完整实现方案的可视化说明。</p>
+    <div class="hero-meta">
+      <span>📤 <b>交付物</b>：设计方案展示页（本文档）</span>
+      <span>🎯 <b>范围</b>：核心 MVP</span>
+      <span>🖥️ <b>骨架</b>：Electron（去 Python 后端）</span>
+      <span>📅 <b>日期</b>：2026-06-17</span>
+    </div>
+
+    <div class="decisions">
+      <div class="decision"><div class="k">交付物</div><div class="v">设计方案展示页<small>可视化 HTML，非可运行应用</small></div></div>
+      <div class="decision"><div class="k">功能范围</div><div class="v">核心 MVP<small>正文·大纲·章节·记忆</small></div></div>
+      <div class="decision"><div class="k">技术骨架</div><div class="v">Electron<small>完全去掉 Python 后端</small></div></div>
+      <div class="decision"><div class="k">存储格式</div><div class="v">混合<small>Markdown 正文 + JSON 结构</small></div></div>
+    </div>
+  </div>
+</div>
+
+<main>
+
+  <!-- ========== 1. 总览对比 ========== -->
+  <section id="overview">
+    <div class="sec-head">
+      <span class="sec-num">01</span>
+      <h2>从 Web 全栈 → 桌面单机</h2>
+      <p class="sec-desc">原项目是 Python 后端 + React 前端 + SQLite 数据库的三层 Web 架构。桌面版用 Electron 主进程接管后端职责，数据库整体替换为本地文件。</p>
+    </div>
+
+    <div class="vs">
+      <div class="vs-col from">
+        <h4>原项目 ai-writer <span class="tag old">Web 全栈</span></h4>
+        <div class="stack">Python 3.11 · FastAPI · SQLAlchemy · SQLite · Playwright · React 19</div>
+        <ul>
+          <li>后端跑 FastAPI 服务，前端走 HTTP API</li>
+          <li>22 张 SQLite 表存全部数据</li>
+          <li>Playwright 抓番茄榜单 + 字体解密</li>
+          <li>LLM 在后端调用，Fernet 加密密钥</li>
+          <li>需启动两个进程，依赖 Python 环境</li>
+        </ul>
+      </div>
+      <div class="vs-arrow">→</div>
+      <div class="vs-col to">
+        <h4>桌面版 <span class="tag new">Electron 单机</span></h4>
+        <div class="stack">Electron · Node.js · TypeScript · React 19 · 原生 fs</div>
+        <ul>
+          <li>主进程直接接管 LLM 调用 + 文件 I/O</li>
+          <li>本地文件夹替代 SQLite（每项目一个目录）</li>
+          <li>砍掉番茄榜单抓取、工作流、Agent</li>
+          <li>AES-256-GCM 加密 API Key</li>
+          <li>双击即用，打包成 exe/dmg</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 2. 架构 ========== -->
+  <section id="arch">
+    <div class="sec-head">
+      <span class="sec-num">02</span>
+      <h2>整体架构：三层结构</h2>
+      <p class="sec-desc">渲染进程几乎直接复用原 React 前端，只把传输层从 HTTP 换成 IPC。原后端的业务逻辑（services）整体平移到主进程的 Repository 层——渲染进程零感知。</p>
+    </div>
+
+    <div class="arch">
+      <div class="layer frontend">
+        <div class="lname">🖥️ 渲染进程（React + Vite + AntD + Zustand）</div>
+        <div class="ldesc">原前端代码几乎直接复用，仅替换数据来源</div>
+        <div class="chip-row">
+          <span class="chip b-indigo">services/api → window.api</span>
+          <span class="chip">Zustand store（不变）</span>
+          <span class="chip b-rose">砍：番茄榜单页</span>
+          <span class="chip b-rose">砍：工作流页</span>
+          <span class="chip b-rose">砍：Agent 页</span>
+        </div>
+      </div>
+
+      <div class="arrow-down">
+        <div class="bar"></div>
+        <div class="lbl">contextBridge · preload.ts</div>
+        <div class="bar"></div>
+        <div class="tri"></div>
+      </div>
+
+      <div class="layer ipc">
+        <div class="lname">🔗 IPC 桥（ipcRenderer ↔ ipcMain）</div>
+        <div class="ldesc">通道命名 <code>域:动作</code>，如 <code>chapters:list</code> / <code>llm:generate</code> / <code>memory:character:create</code></div>
+      </div>
+
+      <div class="arrow-down">
+        <div class="bar"></div>
+        <div class="lbl">invoke / handle</div>
+        <div class="bar"></div>
+        <div class="tri"></div>
+      </div>
+
+      <div class="layer main">
+        <div class="lname">⚙️ Electron 主进程（Node + TypeScript）</div>
+        <div class="ldesc">接管原 Python 后端的全部职责</div>
+        <div class="chip-row">
+          <span class="chip">IpcRouter · 通道路由</span>
+          <span class="chip">FileRepository · 原子写 + 乐观锁</span>
+          <span class="chip">LlmFactory · provider 工厂</span>
+          <span class="chip">SecretStore · AES-256-GCM</span>
+          <span class="chip">ProjectLibrary · library.json</span>
+        </div>
+      </div>
+
+      <span class="arch-note">✓ 无 Python 后端　·　无 SQLite　·　无 Playwright　·　无 HTTP 服务</span>
+    </div>
+  </section>
+
+  <!-- ========== 3. 文件存储 ========== -->
+  <section id="storage">
+    <div class="sec-head">
+      <span class="sec-num">03</span>
+      <h2>文件存储：一个项目 = 一个文件夹</h2>
+      <p class="sec-desc">核心设计理念：小说项目存成一个自包含、可独立携带的文件夹，可放任意本地路径（磁盘 / U 盘 / 网盘同步目录）。全局索引只存路径指针，不存正文。</p>
+    </div>
+
+    <div class="callout">
+      <div class="ico">📁</div>
+      <div>
+        <h4>核心理念：项目可整体打包带走</h4>
+        <p>复制一个文件夹 = 完整备份一部小说（含全部章节、大纲、记忆、伏笔）。可放进 Git 仓库版本管理，可用任意编辑器打开章节 Markdown，可丢进网盘同步。</p>
+      </div>
+    </div>
+
+    <div class="trees">
+      <div class="tree-card">
+        <div class="th">🌐 全局布局 <span class="pill">&lt;userData&gt;</span></div>
+<pre class="tree"><span class="d-root">&lt;userData&gt;/</span>            <span class="d-cmt"># app.getPath('userData')</span>
+<span class="d-dir">├─ config/</span>
+│  ├─ <span class="d-json">settings.json</span>     <span class="d-cmt"># 默认项目路径、UI 偏好</span>
+│  └─ <span class="d-json">providers.enc</span>     <span class="d-cmt"># LLM 密钥(加密)</span>
+├─ <span class="d-json">library.json</span>          <span class="d-cmt"># 项目库索引(路径指针)</span>
+└─ <span class="d-dir">projects/</span>             <span class="d-cmt"># 默认项目根(可改)</span>
+   └─ <span class="d-dir">我的第一部小说/</span>   <span class="d-cmt"># ← 项目文件夹</span></pre>
+      </div>
+
+      <div class="tree-card">
+        <div class="th">📚 项目文件夹 <span class="pill">自包含</span></div>
+<pre class="tree"><span class="d-dir">我的第一部小说/</span>
+├─ <span class="d-json">project.json</span>          <span class="d-cmt"># 项目元信息</span>
+├─ <span class="d-dir">chapters/</span>
+│  ├─ <span class="d-md">001.md</span>             <span class="d-cmt"># 正文(人可读)</span>
+│  ├─ <span class="d-json">001.meta.json</span>     <span class="d-cmt"># 状态/字数/伏笔</span>
+│  └─ <span class="d-json">001.versions.json</span> <span class="d-cmt"># 版本历史</span>
+├─ <span class="d-dir">outlines/</span>
+│  ├─ <span class="d-json">main.json</span>          <span class="d-cmt"># 总纲</span>
+│  └─ <span class="d-json">detailed.json</span>     <span class="d-cmt"># 细纲</span>
+├─ <span class="d-dir">memory/</span>
+│  ├─ <span class="d-json">characters.json</span>
+│  ├─ <span class="d-json">relationships.json</span>
+│  ├─ <span class="d-json">foreshadowings.json</span>
+│  ├─ <span class="d-json">timeline.json</span>
+│  ├─ <span class="d-json">plot_points.json</span>
+│  └─ <span class="d-jsonl">history.jsonl</span>     <span class="d-cmt"># 审计(追加)</span>
+├─ <span class="d-dir">styles/</span>
+│  └─ <span class="d-json">default.json</span>
+└─ <span class="d-json">index.json</span>            <span class="d-cmt"># 目录索引</span></pre>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:18px">
+      <div class="tree-card"><div class="th">📝 章节正文 <span class="pill">001.md</span></div>
+        <pre class="tree" style="font-size:12.2px">第一章 觉醒
+
+清晨的钟声划破浓雾，林远从
+打坐中睁开双眼。丹田内那枚
+沉寂三年的金色符文，此刻竟
+微微震颤起来……</pre>
+        <div style="padding:0 18px 14px"><span class="badge add">人可读</span> <span class="badge keep">可外部编辑</span> <span class="badge keep">Git 友好</span></div>
+      </div>
+      <div class="tree-card"><div class="th">🧩 章节元数据 <span class="pill">001.meta.json</span></div>
+        <pre class="tree" style="font-size:12.2px">{
+  "schemaVersion": 1,
+  "chapterNumber": 1,
+  "title": "觉醒",
+  "wordCount": 2120,
+  "status": "draft",
+  "synopsis": "林远觉醒金符文",
+  "hook": "符文为何此刻异动？",
+  "foreshadowingIds": ["f-01"]
+}</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 4. 表映射 ========== -->
+  <section id="mapping">
+    <div class="sec-head">
+      <span class="sec-num">04</span>
+      <h2>SQLite 表 → 本地文件映射</h2>
+      <p class="sec-desc">核心 MVP 涉及 13 张表。列表型数据用 JSON <code>items</code> 数组，正文用 Markdown，审计日志用 JSONL 追加写。</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th style="width:30%">SQLite 表</th><th style="width:42%">落地位置</th><th style="width:28%">格式</th></tr></thead>
+        <tbody>
+          <tr><td><code>projects</code></td><td><code>{project}/project.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>chapters</code></td><td><code>chapters/NNN.md</code> + <code>NNN.meta.json</code></td><td><span class="fmt md">Markdown</span> + <span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>chapter_versions</code></td><td><code>chapters/NNN.versions.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>writing_styles</code></td><td><code>styles/{name}.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>characters</code></td><td><code>memory/characters.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>character_relationships</code></td><td><code>memory/relationships.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>locations</code></td><td><code>memory/locations.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>foreshadowings</code></td><td><code>memory/foreshadowings.json</code> <span style="color:var(--muted);font-size:12px">（保留 chain_id / parent_id 链）</span></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>timeline_events</code></td><td><code>memory/timeline.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>plot_points</code></td><td><code>memory/plot_points.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>story_bibles</code> / <code>golden_fingers</code> / <code>worldviews</code></td><td>合并为 <code>memory/worldview.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>outline_rules</code> / <code>generated_outlines</code> / <code>detailed_outlines</code></td><td><code>outlines/*.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td><code>memory_history</code></td><td><code>memory/history.jsonl</code></td><td><span class="fmt jsonl">JSONL</span></td></tr>
+          <tr><td><code>generation_tasks</code></td><td><span style="color:var(--muted)">不持久化 · 运行时内存</span></td><td><span class="fmt mem">—</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">所有 JSON 统一带 <code>schemaVersion</code> 与 <code>updatedAt</code> 字段。列表型用 <code>items</code> 数组；单例型（project/index）直接顶层平铺业务字段。</p>
+  </section>
+
+  <!-- ========== 5. 数据访问层 ========== -->
+  <section id="repo">
+    <div class="sec-head">
+      <span class="sec-num">05</span>
+      <h2>数据访问层：Repository + 原子写</h2>
+      <p class="sec-desc">每个领域一个 Repository，接口统一。写入采用「临时文件 + rename」原子操作，保证文件永不被写到一半——即使断电也不会损坏。</p>
+    </div>
+
+    <div class="table-wrap" style="margin-bottom:18px">
+      <table>
+        <thead><tr><th>Repository 接口（统一）</th></tr></thead>
+        <tbody><tr><td style="font-family:var(--mono);font-size:13px;background:#0f172a;color:#e2e8f0">
+<span style="color:#7dd3fc">interface</span> Repository&lt;T&gt; {<br>
+&nbsp;&nbsp;list(projectId): <span style="color:#7dd3fc">Promise</span>&lt;T[]&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#94a3b8">// 列表</span><br>
+&nbsp;&nbsp;get(projectId, id): <span style="color:#7dd3fc">Promise</span>&lt;T | <span style="color:#7dd3fc">null</span>&gt;&nbsp;&nbsp;<span style="color:#94a3b8">// 单条</span><br>
+&nbsp;&nbsp;create(projectId, data): <span style="color:#7dd3fc">Promise</span>&lt;T&gt;&nbsp;&nbsp;<span style="color:#94a3b8">// 新建</span><br>
+&nbsp;&nbsp;update(projectId, id, data): <span style="color:#7dd3fc">Promise</span>&lt;T&gt;&nbsp;<span style="color:#94a3b8">// 更新</span><br>
+&nbsp;&nbsp;delete(projectId, id): <span style="color:#7dd3fc">Promise</span>&lt;<span style="color:#7dd3fc">void</span>&gt;&nbsp;&nbsp;<span style="color:#94a3b8">// 删除</span><br>
+}
+        </td></tr></tbody>
+      </table>
+    </div>
+
+    <h3>原子写流程（防崩溃损坏）</h3>
+    <div class="flow">
+      <div class="step"><div class="n">1</div><div class="t">load</div><div class="d">读取 JSON</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">2</div><div class="t">parse</div><div class="d">JSON.parse</div></div>
+      <div class="farrow">›</div>
+      <div class="step verified"><div class="n">3</div><div class="t">校验</div><div class="d">JSON Schema (ajv)</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">4</div><div class="t">更新</div><div class="d">不可变 spread</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">5</div><div class="t">serialize</div><div class="d">JSON.stringify</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">6</div><div class="t">写 .tmp</div><div class="d">临时文件</div></div>
+      <div class="farrow">›</div>
+      <div class="step verified"><div class="n">7</div><div class="t">rename</div><div class="d">原子替换原文件</div></div>
+    </div>
+    <p class="note">🔒 乐观锁：写入前比对 <code>updatedAt</code>，冲突时提示「文件已被外部修改」。Schema 校验失败时降级提示并支持从版本历史恢复。</p>
+  </section>
+
+  <!-- ========== 6. LLM ========== -->
+  <section id="llm">
+    <div class="sec-head">
+      <span class="sec-num">06</span>
+      <h2>LLM 集成：主进程直连 + 密钥加密</h2>
+      <p class="sec-desc">provider 工厂从原 <code>factory.py</code> 移植到 TS。主进程直接 fetch 调用（无 CORS 问题），SSE 流式 token 经 IPC 推回渲染进程。</p>
+    </div>
+
+    <h3>调用链</h3>
+    <div class="llm-chain">
+      <div class="node render">渲染进程<small>invoke('llm:generate')</small></div>
+      <span class="farrow">→</span>
+      <div class="node ipc">IPC 桥<small>ipcMain.handle</small></div>
+      <span class="farrow">→</span>
+      <div class="node main">主进程<small>读 providers.enc 解密</small></div>
+      <span class="farrow">→</span>
+      <div class="node cloud">LLM API<small>OpenAI / Claude / …</small></div>
+      <span class="farrow">⤴</span>
+      <div class="node main">主进程<small>SSE 解析</small></div>
+      <span class="farrow">→</span>
+      <div class="node ipc">IPC<small>webContents.send</small></div>
+      <span class="farrow">→</span>
+      <div class="node render">渲染进程<small>逐 token 显示</small></div>
+    </div>
+
+    <h3>API Key 加密存储</h3>
+    <div class="secret">
+      <div class="box"><h5>🔐 providers.enc</h5><p>位置：<code>&lt;userData&gt;/config/providers.enc</code><br>算法：<b>AES-256-GCM</b>（替代 Python Fernet）<br>替代原项目的 Fernet + <code>.secret_key</code> 方案。</p></div>
+      <div class="box"><h5>🔑 密钥派生</h5><p>机器特征（Win MachineGuid / mac IOPlatformUUID）+ 用户可选主密码，经 <b>PBKDF2</b> 派生。<br>支持从 <code>~/.claude/settings.json</code> 等外部配置自动导入。</p></div>
+    </div>
+    <p class="note">支持的 provider：OpenAI · Claude(Anthropic) · DeepSeek · MiniMax · 通义千问 · Codex。限流：Token Bucket（默认 0.1 req/s，burst=2）。</p>
+  </section>
+
+  <!-- ========== 7. 正文写作 ========== -->
+  <section id="writing">
+    <div class="sec-head">
+      <span class="sec-num">07</span>
+      <h2>正文写作：AI 辅助章节生成</h2>
+      <p class="sec-desc">整个应用最核心的创作闭环。基于「细纲 + 记忆 + 风格」组装上下文，LLM 流式生成正文，支持去味润色与多版本对比。</p>
+    </div>
+
+    <h3>上下文组装（Prompt 工程）</h3>
+    <div class="table-wrap" style="margin-bottom:8px">
+      <table>
+        <thead><tr><th style="width:24%">输入</th><th>来源</th></tr></thead>
+        <tbody>
+          <tr><td>本章细纲</td><td><code>outlines/detailed.json</code> — 情绪点 / 爽点 / 钩子 / 角色状态 / 剧情概要</td></tr>
+          <tr><td>出场人物档案</td><td><code>memory/characters.json</code>（按本章角色状态过滤）</td></tr>
+          <tr><td>伏笔任务</td><td><code>memory/foreshadowings.json</code>（pending 且本章需 plant / collect）</td></tr>
+          <tr><td>写作风格</td><td><code>styles/*.json</code>（is_active 风格 features）</td></tr>
+          <tr><td>前文衔接</td><td>前 1-3 章 <code>*.meta.json</code> 的 synopsis（摘要链，控上下文窗口）</td></tr>
+          <tr><td>世界观约束</td><td><code>memory/worldview.json</code>（相关设定）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">提示词模板从原 <code>backend/app/prompts/</code> 移植到主进程，作为可编辑资源。</p>
+
+    <h3>生成流程</h3>
+    <div class="flow">
+      <div class="step"><div class="n">1</div><div class="t">生成本章</div><div class="d">编辑器触发</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">2</div><div class="t">组装上下文</div><div class="d">主进程聚合 6 项输入</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">3</div><div class="t">流式生成</div><div class="d">SSE token 实时写入</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">4</div><div class="t">存 ai 版本</div><div class="d">chapter_versions</div></div>
+      <div class="farrow">›</div>
+      <div class="step"><div class="n">5</div><div class="t">人工编辑</div><div class="d">存 manual 版本</div></div>
+      <div class="farrow">›</div>
+      <div class="step verified"><div class="n">6</div><div class="t">去味润色</div><div class="d">deslop → reviewed</div></div>
+    </div>
+
+    <div class="grid-2" style="margin-top:22px">
+      <div class="tree-card">
+        <div class="th">🧹 去味润色（deslop）<span class="pill">移植 deslop.py</span></div>
+        <div style="padding:16px 18px">
+          <p style="margin:0 0 10px;color:var(--ink-2);font-size:14px"><b>检测维度：</b>AI 味句式 · 毒点 · 逻辑问题 · 节奏拖沓</p>
+          <p style="margin:0;color:var(--ink-2);font-size:14px"><b>输出：</b>问题清单 + 润色后文本；采纳后存 <code>reviewed</code> 版本并保留 <code>diff_summary</code>。</p>
+        </div>
+      </div>
+      <div class="tree-card">
+        <div class="th">🔀 版本管理 <span class="pill">NNN.versions.json</span></div>
+        <div style="padding:16px 18px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+            <span class="chip b-violet">ai（AI 生成）</span>
+            <span class="chip b-indigo">manual（人工）</span>
+            <span class="chip b-emerald">reviewed（润色后）</span>
+          </div>
+          <p style="margin:0;color:var(--ink-2);font-size:14px">任意两版 diff 对比、一键回滚。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 8. 迁移 ========== -->
+  <section id="migration">
+    <div class="sec-head">
+      <span class="sec-num">08</span>
+      <h2>前端改造 & 旧数据迁移</h2>
+      <p class="sec-desc">前端改动最小化：只换数据传输层。旧 SQLite 数据可通过「导入旧项目」一次性迁移成本地文件夹。</p>
+    </div>
+
+    <div class="grid-2">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>前端改造</th><th style="width:90px">类型</th></tr></thead>
+          <tbody>
+            <tr><td><code>services/api/*</code>（HTTP 客户端）</td><td><span class="badge del">删除</span></td></tr>
+            <tr><td>preload 暴露的 <code>window.api</code>（同形封装）</td><td><span class="badge add">新增</span></td></tr>
+            <tr><td>Zustand store</td><td><span class="badge keep">不变</span></td></tr>
+            <tr><td>FanqieChartPage / Workflow* / Agent*</td><td><span class="badge cut">砍掉</span></td></tr>
+            <tr><td>路由裁剪（保留创作闭环）</td><td><span class="badge add">调整</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>旧数据迁移路径</th></tr></thead>
+          <tbody>
+            <tr><td style="font-family:var(--mono);font-size:12.5px;line-height:1.9">
+读 <code>ai_writer.db</code><br>
+&nbsp;↓ 遍历 projects<br>
+按第 04 节映射写出<br>
+&nbsp;↓ 13 张表 → 文件夹结构<br>
+注册进 <code>library.json</code><br>
+&nbsp;↓<br>
+✓ 旧项目继续可用
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="note">迁移可作为应用内「导入旧项目」入口，或独立一次性脚本。番茄 / 工作流 / Agent 数据跳过。</p>
+  </section>
+
+  <!-- ========== 8. 实现阶段 ========== -->
+  <section id="phases">
+    <div class="sec-head">
+      <span class="sec-num">09</span>
+      <h2>实现阶段：8 步走</h2>
+      <p class="sec-desc">从脚手架到打包，每阶段独立可验证。第 3 阶段即打通「存本地文件」核心闭环。</p>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-item"><div class="ph">PHASE 01</div><h4>脚手架搭建</h4><p>Electron + 复用原前端工程 + preload IPC 骨架 + TypeScript 配置。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 02</div><h4>文件层 + 项目库</h4><p>FileRepository 基类（原子写 / 乐观锁 / Schema 校验）+ ProjectLibrary 索引管理。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 03</div><h4>章节闭环 ⭐</h4><p>章节读写 + 编辑器打通——验证「存本地文件」核心目标。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 04</div><h4>记忆系统</h4><p>8 个 Repository（人物/关系/地点/伏笔/时间线/剧情点/世界观/风格）+ 记忆审计。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 05</div><h4>LLM 基础设施</h4><p>provider 工厂 + AES 密钥加密 + SSE 流式通道。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 06</div><h4>正文写作 ⭐</h4><p>上下文组装 + 流式生成 + 去味润色 + 版本对比（核心创作闭环）。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 07</div><h4>大纲生成</h4><p>总纲 / 细纲 CRUD + AI 批量生成（情绪点 / 爽点 / 钩子）。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 08</div><h4>打包发布</h4><p>electron-builder 出 Windows / macOS 安装包，签名与自动更新预留。</p></div>
+    </div>
+  </section>
+
+  <!-- ========== 9. 风险 ========== -->
+  <section id="risk">
+    <div class="sec-head">
+      <span class="sec-num">10</span>
+      <h2>风险与对策</h2>
+      <p class="sec-desc">本地文件存储的主要风险集中在性能、并发冲突与密钥安全，均有明确对策。</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th style="width:34%">风险</th><th>对策</th></tr></thead>
+        <tbody>
+          <tr><td>大量章节时目录扫描慢</td><td><code>index.json</code> 缓存章节列表，启动时增量校对</td></tr>
+          <tr><td>用户外部改文件导致不一致</td><td>启动 / 聚焦时基于 mtime 增量重读 + 乐观锁</td></tr>
+          <tr><td>密钥丢失打不开</td><td>主密码可重置（重置后重填 key），提供明文导出警告</td></tr>
+          <tr><td>跨平台路径 / 编码问题</td><td>统一 <code>path.join</code>，文件名做安全化（去非法字符）</td></tr>
+          <tr><td>网盘同步冲突</td><td>乐观锁 + 冲突文件保留两份并提示</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout" style="margin-top:24px">
+      <div class="ico">✅</div>
+      <div>
+        <h4>测试策略：覆盖率目标 80%+</h4>
+        <p>单元（Repository 临时目录测试 / 加密 / provider mock fetch）· 集成（IPC 端到端，临时 userData）· E2E（Playwright 驱动 Electron，覆盖「新建项目→写章节→存文件→重开→数据还在」）。</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p><b>ai-writer 桌面应用 · 实现设计方案</b></p>
+  <p>Electron · 本地文件存储 · 核心 MVP　|　设计文档：<code>docs/superpowers/specs/2026-06-17-desktop-app-design.md</code></p>
+</footer>
+
+<script>
+  // 顶部导航 scroll-spy 高亮
+  const links = [...document.querySelectorAll('.nav-links a')];
+  const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(a => a.classList.remove('active'));
+        map.get(e.target.id)?.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-35% 0px -55% 0px' });
+  document.querySelectorAll('section[id]').forEach(s => io.observe(s));
+</script>
+</body>
+</html>
