@@ -79,4 +79,53 @@ export interface RendererApi {
   updateChapterContent: (projectId: string, n: number, content: string) => Promise<ChapterMeta>
   updateChapterMeta: (projectId: string, n: number, patch: UpdateChapterMetaInput) => Promise<ChapterMeta>
   deleteChapter: (projectId: string, n: number) => Promise<void>
+  listCharacters: (projectId: string) => Promise<Character[]>
+  getCharacter: (projectId: string, id: string) => Promise<Character | null>
+  createCharacter: (projectId: string, input: CreateCharacterInput) => Promise<Character>
+  updateCharacter: (projectId: string, id: string, patch: UpdateCharacterInput) => Promise<Character>
+  deleteCharacter: (projectId: string, id: string) => Promise<void>
+  listHistory: (projectId: string) => Promise<HistoryEntry[]>
+}
+
+export interface Character {
+  id: string
+  name: string
+  role?: string
+  identity?: string
+  personality?: string
+  abilities?: string
+  tags?: string[]
+  synopsis?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateCharacterInput {
+  name: string
+  role?: string
+  identity?: string
+  personality?: string
+  abilities?: string
+  tags?: string[]
+  synopsis?: string
+}
+
+export interface UpdateCharacterInput {
+  name?: string
+  role?: string
+  identity?: string
+  personality?: string
+  abilities?: string
+  tags?: string[]
+  synopsis?: string
+}
+
+export type MemoryAction = 'create' | 'update' | 'delete'
+
+export interface HistoryEntry {
+  at: string
+  type: string
+  action: MemoryAction
+  entityId?: string
+  summary?: string
 }
