@@ -41,4 +41,10 @@ describe('ProjectService', () => {
     expect(data.name).toBe('X')
     expect(data.description).toBe('desc')
   })
+
+  it('keeps id consistent across project.json and library', async () => {
+    const meta = await service.create({ name: 'X' })
+    const data = await service.getProjectData(meta.id)
+    expect(data.id).toBe(meta.id)
+  })
 })

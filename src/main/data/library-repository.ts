@@ -18,7 +18,7 @@ export class LibraryRepository {
     const lib = await readJson<Library>(this.libraryFile, EMPTY)
     const now = new Date().toISOString()
     const project: ProjectMeta = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       name: input.name,
       path: input.path,
       genre: input.genre,

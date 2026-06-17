@@ -30,7 +30,7 @@ export class ProjectService {
       createdAt: now
     }
     await writeJsonAtomic(join(dir, 'project.json'), data)
-    return this.library.create({ name: input.name, path: dir, genre: input.genre })
+    return this.library.create({ id, name: input.name, path: dir, genre: input.genre })
   }
 
   async resolveDir(projectId: string): Promise<string> {

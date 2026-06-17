@@ -13,6 +13,7 @@ export interface Library {
 }
 
 export interface CreateProjectInput {
+  id?: string
   name: string
   path: string
   genre?: string
