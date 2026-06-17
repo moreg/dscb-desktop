@@ -11,3 +11,14 @@ export interface Library {
   schemaVersion: number
   projects: ProjectMeta[]
 }
+
+export interface CreateProjectInput {
+  name: string
+  path: string
+  genre?: string
+}
+
+export interface RendererApi {
+  listProjects: () => Promise<ProjectMeta[]>
+  createProject: (input: CreateProjectInput) => Promise<ProjectMeta>
+}

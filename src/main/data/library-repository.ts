@@ -1,14 +1,10 @@
 import { randomUUID } from 'crypto'
 import { readJson, writeJsonAtomic } from './atomic'
-import type { Library, ProjectMeta } from '../../shared/types'
+import type { Library, ProjectMeta, CreateProjectInput } from '../../shared/types'
+
+export type { CreateProjectInput }
 
 const EMPTY: Library = { schemaVersion: 1, projects: [] }
-
-export interface CreateProjectInput {
-  name: string
-  path: string
-  genre?: string
-}
 
 export class LibraryRepository {
   constructor(private readonly libraryFile: string) {}
