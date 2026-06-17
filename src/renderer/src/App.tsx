@@ -1,35 +1,37 @@
-import { useEffect, useState } from 'react'
-import type { ProjectMeta } from '../../shared/types'
+import { useState } from 'react'
+import ProjectListPage from './ProjectListPage'
+import ChapterListPage from './ChapterListPage'
+import ChapterEditor from './ChapterEditor'
+
+type View =
+  | { kind: 'projects' }
+  | { kind: 'chapters'; projectId: string }
+  | { kind: 'editor'; projectId: string; chapterNumber: number }
 
 export default function App() {
-  const [projects, setProjects] = useState<ProjectMeta[]>([])
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    void window.api.listProjects().then((list) => {
-      setProjects(list)
-      setLoading(false)
-    })
-  }, [])
+  const [view, setView] = useState<View>({ kind: 'projects' })
 
   return (
-    <div style={{ fontFamily: 'system-ui', maxWidth: 720, margin: '40px auto', padding: '0 20px' }}>
+    <div style={{ fontFamily: 'system-ui', maxWidth: 820, margin: '40px auto', padding: '0 20px' }}>
       <h1>ai-writer 桌面版</h1>
-      <p style={{ color: '#64748b' }}>Phase 01 脚手架 · 项目库（读取本地 library.json）</p>
-      <h2>我的项目</h2>
-      {loading ? (
-        <p>加载中…</p>
-      ) : projects.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无项目（首次启动，library.json 还没创建）</p>
+      <p style={{ color: '#64748b' }}>Phase 02 · 项目与章节（本地文件存储）</p>
+      <hr />
+      {view.kind === 'projects' ? (
+        <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
+      ) : view.kind === 'chapters' ? (
+        <ChapterListPage
+          projectId={view.projectId}
+          onBack={() => setView({ kind: 'projects' })}
+          onOpenChapter={(n) =>
+            setView({ kind: 'editor', projectId: view.projectId, chapterNumber: n })
+          }
+        />
       ) : (
-        <ul>
-          {projects.map((p) => (
-            <li key={p.id}>
-              <strong>{p.name}</strong>
-              {p.genre ? <span style={{ color: '#64748b' }}> · {p.genre}</span> : null}
-            </li>
-          ))}
-        </ul>
+        <ChapterEditor
+          projectId={view.projectId}
+          chapterNumber={view.chapterNumber}
+          onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
+        />
       )}
     </div>
   )
