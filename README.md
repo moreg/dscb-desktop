@@ -16,7 +16,7 @@ npx electron .   # 运行构建产物
 
 - 项目库索引：`<userData>/library.json`
 - 项目目录：`<userData>/projects/<projectId>/`，内含 `project.json` + `chapters/` + `memory/`
-- 章节：`chapters/NNN.md`（正文）+ `NNN.meta.json`（元数据）
+- 章节：`chapters/NNN.md`（正文）+ `NNN.meta.json`（元数据）+ `NNN.versions.json`（版本历史）
 - 记忆：`memory/characters.json`（人物）+ `memory/history.jsonl`（审计日志）
 - Windows `<userData>`：`%APPDATA%/ai-writer-desktop/`
 
@@ -46,4 +46,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 04：章节版本历史（`NNN.versions.json`）、其余记忆实体（关系/地点/伏笔/时间线/世界观/风格）基于 `JsonCollectionRepository` 批量接入。
+Phase 05：其余记忆实体（关系/地点/伏笔/时间线/剧情点/世界观/风格）基于 `JsonCollectionRepository` 批量接入；LLM 基础设施（provider 工厂 + 密钥加密 + 流式）。
