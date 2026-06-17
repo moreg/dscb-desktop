@@ -4,7 +4,8 @@ import type {
   CreateChapterInput,
   UpdateChapterMetaInput,
   CreateCharacterInput,
-  UpdateCharacterInput
+  UpdateCharacterInput,
+  CreateChapterVersionInput
 } from '../shared/types'
 
 const api = {
@@ -27,7 +28,17 @@ const api = {
   updateCharacter: (id: string, cid: string, patch: UpdateCharacterInput) =>
     ipcRenderer.invoke('memory:character:update', id, cid, patch),
   deleteCharacter: (id: string, cid: string) => ipcRenderer.invoke('memory:character:delete', id, cid),
-  listHistory: (id: string) => ipcRenderer.invoke('memory:history:list', id)
+  listHistory: (id: string) => ipcRenderer.invoke('memory:history:list', id),
+  listChapterVersions: (id: string, n: number) =>
+    ipcRenderer.invoke('chapters:listVersions', id, n),
+  getChapterVersion: (id: string, n: number, vn: number) =>
+    ipcRenderer.invoke('chapters:getVersion', id, n, vn),
+  createChapterVersion: (id: string, n: number, input: CreateChapterVersionInput) =>
+    ipcRenderer.invoke('chapters:createVersion', id, n, input),
+  deleteChapterVersion: (id: string, n: number, vn: number) =>
+    ipcRenderer.invoke('chapters:deleteVersion', id, n, vn),
+  rollbackChapter: (id: string, n: number, vn: number) =>
+    ipcRenderer.invoke('chapters:rollback', id, n, vn)
 }
 
 contextBridge.exposeInMainWorld('api', api)
