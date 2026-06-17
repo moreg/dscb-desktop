@@ -85,6 +85,15 @@ export interface RendererApi {
   updateCharacter: (projectId: string, id: string, patch: UpdateCharacterInput) => Promise<Character>
   deleteCharacter: (projectId: string, id: string) => Promise<void>
   listHistory: (projectId: string) => Promise<HistoryEntry[]>
+  listChapterVersions: (projectId: string, n: number) => Promise<ChapterVersion[]>
+  getChapterVersion: (projectId: string, n: number, vn: number) => Promise<ChapterVersion>
+  createChapterVersion: (
+    projectId: string,
+    n: number,
+    input: CreateChapterVersionInput
+  ) => Promise<ChapterVersion>
+  deleteChapterVersion: (projectId: string, n: number, vn: number) => Promise<void>
+  rollbackChapter: (projectId: string, n: number, vn: number) => Promise<ChapterMeta>
 }
 
 export interface Character {
@@ -128,4 +137,21 @@ export interface HistoryEntry {
   action: MemoryAction
   entityId?: string
   summary?: string
+}
+
+export type ChapterSource = 'ai' | 'manual' | 'reviewed'
+
+export interface ChapterVersion {
+  versionNumber: number
+  source: ChapterSource
+  content: string
+  wordCount: number
+  note?: string
+  createdAt: string
+}
+
+export interface CreateChapterVersionInput {
+  source: ChapterSource
+  content: string
+  note?: string
 }
