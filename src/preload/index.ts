@@ -2,7 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   CreateProjectDataInput,
   CreateChapterInput,
-  UpdateChapterMetaInput
+  UpdateChapterMetaInput,
+  CreateCharacterInput,
+  UpdateCharacterInput
 } from '../shared/types'
 
 const api = {
@@ -17,7 +19,15 @@ const api = {
     ipcRenderer.invoke('chapters:updateContent', id, n, content),
   updateChapterMeta: (id: string, n: number, patch: UpdateChapterMetaInput) =>
     ipcRenderer.invoke('chapters:updateMeta', id, n, patch),
-  deleteChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:delete', id, n)
+  deleteChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:delete', id, n),
+  listCharacters: (id: string) => ipcRenderer.invoke('memory:character:list', id),
+  getCharacter: (id: string, cid: string) => ipcRenderer.invoke('memory:character:get', id, cid),
+  createCharacter: (id: string, input: CreateCharacterInput) =>
+    ipcRenderer.invoke('memory:character:create', id, input),
+  updateCharacter: (id: string, cid: string, patch: UpdateCharacterInput) =>
+    ipcRenderer.invoke('memory:character:update', id, cid, patch),
+  deleteCharacter: (id: string, cid: string) => ipcRenderer.invoke('memory:character:delete', id, cid),
+  listHistory: (id: string) => ipcRenderer.invoke('memory:history:list', id)
 }
 
 contextBridge.exposeInMainWorld('api', api)
