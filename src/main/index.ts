@@ -2,9 +2,11 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
+import { MemoryService } from './data/memory-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
+import { registerMemoryIpc } from './ipc/memory'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -46,6 +48,8 @@ app.whenReady().then(() => {
   registerLibraryIpc(libraryRepo)
   registerProjectsIpc(projectService)
   registerChaptersIpc(projectService)
+  const memoryService = new MemoryService(projectService)
+  registerMemoryIpc(memoryService)
 
   createWindow()
 
