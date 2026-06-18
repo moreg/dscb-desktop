@@ -63,14 +63,13 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
 
   const aiGenerate = async () => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「设置」中配置 MiniMax API Key')
+      window.alert('请先在「⚙️ 设置」中配置 MiniMax API Key')
       return
     }
     setGenerating(true)
     setDraft('')
-    const prompt = `请为小说第 ${data!.meta.chapterNumber} 章《${data!.meta.title}》写约 800 字的正文，直接输出正文，不要标题和解释。`
     try {
-      await window.api.generateStream(prompt, (token, done) => {
+      await window.api.generateChapterStream(projectId, chapterNumber, (token, done) => {
         if (token) setDraft((d) => d + token)
         if (done) setGenerating(false)
       })
