@@ -46,4 +46,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 08：LLM 基础设施（provider 工厂 + AES 密钥加密 + SSE 流式，需 API key 实测）。
+Phase 09：正文写作增强（上下文组装：细纲+记忆+风格）、大纲生成；打包（electron-builder）。
