@@ -4,10 +4,13 @@ import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
 import { MemoryService } from './data/memory-service'
 import { MemoryEntityService } from './data/memory-entity-service'
+import { SecretStore } from './data/secret-store'
+import { LlmService } from './data/llm-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
 import { registerMemoryIpc } from './ipc/memory'
+import { registerLlmIpc } from './ipc/llm'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -52,6 +55,10 @@ app.whenReady().then(() => {
   const memoryService = new MemoryService(projectService)
   const memoryEntityService = new MemoryEntityService(projectService)
   registerMemoryIpc(memoryService, memoryEntityService)
+  const secretFile = join(userData, 'config', 'providers.enc')
+  const secret = new SecretStore(secretFile)
+  const llmService = new LlmService(secret)
+  registerLlmIpc(secret, llmService)
 
   createWindow()
 
