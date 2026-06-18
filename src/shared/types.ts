@@ -94,6 +94,19 @@ export interface RendererApi {
   ) => Promise<ChapterVersion>
   deleteChapterVersion: (projectId: string, n: number, vn: number) => Promise<void>
   rollbackChapter: (projectId: string, n: number, vn: number) => Promise<ChapterMeta>
+  listMemoryEntities: (projectId: string, type: MemoryEntityType) => Promise<MemoryEntity[]>
+  createMemoryEntity: (
+    projectId: string,
+    type: MemoryEntityType,
+    input: CreateMemoryEntityInput
+  ) => Promise<MemoryEntity>
+  updateMemoryEntity: (
+    projectId: string,
+    type: MemoryEntityType,
+    id: string,
+    patch: UpdateMemoryEntityInput
+  ) => Promise<MemoryEntity>
+  deleteMemoryEntity: (projectId: string, type: MemoryEntityType, id: string) => Promise<void>
 }
 
 export interface Character {
@@ -154,4 +167,27 @@ export interface CreateChapterVersionInput {
   source: ChapterSource
   content: string
   note?: string
+}
+
+export type MemoryEntityType = 'location' | 'worldview' | 'timeline' | 'plot_point'
+
+export interface MemoryEntity {
+  id: string
+  name: string
+  category?: string
+  notes?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateMemoryEntityInput {
+  name: string
+  category?: string
+  notes?: string
+}
+
+export interface UpdateMemoryEntityInput {
+  name?: string
+  category?: string
+  notes?: string
 }
