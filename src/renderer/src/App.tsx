@@ -8,6 +8,7 @@ import MemoryEntityPage from './MemoryEntityPage'
 import ForeshadowingBoard from './ForeshadowingBoard'
 import RelationshipPage from './RelationshipPage'
 import SettingsPage from './SettingsPage'
+import OutlinePage from './OutlinePage'
 import type { MemoryEntityType } from '../../shared/types'
 
 type View =
@@ -19,6 +20,7 @@ type View =
   | { kind: 'memoryEntity'; projectId: string; entityType: MemoryEntityType }
   | { kind: 'foreshadowingBoard'; projectId: string }
   | { kind: 'relationships'; projectId: string }
+  | { kind: 'outline'; projectId: string }
   | { kind: 'settings' }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
@@ -36,7 +38,7 @@ export default function App() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h1 style={{ margin: 0 }}>ai-writer 桌面版</h1>
-          <p style={{ color: '#64748b', margin: '4px 0 0' }}>Phase 08 · 本地创作 + AI 生成</p>
+          <p style={{ color: '#64748b', margin: '4px 0 0' }}>Phase 09 · 本地创作 + AI 生成 + 大纲</p>
         </div>
         <button onClick={() => setView({ kind: 'settings' })}>⚙️ 设置</button>
       </div>
@@ -54,6 +56,7 @@ export default function App() {
           }
           onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
           onOpenMemoryCenter={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
+          onOpenOutline={() => setView({ kind: 'outline', projectId: view.projectId })}
         />
       ) : view.kind === 'editor' ? (
         <ChapterEditor
@@ -90,12 +93,17 @@ export default function App() {
           projectId={view.projectId}
           onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
         />
-      ) : (
+      ) : view.kind === 'relationships' ? (
         <RelationshipPage
           projectId={view.projectId}
           onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
         />
-      )}
+      ) : view.kind === 'outline' ? (
+        <OutlinePage
+          projectId={view.projectId}
+          onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
+        />
+      ) : null}
     </div>
   )
 }
