@@ -8,7 +8,9 @@ import type {
   CreateChapterVersionInput,
   MemoryEntityType,
   CreateMemoryEntityInput,
-  UpdateMemoryEntityInput
+  UpdateMemoryEntityInput,
+  CreateForeshadowingInput,
+  UpdateForeshadowingInput
 } from '../shared/types'
 
 const api = {
@@ -53,7 +55,20 @@ const api = {
     patch: UpdateMemoryEntityInput
   ) => ipcRenderer.invoke('memory:entity:update', id, type, entityId, patch),
   deleteMemoryEntity: (id: string, type: MemoryEntityType, entityId: string) =>
-    ipcRenderer.invoke('memory:entity:delete', id, type, entityId)
+    ipcRenderer.invoke('memory:entity:delete', id, type, entityId),
+  listForeshadowings: (id: string) => ipcRenderer.invoke('memory:foreshadowing:list', id),
+  createForeshadowing: (id: string, input: CreateForeshadowingInput) =>
+    ipcRenderer.invoke('memory:foreshadowing:create', id, input),
+  updateForeshadowing: (id: string, fid: string, patch: UpdateForeshadowingInput) =>
+    ipcRenderer.invoke('memory:foreshadowing:update', id, fid, patch),
+  deleteForeshadowing: (id: string, fid: string) =>
+    ipcRenderer.invoke('memory:foreshadowing:delete', id, fid),
+  plantForeshadowing: (id: string, fid: string, chapterNumber: number) =>
+    ipcRenderer.invoke('memory:foreshadowing:plant', id, fid, chapterNumber),
+  collectForeshadowing: (id: string, fid: string, chapterNumber: number) =>
+    ipcRenderer.invoke('memory:foreshadowing:collect', id, fid, chapterNumber),
+  markForeshadowingMissed: (id: string, fid: string) =>
+    ipcRenderer.invoke('memory:foreshadowing:markMissed', id, fid)
 }
 
 contextBridge.exposeInMainWorld('api', api)
