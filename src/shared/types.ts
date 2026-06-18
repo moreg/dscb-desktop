@@ -121,6 +121,14 @@ export interface RendererApi {
   plantForeshadowing: (projectId: string, id: string, chapterNumber: number) => Promise<Foreshadowing>
   collectForeshadowing: (projectId: string, id: string, chapterNumber: number) => Promise<Foreshadowing>
   markForeshadowingMissed: (projectId: string, id: string) => Promise<Foreshadowing>
+  listRelationships: (projectId: string) => Promise<Relationship[]>
+  createRelationship: (projectId: string, input: CreateRelationshipInput) => Promise<Relationship>
+  updateRelationship: (
+    projectId: string,
+    id: string,
+    patch: UpdateRelationshipInput
+  ) => Promise<Relationship>
+  deleteRelationship: (projectId: string, id: string) => Promise<void>
 }
 
 export interface Character {
@@ -230,4 +238,29 @@ export interface UpdateForeshadowingInput {
   content?: string
   expectedCollect?: number
   note?: string
+}
+
+export interface Relationship {
+  id: string
+  characterAId: string
+  characterBId: string
+  relationType: string
+  description?: string
+  strength?: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateRelationshipInput {
+  characterAId: string
+  characterBId: string
+  relationType: string
+  description?: string
+  strength?: number
+}
+
+export interface UpdateRelationshipInput {
+  relationType?: string
+  description?: string
+  strength?: number
 }
