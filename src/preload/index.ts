@@ -5,7 +5,10 @@ import type {
   UpdateChapterMetaInput,
   CreateCharacterInput,
   UpdateCharacterInput,
-  CreateChapterVersionInput
+  CreateChapterVersionInput,
+  MemoryEntityType,
+  CreateMemoryEntityInput,
+  UpdateMemoryEntityInput
 } from '../shared/types'
 
 const api = {
@@ -38,7 +41,19 @@ const api = {
   deleteChapterVersion: (id: string, n: number, vn: number) =>
     ipcRenderer.invoke('chapters:deleteVersion', id, n, vn),
   rollbackChapter: (id: string, n: number, vn: number) =>
-    ipcRenderer.invoke('chapters:rollback', id, n, vn)
+    ipcRenderer.invoke('chapters:rollback', id, n, vn),
+  listMemoryEntities: (id: string, type: MemoryEntityType) =>
+    ipcRenderer.invoke('memory:entity:list', id, type),
+  createMemoryEntity: (id: string, type: MemoryEntityType, input: CreateMemoryEntityInput) =>
+    ipcRenderer.invoke('memory:entity:create', id, type, input),
+  updateMemoryEntity: (
+    id: string,
+    type: MemoryEntityType,
+    entityId: string,
+    patch: UpdateMemoryEntityInput
+  ) => ipcRenderer.invoke('memory:entity:update', id, type, entityId, patch),
+  deleteMemoryEntity: (id: string, type: MemoryEntityType, entityId: string) =>
+    ipcRenderer.invoke('memory:entity:delete', id, type, entityId)
 }
 
 contextBridge.exposeInMainWorld('api', api)
