@@ -139,6 +139,11 @@ export interface RendererApi {
   generateMainOutline: (projectId: string) => Promise<MainOutline>
   listDetailedOutline: (projectId: string) => Promise<DetailedOutlineItem[]>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
+  generateChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
 }
 
 export interface Character {

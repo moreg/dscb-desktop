@@ -100,7 +100,24 @@ const api = {
   generateMainOutline: (id: string) => ipcRenderer.invoke('outline:generateMain', id),
   listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
   generateDetailedOutline: (id: string, n: number) =>
-    ipcRenderer.invoke('outline:generateDetailed', id, n)
+    ipcRenderer.invoke('outline:generateDetailed', id, n),
+  generateChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = Math.random().toString(36).slice(2)
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:generateChapter', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)
