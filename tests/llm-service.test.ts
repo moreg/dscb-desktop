@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { SecretStore } from '../src/main/data/secret-store'
+import { LlmService } from '../src/main/data/llm-service'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -15,9 +17,6 @@ vi.mock('electron', () => ({
     }
   }
 }))
-
-const { SecretStore } = await import('../src/main/data/secret-store')
-const { LlmService } = await import('../src/main/data/llm-service')
 
 function sseBody(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()

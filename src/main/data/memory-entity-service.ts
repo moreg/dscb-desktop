@@ -22,6 +22,7 @@ export class MemoryEntityService {
     projectId: string,
     type: MemoryEntityType
   ): Promise<JsonCollectionRepository<MemoryEntity>> {
+    if (!(type in FILE_NAMES)) throw new Error(`unknown memory type: ${type}`)
     const dir = await this.projectService.resolveDir(projectId)
     return new JsonCollectionRepository<MemoryEntity>(join(dir, 'memory', FILE_NAMES[type]))
   }

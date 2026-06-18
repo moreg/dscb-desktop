@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
@@ -67,6 +67,19 @@ app.whenReady().then(() => {
   registerOutlineIpc(outlineService)
   const writeService = new WriteService(projectService, llmService)
   registerWriteIpc(writeService)
+
+  if (!process.env['ELECTRON_RENDERER_URL']) {
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+          ]
+        }
+      })
+    })
+  }
 
   createWindow()
 

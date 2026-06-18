@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ChapterContent, ChapterVersion, ChapterSource } from '../../shared/types'
 
 interface Props {
@@ -17,12 +17,15 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
   const [savingVersion, setSavingVersion] = useState(false)
   const [viewing, setViewing] = useState<ChapterVersion | null>(null)
   const [generating, setGenerating] = useState(false)
+  const genRef = useRef(0)
 
   const refreshVersions = () => {
     void window.api.listChapterVersions(projectId, chapterNumber).then(setVersions)
   }
 
   useEffect(() => {
+    ++genRef.current
+    setGenerating(false)
     void window.api.getChapter(projectId, chapterNumber).then((c) => {
       setData(c)
       setDraft(c.content)
@@ -68,15 +71,18 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
     }
     setGenerating(true)
     setDraft('')
+    const myGen = ++genRef.current
     try {
       const result = await window.api.generateChapterStream(
         projectId,
         chapterNumber,
         (token, done) => {
+          if (genRef.current !== myGen) return
           if (token) setDraft((d) => d + token)
           if (done) setGenerating(false)
         }
       )
+      if (genRef.current !== myGen) return
       if (!result.ok) {
         setGenerating(false)
         const msg =
@@ -90,7 +96,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
       }
       setDirty(true)
     } catch {
-      setGenerating(false)
+      if (genRef.current === myGen) setGenerating(false)
     }
   }
 

@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { readJson, writeJsonAtomic } from './atomic'
+import { countWords } from './words'
 import type { ChapterVersion, CreateChapterVersionInput } from '../../shared/types'
 
 interface VersionsFile {
@@ -13,10 +14,6 @@ const EMPTY: VersionsFile = { schemaVersion: 1, updatedAt: '', versions: [] }
 
 function versionsFile(projectDir: string, n: number): string {
   return join(projectDir, 'chapters', `${String(n).padStart(PAD, '0')}.versions.json`)
-}
-
-function countWords(text: string): number {
-  return text.replace(/\s/g, '').length
 }
 
 export class ChapterVersionRepository {

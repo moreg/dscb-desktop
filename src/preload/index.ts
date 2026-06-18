@@ -84,7 +84,7 @@ const api = {
     prompt: string,
     onToken: (token: string, done: boolean) => void
   ) => {
-    const requestId = Math.random().toString(36).slice(2)
+    const requestId = crypto.randomUUID()
     const handler = (
       _e: unknown,
       payload: { requestId: string; token: string; done: boolean }
@@ -106,7 +106,7 @@ const api = {
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
   ) => {
-    const requestId = Math.random().toString(36).slice(2)
+    const requestId = crypto.randomUUID()
     const handler = (
       _e: unknown,
       payload: { requestId: string; token: string; done: boolean }

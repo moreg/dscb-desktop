@@ -48,6 +48,7 @@ async function parseSse(
   const decoder = new TextDecoder()
   let buffer = ''
   let full = ''
+  const MAX = 200_000
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -64,6 +65,7 @@ async function parseSse(
         const token = json.choices?.[0]?.delta?.content
         if (token) {
           full += token
+          if (full.length > MAX) throw new Error('LLM_RESPONSE_TOO_LARGE')
           onToken?.(token)
         }
       } catch {

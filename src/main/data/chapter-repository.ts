@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { readJson, writeJsonAtomic, writeTextAtomic } from './atomic'
+import { countWords } from './words'
 import type {
   ChapterMeta,
   ChapterContent,
@@ -12,10 +13,6 @@ const PAD = 3
 
 function chapterFile(projectDir: string, n: number, ext: string): string {
   return join(projectDir, 'chapters', `${String(n).padStart(PAD, '0')}.${ext}`)
-}
-
-function countWords(text: string): number {
-  return text.replace(/\s/g, '').length
 }
 
 export class ChapterRepository {
