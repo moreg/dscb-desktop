@@ -25,10 +25,11 @@ npx electron .   # 运行构建产物
 
 ```
 渲染进程 (React)  ──window.api──▶  IPC  ──▶  主进程 (Node)
-                  contextBridge           ├─ ProjectService (建项目: 目录 + project.json + library)
-                                          ├─ ChapterRepository (NNN.md + NNN.meta.json)
-                                          ├─ MemoryService (characters.json + history.jsonl)
-                                          ├─ LibraryRepository (library.json)
+                  contextBridge           ├─ ProjectService / ChapterRepository / ChapterVersion
+                                          ├─ MemoryService (人物/关系/伏笔/地点/世界观/时间线/剧情点)
+                                          ├─ OutlineService (总纲/细纲 + AI 生成)
+                                          ├─ WriteService (组装上下文 → AI 写正文)
+                                          ├─ LlmService (MiniMax 流式) + SecretStore (AES-256-GCM)
                                           └─ 原子写 (.tmp + rename)
 ```
 
@@ -47,4 +48,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 10：正文写作增强（AI 生成组装上下文：细纲+人物+伏笔+前文摘要）；打包（electron-builder）。
+Phase 11：打包（electron-builder 出 Windows/macOS 安装包）。
