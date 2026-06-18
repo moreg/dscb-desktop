@@ -10,7 +10,9 @@ import type {
   CreateMemoryEntityInput,
   UpdateMemoryEntityInput,
   CreateForeshadowingInput,
-  UpdateForeshadowingInput
+  UpdateForeshadowingInput,
+  CreateRelationshipInput,
+  UpdateRelationshipInput
 } from '../shared/types'
 
 const api = {
@@ -68,7 +70,14 @@ const api = {
   collectForeshadowing: (id: string, fid: string, chapterNumber: number) =>
     ipcRenderer.invoke('memory:foreshadowing:collect', id, fid, chapterNumber),
   markForeshadowingMissed: (id: string, fid: string) =>
-    ipcRenderer.invoke('memory:foreshadowing:markMissed', id, fid)
+    ipcRenderer.invoke('memory:foreshadowing:markMissed', id, fid),
+  listRelationships: (id: string) => ipcRenderer.invoke('memory:relationship:list', id),
+  createRelationship: (id: string, input: CreateRelationshipInput) =>
+    ipcRenderer.invoke('memory:relationship:create', id, input),
+  updateRelationship: (id: string, rid: string, patch: UpdateRelationshipInput) =>
+    ipcRenderer.invoke('memory:relationship:update', id, rid, patch),
+  deleteRelationship: (id: string, rid: string) =>
+    ipcRenderer.invoke('memory:relationship:delete', id, rid)
 }
 
 contextBridge.exposeInMainWorld('api', api)
