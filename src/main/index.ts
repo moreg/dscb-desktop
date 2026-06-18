@@ -3,6 +3,7 @@ import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
 import { MemoryService } from './data/memory-service'
+import { MemoryEntityService } from './data/memory-entity-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
@@ -49,7 +50,8 @@ app.whenReady().then(() => {
   registerProjectsIpc(projectService)
   registerChaptersIpc(projectService)
   const memoryService = new MemoryService(projectService)
-  registerMemoryIpc(memoryService)
+  const memoryEntityService = new MemoryEntityService(projectService)
+  registerMemoryIpc(memoryService, memoryEntityService)
 
   createWindow()
 
