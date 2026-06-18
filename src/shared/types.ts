@@ -107,6 +107,20 @@ export interface RendererApi {
     patch: UpdateMemoryEntityInput
   ) => Promise<MemoryEntity>
   deleteMemoryEntity: (projectId: string, type: MemoryEntityType, id: string) => Promise<void>
+  listForeshadowings: (projectId: string) => Promise<Foreshadowing[]>
+  createForeshadowing: (
+    projectId: string,
+    input: CreateForeshadowingInput
+  ) => Promise<Foreshadowing>
+  updateForeshadowing: (
+    projectId: string,
+    id: string,
+    patch: UpdateForeshadowingInput
+  ) => Promise<Foreshadowing>
+  deleteForeshadowing: (projectId: string, id: string) => Promise<void>
+  plantForeshadowing: (projectId: string, id: string, chapterNumber: number) => Promise<Foreshadowing>
+  collectForeshadowing: (projectId: string, id: string, chapterNumber: number) => Promise<Foreshadowing>
+  markForeshadowingMissed: (projectId: string, id: string) => Promise<Foreshadowing>
 }
 
 export interface Character {
@@ -190,4 +204,30 @@ export interface UpdateMemoryEntityInput {
   name?: string
   category?: string
   notes?: string
+}
+
+export type ForeshadowingStatus = 'pending' | 'planted' | 'collected' | 'missed'
+
+export interface Foreshadowing {
+  id: string
+  content: string
+  status: ForeshadowingStatus
+  plantChapter?: number
+  expectedCollect?: number
+  actualCollect?: number
+  note?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateForeshadowingInput {
+  content: string
+  expectedCollect?: number
+  note?: string
+}
+
+export interface UpdateForeshadowingInput {
+  content?: string
+  expectedCollect?: number
+  note?: string
 }
