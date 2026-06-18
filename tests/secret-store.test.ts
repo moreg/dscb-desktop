@@ -1,12 +1,26 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mkdtemp, readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import { SecretStore } from '../src/main/data/secret-store'
+
+vi.mock('electron', () => ({
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain: string) =>
+      Buffer.from(`<enc>${Buffer.from(plain, 'utf8').toString('hex')}</enc>`, 'utf8'),
+    decryptString: (buf: Buffer) => {
+      const s = buf.toString('utf8')
+      const hex = s.replace(/^<enc>/, '').replace(/<\/enc>$/, '')
+      return Buffer.from(hex, 'hex').toString('utf8')
+    }
+  }
+}))
+
+const { SecretStore } = await import('../src/main/data/secret-store')
 
 describe('SecretStore', () => {
   let dir: string
-  let store: SecretStore
+  let store: InstanceType<typeof SecretStore>
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'aw-sec-'))
     store = new SecretStore(path.join(dir, 'providers.enc'))
@@ -17,13 +31,19 @@ describe('SecretStore', () => {
   })
 
   it('round-trips encrypted config', async () => {
-    await store.write({ activeProvider: 'minimax', providers: { minimax: { apiKey: 'sk-test-123' } } })
+    await store.write({
+      activeProvider: 'minimax',
+      providers: { minimax: { apiKey: 'sk-test-123' } }
+    })
     const read = await store.read()
     expect(read.providers.minimax?.apiKey).toBe('sk-test-123')
   })
 
   it('stored file is not plaintext', async () => {
-    await store.write({ activeProvider: 'minimax', providers: { minimax: { apiKey: 'sk-secret' } } })
+    await store.write({
+      activeProvider: 'minimax',
+      providers: { minimax: { apiKey: 'sk-secret' } }
+    })
     const raw = await readFile(path.join(dir, 'providers.enc'), 'utf-8')
     expect(raw).not.toContain('sk-secret')
   })

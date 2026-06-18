@@ -31,8 +31,9 @@ export class LlmService {
     })
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`LLM request failed: ${res.status} ${text}`)
+      if (res.status === 401 || res.status === 403) throw new Error('LLM_AUTH_FAILED')
+      if (res.status === 429) throw new Error('LLM_RATE_LIMIT')
+      throw new Error('LLM_REQUEST_FAILED')
     }
 
     return parseSse(res.body as ReadableStream<Uint8Array>, opts.onToken)

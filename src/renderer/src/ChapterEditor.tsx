@@ -69,10 +69,25 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
     setGenerating(true)
     setDraft('')
     try {
-      await window.api.generateChapterStream(projectId, chapterNumber, (token, done) => {
-        if (token) setDraft((d) => d + token)
-        if (done) setGenerating(false)
-      })
+      const result = await window.api.generateChapterStream(
+        projectId,
+        chapterNumber,
+        (token, done) => {
+          if (token) setDraft((d) => d + token)
+          if (done) setGenerating(false)
+        }
+      )
+      if (!result.ok) {
+        setGenerating(false)
+        const msg =
+          result.error === 'LLM_AUTH_FAILED'
+            ? '认证失败，请检查 API Key'
+            : result.error === 'LLM_RATE_LIMIT'
+              ? '请求过于频繁，请稍后再试'
+              : '生成失败，请重试'
+        window.alert(msg)
+        return
+      }
       setDirty(true)
     } catch {
       setGenerating(false)

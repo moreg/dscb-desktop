@@ -5,9 +5,12 @@ import { SecretStore } from '../data/secret-store'
 export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   ipcMain.handle('llm:configure', async (_e, apiKey: string) => {
     const config = await secret.read()
-    config.providers.minimax = { apiKey }
-    config.activeProvider = 'minimax'
-    await secret.write(config)
+    const next = {
+      ...config,
+      activeProvider: 'minimax',
+      providers: { ...config.providers, minimax: { apiKey } }
+    }
+    await secret.write(next)
     return true
   })
 

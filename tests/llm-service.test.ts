@@ -1,9 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SecretStore } from '../src/main/data/secret-store'
-import { LlmService } from '../src/main/data/llm-service'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
+
+vi.mock('electron', () => ({
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain: string) =>
+      Buffer.from(`<enc>${Buffer.from(plain, 'utf8').toString('hex')}</enc>`, 'utf8'),
+    decryptString: (buf: Buffer) => {
+      const s = buf.toString('utf8')
+      const hex = s.replace(/^<enc>/, '').replace(/<\/enc>$/, '')
+      return Buffer.from(hex, 'hex').toString('utf8')
+    }
+  }
+}))
+
+const { SecretStore } = await import('../src/main/data/secret-store')
+const { LlmService } = await import('../src/main/data/llm-service')
 
 function sseBody(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -47,6 +61,6 @@ describe('LlmService', () => {
       status: 401,
       text: async () => 'unauth'
     } as never)
-    await expect(service.generateStream('hi')).rejects.toThrow(/401/)
+    await expect(service.generateStream('hi')).rejects.toThrow(/LLM_AUTH_FAILED/)
   })
 })
