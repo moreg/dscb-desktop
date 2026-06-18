@@ -6,13 +6,15 @@ interface Props {
   onBack: () => void
   onOpenChapter: (n: number) => void
   onOpenCharacters: () => void
+  onOpenMemoryCenter: () => void
 }
 
 export default function ChapterListPage({
   projectId,
   onBack,
   onOpenChapter,
-  onOpenCharacters
+  onOpenCharacters,
+  onOpenMemoryCenter
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [loading, setLoading] = useState(true)
@@ -40,7 +42,10 @@ export default function ChapterListPage({
         <button onClick={onBack}>← 返回项目列表</button>
         <div>
           <button onClick={onOpenCharacters} style={{ marginRight: 8 }}>
-            📝 人物管理
+            📝 人物
+          </button>
+          <button onClick={onOpenMemoryCenter} style={{ marginRight: 8 }}>
+            🧠 记忆中心
           </button>
           <button onClick={createChapter}>+ 新建章节</button>
         </div>

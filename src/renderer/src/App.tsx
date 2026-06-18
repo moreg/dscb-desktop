@@ -3,12 +3,24 @@ import ProjectListPage from './ProjectListPage'
 import ChapterListPage from './ChapterListPage'
 import ChapterEditor from './ChapterEditor'
 import CharacterManagerPage from './CharacterManagerPage'
+import MemoryCenterPage from './MemoryCenterPage'
+import MemoryEntityPage from './MemoryEntityPage'
+import type { MemoryEntityType } from '../../shared/types'
 
 type View =
   | { kind: 'projects' }
   | { kind: 'chapters'; projectId: string }
   | { kind: 'editor'; projectId: string; chapterNumber: number }
   | { kind: 'characters'; projectId: string }
+  | { kind: 'memoryCenter'; projectId: string }
+  | { kind: 'memoryEntity'; projectId: string; entityType: MemoryEntityType }
+
+const ENTITY_LABELS: Record<MemoryEntityType, string> = {
+  location: '地点',
+  worldview: '世界观',
+  timeline: '时间线',
+  plot_point: '剧情点'
+}
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'projects' })
@@ -16,7 +28,7 @@ export default function App() {
   return (
     <div style={{ fontFamily: 'system-ui', maxWidth: 820, margin: '40px auto', padding: '0 20px' }}>
       <h1>ai-writer 桌面版</h1>
-      <p style={{ color: '#64748b' }}>Phase 03 · 项目 / 章节 / 人物（本地文件存储）</p>
+      <p style={{ color: '#64748b' }}>Phase 05 · 项目 / 章节 / 记忆中心（本地文件存储）</p>
       <hr />
       {view.kind === 'projects' ? (
         <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
@@ -28,17 +40,33 @@ export default function App() {
             setView({ kind: 'editor', projectId: view.projectId, chapterNumber: n })
           }
           onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
+          onOpenMemoryCenter={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
         />
-      ) : view.kind === 'characters' ? (
-        <CharacterManagerPage
-          projectId={view.projectId}
-          onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
-        />
-      ) : (
+      ) : view.kind === 'editor' ? (
         <ChapterEditor
           projectId={view.projectId}
           chapterNumber={view.chapterNumber}
           onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
+        />
+      ) : view.kind === 'characters' ? (
+        <CharacterManagerPage
+          projectId={view.projectId}
+          onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
+        />
+      ) : view.kind === 'memoryCenter' ? (
+        <MemoryCenterPage
+          onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
+          onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
+          onOpenEntity={(t) =>
+            setView({ kind: 'memoryEntity', projectId: view.projectId, entityType: t })
+          }
+        />
+      ) : (
+        <MemoryEntityPage
+          projectId={view.projectId}
+          type={view.entityType}
+          label={ENTITY_LABELS[view.entityType]}
+          onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
         />
       )}
     </div>
