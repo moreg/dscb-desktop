@@ -6,11 +6,13 @@ import { MemoryService } from './data/memory-service'
 import { MemoryEntityService } from './data/memory-entity-service'
 import { SecretStore } from './data/secret-store'
 import { LlmService } from './data/llm-service'
+import { OutlineService } from './data/outline-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
 import { registerMemoryIpc } from './ipc/memory'
 import { registerLlmIpc } from './ipc/llm'
+import { registerOutlineIpc } from './ipc/outline'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -59,6 +61,8 @@ app.whenReady().then(() => {
   const secret = new SecretStore(secretFile)
   const llmService = new LlmService(secret)
   registerLlmIpc(secret, llmService)
+  const outlineService = new OutlineService(projectService, llmService)
+  registerOutlineIpc(outlineService)
 
   createWindow()
 
