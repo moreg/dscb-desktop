@@ -4,6 +4,7 @@ interface Props {
   onBack: () => void
   onOpenCharacters: () => void
   onOpenEntity: (type: MemoryEntityType) => void
+  onOpenForeshadowings: () => void
 }
 
 const ENTITIES: { type: MemoryEntityType; label: string; desc: string }[] = [
@@ -13,13 +14,19 @@ const ENTITIES: { type: MemoryEntityType; label: string; desc: string }[] = [
   { type: 'plot_point', label: '剧情点', desc: '故事弧、转折点' }
 ]
 
-export default function MemoryCenterPage({ onBack, onOpenCharacters, onOpenEntity }: Props) {
+export default function MemoryCenterPage({
+  onBack,
+  onOpenCharacters,
+  onOpenEntity,
+  onOpenForeshadowings
+}: Props) {
   return (
     <div>
       <button onClick={onBack}>← 返回章节列表</button>
       <h2>记忆中心</h2>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
         <Card label="人物" desc="角色档案、性格、能力" onClick={onOpenCharacters} />
+        <Card label="伏笔" desc="埋设与回收，状态看板" onClick={onOpenForeshadowings} />
         {ENTITIES.map((e) => (
           <Card key={e.type} label={e.label} desc={e.desc} onClick={() => onOpenEntity(e.type)} />
         ))}

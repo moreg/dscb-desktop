@@ -5,6 +5,7 @@ import ChapterEditor from './ChapterEditor'
 import CharacterManagerPage from './CharacterManagerPage'
 import MemoryCenterPage from './MemoryCenterPage'
 import MemoryEntityPage from './MemoryEntityPage'
+import ForeshadowingBoard from './ForeshadowingBoard'
 import type { MemoryEntityType } from '../../shared/types'
 
 type View =
@@ -14,6 +15,7 @@ type View =
   | { kind: 'characters'; projectId: string }
   | { kind: 'memoryCenter'; projectId: string }
   | { kind: 'memoryEntity'; projectId: string; entityType: MemoryEntityType }
+  | { kind: 'foreshadowingBoard'; projectId: string }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
   location: '地点',
@@ -28,7 +30,7 @@ export default function App() {
   return (
     <div style={{ fontFamily: 'system-ui', maxWidth: 820, margin: '40px auto', padding: '0 20px' }}>
       <h1>ai-writer 桌面版</h1>
-      <p style={{ color: '#64748b' }}>Phase 05 · 项目 / 章节 / 记忆中心（本地文件存储）</p>
+      <p style={{ color: '#64748b' }}>Phase 06 · 项目 / 章节 / 记忆 / 伏笔（本地文件存储）</p>
       <hr />
       {view.kind === 'projects' ? (
         <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
@@ -60,12 +62,20 @@ export default function App() {
           onOpenEntity={(t) =>
             setView({ kind: 'memoryEntity', projectId: view.projectId, entityType: t })
           }
+          onOpenForeshadowings={() =>
+            setView({ kind: 'foreshadowingBoard', projectId: view.projectId })
+          }
         />
-      ) : (
+      ) : view.kind === 'memoryEntity' ? (
         <MemoryEntityPage
           projectId={view.projectId}
           type={view.entityType}
           label={ENTITY_LABELS[view.entityType]}
+          onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
+        />
+      ) : (
+        <ForeshadowingBoard
+          projectId={view.projectId}
           onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
         />
       )}
