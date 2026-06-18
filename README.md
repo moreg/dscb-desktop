@@ -17,6 +17,7 @@ npx electron .   # 运行构建产物
 - 项目库索引：`<userData>/library.json`
 - 项目目录：`<userData>/projects/<projectId>/`，内含 `project.json` + `chapters/` + `memory/`
 - 章节：`chapters/NNN.md`（正文）+ `NNN.meta.json`（元数据）+ `NNN.versions.json`（版本历史）
+- 大纲：`outlines/main.json`（总纲）+ `outlines/detailed.json`（细纲，按章）
 - 记忆：`memory/characters.json`（人物）、`relationships.json`（人物关系）、`locations.json`（地点）、`worldview.json`（世界观）、`timeline.json`（时间线）、`plot_points.json`（剧情点）、`foreshadowings.json`（伏笔）、`history.jsonl`（审计）
 - Windows `<userData>`：`%APPDATA%/ai-writer-desktop/`
 
@@ -46,4 +47,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 09：正文写作增强（上下文组装：细纲+记忆+风格）、大纲生成；打包（electron-builder）。
+Phase 10：正文写作增强（AI 生成组装上下文：细纲+人物+伏笔+前文摘要）；打包（electron-builder）。
