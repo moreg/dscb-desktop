@@ -135,6 +135,10 @@ export interface RendererApi {
     prompt: string,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
+  getMainOutline: (projectId: string) => Promise<MainOutline | null>
+  generateMainOutline: (projectId: string) => Promise<MainOutline>
+  listDetailedOutline: (projectId: string) => Promise<DetailedOutlineItem[]>
+  generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
 }
 
 export interface Character {
@@ -269,4 +273,26 @@ export interface UpdateRelationshipInput {
   relationType?: string
   description?: string
   strength?: number
+}
+
+export interface MainOutline {
+  schemaVersion: number
+  updatedAt: string
+  synopsis: string
+  theme?: string
+  mainLine?: string
+}
+
+export interface DetailedOutlineItem {
+  chapterNumber: number
+  plotSummary: string
+  emotionPoint?: string
+  coolPoint?: string
+  hook?: string
+}
+
+export interface DetailedOutline {
+  schemaVersion: number
+  updatedAt: string
+  items: DetailedOutlineItem[]
 }
