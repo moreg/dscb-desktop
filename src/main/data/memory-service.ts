@@ -1,5 +1,6 @@
 import { CharacterRepository } from './character-repository'
 import { ForeshadowingRepository } from './foreshadowing-repository'
+import { RelationshipRepository } from './relationship-repository'
 import { MemoryHistory } from './memory-history'
 import type { ProjectService } from './project-service'
 import type {
@@ -9,7 +10,10 @@ import type {
   HistoryEntry,
   Foreshadowing,
   CreateForeshadowingInput,
-  UpdateForeshadowingInput
+  UpdateForeshadowingInput,
+  Relationship,
+  CreateRelationshipInput,
+  UpdateRelationshipInput
 } from '../../shared/types'
 
 export class MemoryService {
@@ -135,5 +139,42 @@ export class MemoryService {
 
   async markForeshadowingMissed(projectId: string, id: string): Promise<Foreshadowing> {
     return (await this.fsRepo(projectId)).markMissed(id)
+  }
+
+  private async relRepo(projectId: string): Promise<RelationshipRepository> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new RelationshipRepository(dir)
+  }
+
+  async listRelationships(projectId: string): Promise<Relationship[]> {
+    return (await this.relRepo(projectId)).list()
+  }
+
+  async createRelationship(
+    projectId: string,
+    input: CreateRelationshipInput
+  ): Promise<Relationship> {
+    const repo = await this.relRepo(projectId)
+    const r = await repo.create(input)
+    await (await this.history(projectId)).append({
+      at: new Date().toISOString(),
+      type: 'relationship',
+      action: 'create',
+      entityId: r.id,
+      summary: r.relationType
+    })
+    return r
+  }
+
+  async updateRelationship(
+    projectId: string,
+    id: string,
+    patch: UpdateRelationshipInput
+  ): Promise<Relationship> {
+    return (await this.relRepo(projectId)).update(id, patch)
+  }
+
+  async deleteRelationship(projectId: string, id: string): Promise<void> {
+    return (await this.relRepo(projectId)).delete(id)
   }
 }

@@ -8,7 +8,9 @@ import type {
   CreateMemoryEntityInput,
   UpdateMemoryEntityInput,
   CreateForeshadowingInput,
-  UpdateForeshadowingInput
+  UpdateForeshadowingInput,
+  CreateRelationshipInput,
+  UpdateRelationshipInput
 } from '../../shared/types'
 
 export function registerMemoryIpc(
@@ -82,5 +84,22 @@ export function registerMemoryIpc(
   )
   ipcMain.handle('memory:foreshadowing:markMissed', (_e, projectId: string, id: string) =>
     service.markForeshadowingMissed(projectId, id)
+  )
+
+  ipcMain.handle('memory:relationship:list', (_e, projectId: string) =>
+    service.listRelationships(projectId)
+  )
+  ipcMain.handle(
+    'memory:relationship:create',
+    (_e, projectId: string, input: CreateRelationshipInput) =>
+      service.createRelationship(projectId, input)
+  )
+  ipcMain.handle(
+    'memory:relationship:update',
+    (_e, projectId: string, id: string, patch: UpdateRelationshipInput) =>
+      service.updateRelationship(projectId, id, patch)
+  )
+  ipcMain.handle('memory:relationship:delete', (_e, projectId: string, id: string) =>
+    service.deleteRelationship(projectId, id)
   )
 }
