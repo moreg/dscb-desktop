@@ -6,7 +6,9 @@ import type {
   UpdateCharacterInput,
   MemoryEntityType,
   CreateMemoryEntityInput,
-  UpdateMemoryEntityInput
+  UpdateMemoryEntityInput,
+  CreateForeshadowingInput,
+  UpdateForeshadowingInput
 } from '../../shared/types'
 
 export function registerMemoryIpc(
@@ -50,5 +52,35 @@ export function registerMemoryIpc(
     'memory:entity:delete',
     (_e, projectId: string, type: MemoryEntityType, id: string) =>
       entityService.delete(projectId, type, id)
+  )
+
+  ipcMain.handle('memory:foreshadowing:list', (_e, projectId: string) =>
+    service.listForeshadowings(projectId)
+  )
+  ipcMain.handle(
+    'memory:foreshadowing:create',
+    (_e, projectId: string, input: CreateForeshadowingInput) =>
+      service.createForeshadowing(projectId, input)
+  )
+  ipcMain.handle(
+    'memory:foreshadowing:update',
+    (_e, projectId: string, id: string, patch: UpdateForeshadowingInput) =>
+      service.updateForeshadowing(projectId, id, patch)
+  )
+  ipcMain.handle('memory:foreshadowing:delete', (_e, projectId: string, id: string) =>
+    service.deleteForeshadowing(projectId, id)
+  )
+  ipcMain.handle(
+    'memory:foreshadowing:plant',
+    (_e, projectId: string, id: string, chapterNumber: number) =>
+      service.plantForeshadowing(projectId, id, chapterNumber)
+  )
+  ipcMain.handle(
+    'memory:foreshadowing:collect',
+    (_e, projectId: string, id: string, chapterNumber: number) =>
+      service.collectForeshadowing(projectId, id, chapterNumber)
+  )
+  ipcMain.handle('memory:foreshadowing:markMissed', (_e, projectId: string, id: string) =>
+    service.markForeshadowingMissed(projectId, id)
   )
 }

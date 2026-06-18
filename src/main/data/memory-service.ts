@@ -1,11 +1,15 @@
 import { CharacterRepository } from './character-repository'
+import { ForeshadowingRepository } from './foreshadowing-repository'
 import { MemoryHistory } from './memory-history'
 import type { ProjectService } from './project-service'
 import type {
   Character,
   CreateCharacterInput,
   UpdateCharacterInput,
-  HistoryEntry
+  HistoryEntry,
+  Foreshadowing,
+  CreateForeshadowingInput,
+  UpdateForeshadowingInput
 } from '../../shared/types'
 
 export class MemoryService {
@@ -74,5 +78,62 @@ export class MemoryService {
 
   async listHistory(projectId: string): Promise<HistoryEntry[]> {
     return (await this.history(projectId)).list()
+  }
+
+  private async fsRepo(projectId: string): Promise<ForeshadowingRepository> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new ForeshadowingRepository(dir)
+  }
+
+  async listForeshadowings(projectId: string): Promise<Foreshadowing[]> {
+    return (await this.fsRepo(projectId)).list()
+  }
+
+  async createForeshadowing(
+    projectId: string,
+    input: CreateForeshadowingInput
+  ): Promise<Foreshadowing> {
+    const repo = await this.fsRepo(projectId)
+    const f = await repo.create(input)
+    await (await this.history(projectId)).append({
+      at: new Date().toISOString(),
+      type: 'foreshadowing',
+      action: 'create',
+      entityId: f.id,
+      summary: f.content
+    })
+    return f
+  }
+
+  async updateForeshadowing(
+    projectId: string,
+    id: string,
+    patch: UpdateForeshadowingInput
+  ): Promise<Foreshadowing> {
+    return (await this.fsRepo(projectId)).update(id, patch)
+  }
+
+  async deleteForeshadowing(projectId: string, id: string): Promise<void> {
+    return (await this.fsRepo(projectId)).delete(id)
+  }
+
+  async plantForeshadowing(
+    projectId: string,
+    id: string,
+    chapterNumber: number
+  ): Promise<Foreshadowing> {
+    return (await this.fsRepo(projectId)).plant(id, chapterNumber)
+  }
+
+  async collectForeshadowing(
+    projectId: string,
+    id: string,
+    chapterNumber: number
+  ): Promise<Foreshadowing> {
+    return (await this.fsRepo(projectId)).collect(id, chapterNumber)
+  }
+
+  async markForeshadowingMissed(projectId: string, id: string): Promise<Foreshadowing> {
+    return (await this.fsRepo(projectId)).markMissed(id)
   }
 }
