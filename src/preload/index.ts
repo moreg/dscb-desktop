@@ -77,7 +77,25 @@ const api = {
   updateRelationship: (id: string, rid: string, patch: UpdateRelationshipInput) =>
     ipcRenderer.invoke('memory:relationship:update', id, rid, patch),
   deleteRelationship: (id: string, rid: string) =>
-    ipcRenderer.invoke('memory:relationship:delete', id, rid)
+    ipcRenderer.invoke('memory:relationship:delete', id, rid),
+  configureLlm: (apiKey: string) => ipcRenderer.invoke('llm:configure', apiKey),
+  hasLlmKey: () => ipcRenderer.invoke('llm:hasKey'),
+  generateStream: (
+    prompt: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = Math.random().toString(36).slice(2)
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('llm:generate', { prompt, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

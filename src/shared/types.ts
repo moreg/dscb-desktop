@@ -129,6 +129,12 @@ export interface RendererApi {
     patch: UpdateRelationshipInput
   ) => Promise<Relationship>
   deleteRelationship: (projectId: string, id: string) => Promise<void>
+  configureLlm: (apiKey: string) => Promise<boolean>
+  hasLlmKey: () => Promise<boolean>
+  generateStream: (
+    prompt: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
 }
 
 export interface Character {
