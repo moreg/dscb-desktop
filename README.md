@@ -17,7 +17,7 @@ npx electron .   # 运行构建产物
 - 项目库索引：`<userData>/library.json`
 - 项目目录：`<userData>/projects/<projectId>/`，内含 `project.json` + `chapters/` + `memory/`
 - 章节：`chapters/NNN.md`（正文）+ `NNN.meta.json`（元数据）+ `NNN.versions.json`（版本历史）
-- 记忆：`memory/characters.json`（人物）、`locations.json`（地点）、`worldview.json`（世界观）、`timeline.json`（时间线）、`plot_points.json`（剧情点）、`foreshadowings.json`（伏笔）、`history.jsonl`（审计）
+- 记忆：`memory/characters.json`（人物）、`relationships.json`（人物关系）、`locations.json`（地点）、`worldview.json`（世界观）、`timeline.json`（时间线）、`plot_points.json`（剧情点）、`foreshadowings.json`（伏笔）、`history.jsonl`（审计）
 - Windows `<userData>`：`%APPDATA%/ai-writer-desktop/`
 
 ## 架构
@@ -46,4 +46,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 07：人物关系（relationships）；LLM 基础设施（provider 工厂 + 密钥加密 + 流式）。
+Phase 08：LLM 基础设施（provider 工厂 + AES 密钥加密 + SSE 流式，需 API key 实测）。
