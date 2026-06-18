@@ -12,6 +12,14 @@ npm run build    # 构建产物到 out/
 npx electron .   # 运行构建产物
 ```
 
+## 打包
+
+```bash
+npm run package      # 构建并打包成 Windows 安装包（release/*.exe）
+```
+
+产物：`release/ai-writer Setup <version>.exe`（NSIS 安装包）。
+
 ## 数据位置
 
 - 项目库索引：`<userData>/library.json`
@@ -48,4 +56,4 @@ npx electron .   # 运行构建产物
 
 ## 下一阶段
 
-Phase 11：打包（electron-builder 出 Windows/macOS 安装包）。
+应用已完整：本地创作 + 记忆 + 大纲 + AI 写作 + 可打包分发。后续可扩展去味润色、更多 LLM provider、macOS 打包等。
