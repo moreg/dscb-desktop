@@ -95,7 +95,12 @@ const api = {
     return ipcRenderer
       .invoke('llm:generate', { prompt, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
-  }
+  },
+  getMainOutline: (id: string) => ipcRenderer.invoke('outline:getMain', id),
+  generateMainOutline: (id: string) => ipcRenderer.invoke('outline:generateMain', id),
+  listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
+  generateDetailedOutline: (id: string, n: number) =>
+    ipcRenderer.invoke('outline:generateDetailed', id, n)
 }
 
 contextBridge.exposeInMainWorld('api', api)
