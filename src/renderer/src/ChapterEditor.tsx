@@ -16,6 +16,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
   const [showVersions, setShowVersions] = useState(false)
   const [savingVersion, setSavingVersion] = useState(false)
   const [viewing, setViewing] = useState<ChapterVersion | null>(null)
+  const [generating, setGenerating] = useState(false)
 
   const refreshVersions = () => {
     void window.api.listChapterVersions(projectId, chapterNumber).then(setVersions)
@@ -60,6 +61,25 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
     }
   }
 
+  const aiGenerate = async () => {
+    if (!(await window.api.hasLlmKey())) {
+      window.alert('请先在「设置」中配置 MiniMax API Key')
+      return
+    }
+    setGenerating(true)
+    setDraft('')
+    const prompt = `请为小说第 ${data!.meta.chapterNumber} 章《${data!.meta.title}》写约 800 字的正文，直接输出正文，不要标题和解释。`
+    try {
+      await window.api.generateStream(prompt, (token, done) => {
+        if (token) setDraft((d) => d + token)
+        if (done) setGenerating(false)
+      })
+      setDirty(true)
+    } catch {
+      setGenerating(false)
+    }
+  }
+
   const rollback = async (v: ChapterVersion) => {
     if (!window.confirm(`回滚到版本 ${v.versionNumber}（${v.source}）？当前正文将被覆盖。`)) return
     const meta = await window.api.rollbackChapter(projectId, chapterNumber, v.versionNumber)
@@ -95,6 +115,9 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
           <button onClick={() => setShowVersions((s) => !s)} style={{ marginLeft: 8 }}>
             {showVersions ? '收起历史' : '版本历史'}
           </button>
+          <button onClick={aiGenerate} disabled={generating} style={{ marginLeft: 8 }}>
+            {generating ? '生成中…' : '✨ AI 生成'}
+          </button>
         </div>
       </div>
       <textarea
@@ -111,7 +134,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
           fontSize: 15,
           padding: 12
         }}
-        placeholder="在此输入正文……"
+        placeholder="在此输入正文，或点「✨ AI 生成」…"
       />
 
       {showVersions ? (

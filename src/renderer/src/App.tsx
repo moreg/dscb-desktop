@@ -7,6 +7,7 @@ import MemoryCenterPage from './MemoryCenterPage'
 import MemoryEntityPage from './MemoryEntityPage'
 import ForeshadowingBoard from './ForeshadowingBoard'
 import RelationshipPage from './RelationshipPage'
+import SettingsPage from './SettingsPage'
 import type { MemoryEntityType } from '../../shared/types'
 
 type View =
@@ -18,6 +19,7 @@ type View =
   | { kind: 'memoryEntity'; projectId: string; entityType: MemoryEntityType }
   | { kind: 'foreshadowingBoard'; projectId: string }
   | { kind: 'relationships'; projectId: string }
+  | { kind: 'settings' }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
   location: '地点',
@@ -31,11 +33,18 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui', maxWidth: 820, margin: '40px auto', padding: '0 20px' }}>
-      <h1>ai-writer 桌面版</h1>
-      <p style={{ color: '#64748b' }}>Phase 07 · 项目 / 章节 / 记忆 / 伏笔 / 关系（本地文件存储）</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h1 style={{ margin: 0 }}>ai-writer 桌面版</h1>
+          <p style={{ color: '#64748b', margin: '4px 0 0' }}>Phase 08 · 本地创作 + AI 生成</p>
+        </div>
+        <button onClick={() => setView({ kind: 'settings' })}>⚙️ 设置</button>
+      </div>
       <hr />
       {view.kind === 'projects' ? (
         <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
+      ) : view.kind === 'settings' ? (
+        <SettingsPage onBack={() => setView({ kind: 'projects' })} />
       ) : view.kind === 'chapters' ? (
         <ChapterListPage
           projectId={view.projectId}
