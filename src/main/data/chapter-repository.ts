@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { readJson, writeJsonAtomic, writeTextAtomic } from './atomic'
+import { withFileLock } from './file-lock'
 import { countWords } from './words'
 import type {
   ChapterMeta,
@@ -54,20 +55,23 @@ export class ChapterRepository {
   }
 
   async create(input: CreateChapterInput): Promise<ChapterMeta> {
-    const list = await this.list()
-    const nextNumber = list.length === 0 ? 1 : Math.max(...list.map((m) => m.chapterNumber)) + 1
-    const now = new Date().toISOString()
-    const meta: ChapterMeta = {
-      schemaVersion: 1,
-      updatedAt: now,
-      chapterNumber: nextNumber,
-      title: input.title,
-      wordCount: 0,
-      status: 'outline'
-    }
-    await writeJsonAtomic(chapterFile(this.projectDir, nextNumber, 'meta.json'), meta)
-    await writeTextAtomic(chapterFile(this.projectDir, nextNumber, 'md'), '')
-    return meta
+    return withFileLock(join(this.projectDir, 'chapters'), async () => {
+      const list = await this.list()
+      const nextNumber =
+        list.length === 0 ? 1 : Math.max(...list.map((m) => m.chapterNumber)) + 1
+      const now = new Date().toISOString()
+      const meta: ChapterMeta = {
+        schemaVersion: 1,
+        updatedAt: now,
+        chapterNumber: nextNumber,
+        title: input.title,
+        wordCount: 0,
+        status: 'outline'
+      }
+      await writeJsonAtomic(chapterFile(this.projectDir, nextNumber, 'meta.json'), meta)
+      await writeTextAtomic(chapterFile(this.projectDir, nextNumber, 'md'), '')
+      return meta
+    })
   }
 
   async updateContent(n: number, content: string): Promise<ChapterMeta> {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { readJson, writeJsonAtomic } from './atomic'
+import { withFileLock } from './file-lock'
 
 interface CollectionFile<T> {
   schemaVersion: number
@@ -29,30 +30,36 @@ export class JsonCollectionRepository<T extends { id: string }> {
   }
 
   async create(input: Omit<T, 'id'> & { id?: string }): Promise<T> {
-    const data = await this.read()
-    const item = { ...input, id: input.id ?? randomUUID() } as T
-    await writeJsonAtomic(this.file, {
-      ...data,
-      updatedAt: new Date().toISOString(),
-      items: [...data.items, item]
+    return withFileLock(this.file, async () => {
+      const data = await this.read()
+      const item = { ...input, id: input.id ?? randomUUID() } as T
+      await writeJsonAtomic(this.file, {
+        ...data,
+        updatedAt: new Date().toISOString(),
+        items: [...data.items, item]
+      })
+      return item
     })
-    return item
   }
 
   async update(id: string, patch: Partial<T>): Promise<T> {
-    const data = await this.read()
-    const idx = data.items.findIndex((x) => x.id === id)
-    if (idx < 0) throw new Error(`item ${id} not found`)
-    const updated = { ...data.items[idx], ...patch, id } as T
-    const items = [...data.items]
-    items[idx] = updated
-    await writeJsonAtomic(this.file, { ...data, updatedAt: new Date().toISOString(), items })
-    return updated
+    return withFileLock(this.file, async () => {
+      const data = await this.read()
+      const idx = data.items.findIndex((x) => x.id === id)
+      if (idx < 0) throw new Error(`item ${id} not found`)
+      const updated = { ...data.items[idx], ...patch, id } as T
+      const items = [...data.items]
+      items[idx] = updated
+      await writeJsonAtomic(this.file, { ...data, updatedAt: new Date().toISOString(), items })
+      return updated
+    })
   }
 
   async delete(id: string): Promise<void> {
-    const data = await this.read()
-    const items = data.items.filter((x) => x.id !== id)
-    await writeJsonAtomic(this.file, { ...data, updatedAt: new Date().toISOString(), items })
+    return withFileLock(this.file, async () => {
+      const data = await this.read()
+      const items = data.items.filter((x) => x.id !== id)
+      await writeJsonAtomic(this.file, { ...data, updatedAt: new Date().toISOString(), items })
+    })
   }
 }
