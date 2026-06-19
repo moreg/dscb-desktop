@@ -1,10 +1,10 @@
-import { ipcMain } from 'electron'
+import { safeHandle } from './safe-handle'
 import { LibraryRepository, type CreateProjectInput } from '../data/library-repository'
 import type { ProjectMeta } from '../../shared/types'
 
 export function registerLibraryIpc(repo: LibraryRepository): void {
-  ipcMain.handle('library:list', async (): Promise<ProjectMeta[]> => repo.list())
-  ipcMain.handle(
+  safeHandle('library:list', async (): Promise<ProjectMeta[]> => repo.list())
+  safeHandle(
     'library:create',
     async (_e, input: CreateProjectInput): Promise<ProjectMeta> => repo.create(input)
   )

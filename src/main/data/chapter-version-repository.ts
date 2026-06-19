@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { readJson, writeJsonAtomic } from './atomic'
+import { withFileLock } from './file-lock'
 import { countWords } from './words'
 import type { ChapterVersion, CreateChapterVersionInput } from '../../shared/types'
 
@@ -32,33 +33,39 @@ export class ChapterVersionRepository {
   }
 
   async create(n: number, input: CreateChapterVersionInput): Promise<ChapterVersion> {
-    const data = await readJson<VersionsFile>(versionsFile(this.projectDir, n), EMPTY)
-    const nextNumber =
-      data.versions.length === 0 ? 1 : Math.max(...data.versions.map((v) => v.versionNumber)) + 1
-    const version: ChapterVersion = {
-      versionNumber: nextNumber,
-      source: input.source,
-      content: input.content,
-      wordCount: countWords(input.content),
-      note: input.note,
-      createdAt: new Date().toISOString()
-    }
-    const next: VersionsFile = {
-      ...data,
-      updatedAt: new Date().toISOString(),
-      versions: [...data.versions, version]
-    }
-    await writeJsonAtomic(versionsFile(this.projectDir, n), next)
-    return version
+    return withFileLock(versionsFile(this.projectDir, n), async () => {
+      const data = await readJson<VersionsFile>(versionsFile(this.projectDir, n), EMPTY)
+      const nextNumber =
+        data.versions.length === 0
+          ? 1
+          : Math.max(...data.versions.map((v) => v.versionNumber)) + 1
+      const version: ChapterVersion = {
+        versionNumber: nextNumber,
+        source: input.source,
+        content: input.content,
+        wordCount: countWords(input.content),
+        note: input.note,
+        createdAt: new Date().toISOString()
+      }
+      const next: VersionsFile = {
+        ...data,
+        updatedAt: new Date().toISOString(),
+        versions: [...data.versions, version]
+      }
+      await writeJsonAtomic(versionsFile(this.projectDir, n), next)
+      return version
+    })
   }
 
   async delete(n: number, vn: number): Promise<void> {
-    const data = await readJson<VersionsFile>(versionsFile(this.projectDir, n), EMPTY)
-    const versions = data.versions.filter((v) => v.versionNumber !== vn)
-    await writeJsonAtomic(versionsFile(this.projectDir, n), {
-      ...data,
-      updatedAt: new Date().toISOString(),
-      versions
+    return withFileLock(versionsFile(this.projectDir, n), async () => {
+      const data = await readJson<VersionsFile>(versionsFile(this.projectDir, n), EMPTY)
+      const versions = data.versions.filter((v) => v.versionNumber !== vn)
+      await writeJsonAtomic(versionsFile(this.projectDir, n), {
+        ...data,
+        updatedAt: new Date().toISOString(),
+        versions
+      })
     })
   }
 }

@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { readJson, writeJsonAtomic } from './atomic'
+import { withFileLock } from './file-lock'
 import type { MainOutline, DetailedOutline, DetailedOutlineItem } from '../../shared/types'
 
 const EMPTY_DETAILED: DetailedOutline = { schemaVersion: 1, updatedAt: '', items: [] }
@@ -25,13 +26,15 @@ export class OutlineRepository {
 
   async upsertDetailed(item: DetailedOutlineItem): Promise<DetailedOutlineItem> {
     const file = join(this.projectDir, 'outlines', 'detailed.json')
-    const data = await readJson<DetailedOutline>(file, EMPTY_DETAILED)
-    const idx = data.items.findIndex((x) => x.chapterNumber === item.chapterNumber)
-    const items = [...data.items]
-    if (idx >= 0) items[idx] = item
-    else items.push(item)
-    items.sort((a, b) => a.chapterNumber - b.chapterNumber)
-    await writeJsonAtomic(file, { ...data, updatedAt: new Date().toISOString(), items })
-    return item
+    return withFileLock(file, async () => {
+      const data = await readJson<DetailedOutline>(file, EMPTY_DETAILED)
+      const idx = data.items.findIndex((x) => x.chapterNumber === item.chapterNumber)
+      const items = [...data.items]
+      if (idx >= 0) items[idx] = item
+      else items.push(item)
+      items.sort((a, b) => a.chapterNumber - b.chapterNumber)
+      await writeJsonAtomic(file, { ...data, updatedAt: new Date().toISOString(), items })
+      return item
+    })
   }
 }
