@@ -12,6 +12,8 @@ export class ProjectService {
     private readonly library: LibraryRepository
   ) {}
 
+  private readonly dirCache = new Map<string, string>()
+
   async create(input: CreateProjectDataInput): Promise<ProjectMeta> {
     const id = randomUUID()
     const dir = join(this.projectsRoot, id)
@@ -34,9 +36,12 @@ export class ProjectService {
   }
 
   async resolveDir(projectId: string): Promise<string> {
+    const cached = this.dirCache.get(projectId)
+    if (cached) return cached
     const projects = await this.library.list()
     const p = projects.find((x) => x.id === projectId)
     if (!p) throw new Error(`project not found: ${projectId}`)
+    this.dirCache.set(projectId, p.path)
     return p.path
   }
 

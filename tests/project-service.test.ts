@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mkdtemp, readFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -46,5 +46,13 @@ describe('ProjectService', () => {
     const meta = await service.create({ name: 'X' })
     const data = await service.getProjectData(meta.id)
     expect(data.id).toBe(meta.id)
+  })
+
+  it('resolveDir caches directory across calls', async () => {
+    const meta = await service.create({ name: 'X' })
+    const listSpy = vi.spyOn(service['library'], 'list')
+    await service.resolveDir(meta.id)
+    await service.resolveDir(meta.id)
+    expect(listSpy).toHaveBeenCalledTimes(1)
   })
 })
