@@ -34,15 +34,17 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: 'projects' })
 
   return (
-    <div style={{ fontFamily: 'system-ui', maxWidth: 820, margin: '40px auto', padding: '0 20px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className="page">
+      <header className="topbar">
         <div>
-          <h1 style={{ margin: 0 }}>ai-writer 桌面版</h1>
-          <p style={{ color: '#64748b', margin: '4px 0 0' }}>Phase 09 · 本地创作 + AI 生成 + 大纲</p>
+          <h1>大神持笔</h1>
+          <p className="sub">本地创作 · AI 辅助 · 温暖纸笺</p>
         </div>
-        <button onClick={() => setView({ kind: 'settings' })}>⚙️ 设置</button>
-      </div>
-      <hr />
+        <button className="btn btn-ghost" onClick={() => setView({ kind: 'settings' })}>
+          ⚙ 设置
+        </button>
+      </header>
+      <hr className="soft" />
       {view.kind === 'projects' ? (
         <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
       ) : view.kind === 'settings' ? (

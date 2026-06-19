@@ -22,30 +22,30 @@ export default function ProjectListPage({ onOpenProject }: Props) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>我的项目</h2>
-        <button onClick={() => setShowNew(true)}>+ 新建项目</button>
+      <div className="row">
+        <h2 className="section">我的书案</h2>
+        <button className="btn btn-primary" onClick={() => setShowNew(true)}>
+          + 新建项目
+        </button>
       </div>
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : projects.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无项目，点击右上角新建。</p>
+        <p className="empty">书案空空，点右上角落笔写下第一部吧。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {projects.map((p) => (
             <li
               key={p.id}
-              style={{
-                padding: '12px',
-                border: '1px solid #e2e8f0',
-                borderRadius: 8,
-                margin: '8px 0',
-                cursor: 'pointer'
-              }}
+              className="card card-hover"
               onClick={() => onOpenProject(p.id)}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
             >
-              <strong>{p.name}</strong>
-              {p.genre ? <span style={{ color: '#64748b' }}> · {p.genre}</span> : null}
+              <div>
+                <strong style={{ fontSize: 16 }}>{p.name}</strong>
+                {p.genre ? <span className="chip chip-accent" style={{ marginLeft: 10 }}>{p.genre}</span> : null}
+              </div>
+              <span className="muted">翻开 ›</span>
             </li>
           ))}
         </ul>
@@ -85,45 +85,37 @@ function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   }
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}
-    >
-      <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: 380 }}>
-        <h3 style={{ marginTop: 0 }}>新建项目</h3>
-        <p>
-          名称：<input value={name} onChange={(e) => setName(e.target.value)} style={{ width: '100%' }} />
-        </p>
-        <p>
-          题材：
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>新建项目</h3>
+        <div className="field">
+          <label>名称</label>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>题材</label>
           <input
+            className="input"
             value={genre}
             onChange={(e) => setGenre(e.target.value)}
-            placeholder="玄幻/都市/科幻…"
-            style={{ width: '100%' }}
+            placeholder="玄幻 / 都市 / 科幻…"
           />
-        </p>
-        <p>
-          简介：
+        </div>
+        <div className="field">
+          <label>简介</label>
           <textarea
+            className="textarea"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
-            style={{ width: '100%' }}
           />
-        </p>
-        <div style={{ textAlign: 'right' }}>
-          <button onClick={onClose} style={{ marginRight: 8 }}>
+        </div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>
             取消
           </button>
-          <button onClick={submit} disabled={saving || !name.trim()}>
-            创建
+          <button className="btn btn-primary" onClick={submit} disabled={saving || !name.trim()}>
+            {saving ? '创建中…' : '落笔'}
           </button>
         </div>
       </div>

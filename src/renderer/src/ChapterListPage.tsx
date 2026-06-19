@@ -40,44 +40,43 @@ export default function ChapterListPage({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <button onClick={onBack}>← 返回项目列表</button>
-        <div>
-          <button onClick={onOpenOutline} style={{ marginRight: 8 }}>
-            📋 大纲
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 项目
+        </button>
+        <div className="btn-group">
+          <button className="btn btn-sm" onClick={onOpenOutline}>
+            📜 大纲
           </button>
-          <button onClick={onOpenCharacters} style={{ marginRight: 8 }}>
-            📝 人物
+          <button className="btn btn-sm" onClick={onOpenCharacters}>
+            🧑 人物
           </button>
-          <button onClick={onOpenMemoryCenter} style={{ marginRight: 8 }}>
-            🧠 记忆中心
+          <button className="btn btn-sm" onClick={onOpenMemoryCenter}>
+            🧠 记忆
           </button>
-          <button onClick={createChapter}>+ 新建章节</button>
+          <button className="btn btn-primary btn-sm" onClick={createChapter}>
+            + 新章
+          </button>
         </div>
       </div>
-      <h2>章节列表</h2>
+      <h2 className="section mt">章节</h2>
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : chapters.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无章节，点击右上角新建。</p>
+        <p className="empty">尚无章节，点「+ 新章」开篇。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {chapters.map((c) => (
             <li
               key={c.chapterNumber}
-              style={{
-                padding: '10px',
-                border: '1px solid #e2e8f0',
-                borderRadius: 8,
-                margin: '6px 0',
-                cursor: 'pointer'
-              }}
+              className="card card-hover"
               onClick={() => onOpenChapter(c.chapterNumber)}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
             >
               <strong>
                 第 {c.chapterNumber} 章 · {c.title}
               </strong>
-              <span style={{ color: '#94a3b8', marginLeft: 12 }}>
+              <span className="meta">
                 {c.wordCount} 字 · {c.status}
               </span>
             </li>

@@ -36,39 +36,40 @@ export default function RelationshipPage({ projectId, onBack }: Props) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <button onClick={onBack}>← 返回记忆中心</button>
-        <button onClick={() => setCreating(true)} disabled={characters.length < 2}>
-          + 新建关系
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 记忆中心
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)} disabled={characters.length < 2}>
+          + 新关系
         </button>
       </div>
-      <h2>人物关系</h2>
+      <h2 className="section mt">人物关系</h2>
       {characters.length < 2 ? (
-        <p style={{ color: '#d97706' }}>至少需要 2 个人物才能建立关系。</p>
+        <p className="empty" style={{ color: 'var(--warning)' }}>
+          至少需要 2 个人物才能建立关系。
+        </p>
       ) : null}
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : relationships.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无关系。</p>
+        <p className="empty">尚无关系。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {relationships.map((r) => (
-            <li
-              key={r.id}
-              style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 8, margin: '8px 0' }}
-            >
+            <li key={r.id} className="card">
               <strong>
-                {nameOf(r.characterAId)} ↔ {nameOf(r.characterBId)}
+                {nameOf(r.characterAId)} ⇄ {nameOf(r.characterBId)}
               </strong>
-              <span style={{ color: '#64748b' }}> · {r.relationType}</span>
+              <span className="chip chip-accent" style={{ marginLeft: 8 }}>{r.relationType}</span>
               {r.strength != null ? (
-                <span style={{ color: '#94a3b8' }}> · 强度 {r.strength}</span>
+                <span className="chip" style={{ marginLeft: 6 }}>强度 {r.strength}</span>
               ) : null}
-              {r.description ? (
-                <div style={{ color: '#475569', fontSize: 14, marginTop: 4 }}>{r.description}</div>
-              ) : null}
-              <div style={{ marginTop: 8 }}>
-                <button onClick={() => remove(r)}>删除</button>
+              {r.description ? <pre className="body">{r.description}</pre> : null}
+              <div className="btn-group" style={{ marginTop: 10 }}>
+                <button className="btn btn-sm btn-danger" onClick={() => remove(r)}>
+                  删除
+                </button>
               </div>
             </li>
           ))}
@@ -111,68 +112,52 @@ function Dialog({
   const [strength, setStrength] = useState('')
   const [saving, setSaving] = useState(false)
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}
-    >
-      <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: 420 }}>
-        <h3 style={{ marginTop: 0 }}>新建关系</h3>
-        <p>
-          人物A：
-          <select value={a} onChange={(e) => setA(e.target.value)} style={{ width: '100%' }}>
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>新建关系</h3>
+        <div className="field">
+          <label>人物甲</label>
+          <select className="select" value={a} onChange={(e) => setA(e.target.value)}>
             {characters.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
           </select>
-        </p>
-        <p>
-          人物B：
-          <select value={b} onChange={(e) => setB(e.target.value)} style={{ width: '100%' }}>
+        </div>
+        <div className="field">
+          <label>人物乙</label>
+          <select className="select" value={b} onChange={(e) => setB(e.target.value)}>
             {characters.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
           </select>
-        </p>
-        <p>
-          关系类型：
+        </div>
+        <div className="field">
+          <label>关系类型</label>
           <input
+            className="input"
             value={relationType}
             onChange={(e) => setRelationType(e.target.value)}
-            placeholder="师徒/敌对/恋人/兄弟…"
-            style={{ width: '100%' }}
+            placeholder="师徒 / 敌对 / 恋人 / 兄弟…"
           />
-        </p>
-        <p>
-          描述：
-          <input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            style={{ width: '100%' }}
-          />
-        </p>
-        <p>
-          强度（0-100，可留空）：
-          <input
-            value={strength}
-            onChange={(e) => setStrength(e.target.value)}
-            style={{ width: '100%' }}
-          />
-        </p>
-        <div style={{ textAlign: 'right' }}>
-          <button onClick={onClose} style={{ marginRight: 8 }}>
+        </div>
+        <div className="field">
+          <label>描述</label>
+          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>强度（0-100，可留空）</label>
+          <input className="input" value={strength} onChange={(e) => setStrength(e.target.value)} />
+        </div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>
             取消
           </button>
           <button
+            className="btn btn-primary"
             disabled={saving || !a || !b || a === b || !relationType.trim()}
             onClick={async () => {
               setSaving(true)

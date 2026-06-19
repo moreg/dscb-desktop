@@ -34,40 +34,41 @@ export default function MemoryEntityPage({ projectId, type, label, onBack }: Pro
 
   return (
     <div>
-      <button onClick={onBack}>← 返回记忆中心</button>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>{label}</h2>
-        <button onClick={() => setCreating(true)}>+ 新建</button>
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 记忆中心
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+          + 新建
+        </button>
       </div>
+      <h2 className="section mt">{label}</h2>
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : items.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无{label}。</p>
+        <p className="empty">尚无{label}。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {items.map((e) => (
-            <li
-              key={e.id}
-              style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 8, margin: '8px 0' }}
-            >
+            <li key={e.id} className="card">
               <strong>{e.name}</strong>
-              {e.category ? <span style={{ color: '#64748b' }}> · {e.category}</span> : null}
-              {e.notes ? (
-                <div style={{ color: '#475569', fontSize: 14, marginTop: 4 }}>{e.notes}</div>
-              ) : null}
-              <div style={{ marginTop: 8 }}>
+              {e.category ? <span className="chip" style={{ marginLeft: 8 }}>{e.category}</span> : null}
+              {e.notes ? <pre className="body">{e.notes}</pre> : null}
+              <div className="btn-group" style={{ marginTop: 10 }}>
                 <button
+                  className="btn btn-sm"
                   onClick={() =>
                     setEditing({
                       id: e.id,
                       input: { name: e.name, category: e.category ?? '', notes: e.notes ?? '' }
                     })
                   }
-                  style={{ marginRight: 8 }}
                 >
                   编辑
                 </button>
-                <button onClick={() => remove(e)}>删除</button>
+                <button className="btn btn-sm btn-danger" onClick={() => remove(e)}>
+                  删除
+                </button>
               </div>
             </li>
           ))}
@@ -123,48 +124,27 @@ function EntityDialog({
   const [input, setInput] = useState<CreateMemoryEntityInput>(initial)
   const [saving, setSaving] = useState(false)
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}
-    >
-      <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: 420 }}>
-        <h3 style={{ marginTop: 0 }}>{title}</h3>
-        <p>
-          名称：
-          <input
-            value={input.name}
-            onChange={(e) => setInput({ ...input, name: e.target.value })}
-            style={{ width: '100%' }}
-          />
-        </p>
-        <p>
-          分类：
-          <input
-            value={input.category}
-            onChange={(e) => setInput({ ...input, category: e.target.value })}
-            style={{ width: '100%' }}
-          />
-        </p>
-        <p>
-          详情：
-          <textarea
-            value={input.notes}
-            onChange={(e) => setInput({ ...input, notes: e.target.value })}
-            rows={4}
-            style={{ width: '100%' }}
-          />
-        </p>
-        <div style={{ textAlign: 'right' }}>
-          <button onClick={onClose} style={{ marginRight: 8 }}>
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>{title}</h3>
+        <div className="field">
+          <label>名称</label>
+          <input className="input" value={input.name} onChange={(e) => setInput({ ...input, name: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>分类</label>
+          <input className="input" value={input.category} onChange={(e) => setInput({ ...input, category: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>详情</label>
+          <textarea className="textarea" value={input.notes} onChange={(e) => setInput({ ...input, notes: e.target.value })} rows={4} />
+        </div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>
             取消
           </button>
           <button
+            className="btn btn-primary"
             disabled={saving || !input.name.trim()}
             onClick={async () => {
               setSaving(true)

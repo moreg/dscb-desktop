@@ -6,11 +6,11 @@ interface Props {
   onBack: () => void
 }
 
-const COLUMNS: { status: ForeshadowingStatus; label: string; color: string }[] = [
-  { status: 'pending', label: '待埋', color: '#64748b' },
-  { status: 'planted', label: '已埋', color: '#d97706' },
-  { status: 'collected', label: '已收', color: '#059669' },
-  { status: 'missed', label: '遗漏', color: '#e11d48' }
+const COLUMNS: { status: ForeshadowingStatus; label: string; chip: string }[] = [
+  { status: 'pending', label: '待埋', chip: '' },
+  { status: 'planted', label: '已埋', chip: 'warning' },
+  { status: 'collected', label: '已收', chip: 'success' },
+  { status: 'missed', label: '遗漏', chip: 'danger' }
 ]
 
 export default function ForeshadowingBoard({ projectId, onBack }: Props) {
@@ -66,53 +66,53 @@ export default function ForeshadowingBoard({ projectId, onBack }: Props) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <button onClick={onBack}>← 返回记忆中心</button>
-        <button onClick={create}>+ 新建伏笔</button>
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 记忆中心
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={create}>
+          + 新伏笔
+        </button>
       </div>
-      <h2>伏笔看板</h2>
+      <h2 className="section mt">伏笔看板</h2>
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <div className="kanban">
           {COLUMNS.map((col) => {
             const list = items.filter((f) => f.status === col.status)
             return (
-              <div
-                key={col.status}
-                style={{ background: '#f8fafc', borderRadius: 10, padding: 10 }}
-              >
-                <div style={{ fontWeight: 700, color: col.color, marginBottom: 8 }}>
+              <div key={col.status} className="kanban-col">
+                <h4 style={{ color: col.chip ? `var(--${col.chip === 'warning' ? 'warning' : col.chip === 'success' ? 'success' : 'danger'})` : 'var(--ink-2)' }}>
                   {col.label}（{list.length}）
-                </div>
+                </h4>
                 {list.map((f) => (
-                  <div
-                    key={f.id}
-                    style={{
-                      background: '#fff',
-                      border: '1px solid #e2e8f0',
-                      borderRadius: 8,
-                      padding: 10,
-                      marginBottom: 8
-                    }}
-                  >
+                  <div key={f.id} className="card" style={{ marginBottom: 8, padding: 10 }}>
                     <div style={{ fontSize: 14 }}>{f.content}</div>
-                    <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 4 }}>
+                    <div className="meta" style={{ marginTop: 4 }}>
                       {f.plantChapter ? `埋:${f.plantChapter} ` : ''}
                       {f.expectedCollect ? `预收:${f.expectedCollect} ` : ''}
                       {f.actualCollect ? `实收:${f.actualCollect}` : ''}
                     </div>
-                    <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    <div className="btn-group" style={{ marginTop: 6 }}>
                       {f.status === 'pending' ? (
-                        <button onClick={() => plant(f)}>埋设</button>
+                        <button className="btn btn-sm" onClick={() => plant(f)}>
+                          埋设
+                        </button>
                       ) : null}
                       {f.status === 'planted' ? (
                         <>
-                          <button onClick={() => collect(f)}>回收</button>
-                          <button onClick={() => markMissed(f)}>遗漏</button>
+                          <button className="btn btn-sm" onClick={() => collect(f)}>
+                            回收
+                          </button>
+                          <button className="btn btn-sm" onClick={() => markMissed(f)}>
+                            遗漏
+                          </button>
                         </>
                       ) : null}
-                      <button onClick={() => remove(f)}>删除</button>
+                      <button className="btn btn-sm btn-danger" onClick={() => remove(f)}>
+                        删
+                      </button>
                     </div>
                   </div>
                 ))}

@@ -7,6 +7,12 @@ interface Props {
   onBack: () => void
 }
 
+const SOURCE_LABEL: Record<ChapterSource, string> = {
+  manual: '手写',
+  ai: 'AI',
+  reviewed: '润色'
+}
+
 export default function ChapterEditor({ projectId, chapterNumber, onBack }: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
   const [draft, setDraft] = useState('')
@@ -46,7 +52,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
   }
 
   const saveAsVersion = async () => {
-    const source = window.prompt('版本来源（输入：manual / ai / reviewed）', 'manual') as
+    const source = window.prompt('版本来源（manual / ai / reviewed）', 'manual') as
       | ChapterSource
       | null
     if (!source) return
@@ -66,7 +72,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
 
   const aiGenerate = async () => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「⚙️ 设置」中配置 MiniMax API Key')
+      window.alert('请先在「⚙ 设置」中配置 MiniMax API Key')
       return
     }
     setGenerating(true)
@@ -101,7 +107,8 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
   }
 
   const rollback = async (v: ChapterVersion) => {
-    if (!window.confirm(`回滚到版本 ${v.versionNumber}（${v.source}）？当前正文将被覆盖。`)) return
+    if (!window.confirm(`回滚到版本 ${v.versionNumber}（${SOURCE_LABEL[v.source]}）？当前正文将被覆盖。`))
+      return
     const meta = await window.api.rollbackChapter(projectId, chapterNumber, v.versionNumber)
     setDraft(v.content)
     setData({ meta, content: v.content })
@@ -115,84 +122,76 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
     refreshVersions()
   }
 
-  if (!data) return <p>加载中…</p>
+  if (!data) return <p className="empty">展卷中…</p>
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <button onClick={onBack}>← 返回章节列表</button>
-        <span style={{ color: '#94a3b8' }}>
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 返回
+        </button>
+        <span className="meta">
           第 {data.meta.chapterNumber} 章 · {data.meta.title} · {data.meta.wordCount} 字 ·{' '}
-          {versions.length} 个版本
+          {versions.length} 版
         </span>
-        <div>
-          <button onClick={save} disabled={!dirty || saving}>
-            {saving ? '保存中…' : dirty ? '保存 *' : '已保存'}
+        <div className="btn-group">
+          <button className="btn btn-sm" onClick={save} disabled={!dirty || saving}>
+            {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
           </button>
-          <button onClick={saveAsVersion} disabled={savingVersion} style={{ marginLeft: 8 }}>
-            存为版本
+          <button className="btn btn-sm" onClick={saveAsVersion} disabled={savingVersion}>
+            存版本
           </button>
-          <button onClick={() => setShowVersions((s) => !s)} style={{ marginLeft: 8 }}>
-            {showVersions ? '收起历史' : '版本历史'}
+          <button className="btn btn-sm" onClick={() => setShowVersions((s) => !s)}>
+            {showVersions ? '收起' : '版本'}
           </button>
-          <button onClick={aiGenerate} disabled={generating} style={{ marginLeft: 8 }}>
-            {generating ? '生成中…' : '✨ AI 生成'}
+          <button className="btn btn-primary btn-sm" onClick={aiGenerate} disabled={generating}>
+            {generating ? '落墨中…' : '✦ 续写'}
           </button>
         </div>
       </div>
       <textarea
+        className="editor-text"
         value={draft}
         onChange={(e) => {
           setDraft(e.target.value)
           setDirty(true)
         }}
-        style={{
-          width: '100%',
-          height: '50vh',
-          marginTop: 12,
-          fontFamily: 'inherit',
-          fontSize: 15,
-          padding: 12
-        }}
-        placeholder="在此输入正文，或点「✨ AI 生成」…"
+        placeholder="此处落笔，或点「续写」让 AI 接续成文……"
+        style={{ marginTop: 16 }}
       />
 
       {showVersions ? (
-        <div style={{ marginTop: 16, border: '1px solid #e2e8f0', borderRadius: 8, padding: 12 }}>
-          <h3 style={{ marginTop: 0 }}>版本历史（{versions.length}）</h3>
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3 className="sub">版本历史（{versions.length}）</h3>
           {versions.length === 0 ? (
-            <p style={{ color: '#94a3b8' }}>暂无版本，点「存为版本」创建。</p>
+            <p className="empty">尚无版本，点「存版本」留存。</p>
           ) : (
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            <ul className="bare">
               {[...versions].reverse().map((v) => (
                 <li
                   key={v.versionNumber}
-                  style={{
-                    padding: 10,
-                    borderBottom: '1px solid #f1f5f9',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8
-                  }}
+                  className="row"
+                  style={{ borderBottom: '1px solid var(--line)', paddingBottom: 8 }}
                 >
                   <div>
                     <strong>#{v.versionNumber}</strong>{' '}
-                    <span style={{ color: sourceColor(v.source) }}>{v.source}</span>{' '}
-                    <span style={{ color: '#94a3b8' }}>
-                      {v.wordCount} 字 · {v.createdAt.replace('T', ' ').slice(0, 19)}
+                    <span className={`chip chip-${sourceChip(v.source)}`}>
+                      {SOURCE_LABEL[v.source]}
+                    </span>{' '}
+                    <span className="meta">
+                      {v.wordCount} 字 · {v.createdAt.replace('T', ' ').slice(0, 16)}
                     </span>
-                    {v.note ? (
-                      <div style={{ color: '#64748b', fontSize: 13 }}>{v.note}</div>
-                    ) : null}
+                    {v.note ? <div className="muted">{v.note}</div> : null}
                   </div>
-                  <div>
-                    <button onClick={() => setViewing(v)}>查看</button>
-                    <button onClick={() => rollback(v)} style={{ marginLeft: 6 }}>
+                  <div className="btn-group">
+                    <button className="btn btn-sm" onClick={() => setViewing(v)}>
+                      看
+                    </button>
+                    <button className="btn btn-sm" onClick={() => rollback(v)}>
                       回滚
                     </button>
-                    <button onClick={() => removeVersion(v)} style={{ marginLeft: 6 }}>
-                      删除
+                    <button className="btn btn-sm btn-danger" onClick={() => removeVersion(v)}>
+                      删
                     </button>
                   </div>
                 </li>
@@ -203,40 +202,19 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
       ) : null}
 
       {viewing ? (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.4)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 10
-          }}
-          onClick={() => setViewing(null)}
-        >
-          <div
-            style={{
-              background: '#fff',
-              padding: 20,
-              borderRadius: 12,
-              width: 640,
-              maxHeight: '80vh',
-              overflow: 'auto'
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 style={{ marginTop: 0 }}>
-              版本 #{viewing.versionNumber} · {viewing.source} · {viewing.wordCount} 字
+        <div className="dialog-overlay" onClick={() => setViewing(null)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              版本 #{viewing.versionNumber} · {SOURCE_LABEL[viewing.source]} · {viewing.wordCount} 字
             </h3>
-            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: 14, color: '#334155' }}>
-              {viewing.content}
-            </pre>
-            <div style={{ textAlign: 'right', marginTop: 12 }}>
-              <button onClick={() => setViewing(null)} style={{ marginRight: 8 }}>
+            <pre className="body">{viewing.content}</pre>
+            <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
+              <button className="btn btn-ghost" onClick={() => setViewing(null)}>
                 关闭
               </button>
-              <button onClick={() => rollback(viewing)}>回滚到此版本</button>
+              <button className="btn btn-primary" onClick={() => rollback(viewing)}>
+                回滚到此版
+              </button>
             </div>
           </div>
         </div>
@@ -245,8 +223,8 @@ export default function ChapterEditor({ projectId, chapterNumber, onBack }: Prop
   )
 }
 
-function sourceColor(source: ChapterSource): string {
-  if (source === 'ai') return '#7c3aed'
-  if (source === 'reviewed') return '#059669'
-  return '#475569'
+function sourceChip(s: ChapterSource): string {
+  if (s === 'ai') return 'accent'
+  if (s === 'reviewed') return 'success'
+  return ''
 }

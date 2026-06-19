@@ -36,40 +36,43 @@ export default function CharacterManagerPage({ projectId, onBack }: Props) {
     })
 
   const remove = async (c: Character) => {
-    if (!window.confirm(`删除人物「${c.name}」？`)) return
+    if (!window.confirm(`删除「${c.name}」？`)) return
     await window.api.deleteCharacter(projectId, c.id)
     refresh()
   }
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <button onClick={onBack}>← 返回章节列表</button>
-        <button onClick={() => setCreating(true)}>+ 新建人物</button>
+      <div className="row">
+        <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          ‹ 记忆中心
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+          + 新人物
+        </button>
       </div>
-      <h2>人物管理</h2>
+      <h2 className="section mt">人物</h2>
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">展卷中…</p>
       ) : characters.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无人物。</p>
+        <p className="empty">尚无人物。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {characters.map((c) => (
-            <li
-              key={c.id}
-              style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 8, margin: '8px 0' }}
-            >
-              <strong>{c.name}</strong>
-              {c.role ? <span style={{ color: '#64748b' }}> · {c.role}</span> : null}
-              {c.identity ? <div style={{ color: '#475569', fontSize: 14 }}>{c.identity}</div> : null}
+            <li key={c.id} className="card">
+              <strong style={{ fontSize: 16 }}>{c.name}</strong>
+              {c.role ? <span className="chip chip-accent" style={{ marginLeft: 8 }}>{c.role}</span> : null}
+              {c.identity ? <div className="muted" style={{ marginTop: 6 }}>{c.identity}</div> : null}
               {c.personality ? (
-                <div style={{ color: '#64748b', fontSize: 14 }}>性格：{c.personality}</div>
+                <div className="muted">性格：{c.personality}</div>
               ) : null}
-              <div style={{ marginTop: 8 }}>
-                <button onClick={() => startEdit(c)} style={{ marginRight: 8 }}>
+              <div className="btn-group" style={{ marginTop: 10 }}>
+                <button className="btn btn-sm" onClick={() => startEdit(c)}>
                   编辑
                 </button>
-                <button onClick={() => remove(c)}>删除</button>
+                <button className="btn btn-sm btn-danger" onClick={() => remove(c)}>
+                  删除
+                </button>
               </div>
             </li>
           ))}
@@ -125,42 +128,37 @@ function CharacterDialog({
 }) {
   const [input, setInput] = useState<CreateCharacterInput>(initial)
   const [saving, setSaving] = useState(false)
-  const field = (key: keyof CreateCharacterInput) => ({
+  const f = (key: keyof CreateCharacterInput) => ({
     value: (input[key] as string) ?? '',
     onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
       setInput({ ...input, [key]: e.target.value })
   })
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}
-    >
-      <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: 420 }}>
-        <h3 style={{ marginTop: 0 }}>{title}</h3>
-        <p>
-          名称：<input {...field('name')} style={{ width: '100%' }} />
-        </p>
-        <p>
-          角色：
-          <input {...field('role')} placeholder="主角/配角/反派" style={{ width: '100%' }} />
-        </p>
-        <p>
-          身份：<input {...field('identity')} style={{ width: '100%' }} />
-        </p>
-        <p>
-          性格：<input {...field('personality')} style={{ width: '100%' }} />
-        </p>
-        <div style={{ textAlign: 'right' }}>
-          <button onClick={onClose} style={{ marginRight: 8 }}>
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>{title}</h3>
+        <div className="field">
+          <label>名称</label>
+          <input className="input" {...f('name')} />
+        </div>
+        <div className="field">
+          <label>角色</label>
+          <input className="input" {...f('role')} placeholder="主角 / 配角 / 反派" />
+        </div>
+        <div className="field">
+          <label>身份</label>
+          <input className="input" {...f('identity')} />
+        </div>
+        <div className="field">
+          <label>性格</label>
+          <input className="input" {...f('personality')} />
+        </div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>
             取消
           </button>
           <button
+            className="btn btn-primary"
             disabled={saving || !input.name.trim()}
             onClick={async () => {
               setSaving(true)

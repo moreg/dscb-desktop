@@ -40,51 +40,39 @@ export default function OutlinePage({ projectId, onBack }: Props) {
 
   return (
     <div>
-      <button onClick={onBack}>← 返回章节列表</button>
-      <h2>大纲</h2>
-      <h3>总纲</h3>
+      <button className="btn btn-ghost btn-sm" onClick={onBack}>
+        ‹ 章节
+      </button>
+      <h2 className="section mt">大纲</h2>
+
+      <h3 className="sub">总纲</h3>
       {main ? (
-        <pre style={{ whiteSpace: 'pre-wrap', background: '#f8fafc', padding: 12, borderRadius: 8 }}>
-          {main.synopsis}
-        </pre>
+        <pre className="body card">{main.synopsis}</pre>
       ) : (
-        <p style={{ color: '#94a3b8' }}>暂无总纲。</p>
+        <p className="empty">尚无总纲。</p>
       )}
-      <button onClick={genMain} disabled={loadingMain}>
-        {loadingMain ? '生成中…' : main ? '重新生成总纲' : '✨ AI 生成总纲'}
+      <button className="btn btn-primary btn-sm" onClick={genMain} disabled={loadingMain} style={{ marginTop: 10 }}>
+        {loadingMain ? '运笔中…' : main ? '重新生成总纲' : '✦ AI 生成总纲'}
       </button>
 
-      <h3 style={{ marginTop: 24 }}>细纲</h3>
+      <h3 className="sub" style={{ marginTop: 28 }}>细纲</h3>
       {items.length === 0 ? (
-        <p style={{ color: '#94a3b8' }}>暂无细纲。先创建章节，再为每章生成细纲。</p>
+        <p className="empty">尚无细纲。先建章节，再为每章生成细纲。</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
+        <ul className="bare">
           {items.map((it) => (
-            <li
-              key={it.chapterNumber}
-              style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 8, margin: '8px 0' }}
-            >
-              <div
-                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
-              >
+            <li key={it.chapterNumber} className="card">
+              <div className="row">
                 <strong>第 {it.chapterNumber} 章</strong>
                 <button
+                  className="btn btn-sm"
                   onClick={() => genDetailed(it.chapterNumber)}
                   disabled={genChapter === it.chapterNumber}
                 >
-                  {genChapter === it.chapterNumber ? '生成中…' : '重新生成'}
+                  {genChapter === it.chapterNumber ? '运笔中…' : '重新生成'}
                 </button>
               </div>
-              <pre
-                style={{
-                  whiteSpace: 'pre-wrap',
-                  margin: '8px 0 0',
-                  fontSize: 14,
-                  color: '#334155'
-                }}
-              >
-                {it.plotSummary}
-              </pre>
+              <pre className="body">{it.plotSummary}</pre>
             </li>
           ))}
         </ul>
