@@ -100,6 +100,47 @@ describe('registerLlmIpc handlers', () => {
     ).rejects.toThrow(/PROVIDER_INVALID/)
   })
 
+  it('llm:upsertProvider accepts protocol=anthropic and stores it', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_ant',
+      label: 'minimax',
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      model: 'MiniMax-M3',
+      apiKey: 'sk-x',
+      protocol: 'anthropic'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].protocol).toBe('anthropic')
+  })
+
+  it('llm:upsertProvider defaults protocol to openai when omitted', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_oa',
+      label: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+      apiKey: 'sk-x'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].protocol).toBe('openai')
+  })
+
+  it('llm:upsertProvider coerces unknown protocol value to openai', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_x',
+      label: 'x',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: 'k',
+      protocol: 'mystery-protocol'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].protocol).toBe('openai')
+  })
+
   it('llm:upsertProvider sanitizes payload (rejects non-http scheme)', async () => {
     const handler = handlers.get('llm:upsertProvider')
     await expect(

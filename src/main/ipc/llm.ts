@@ -11,21 +11,23 @@ import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../..
  * 主进程不再硬编码任何厂商。统一走 OpenAI Chat Completions 兼容协议。
  */
 
+function maskKey(apiKey: string): string {
+  const len = apiKey.length
+  if (len === 0) return ''
+  if (len <= 8) return '•'.repeat(len)
+  return `${apiKey.slice(0, 4)}••••${apiKey.slice(-4)}`
+}
+
 function summarize(p: ProviderConfig): ProviderSummary {
-  const len = p.apiKey?.length ?? 0
-  let keyMasked = ''
-  if (len > 0) {
-    if (len <= 8) keyMasked = '•'.repeat(len)
-    else keyMasked = `${p.apiKey.slice(0, 4)}••••${p.apiKey.slice(-4)}`
-  }
   return {
     id: p.id,
     label: p.label,
     homepage: p.homepage,
     baseUrl: p.baseUrl,
     model: p.model,
+    protocol: p.protocol ?? 'openai',
     hasKey: Boolean(p.apiKey),
-    keyMasked
+    keyMasked: maskKey(p.apiKey)
   }
 }
 
@@ -39,6 +41,8 @@ function sanitizeProvider(input: unknown): ProviderConfig {
   const model = typeof o.model === 'string' ? o.model.trim() : ''
   const apiKeyRaw = typeof o.apiKey === 'string' ? o.apiKey : ''
   const homepage = typeof o.homepage === 'string' ? o.homepage.trim() : undefined
+  const protocolRaw = o.protocol
+  const protocol: 'openai' | 'anthropic' = protocolRaw === 'anthropic' ? 'anthropic' : 'openai'
   if (!id) throw new Error('PROVIDER_INVALID: missing id')
   if (!label) throw new Error('PROVIDER_INVALID: missing label')
   // 严格 URL 校验：必须是 http(s) 且能 new URL 解析
@@ -59,6 +63,7 @@ function sanitizeProvider(input: unknown): ProviderConfig {
     baseUrl: baseUrl.replace(/\/+$/, ''),
     model,
     apiKey: apiKeyRaw,
+    protocol,
     ...(homepage ? { homepage } : {})
   }
 }

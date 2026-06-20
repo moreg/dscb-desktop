@@ -43,9 +43,10 @@ function migrate(legacy: LegacyShape | unknown): ProvidersConfig {
     providers.push({
       id: 'p_legacy_minimax',
       label: 'minimax（旧）',
-      baseUrl: 'https://api.minimaxi.com/v1',
+      baseUrl: 'https://api.minimaxi.com/anthropic',
       model: 'MiniMax-M3',
-      apiKey: lp.minimax.apiKey
+      apiKey: lp.minimax.apiKey,
+      protocol: 'anthropic' as const
     })
   }
   if (lp.openai?.apiKey) {

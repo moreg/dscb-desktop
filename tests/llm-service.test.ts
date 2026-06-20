@@ -93,4 +93,95 @@ describe('LlmService', () => {
     expect(cfg.providers[0].apiKey).toBe('sk-test')
     // 真要做 ipc 端脱敏验证，见后续 ipc.llm.test.ts
   })
+
+  it('Anthropic protocol hits /v1/messages with x-api-key and parses content_block_delta', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-ant-'))
+    const antStore = new SecretStore(path.join(dir, 'providers.enc'))
+    await antStore.write({
+      activeId: 'p_ant',
+      providers: [
+        {
+          id: 'p_ant',
+          label: 'ant',
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+          model: 'MiniMax-M3',
+          apiKey: 'sk-ant-key',
+          protocol: 'anthropic'
+        }
+      ]
+    })
+    const svc = new LlmService(antStore)
+    const fakeRes = {
+      ok: true,
+      body: sseBody([
+        'event: message_start\ndata: {"message":{"usage":{"input_tokens":10}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start"}\n\n',
+        'event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"你好"}}\n\n',
+        'event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"世界"}}\n\n',
+        'event: message_delta\ndata: {"usage":{"output_tokens":20}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+      ])
+    }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(fakeRes as never)
+    const tokens: string[] = []
+    const out = await svc.generateStream('hi', { onToken: (t) => tokens.push(t) })
+    expect(out).toBe('你好世界')
+    expect(tokens.join('')).toBe('你好世界')
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.minimaxi.com/anthropic/v1/messages')
+    const headers = init.headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('sk-ant-key')
+    expect(headers['anthropic-version']).toBe('2023-06-15')
+    expect(headers['Authorization']).toBeUndefined()
+    const body = JSON.parse(init.body as string)
+    expect(body.model).toBe('MiniMax-M3')
+    expect(body.max_tokens).toBeGreaterThan(0)
+    expect(body.stream).toBe(true)
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'hi' })
+    fetchSpy.mockRestore()
+  })
+
+  it('OpenAI protocol (default) hits /chat/completions with Bearer', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody([
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        'data: [DONE]\n\n'
+      ])
+    } as never)
+    await service.generateStream('hi')
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.example.com/v1/chat/completions')
+    const headers = init.headers as Record<string, string>
+    expect(headers['Authorization']).toBe('Bearer sk-test')
+    fetchSpy.mockRestore()
+  })
+
+  it('Anthropic baseUrl with trailing /v1 does not double up', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-antv1-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p1',
+      providers: [
+        {
+          id: 'p1',
+          label: 't',
+          baseUrl: 'https://example.com/v1',
+          model: 'm',
+          apiKey: 'k',
+          protocol: 'anthropic'
+        }
+      ]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['event: message_stop\ndata: {}\n\n'])
+    } as never)
+    await svc.generateStream('hi')
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://example.com/v1/messages')
+    fetchSpy.mockRestore()
+  })
 })

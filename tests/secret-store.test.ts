@@ -72,7 +72,9 @@ describe('SecretStore', () => {
     expect(cfg.activeId).toBe('p_legacy_minimax')
     expect(cfg.providers).toHaveLength(1)
     expect(cfg.providers[0].apiKey).toBe('sk-legacy-mm')
-    expect(cfg.providers[0].baseUrl).toBe('https://api.minimaxi.com/v1')
+    expect(cfg.providers[0].baseUrl).toBe('https://api.minimaxi.com/anthropic')
+    expect(cfg.providers[0].protocol).toBe('anthropic')
+    expect(cfg.providers[0].model).toBe('MiniMax-M3')
   })
 
   it('migrates legacy schema with multiple providers', async () => {

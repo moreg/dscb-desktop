@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import type {
   UsageSummary,
   ListProvidersResult,
-  ProviderSummary
+  ProviderSummary,
+  ProviderProtocol
 } from '../../shared/types'
 
 interface Props {
@@ -190,8 +191,9 @@ export default function SettingsPage({ onBack }: Props) {
           )}
         </div>
         <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-          用于大纲生成、细纲生成、章节续写、改稿。所有 provider 走 OpenAI Chat
-          Completions 兼容协议（POST <code>{'{baseUrl}'}/chat/completions</code>），适用于绝大多数主流厂商。
+          用于大纲生成、细纲生成、章节续写、改稿。支持 OpenAI Chat
+          Completions 兼容协议（POST <code>{'{baseUrl}'}/chat/completions</code>）和
+          Anthropic Messages API（POST <code>{'{baseUrl}'}/v1/messages</code>）。
         </p>
 
         {/* provider 列表 */}
@@ -473,6 +475,17 @@ function ProviderRow({
             ) : (
               <span className="chip chip-warning">无 Key</span>
             )}
+            <span
+              className="chip"
+              style={{
+                background:
+                  provider.protocol === 'anthropic' ? 'var(--inkstone-soft)' : 'var(--paper-soft)',
+                color:
+                  provider.protocol === 'anthropic' ? 'var(--inkstone)' : 'var(--ink-3)'
+              }}
+            >
+              {provider.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+            </span>
           </div>
           <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
             {provider.baseUrl || '(未填 baseUrl)'} · {provider.model || '(未填 model)'}
@@ -495,6 +508,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
   const [model, setModel] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -520,7 +534,8 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         label: label.trim(),
         baseUrl: baseUrlTrim.replace(/\/+$/, ''),
         model: model.trim(),
-        apiKey: apiKey.trim()
+        apiKey: apiKey.trim(),
+        protocol
       })
       setLabel('')
       setApiKey('')
@@ -563,6 +578,17 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             onChange={(e) => setModel(e.target.value)}
             placeholder="例如 gpt-4o-mini / deepseek-chat"
           />
+        </div>
+        <div className="field" style={{ flex: 1, marginBottom: 10 }}>
+          <label>协议</label>
+          <select
+            className="select"
+            value={protocol}
+            onChange={(e) => setProtocol(e.target.value as ProviderProtocol)}
+          >
+            <option value="openai">OpenAI 兼容</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
         </div>
         <div className="field" style={{ flex: 2, marginBottom: 10 }}>
           <label>API Key</label>

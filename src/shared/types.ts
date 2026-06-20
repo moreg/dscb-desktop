@@ -22,18 +22,26 @@ export interface CreateProjectInput {
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
+export type ProviderProtocol = 'openai' | 'anthropic'
+
 export interface ProviderConfig {
   id: string
   /** 展示名（用户可改），例如「主力 / 备用 / DeepSeek」 */
   label: string
   /** 厂商主页，仅展示用 */
   homepage?: string
-  /** 形如 https://api.example.com/v1；请求时会拼上 /chat/completions */
+  /** 形如 https://api.example.com/v1；请求时会拼上协议对应路径 */
   baseUrl: string
   /** 模型名，传给请求体里的 model 字段 */
   model: string
   /** API Key；空字符串表示未配置（保留旧值时由 main 端处理） */
   apiKey: string
+  /**
+   * 请求协议：
+   * - 'openai'（默认）：POST {baseUrl}/chat/completions，Authorization: Bearer
+   * - 'anthropic'：POST {baseUrl}/v1/messages，x-api-key + anthropic-version
+   */
+  protocol?: ProviderProtocol
 }
 
 /** 列表接口返回的脱敏 provider —— 永不返回明文 apiKey */
