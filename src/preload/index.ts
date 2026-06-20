@@ -20,6 +20,7 @@ import type {
 
 const api = {
   listProjects: () => ipcRenderer.invoke('library:list'),
+  scanProjects: () => ipcRenderer.invoke('library:scan'),
   createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
   getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
   listChapters: (id: string) => ipcRenderer.invoke('chapters:list', id),
@@ -111,6 +112,13 @@ const api = {
   listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
   generateDetailedOutline: (id: string, n: number) =>
     ipcRenderer.invoke('outline:generateDetailed', id, n),
+  getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
+  getVolumes: (id: string) => ipcRenderer.invoke('outline:getVolumes', id),
+  getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
+  getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),
+  listFigures: (id: string) => ipcRenderer.invoke('figure:list', id),
+  readFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:read', id, fileName),
+  openFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:open', id, fileName),
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,

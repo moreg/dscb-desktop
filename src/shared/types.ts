@@ -86,6 +86,12 @@ export interface ChapterMeta {
   hook?: string
   /** 在本章登场的人物 id 列表（用于人物卡 ↔ 章节联动） */
   appearingCharacters?: string[]
+  /** 所属卷号（1-based，来自节奏图谱 volume 字段） */
+  volume?: number
+  /** 情绪值（1-10，来自节奏图谱） */
+  emotion?: number
+  /** 爽点类型（0/1/2/3/3.5/4，来自节奏图谱） */
+  climax?: number
 }
 
 export interface ChapterContent {
@@ -116,6 +122,8 @@ export interface UpdateChapterMetaInput {
 
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
+  /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
+  scanProjects: () => Promise<ProjectMeta[]>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
   listChapters: (projectId: string) => Promise<ChapterMeta[]>
@@ -190,6 +198,13 @@ export interface RendererApi {
   generateMainOutline: (projectId: string) => Promise<MainOutline>
   listDetailedOutline: (projectId: string) => Promise<DetailedOutlineItem[]>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
+  getRhythm: (projectId: string) => Promise<RhythmEntry[]>
+  getVolumes: (projectId: string) => Promise<Volume[]>
+  getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
+  getDiagnostics: (projectId: string) => Promise<Diagnostic[]>
+  listFigures: (projectId: string) => Promise<FigureSummary[]>
+  readFigure: (projectId: string, fileName: string) => Promise<ChapterFigure | null>
+  openFigure: (projectId: string, fileName: string) => Promise<void>
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
@@ -233,6 +248,11 @@ export interface Character {
   abilities?: string
   tags?: string[]
   synopsis?: string
+  /**
+   * 角色卡.md 中解析出的全部原始字段（超出上述映射的，如 行为习惯/觉醒路线/成长目标/专属标签/当前状态 等）。
+   * 值为 string 或 string[]（多行子列表）。
+   */
+  rawFields?: Record<string, string | string[]>
   createdAt: string
   updatedAt: string
 }
@@ -291,6 +311,8 @@ export interface MemoryEntity {
   name: string
   category?: string
   notes?: string
+  /** 原始 .md 解析出的全部字段（超出 name/category/notes 的，如 关联事件/关联角色/当前状态 等） */
+  rawFields?: Record<string, string | string[]>
   createdAt: string
   updatedAt: string
 }
@@ -368,16 +390,117 @@ export interface MainOutline {
 
 export interface DetailedOutlineItem {
   chapterNumber: number
-  plotSummary: string
+  plotSummary?: string
   emotionPoint?: string
   coolPoint?: string
   hook?: string
+  /** 角色出场（来自细纲每章「角色出场」） */
+  charactersAppearing?: string[]
+  /** 伏笔铺设（来自细纲每章「伏笔铺设」） */
+  foreshadowings?: string[]
+  /** 字数预估（来自细纲每章「字数预估」，原文如「约 2500 字」） */
+  wordEstimate?: string
+  /** 金句（来自细纲每章「金句」） */
+  goldenLine?: string
+  /** 所属卷号 */
+  volume?: number
+  /** 情绪值（1-10） */
+  emotion?: number
+  /** 爽点类型（0/1/2/3/3.5/4） */
+  climax?: number
 }
 
 export interface DetailedOutline {
   schemaVersion: number
   updatedAt: string
   items: DetailedOutlineItem[]
+}
+
+/** 节奏图谱 html 中 rhythmData 数组的一项（逐章节奏，机器可读） */
+export interface RhythmEntry {
+  /** 章号 */
+  chapter: number
+  /** 章节标题 */
+  title: string
+  /** 情绪值 1-10 */
+  emotion: number
+  /** 爽点类型：0=无爽点 1=小打脸 2=中打脸 3=大高潮 3.5=卷中决战 4=卷终决战 */
+  climax: number
+  /** 所属卷号 */
+  volume: number
+  /** 是否已回填实际值（细纲生成时 false；正文写完后 true） */
+  actualized: boolean
+}
+
+/** 卷结构（从大纲.md 主线剧情走向的 H3 + 节奏图谱推导） */
+export interface Volume {
+  number: number
+  /** 卷名，不含「第N卷：」前缀 */
+  name: string
+  /** 起始章号（含） */
+  chapterStart: number
+  /** 结束章号（含） */
+  chapterEnd: number
+}
+
+/** 细纲每章的完整细节（来自 细纲/第NN卷.md 每章块） */
+export interface ChapterDetail {
+  chapterNumber: number
+  title: string
+  volume?: number
+  emotion?: number
+  climax?: number
+  /** 核心事件 */
+  plotSummary?: string
+  /** 爽点/打脸 */
+  coolPoint?: string
+  /** 角色出场 */
+  charactersAppearing?: string[]
+  /** 伏笔铺设 */
+  foreshadowings?: string[]
+  /** 章末钩子 */
+  hook?: string
+  /** 字数预估 */
+  wordEstimate?: string
+  /** 金句 */
+  goldenLine?: string
+  /** 卷终反转 / 关键设定 等特殊标记 */
+  climaxTag?: string
+  /** 全部原始字段（兜底） */
+  rawFields?: Record<string, string | string[]>
+}
+
+/** 格式体检结果项（解析健康检查） */
+export interface Diagnostic {
+  severity: 'warn' | 'info'
+  file: string
+  message: string
+  hint?: string
+}
+
+/** 关键情节图解（图解/第N章-*.html）的结构化解析 */
+export interface FigureSummary {
+  fileName: string
+  chapterNumber: number | null
+  title: string
+}
+
+export type FigureSectionKind = 'list' | 'table' | 'mermaid' | 'prose'
+
+export interface FigureSection {
+  name: string
+  kind: FigureSectionKind
+  items?: string[]
+  rows?: string[][]
+  mermaid?: string
+  text?: string
+}
+
+export interface ChapterFigure {
+  fileName: string
+  chapterNumber: number | null
+  title: string
+  sections: FigureSection[]
 }
 
 export interface UsageBucket {

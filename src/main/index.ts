@@ -5,9 +5,13 @@ import { ProjectService } from './data/project-service'
 import { MemoryService } from './data/memory-service'
 import { MemoryEntityService } from './data/memory-entity-service'
 import { SecretStore } from './data/secret-store'
+import { SettingsRepository } from './data/settings-repository'
+import { UsageRepository } from './data/usage-repository'
 import { LlmService } from './data/llm-service'
 import { OutlineService } from './data/outline-service'
 import { WriteService } from './data/write-service'
+import { DiagnosticsService } from './data/diagnostics-service'
+import { FigureService } from './data/figure-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
@@ -15,6 +19,10 @@ import { registerMemoryIpc } from './ipc/memory'
 import { registerLlmIpc } from './ipc/llm'
 import { registerOutlineIpc } from './ipc/outline'
 import { registerWriteIpc } from './ipc/write'
+import { registerSettingsIpc } from './ipc/settings'
+import { registerUsageIpc } from './ipc/usage'
+import { registerDiagnosticsIpc } from './ipc/diagnostics'
+import { registerFigureIpc } from './ipc/figure'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -46,27 +54,38 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const userData = app.getPath('userData')
   const libraryFile = join(userData, 'library.json')
-  const projectsRoot = join(userData, 'projects')
-  const libraryRepo = new LibraryRepository(libraryFile)
-  const projectService = new ProjectService(projectsRoot, libraryRepo)
+  const defaultProjectsRoot = join(userData, 'projects')
+  const settingsFile = join(userData, 'config', 'settings.json')
+  const settings = new SettingsRepository(settingsFile)
+  const projectsRoot = await settings.getProjectsRoot(defaultProjectsRoot)
 
-  registerLibraryIpc(libraryRepo)
+  const libraryRepo = new LibraryRepository(libraryFile)
+  const projectService = new ProjectService(projectsRoot, libraryRepo, settings)
+  const usageRepo = new UsageRepository(join(userData, 'config'))
+
+  registerLibraryIpc(projectService)
   registerProjectsIpc(projectService)
   registerChaptersIpc(projectService)
+  registerSettingsIpc(settings, defaultProjectsRoot)
+  registerUsageIpc(usageRepo, settings)
   const memoryService = new MemoryService(projectService)
   const memoryEntityService = new MemoryEntityService(projectService)
   registerMemoryIpc(memoryService, memoryEntityService)
   const secretFile = join(userData, 'config', 'providers.enc')
   const secret = new SecretStore(secretFile)
-  const llmService = new LlmService(secret)
+  const llmService = new LlmService(secret, usageRepo)
   registerLlmIpc(secret, llmService)
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
   const writeService = new WriteService(projectService, llmService)
   registerWriteIpc(writeService)
+  const diagnosticsService = new DiagnosticsService(projectService)
+  registerDiagnosticsIpc(diagnosticsService)
+  const figureService = new FigureService(projectService)
+  registerFigureIpc(figureService)
 
   if (!process.env['ELECTRON_RENDERER_URL']) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
