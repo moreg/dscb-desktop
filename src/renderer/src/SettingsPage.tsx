@@ -7,7 +7,7 @@ import type {
 } from '../../shared/types'
 
 interface Props {
-  onBack: () => void
+  onBack?: () => void
 }
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -28,7 +28,7 @@ function newId(): string {
   return 'p_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 }
 
-export default function SettingsPage({ onBack }: Props) {
+export default function SettingsPage(_: Props) {
   // list 接口返回的是脱敏的 ProviderSummary（没有 apiKey）
   const [providers, setProviders] = useState<ListProvidersResult>({
     activeId: '',
@@ -126,10 +126,14 @@ export default function SettingsPage({ onBack }: Props) {
 
   return (
     <div>
-      <button className="btn btn-ghost btn-sm" onClick={onBack}>
-        ‹ 返回
-      </button>
-      <h2 className="section mt">设置</h2>
+      <div className="page-head">
+        <div className="page-head-row">
+          <div>
+            <h1>设置</h1>
+            <p className="desc">外观、保存位置、模型服务、用量与写作节奏</p>
+          </div>
+        </div>
+      </div>
 
       <div className="card" style={{ maxWidth: 600 }}>
         <h3 className="sub">外观</h3>
@@ -218,7 +222,9 @@ export default function SettingsPage({ onBack }: Props) {
             ))}
           </ul>
         ) : (
-          <p className="empty" style={{ padding: '12px 0' }}>尚未添加任何 provider</p>
+          <div className="placeholder" style={{ padding: 16 }}>
+            尚未添加任何 provider，请在下方填写表单添加。
+          </div>
         )}
 
         {/* 联通测试 */}
@@ -370,7 +376,7 @@ export default function SettingsPage({ onBack }: Props) {
             </div>
           </>
         ) : (
-          <p className="empty" style={{ padding: 8 }}>加载中…</p>
+          <div className="placeholder" style={{ padding: 12 }}>加载中…</div>
         )}
       </div>
 
@@ -479,7 +485,7 @@ function ProviderRow({
               className="chip"
               style={{
                 background:
-                  provider.protocol === 'anthropic' ? 'var(--inkstone-soft)' : 'var(--paper-soft)',
+                  provider.protocol === 'anthropic' ? 'var(--inkstone-soft)' : 'var(--surface-2)',
                 color:
                   provider.protocol === 'anthropic' ? 'var(--inkstone)' : 'var(--ink-3)'
               }}

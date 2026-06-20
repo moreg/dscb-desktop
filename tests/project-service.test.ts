@@ -4,6 +4,9 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
+import type { SettingsRepository } from '../src/main/data/settings-repository'
+
+const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
 describe('ProjectService', () => {
   let root: string
@@ -11,7 +14,7 @@ describe('ProjectService', () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-svc-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
-    service = new ProjectService(path.join(root, 'projects'), library)
+    service = new ProjectService(path.join(root, 'projects'), library, mockSettings)
   })
 
   it('create makes a project dir with chapters/ and project.json', async () => {

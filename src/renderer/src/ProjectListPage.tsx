@@ -10,6 +10,7 @@ export default function ProjectListPage({ onOpenProject }: Props) {
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({})
   const [wordCounts, setWordCounts] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
+  const [scanning, setScanning] = useState(false)
   const [showNew, setShowNew] = useState(false)
   const [keyword, setKeyword] = useState('')
 
@@ -32,6 +33,17 @@ export default function ProjectListPage({ onOpenProject }: Props) {
     })
   }
 
+  /** 扫描 projectsRoot，自动发现含 大纲/大纲.md 的 v3.2 项目 */
+  const scan = async () => {
+    setScanning(true)
+    try {
+      await window.api.scanProjects()
+      refresh()
+    } finally {
+      setScanning(false)
+    }
+  }
+
   useEffect(refresh, [])
 
   const filtered = useMemo(() => {
@@ -48,7 +60,7 @@ export default function ProjectListPage({ onOpenProject }: Props) {
   )
 
   const formatRelative = (iso: string) => {
-    if (!iso) return ''
+    if (!iso) return '—'
     const t = new Date(iso).getTime()
     const now = Date.now()
     const diff = Math.floor((now - t) / 1000)
@@ -61,19 +73,29 @@ export default function ProjectListPage({ onOpenProject }: Props) {
 
   return (
     <div>
-      <div className="row" style={{ alignItems: 'flex-end' }}>
-        <div>
-          <h2 className="section">我的书案</h2>
-          <p className="sub" style={{ margin: 0, fontSize: 13, letterSpacing: '0.1em' }}>
-            静待落笔处，万卷由此生
-          </p>
+      <div className="page-head">
+        <div className="page-head-row">
+          <div>
+            <h1>我的书案</h1>
+            <p className="desc">静待落笔处，万卷由此生</p>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn btn-ghost"
+              onClick={scan}
+              disabled={scanning}
+              title="扫描保存位置，自动发现技能 v3.2 格式的项目"
+            >
+              {scanning ? '扫描中…' : '↻ 扫描项目'}
+            </button>
+            <button className="btn btn-primary" onClick={() => setShowNew(true)}>
+              + 落笔开篇
+            </button>
+          </div>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowNew(true)}>
-          + 落笔开篇
-        </button>
       </div>
 
-      <div className="toolbar" style={{ marginBottom: 20 }}>
+      <div className="toolbar">
         <div className="filters">
           <span className="filter-chip">项目 {projects.length}</span>
           <span className="filter-chip">总字数 {(totalWords / 10000).toFixed(1)} 万</span>
@@ -90,8 +112,8 @@ export default function ProjectListPage({ onOpenProject }: Props) {
       {loading ? (
         <p className="empty">展卷中…</p>
       ) : projects.length === 0 ? (
-        <div className="placeholder" style={{ marginTop: 32 }}>
-          <p style={{ margin: '0 0 16px', fontSize: 15 }}>书案空空，点右上角落笔写下第一部吧。</p>
+        <div className="placeholder" style={{ marginTop: 24 }}>
+          <p style={{ margin: '0 0 16px', fontSize: 15 }}>书案空空，落笔写下第一部吧。</p>
           <button className="btn btn-primary" onClick={() => setShowNew(true)}>
             + 落笔开篇
           </button>
@@ -99,49 +121,43 @@ export default function ProjectListPage({ onOpenProject }: Props) {
       ) : filtered.length === 0 ? (
         <p className="empty">没有匹配的项目。</p>
       ) : (
-        <ul className="bare">
+        <div className="project-grid">
           {filtered.map((p) => {
             const ch = chapterCounts[p.id] ?? 0
             const wc = wordCounts[p.id] ?? 0
             const initial = p.name.trim().charAt(0) || '卷'
             return (
-              <li key={p.id} className="card card-hover" style={{ padding: 0 }}>
-                <button
-                  type="button"
-                  onClick={() => onOpenProject(p.id)}
-                  style={{
-                    all: 'unset',
-                    display: 'block',
-                    width: '100%',
-                    cursor: 'pointer',
-                    padding: '20px 22px',
-                    boxSizing: 'border-box'
-                  }}
-                >
-                <div className="char-card" style={{ alignItems: 'center' }}>
-                  <div className="char-avatar" aria-hidden>{initial}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="char-name-row">
-                      <span className="char-name">{p.name}</span>
-                      {p.genre ? (
-                        <span className="chip chip-accent">{p.genre}</span>
-                      ) : null}
-                    </div>
-                    <div className="char-meta">
-                      <span><span className="label">章节</span> <span className="val">{ch}</span></span>
-                      <span><span className="label">字数</span> <span className="val">{wc.toLocaleString()}</span></span>
-                      <span><span className="label">翻开</span> <span className="val">{formatRelative(p.lastOpenedAt)}</span></span>
-                    </div>
-                  </div>
-                  <div className="char-actions">
-                    <span className="chip chip-vermilion" style={{ fontSize: 11 }}>翻开</span>
+              <button
+                key={p.id}
+                type="button"
+                className="project-card"
+                onClick={() => onOpenProject(p.id)}
+              >
+                <div className="pc-head">
+                  <div className="pc-avatar" aria-hidden>{initial}</div>
+                  <div className="pc-title">
+                    <div className="pc-name">{p.name}</div>
+                    {p.genre ? <div className="pc-genre">{p.genre}</div> : null}
                   </div>
                 </div>
-                </button>
-              </li>
+                <div className="pc-stats">
+                  <div className="pc-stat">
+                    <span className="num">{ch}</span>
+                    <span className="lbl">章节</span>
+                  </div>
+                  <div className="pc-stat">
+                    <span className="num">{(wc / 10000).toFixed(1)}</span>
+                    <span className="lbl">万字</span>
+                  </div>
+                </div>
+                <div className="pc-foot">
+                  <span>翻开 {formatRelative(p.lastOpenedAt)}</span>
+                  <span className="open">进入 →</span>
+                </div>
+              </button>
             )
           })}
-        </ul>
+        </div>
       )}
       {showNew ? (
         <NewProjectDialog

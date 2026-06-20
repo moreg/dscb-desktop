@@ -76,7 +76,7 @@ const ROLE_BUCKETS = [
   { match: ['反派', 'BOSS', 'boss', '敌'], label: '反派', cls: 'role-antagonist' }
 ] as const
 
-export default function RelationshipPage({ projectId, onBack, onOpenChapter, onOpenCharacters }: Props) {
+export default function RelationshipPage({ projectId, onOpenChapter, onOpenCharacters }: Props) {
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
@@ -439,37 +439,41 @@ export default function RelationshipPage({ projectId, onBack, onOpenChapter, onO
 
   return (
     <div>
-      <div className="row">
-        <button className="btn btn-ghost btn-sm" onClick={onBack}>
-          ‹ 记忆中心
-        </button>
-        <div className="btn-group">
-          <button
-            className="btn btn-sm"
-            onClick={() => setLayoutSeed((s) => s + 1)}
-            disabled={characters.length === 0}
-            title="重新排布节点"
-          >
-            ⟳ 重新排布
-          </button>
-          <button
-            className="btn btn-sm"
-            onClick={startDetectRelationships}
-            disabled={detectingRels || characters.length < 2}
-            title="让 AI 扫描近期章节，推断人物关系"
-          >
-            {detectingRels ? '推断中…' : '🤖 AI 推断关系'}
-          </button>
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={() => setCreating(true)}
-            disabled={characters.length < 2}
-          >
-            + 新关系
-          </button>
+      <div className="page-head">
+        <div className="page-head-row">
+          <div>
+            <h1>人物关系</h1>
+            <p className="desc">
+              {characters.length} 个人物 · {relationships.length} 条关系
+            </p>
+          </div>
+          <div className="btn-group">
+            <button
+              className="btn btn-sm"
+              onClick={() => setLayoutSeed((s) => s + 1)}
+              disabled={characters.length === 0}
+              title="重新排布节点"
+            >
+              ⟳ 重新排布
+            </button>
+            <button
+              className="btn btn-sm"
+              onClick={startDetectRelationships}
+              disabled={detectingRels || characters.length < 2}
+              title="让 AI 扫描近期章节，推断人物关系"
+            >
+              {detectingRels ? '推断中…' : '🤖 AI 推断关系'}
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => setCreating(true)}
+              disabled={characters.length < 2}
+            >
+              + 新关系
+            </button>
+          </div>
         </div>
       </div>
-      <h2 className="section mt">人物关系</h2>
       {characters.length < 2 ? (
         <p className="empty" style={{ color: 'var(--warning)' }}>
           至少需要 2 个人物才能建立关系。
@@ -559,7 +563,7 @@ export default function RelationshipPage({ projectId, onBack, onOpenChapter, onO
                       width={Math.max(40, e.type.length * 12)}
                       height={18}
                       rx={4}
-                      fill="var(--paper-card)"
+                      fill="var(--surface)"
                       stroke="var(--line)"
                     />
                     <text x={mx} y={my + 4} className="rel-edge-label">
@@ -821,7 +825,7 @@ function RelationshipSuggestionPanel({
         ) : (
           <>
             {unknown.length > 0 ? (
-              <div style={{ background: 'var(--paper-soft)', borderRadius: 6, padding: 8, marginBottom: 10 }}>
+              <div style={{ background: 'var(--warning-soft)', borderRadius: 6, padding: 8, marginBottom: 10 }}>
                 <strong style={{ fontSize: 12.5, color: 'var(--warning)' }}>
                   ⚠ {unknown.length} 条涉及未知人物（名字未匹配人物库）
                 </strong>

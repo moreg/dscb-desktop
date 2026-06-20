@@ -9,10 +9,13 @@ import { CharacterRepository } from '../src/main/data/character-repository'
 import { ChapterRepository } from '../src/main/data/chapter-repository'
 import { WriteService } from '../src/main/data/write-service'
 import type { LlmService } from '../src/main/data/llm-service'
+import type { SettingsRepository } from '../src/main/data/settings-repository'
 
 function mockLlm(reply: string): LlmService {
   return { generateStream: vi.fn().mockResolvedValue(reply) } as unknown as LlmService
 }
+
+const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
 describe('WriteService', () => {
   let root: string
@@ -22,7 +25,7 @@ describe('WriteService', () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-ws-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
-    ps = new ProjectService(path.join(root, 'projects'), library)
+    ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
     projectId = (await ps.create({ name: '青云志', genre: '玄幻' })).id
   })
 

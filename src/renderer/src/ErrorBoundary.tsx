@@ -39,7 +39,7 @@ export class ErrorBoundary extends Component<Props, State> {
             style={{
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
-              background: 'var(--paper-soft)',
+              background: 'var(--surface-2)',
               padding: 16,
               borderRadius: 8,
               fontSize: 12.5,

@@ -1,11 +1,11 @@
 import { safeHandle } from './safe-handle'
-import { LibraryRepository, type CreateProjectInput } from '../data/library-repository'
-import type { ProjectMeta } from '../../shared/types'
+import { ProjectService } from '../data/project-service'
 
-export function registerLibraryIpc(repo: LibraryRepository): void {
-  safeHandle('library:list', async (): Promise<ProjectMeta[]> => repo.list())
-  safeHandle(
-    'library:create',
-    async (_e, input: CreateProjectInput): Promise<ProjectMeta> => repo.create(input)
-  )
+/**
+ * library:list 现在走 ProjectService.listProjects()，过滤掉非 v3.2 项目。
+ * library:scan 扫描 projectsRoot 自动发现 v3.2 项目。
+ */
+export function registerLibraryIpc(service: ProjectService): void {
+  safeHandle('library:list', async () => service.listProjects())
+  safeHandle('library:scan', async () => service.scanProjects())
 }

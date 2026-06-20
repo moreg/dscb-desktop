@@ -65,7 +65,7 @@ function parseSuggestions(text: string): ReviewSuggestion[] {
   return out
 }
 
-export default function ChapterEditor({ projectId, chapterNumber, onBack, onOpenOutline }: Props) {
+export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline }: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
   const [draft, setDraft] = useState('')
   const [dirty, setDirty] = useState(false)
@@ -498,65 +498,69 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   if (!data) return <p className="empty">展卷中…</p>
 
+  const STATUS_FULL: Record<ChapterStatus, string> = {
+    outline: '大纲',
+    draft: '草稿',
+    reviewed: '润色',
+    published: '定稿'
+  }
+  const STATUS_CLASS: Record<ChapterStatus, string> = {
+    outline: 'status-outline',
+    draft: 'status-draft',
+    reviewed: 'status-reviewed',
+    published: 'status-published'
+  }
+
   return (
     <div style={{ paddingRight: reviewOpen ? 396 : 0, transition: 'padding 0.2s' }}>
-      <div className="row">
-        <button className="btn btn-ghost btn-sm" onClick={onBack}>
-          ‹ 返回
-        </button>
-        <span className="meta">
-          第 {data.meta.chapterNumber} 章 · {data.meta.title} · {data.meta.wordCount} 字 ·{' '}
-          {versions.length} 版
-        </span>
-        <div className="btn-group">
+      <div className="page-head">
+        <div className="page-head-row">
+          <div>
+            <h1>第 {data.meta.chapterNumber} 章 · {data.meta.title}</h1>
+            <p className="desc">
+              <span className="num">{data.meta.wordCount.toLocaleString()}</span> 字 ·{' '}
+              <span className="num">{versions.length}</span> 版
+            </p>
+          </div>
           <span
-            className={`chip ${
-              data.meta.status === 'published'
-                ? 'chip-success'
-                : data.meta.status === 'reviewed'
-                  ? 'chip-accent'
-                  : ''
-            }`}
-            style={{ cursor: 'pointer' }}
+            className={`editor-status ${STATUS_CLASS[data.meta.status]}`}
             onClick={cycleStatus}
             title="点击切换状态"
           >
-            {data.meta.status === 'outline'
-              ? '纲'
-              : data.meta.status === 'draft'
-                ? '稿'
-                : data.meta.status === 'reviewed'
-                  ? '润'
-                  : '定'}
-            {' '}↻
+            {STATUS_FULL[data.meta.status]} ↻
           </span>
-          <button className="btn btn-sm" onClick={save} disabled={!dirty || saving}>
-            {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
-          </button>
-          <button className="btn btn-sm" onClick={saveAsVersion} disabled={savingVersion}>
-            存版本
-          </button>
-          <button className="btn btn-sm" onClick={() => setShowVersions((s) => !s)}>
-            {showVersions ? '收起' : '版本'}
-          </button>
-          <button
-            className="btn btn-sm"
-            onClick={() => setShowPreview((s) => !s)}
-            title="按人物/伏笔/地点高亮正文"
-          >
-            {showPreview ? '收起预览' : '👁 预览'}
-          </button>
-          <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
-            {reviewing ? '审稿中…' : '✎ AI 改稿'}
-          </button>
-          <button className="btn btn-primary btn-sm" onClick={aiGenerate} disabled={generating}>
-            {generating ? '落墨中…' : '✦ 续写'}
-          </button>
         </div>
       </div>
 
+      {/* 操作工具栏 */}
+      <div className="editor-toolbar">
+        <button className="btn btn-sm" onClick={save} disabled={!dirty || saving}>
+          {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
+        </button>
+        <button className="btn btn-sm" onClick={saveAsVersion} disabled={savingVersion}>
+          存版本
+        </button>
+        <button className="btn btn-sm" onClick={() => setShowVersions((s) => !s)}>
+          {showVersions ? '收起版本' : `版本 ${versions.length}`}
+        </button>
+        <button
+          className="btn btn-sm"
+          onClick={() => setShowPreview((s) => !s)}
+          title="按人物/伏笔/地点高亮正文"
+        >
+          {showPreview ? '收起预览' : '👁 预览'}
+        </button>
+        <span className="spacer" />
+        <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
+          {reviewing ? '审稿中…' : '✎ AI 改稿'}
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={aiGenerate} disabled={generating}>
+          {generating ? '落墨中…' : '✦ 续写'}
+        </button>
+      </div>
+
       {/* 番茄钟 + 写作进度 */}
-      <div className="row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
+      <div className="row" style={{ marginTop: 4, marginBottom: 12, flexWrap: 'wrap' }}>
         <div className={`pomodoro ${pomoMode === 'break' ? 'break' : ''}`}>
           <span
             className={`dot ${pomoRunning ? 'running' : ''}`}
@@ -597,7 +601,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       </div>
 
       {/* 本章细纲 */}
-      <div className="row" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginBottom: 8 }}>
         <button
           className="btn btn-sm btn-ghost"
           onClick={() => setShowChapterOutline((s) => !s)}
@@ -698,13 +702,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </>
       ) : null}
 
-      <div className="card" style={{ marginTop: 14, padding: 12 }}>
-        <div className="row">
-          <div>
-            <strong style={{ fontSize: 13.5 }}>本章登场人物</strong>
-            <span className="meta" style={{ marginLeft: 8 }}>
-              {appearing.length} 位
-              {savingCast ? ' · 保存中…' : ''}
+      <div className="editor-panel">
+        <div className="ep-head">
+          <div className="ep-title">
+            本章登场人物
+            <span className="count">
+              {appearing.length} 位{savingCast ? ' · 保存中…' : ''}
             </span>
           </div>
           <div className="btn-group">
@@ -726,7 +729,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           </div>
         </div>
         {appearing.length > 0 ? (
-          <div className="outline-tags" style={{ marginTop: 8 }}>
+          <div className="outline-tags" style={{ marginTop: 4 }}>
             {appearing.map((id) => {
               const c = characters.find((x) => x.id === id)
               return (
@@ -737,7 +740,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             })}
           </div>
         ) : (
-          <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
             暂未标记。点「编辑登场」勾选本章出场的人物。
           </p>
         )}
@@ -788,8 +791,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       <AnalysisPanel text={draft} />
 
       {showVersions ? (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3 className="sub">版本历史（{versions.length}）</h3>
+        <div className="editor-panel">
+          <div className="ep-head">
+            <div className="ep-title">
+              版本历史
+              <span className="count">{versions.length}</span>
+            </div>
+          </div>
           {versions.length === 0 ? (
             <p className="empty">尚无版本，点「存版本」留存。</p>
           ) : (
@@ -798,11 +806,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 <li
                   key={v.versionNumber}
                   className="row"
-                  style={{ borderBottom: '1px solid var(--line)', paddingBottom: 8 }}
+                  style={{ borderBottom: '1px solid var(--line-soft)', paddingBottom: 8, paddingTop: 4 }}
                 >
                   <div>
                     <strong>#{v.versionNumber}</strong>{' '}
-                    <span className={`chip chip-${sourceChip(v.source)}`}>
+                    <span className={`chip ${sourceChipClass(v.source)}`}>
                       {SOURCE_LABEL[v.source]}
                     </span>{' '}
                     <span className="meta">
@@ -812,13 +820,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   </div>
                   <div className="btn-group">
                     <button className="btn btn-sm" onClick={() => setViewing(v)}>
-                      看
+                      查看
                     </button>
                     <button className="btn btn-sm" onClick={() => rollback(v)}>
                       回滚
                     </button>
                     <button className="btn btn-sm btn-danger" onClick={() => removeVersion(v)}>
-                      删
+                      删除
                     </button>
                   </div>
                 </li>
@@ -944,9 +952,9 @@ function CastSuggestionPanel({
   const unmatched = suggestions.filter((s) => !s.characterId)
   const charById = new Map<string, Character>(characters.map((c) => [c.id, c]))
   return (
-    <div className="card" style={{ marginTop: 14, padding: 14 }}>
-      <div className="row" style={{ marginBottom: 6 }}>
-        <strong style={{ fontSize: 14 }}>🤖 AI 识别结果</strong>
+    <div className="editor-panel">
+      <div className="ep-head">
+        <div className="ep-title">🤖 AI 识别结果</div>
         <button className="btn btn-ghost btn-sm" onClick={onClose}>
           关闭
         </button>
@@ -964,7 +972,7 @@ function CastSuggestionPanel({
           {unmatched.length > 0 ? (
             <div
               style={{
-                background: 'var(--paper-soft)',
+                background: 'var(--warning-soft)',
                 border: '1px solid var(--line)',
                 borderRadius: 'var(--r-sm)',
                 padding: 8,
@@ -1028,10 +1036,12 @@ function AnalysisPanel({ text }: { text: string }) {
   const stats: ChapterStats = useMemo(() => analyze(text, 12), [text])
   const warnings = useMemo(() => rhythmWarnings(stats), [stats])
   return (
-    <div className="card" style={{ marginTop: 14, padding: 14 }}>
-      <div className="row" style={{ marginBottom: 4 }}>
-        <strong style={{ fontSize: 14 }}>📊 章节分析</strong>
-        <span className="meta">实时</span>
+    <div className="editor-panel">
+      <div className="ep-head">
+        <div className="ep-title">
+          📊 章节分析
+          <span className="count">实时</span>
+        </div>
       </div>
       <div className="stats-grid">
         <div className="stat-cell">
@@ -1159,8 +1169,8 @@ function VersionDialog({
   )
 }
 
-function sourceChip(s: ChapterSource): string {
-  if (s === 'ai') return 'accent'
-  if (s === 'reviewed') return 'success'
+function sourceChipClass(s: ChapterSource): string {
+  if (s === 'ai') return 'chip-accent'
+  if (s === 'reviewed') return 'chip-success'
   return ''
 }

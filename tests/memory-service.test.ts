@@ -5,6 +5,9 @@ import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { MemoryService } from '../src/main/data/memory-service'
+import type { SettingsRepository } from '../src/main/data/settings-repository'
+
+const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
 describe('MemoryService', () => {
   let root: string
@@ -14,7 +17,7 @@ describe('MemoryService', () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-mem-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
-    const projectService = new ProjectService(path.join(root, 'projects'), library)
+    const projectService = new ProjectService(path.join(root, 'projects'), library, mockSettings)
     memory = new MemoryService(projectService)
     const project = await projectService.create({ name: 'X' })
     projectId = project.id
