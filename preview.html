@@ -1,0 +1,1085 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>大神持笔 · UI 预览</title>
+  <link rel="stylesheet" href="src/renderer/src/design.css" />
+  <style>
+    body { padding-bottom: 80px; }
+    .preview-bar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: #3a2d24; color: #fffaf2; padding: 8px 16px;
+      display: flex; gap: 12px; align-items: center; font-family: var(--font-sans); font-size: 13px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+    }
+    .preview-bar a { color: var(--accent-soft); text-decoration: none; }
+    .preview-bar a:hover { text-decoration: underline; }
+    body { padding-top: 48px; }
+    .preview-nav { display: flex; gap: 6px; flex-wrap: wrap; }
+    .preview-nav a {
+      padding: 4px 10px; border-radius: 4px; color: #fffaf2;
+      background: rgba(255,255,255,0.08); font-size: 12px;
+    }
+    .preview-nav a:hover { background: rgba(255,255,255,0.18); }
+    .preview-theme-btn {
+      background: #fffaf2; color: #3a2d24; border: none; border-radius: 4px;
+      padding: 4px 8px; font-size: 12px; cursor: pointer; font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <div class="preview-bar">
+    <strong style="font-family: var(--font-serif);">大神持笔 · UI 预览</strong>
+    <div class="preview-nav" id="nav"></div>
+    <button class="preview-theme-btn" id="themeBtn">切换深色</button>
+    <a href="#top">↑ 顶部</a>
+  </div>
+
+  <div id="root"></div>
+
+  <script>
+    // =================== 模拟数据 ===================
+    const PROJECTS = [
+      { id: 'p1', name: '九霄剑尊', genre: '玄幻', lastOpenedAt: '2026-06-19T08:30:00Z' },
+      { id: 'p2', name: '长安未雪', genre: '历史', lastOpenedAt: '2026-06-17T14:22:00Z' },
+      { id: 'p3', name: '回声', genre: '科幻', lastOpenedAt: '2026-06-10T20:11:00Z' }
+    ]
+    const CHAPTERS = [
+      { chapterNumber: 1, title: '剑冢少年', wordCount: 3200, status: 'reviewed', synopsis: '陆沉于废墟中得残剑，遇神秘老仆' },
+      { chapterNumber: 2, title: '山门试炼', wordCount: 2850, status: 'draft' },
+      { chapterNumber: 3, title: '一剑破境', wordCount: 4100, status: 'published' },
+      { chapterNumber: 4, title: '故人来访', wordCount: 0, status: 'outline' }
+    ]
+    const CHARACTERS = [
+      { id: 'c1', name: '陆沉', role: '主角', tags: ['剑修','天玄宗'], identity: '剑冢遗孤', personality: '沉默寡言',
+        abilities: '九霄剑诀·残卷', synopsis: '生于剑冢废墟，自幼伴残剑而眠。十年磨一剑，一朝破境而出，立誓查清当年灭门真相。' },
+      { id: 'c2', name: '沈清漪', role: '女主', tags: ['天玄宗','剑修'], identity: '天玄宗大师姐', personality: '外冷内热',
+        abilities: '霜天剑诀', synopsis: '天玄宗大师姐，剑道天赋百年罕见。受师命下山调查魔门异动，与陆沉相遇。' },
+      { id: 'c3', name: '姜北辰', role: '反派', tags: ['魔门','BOSS'], identity: '魔门少主', personality: '阴鸷',
+        abilities: '噬魂大法', synopsis: '魔门当代少主，与陆沉之父有灭门之仇。多番设局阻挠陆沉破境。' },
+      { id: 'c4', name: '姜老仆', role: '配角', tags: ['老仆'], identity: '剑冢守墓人', personality: '慈祥',
+        abilities: '无', synopsis: '陆沉幼年的引路人，知道当年灭门的部分真相。' }
+    ]
+    const RELATIONSHIPS = [
+      { id: 'r1', characterAId: 'c1', characterBId: 'c2', relationType: '恋人', strength: 78, description: '山下相遇，互生情愫' },
+      { id: 'r2', characterAId: 'c1', characterBId: 'c3', relationType: '仇人', strength: 95, description: '灭门之仇' },
+      { id: 'r3', characterAId: 'c1', characterBId: 'c4', relationType: '主仆', strength: 88, description: '老仆扶养幼年陆沉' },
+      { id: 'r4', characterAId: 'c2', characterBId: 'c3', relationType: '敌对', strength: 70, description: '正邪对立' }
+    ]
+    const FORESHADOWS = [
+      { id: 'f1', content: '陆沉左眼下有一颗痣', status: 'planted', plantChapter: 1, expectedCollect: 12, note: '与母亲有关' },
+      { id: 'f2', content: '剑冢下封印的上古剑灵', status: 'pending', note: '尚未埋设' },
+      { id: 'f3', content: '沈清漪的师门命牌曾断裂', status: 'collected', plantChapter: 5, expectedCollect: 18, actualCollect: 17 },
+      { id: 'f4', content: '姜北辰的真正身世', status: 'missed', plantChapter: 3, expectedCollect: 9 },
+      { id: 'f5', content: '九霄剑诀共九卷', status: 'planted', plantChapter: 2, expectedCollect: 20 }
+    ]
+    const LOCATIONS = [
+      { id: 'l1', name: '九霄山', category: '天玄宗山门', notes: '七十二峰，主峰常年云雾缭绕。' },
+      { id: 'l2', name: '剑冢', category: '遗迹', notes: '上古剑修葬地，封印未解。' },
+      { id: 'l3', name: '幽冥渊', category: '魔门禁地', notes: '魔门根基所在，阴气极重。' }
+    ]
+    const TIMELINES = [
+      { id: 't1', name: '陆沉家破', category: '开场', notes: '十五年前，陆氏一族一夜被灭。' },
+      { id: 't2', name: '陆沉觉醒剑意', category: '转折', notes: '在第 1 章初次引动残剑。' },
+      { id: 't3', name: '天玄宗大比', category: '高潮', notes: '与魔门正面交锋。' }
+    ]
+    const PLOT_POINTS = [
+      { id: 'pp1', name: '陆沉身份揭晓', category: '揭秘', notes: '他是 @陆沉 真正的 @姜北辰 双生兄弟。#伏笔 痣' },
+      { id: 'pp2', name: '九霄剑诀合一', category: '高潮', notes: '九卷归一，可斩神魔。涉及 @陆沉 @沈清漪' }
+    ]
+    const MAIN_OUTLINE = {
+      theme: '复仇与救赎',
+      mainLine: '剑冢遗孤陆沉携残剑出山，于正邪夹缝中查清灭门真相，最终以九霄剑诀破开命运之局。',
+      synopsis: '十五年前，名动天下的陆氏剑族一夜被灭，仅遗孤陆沉被老仆救走，藏于剑冢废墟。十年磨剑，陆沉引动残剑破境而出，恰逢魔门蠢动、正道式微。下山途中，他与天玄宗大师姐沈清漪相遇，并被卷入一场跨越百年的阴谋。在追寻真相的路上，他逐渐发现：所谓"灭门凶手"并非真正的仇敌，而自己身上亦藏着惊天秘密。'
+    }
+    const DETAILED = [
+      { chapterNumber: 1, plotSummary: '陆沉于剑冢废墟中挣扎求存十年。一日残剑突发异动，引动天地灵气，老仆含泪告知其身世。陆沉破境而出，立誓下山。', emotionPoint: '沉重 → 觉醒', coolPoint: '残剑引动九霄', hook: '山下传来急促的号角声' },
+      { chapterNumber: 2, plotSummary: '陆沉初入江湖，于茶肆听闻天玄宗招收新弟子。途中遇魔门追杀一女子，拔剑相助。', emotionPoint: '懵懂 → 锋芒', coolPoint: '一剑退魔', hook: '那女子的腰牌上，刻着一个熟悉的字' }
+    ]
+    const CHAPTER_CONTENT = `剑冢的风从石缝里挤进来，带着十五年没散尽的铁锈味。
+
+陆沉坐在断碑上，膝上横着那柄残剑。他想起十五年前的九霄山，山门大开，父亲牵着他的手走过七十二峰。沈清漪那时候还没出生，姜北辰也还是魔门里一个不谙世事的少年。
+
+"少爷，"姜老仆的声音从身后传来，"今夜子时，残剑会再动。"
+
+他没有回头，只是把剑握得更紧了些。剑冢上空的星斗，正一颗一颗亮起来。
+
+远处忽然传来一声闷响，魔门的号角在山谷中回荡。陆沉猛地睁眼，他能感到一股熟悉的气息正在逼近——那是杀意。`
+
+    const CAST_SUGGESTIONS = [
+      { name: '陆沉', reason: '本章主角，残剑觉醒、立誓下山', quote: '陆沉坐在断碑上，膝上横着那柄残剑。', known: true, applied: true },
+      { name: '姜老仆', reason: '告知陆沉身世，引出剧情', quote: '"少爷，"姜老仆的声音从身后传来', known: true, applied: true },
+      { name: '姜北辰', reason: '作为回忆中的人物被提及，并在结尾以号角暗示登场', quote: '姜北辰也还是魔门里一个不谙世事的少年。', known: true, applied: false },
+      { name: '神秘黑影', reason: '章末出现的杀意来源', quote: '他能感到一股熟悉的气息正在逼近', known: false, applied: false }
+    ]
+    const REL_SUGGESTIONS = [
+      { characterA: '陆沉', characterB: '沈清漪', relationType: '恋人', description: '山下相遇，多次并肩御敌', strength: 78, known: true, exists: true },
+      { characterA: '陆沉', characterB: '姜老仆', relationType: '主仆', description: '老仆扶养幼年陆沉十年', strength: 88, known: true, exists: false },
+      { characterA: '沈清漪', characterB: '姜北辰', relationType: '宿敌', description: '正邪立场对立，多次交锋', strength: 65, known: true, exists: false },
+      { characterA: '陆沉', characterB: '黑袍人', relationType: '未知', description: '章末杀意来源，身份未明', strength: 40, known: false, exists: false }
+    ]
+    const USAGE_SUMMARY = {
+      today: { total: 18420, cost: 0.042 },
+      month: { total: 386500, cost: 0.91 },
+      allTime: { total: 1240000, cost: 3.26 },
+      byFeature: [
+        { feature: '正文续写', total: 620000, cost: 1.84, calls: 18 },
+        { feature: '细纲生成', total: 280000, cost: 0.61, calls: 22 },
+        { feature: '改稿建议', total: 180000, cost: 0.42, calls: 9 },
+        { feature: '总纲生成', total: 90000, cost: 0.21, calls: 3 },
+        { feature: '登场识别', total: 45000, cost: 0.12, calls: 6 },
+        { feature: '关系推断', total: 25000, cost: 0.06, calls: 2 }
+      ]
+    }
+    const REVIEW_SUGGESTIONS = [
+      { quote: '带着十五年没散尽的铁锈味', advice: '改用更具象的意象，避免"铁锈味"过于直白', why: '散文味冲淡了紧张感，可换成"血腥气"或具体气味' },
+      { quote: '山门大开，父亲牵着他的手走过七十二峰', advice: '补一两句陆沉对父亲的体感，让回忆更立体', why: '现在的回忆像陈述，缺乏情感锚点' },
+      { quote: '沈清漪那时候还没出生', advice: '删除或后置，避免破坏叙事节奏', why: '读者此时还不需要知道沈清漪，过早剧透稀释出场张力' },
+      { quote: '残剑会再动', advice: '前文已铺垫"残剑突发异动"，此处改为具体征兆更佳', why: '重复表述会削弱悬疑' }
+    ]
+
+    // =================== 工具 ===================
+    function relativeTime(iso) {
+      const d = new Date(iso); const diff = Math.floor((Date.now() - d.getTime()) / 1000)
+      if (diff < 60) return '刚刚'
+      if (diff < 3600) return Math.floor(diff/60) + ' 分钟前'
+      if (diff < 86400) return Math.floor(diff/3600) + ' 小时前'
+      if (diff < 86400 * 7) return Math.floor(diff/86400) + ' 天前'
+      return d.toLocaleDateString('zh-CN')
+    }
+    function avatarOf(name) { return (name || '·').slice(0, 1) }
+    function fmtTokens(n) {
+      if (n >= 1000000) return (n/1000000).toFixed(2) + 'M'
+      if (n >= 1000) return (n/1000).toFixed(1) + 'k'
+      return String(n)
+    }
+    function fmtCost(n) {
+      if (n >= 1) return '¥' + n.toFixed(2)
+      if (n >= 0.01) return '¥' + n.toFixed(3)
+      return '¥' + n.toFixed(4)
+    }    function bucketOf(c) {
+      const r = c.role || ''
+      if (r.includes('主角')) return { label: '主角', cls: 'role-protagonist' }
+      if (r.includes('女主') || r.includes('男主') || r.includes('配角')) return { label: '重要角色', cls: 'role-supporting' }
+      if (r.includes('反派') || r.includes('BOSS') || r.includes('敌')) return { label: '反派', cls: 'role-antagonist' }
+      return { label: '其他', cls: 'role-extra' }
+    }
+    function chapterTitle(n) {
+      const c = CHAPTERS.find(x => x.chapterNumber === n)
+      return c ? c.title : '第 ' + n + ' 章'
+    }
+    function charName(id) {
+      const c = CHARACTERS.find(x => x.id === id)
+      return c ? c.name : '?'
+    }
+    const STATUS_LABEL = { outline:'纲', draft:'稿', reviewed:'润', published:'定' }
+    const STATUS_CLASS = { outline:'status-outline', draft:'status-draft', reviewed:'status-reviewed', published:'status-published' }
+    const FORESHADOW_STATUS = {
+      pending: { label:'待埋', tone:'var(--ink-2)' },
+      planted: { label:'已埋', tone:'var(--warning)' },
+      collected: { label:'已收', tone:'var(--success)' },
+      missed: { label:'遗漏', tone:'var(--danger)' }
+    }
+
+    // =================== 章节分析模拟 ===================
+    function analyzePreview(text, segments) {
+      segments = segments || 12
+      const t = (text || '').replace(/\r/g, '')
+      const words = t.replace(/\s+/g, '').length
+      const paragraphs = t.split(/\n+/).filter(p => p.trim().length > 0)
+      const sentences = t.split(/[。！？!?]+/).filter(s => s.trim().length > 0)
+      const longest = paragraphs.reduce((m, p) => Math.max(m, p.replace(/\s+/g, '').length), 0)
+      const dq = (t.match(/[「」""]/g) || []).length
+      const filler = (t.match(/[的了着过啊呢嘛吧哦嗯]/g) || []).length
+      const POS = ['笑','喜','光','明','胜','破','暖','希望','喜','温柔','光明','胜利','喜悦','微笑']
+      const NEG = ['哭','泪','痛','伤','恨','怒','寒','冷','血','杀','死','灭','背叛','恐惧','绝望']
+      const TENSE = ['急','猛','疾','速','爆','突','冲','杀','刺','爆裂','轰鸣','火焰']
+      const CALM = ['静','宁','缓','慢','微','风','月','雪','雾','溪','宁静','安详','沉思','微风']
+      function cnt(s, ws) { let n=0; for (const w of ws) { let i=0; while((i=s.indexOf(w,i))>=0){n++;i+=w.length} } return n }
+      const chunk = Math.max(1, Math.floor(t.length / segments))
+      const curve = []
+      for (let i = 0; i < segments; i++) {
+        const s = t.slice(i*chunk, i === segments-1 ? t.length : (i+1)*chunk)
+        const pos = cnt(s, POS), neg = cnt(s, NEG)
+        const t1 = cnt(s, TENSE), c1 = cnt(s, CALM)
+        const intensity = Math.min(1, (t1 + c1) / 20)
+        const score = Math.max(-100, Math.min(100, (pos - neg) * 4 * (0.5 + intensity)))
+        curve.push(Math.round(score))
+      }
+      return {
+        wordCount: words,
+        paragraphCount: paragraphs.length,
+        sentenceCount: sentences.length,
+        avgSentenceLen: sentences.length ? Math.round(words / sentences.length) : 0,
+        longestParagraphLen: longest,
+        dialogueRatio: words === 0 ? 0 : dq / words,
+        fillerRatio: words === 0 ? 0 : filler / words,
+        emotionCurve: curve
+      }
+    }
+    function rhythmWarnings(s) {
+      const out = []
+      if (s.longestParagraphLen > 200) out.push({ level: s.longestParagraphLen > 350 ? 2 : 1, msg: '最长段落 ' + s.longestParagraphLen + ' 字' + (s.longestParagraphLen > 350 ? '（建议拆分）' : '（略长）') })
+      if (s.fillerRatio > 0.12) out.push({ level: s.fillerRatio > 0.2 ? 2 : 1, msg: '虚词占比 ' + (s.fillerRatio*100).toFixed(1) + '%' + (s.fillerRatio > 0.2 ? '（明显过多）' : '（偏多）') })
+      if (s.avgSentenceLen > 50) out.push({ level: 1, msg: '平均句长 ' + s.avgSentenceLen + ' 字（偏长）' })
+      return out
+    }
+    function buildPreview(text) {
+      const hits = []
+      const push = (term, kind, label) => {
+        if (!term) return
+        let idx = 0
+        while ((idx = text.indexOf(term, idx)) >= 0) {
+          hits.push({ start: idx, end: idx + term.length, kind, label, text: term })
+          idx += term.length
+        }
+      }
+      CHARACTERS.forEach(c => push(c.name, 'char', '人物'))
+      FORESHADOWS.forEach(f => push(f.content, 'foreshadow', '伏笔'))
+      LOCATIONS.forEach(l => push(l.name, 'location', '地点'))
+      hits.sort((a, b) => a.start - b.start)
+      const merged = []
+      for (const h of hits) {
+        const last = merged[merged.length - 1]
+        if (last && h.start < last.end) continue
+        merged.push(h)
+      }
+      const out = []
+      let cursor = 0
+      for (const h of merged) {
+        if (h.start > cursor) out.push({ text: text.slice(cursor, h.start) })
+        out.push({ text: text.slice(h.start, h.end), hl: h })
+        cursor = h.end
+      }
+      if (cursor < text.length) out.push({ text: text.slice(cursor) })
+      return out
+    }
+
+    // =================== 渲染函数 ===================
+    const root = document.getElementById('root')
+
+    function pageHeader(sub, actions) {
+      return `<div class="page">
+        <header class="topbar">
+          <div><h1>大神持笔</h1><p class="sub">${sub}</p></div>
+          <div class="row" style="gap:8px">
+            <div class="theme-toggle">
+              <button class="active" onclick="setThemePreview('light')">☀ 浅</button>
+              <button onclick="setThemePreview('dark')">☾ 深</button>
+              <button onclick="setThemePreview('system')">◐ 自动</button>
+            </div>
+            <button class="btn btn-ghost">⚙ 设置</button>
+          </div>
+        </header>
+        <hr class="soft" />`
+    }
+
+    function renderProjects() {
+      const totalWords = CHAPTERS.reduce((s, c) => s + c.wordCount, 0) * 100
+      const items = PROJECTS.map(p => {
+        const ch = CHAPTERS.length
+        const wc = (p.id === 'p1' ? 32150 : p.id === 'p2' ? 12480 : 4200)
+        return `<li class="card card-hover">
+          <div class="row" style="align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px">
+                <strong style="font-size:16px">${p.name}</strong>
+                <span class="chip chip-accent">${p.genre}</span>
+              </div>
+              <div class="meta" style="margin-top:6px">
+                ${ch} 章 · ${wc.toLocaleString()} 字 · ${relativeTime(p.lastOpenedAt)}翻开
+              </div>
+            </div>
+            <span class="muted" style="align-self:center">翻开 ›</span>
+          </div>
+        </li>`
+      }).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <h2 class="section">我的书案</h2>
+          <button class="btn btn-primary">+ 新建项目</button>
+        </div>
+        <div class="toolbar" style="margin-bottom:16px">
+          <div class="filters">
+            <span class="filter-chip">项目 ${PROJECTS.length}</span>
+            <span class="filter-chip">总字数 ${(totalWords/10000).toFixed(1)} 万</span>
+          </div>
+          <input class="input" style="max-width:240px" placeholder="搜索项目 / 题材" />
+        </div>
+        <ul class="bare">${items}</ul>
+      </div>`
+    }
+
+    function renderChapters() {
+      const counts = { all: CHAPTERS.length }
+      CHAPTERS.forEach(c => counts[c.status] = (counts[c.status] || 0) + 1)
+      const totalWords = CHAPTERS.reduce((s,c) => s+c.wordCount, 0)
+      const items = CHAPTERS.map(c => `
+        <li class="card card-hover">
+          <div class="row" style="align-items:baseline">
+            <strong style="font-size:14.5px">第 ${c.chapterNumber} 章 · ${c.title}</strong>
+            <span class="chip ${STATUS_CLASS[c.status]}" style="margin-left:8px">${STATUS_LABEL[c.status]}</span>
+            <span class="muted" style="margin-left:8px;font-size:12.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.synopsis || ''}</span>
+            <span class="meta" style="margin-left:auto">${c.wordCount.toLocaleString()} 字</span>
+          </div>
+          ${c.chapterNumber === 1 ? `<div class="outline-tags" style="margin-top:8px">
+            <span class="outline-tag">登场</span>
+            <span class="outline-tag emotion">陆沉</span>
+            <span class="outline-tag emotion">姜老仆</span>
+          </div>` : ''}
+        </li>`).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 项目</button>
+          <div class="btn-group">
+            <button class="btn btn-sm">📜 大纲</button>
+            <button class="btn btn-sm">🧑 人物</button>
+            <button class="btn btn-sm">🧠 记忆</button>
+            <button class="btn btn-primary btn-sm">+ 新章</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:18px">
+          <h2 class="section" style="margin:0">章节</h2>
+          <span class="meta">${CHAPTERS.length} 章 · ${totalWords.toLocaleString()} 字</span>
+        </div>
+        <div class="toolbar" style="margin-bottom:12px">
+          <div class="filters">
+            <span class="filter-chip active">全部 · ${counts.all}</span>
+            <span class="filter-chip">稿 · ${counts.draft || 0}</span>
+            <span class="filter-chip">润 · ${counts.reviewed || 0}</span>
+            <span class="filter-chip">定 · ${counts.published || 0}</span>
+          </div>
+        </div>
+        <ul class="bare">${items}</ul>
+      </div>`
+    }
+
+    function renderEditor() {
+      const segs = buildPreview(CHAPTER_CONTENT)
+      const previewHtml = segs.length > 0
+        ? segs.map(seg => seg.hl
+            ? `<span class="hl ${seg.hl.kind}" title="${seg.hl.label} · ${seg.text}">${seg.text}</span>`
+            : seg.text
+          ).join('')
+        : '暂无可联动高亮的内容。'
+      const reviewHtml = REVIEW_SUGGESTIONS.map(s => `
+        <div class="review-suggestion">
+          ${s.quote ? `<div class="quote">「${s.quote}」</div>` : ''}
+          <div style="font-weight:600;margin-bottom:4px">建议 · ${s.advice}</div>
+          ${s.why ? `<div class="why">理由 · ${s.why}</div>` : ''}
+        </div>
+      `).join('')
+      // 分析 + cast
+      const stats = analyzePreview(CHAPTER_CONTENT, 12)
+      const warnings = rhythmWarnings(stats)
+      const statsHtml = `
+        <div class="stats-grid">
+          <div class="stat-cell"><div class="label">字数</div><div class="val">${stats.wordCount.toLocaleString()}</div></div>
+          <div class="stat-cell"><div class="label">段落</div><div class="val">${stats.paragraphCount}</div></div>
+          <div class="stat-cell"><div class="label">句数</div><div class="val">${stats.sentenceCount}</div></div>
+          <div class="stat-cell"><div class="label">平均句长</div><div class="val">${stats.avgSentenceLen}</div><div class="sub">字/句</div></div>
+          <div class="stat-cell"><div class="label">对话占比</div><div class="val">${Math.round(stats.dialogueRatio*100)}%</div><div class="sub">「」范围</div></div>
+          <div class="stat-cell"><div class="label">虚词占比</div><div class="val">${Math.round(stats.fillerRatio*100)}%</div><div class="sub">的/了/着…</div></div>
+        </div>
+      `
+      const curveHtml = stats.emotionCurve.map(v => {
+        const intensity = Math.min(1, Math.abs(v) / 100)
+        const h = Math.max(2, intensity * 32)
+        const positive = v >= 0
+        const cls = v > 5 ? 'positive' : v < -5 ? 'negative' : 'neutral'
+        return `<div class="emotion-bar ${cls}" style="height:${h}px;margin-top:${positive ? 32-h : 32}px;align-self:${positive ? 'flex-end' : 'flex-start'}"></div>`
+      }).join('')
+      const warnHtml = warnings.length > 0
+        ? warnings.map(w => `<span class="warning-pill level-${w.level}">${w.level === 2 ? '⚠ ' : '· '}${w.msg}</span>`).join('')
+        : ''
+      const analysisHtml = `
+        <div class="card" style="margin-top:14px;padding:14px">
+          <div class="row" style="margin-bottom:4px">
+            <strong style="font-size:14px">📊 章节分析</strong>
+            <span class="meta">实时</span>
+          </div>
+          ${statsHtml}
+          <div style="margin-top:14px">
+            <div class="row" style="margin-bottom:4px">
+              <span style="font-size:12.5px;color:var(--ink-2)">情绪曲线</span>
+              <span class="meta" style="font-size:11px">消极 ← 积极</span>
+            </div>
+            <div class="emotion-curve" title="按章分段估算的极性">${curveHtml}</div>
+            <div class="emotion-axis"><span>开头</span><span>中段</span><span>结尾</span></div>
+          </div>
+          ${warnHtml ? `<div style="margin-top:10px">${warnHtml}</div>` : ''}
+        </div>
+      `
+      const unknownCount = CAST_SUGGESTIONS.filter(s => !s.known).length
+      const matchedCount = CAST_SUGGESTIONS.filter(s => s.known && !s.applied).length
+      const castHtml = `
+        <div class="card" style="margin-top:14px;padding:14px">
+          <div class="row" style="margin-bottom:6px">
+            <strong style="font-size:14px">🤖 AI 识别结果</strong>
+            <button class="btn btn-ghost btn-sm">关闭</button>
+          </div>
+          ${unknownCount > 0 ? `
+            <div style="background:var(--paper-soft);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px;margin-bottom:10px">
+              <strong style="font-size:12.5px;color:var(--warning)">⚠ ${unknownCount} 位未在人物库中</strong>
+              <p class="muted" style="font-size:12px;margin-top:4px">建议先到「人物」页补建：${CAST_SUGGESTIONS.filter(s=>!s.known).map(s=>s.name).join('、')}</p>
+            </div>
+          ` : ''}
+          <div class="row" style="margin-bottom:6px">
+            <span class="meta">共 ${CAST_SUGGESTIONS.length} 人 · ${matchedCount} 可一键应用</span>
+            <button class="btn btn-primary btn-sm">应用 ${matchedCount} 个到登场</button>
+          </div>
+          ${CAST_SUGGESTIONS.map(s => `
+            <div class="cast-suggestion ${s.known ? 'known' : 'unknown'} ${s.applied ? 'applied' : ''}">
+              <div class="row" style="align-items:baseline">
+                <span class="name">${s.name}${s.applied ? ' <span class="chip chip-success" style="margin-left:8px">已加入</span>' : ''}</span>
+                <span class="meta" style="margin-left:auto;font-size:11.5px">${s.known ? (CHARACTERS.find(c=>c.name===s.name)?.role || '人物库') : '未在人物库'}</span>
+              </div>
+              <div class="reason">${s.reason}</div>
+              <div class="quote">「${s.quote}」</div>
+            </div>
+          `).join('')}
+        </div>
+      `
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="page-wide">
+          <div class="row" style="flex-wrap:wrap;gap:6px;align-items:center">
+            <button class="btn btn-ghost btn-sm">‹ 返回</button>
+            <span class="meta" style="min-width:140px">第 1 章 · 剑少年 · 3,200 字 · 4 版</span>
+            <span class="chip chip-accent" style="cursor:pointer" title="点击切换状态">润 ↻</span>
+            <div class="btn-group" style="flex-wrap:wrap;gap:4px">
+              <button class="btn btn-sm">已存</button>
+              <button class="btn btn-sm">存版本</button>
+              <button class="btn btn-sm">版本</button>
+              <span class="btn-divider"></span>
+              <button class="btn btn-sm" style="background:var(--accent-soft);color:var(--accent);border-color:transparent">👁 收起预览</button>
+              <button class="btn btn-sm">✎ AI 改稿</button>
+              <span class="btn-divider"></span>
+              <button class="btn btn-primary btn-sm">✦ 续写</button>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:12px;gap:16px;align-items:flex-start">
+            <div class="pomodoro">
+              <span class="dot running"></span>
+              <span class="muted" style="font-size:11px">专注</span>
+              <span class="time">17:42</span>
+              <button title="暂停">⏸</button>
+              <button title="重置">↺</button>
+              <span class="muted" style="font-size:11px">今日 3 番</span>
+            </div>
+            <div style="flex:1;min-width:200px">
+              <div class="goal-row">
+                <span>本次会话</span>
+                <span class="num">+847</span>
+                <span>字 · 每日目标</span>
+                <span class="num">3,000</span>
+                <span>字</span>
+              </div>
+              <div class="goal-bar">
+                <div class="fill" style="width:28%"></div>
+              </div>
+            </div>
+          </div>
+          </div>
+
+          <div class="row" style="margin-top:12px">
+            <button class="btn btn-sm btn-ghost"> 收起本章细纲</button>
+            <button class="btn btn-sm btn-ghost">大纲页 →</button>
+          </div>
+          <div class="chapter-outline-panel">
+            <div class="row" style="margin-bottom:8px">
+              <strong style="font-size:13.5px">第 1 章细纲</strong>
+              <button class="btn btn-sm" style="margin-left:auto">重新生成</button>
+            </div>
+            <p class="body-text">陆沉于剑冢废墟中挣扎求存十年。一日残剑突发异动，引动天地灵气，老仆含泪告知其身世。陆沉破境而出，立誓下山。</p>
+            <div class="outline-tags" style="margin-top:8px">
+              <span class="outline-tag emotion">情绪 · 沉重 → 觉醒</span>
+              <span class="outline-tag cool">爽点 · 残剑引动九霄</span>
+              <span class="outline-tag hook">钩子 · 山下传来急促的号角声</span>
+            </div>
+          </div>
+
+          <textarea class="editor-text" style="margin-top:16px" readonly>${CHAPTER_CONTENT}</textarea>
+
+          <div class="row" style="margin-top:16px;margin-bottom:4px">
+            <strong style="font-size:13.5px">联动预览</strong>
+            <div class="row" style="gap:12px;font-size:12px;color:var(--ink-3)">
+              <span><span class="hl char" style="padding:1px 4px">人物</span></span>
+              <span><span class="hl foreshadow" style="padding:1px 4px">伏笔</span></span>
+              <span><span class="hl location" style="padding:1px 4px">地点</span></span>
+            </div>
+          </div>
+          <div class="editor-preview">${previewHtml}</div>
+
+          <div class="card" style="margin-top:14px;padding:12px">
+            <div class="row">
+              <div>
+                <strong style="font-size:13.5px">本章登场人物</strong>
+                <span class="meta" style="margin-left:8px">2 位</span>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-sm" title="让 AI 扫描本章，自动列出出场人物">🤖 AI 识别</button>
+                <button class="btn btn-sm">编辑登场</button>
+              </div>
+            </div>
+            <div class="outline-tags" style="margin-top:8px">
+              <span class="outline-tag emotion">陆沉</span>
+              <span class="outline-tag emotion">姜老仆</span>
+            </div>
+          </div>
+          ${castHtml}
+          ${analysisHtml}
+        </div>
+
+        <aside class="review-panel" style="position:relative;width:auto;right:auto;top:auto;bottom:auto;border-left:none;box-shadow:none;margin-top:20px">
+          <header>
+            <h3>AI 改稿建议</h3>
+            <div class="btn-group">
+              <button class="btn btn-sm">复制</button>
+              <button class="btn btn-ghost btn-sm">关闭</button>
+            </div>
+          </header>
+          <div class="body-area">${reviewHtml}</div>
+        </aside>
+      </div>`
+    }
+
+    function renderOutline() {
+      const detailed = DETAILED.map(it => `
+        <li class="card">
+          <div class="outline-item">
+            <div class="num">${String(it.chapterNumber).padStart(3,'0')}</div>
+            <div>
+              <div class="row" style="margin-bottom:4px;align-items:baseline">
+                <strong style="font-size:14.5px;color:var(--accent);cursor:pointer">第 ${it.chapterNumber} 章 · ${chapterTitle(it.chapterNumber)}</strong>
+                <button class="btn btn-sm" style="margin-left:auto">重新生成</button>
+              </div>
+              <pre class="body">${it.plotSummary}</pre>
+              <div class="outline-tags">
+                ${it.emotionPoint ? `<span class="outline-tag emotion">情绪 · ${it.emotionPoint}</span>` : ''}
+                ${it.coolPoint ? `<span class="outline-tag cool">爽点 · ${it.coolPoint}</span>` : ''}
+                ${it.hook ? `<span class="outline-tag hook">钩子 · ${it.hook}</span>` : ''}
+              </div>
+            </div>
+          </div>
+        </li>
+      `).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 章节</button>
+          <span class="meta">细纲覆盖 ${DETAILED.length} / ${CHAPTERS.length} 章（50%）</span>
+        </div>
+        <h2 class="section mt">大纲</h2>
+        <div class="outline-grid">
+          <aside class="outline-side">
+            <div class="card">
+              <div class="row" style="margin-bottom:8px">
+                <strong style="font-size:16px">总纲</strong>
+                <button class="btn btn-sm btn-ghost">✎ 编辑</button>
+              </div>
+              <div class="outline-tags" style="margin-top:0">
+                <span class="outline-tag">主题 · ${MAIN_OUTLINE.theme}</span>
+              </div>
+              <p class="muted" style="font-style:normal;font-size:13.5px;margin-top:8px;padding:6px 10px;background:var(--paper-soft);border-radius:6px">${MAIN_OUTLINE.mainLine}</p>
+              <pre class="body" style="margin-top:10px">${MAIN_OUTLINE.synopsis}</pre>
+              <div class="row" style="margin-top:12px">
+                <button class="btn btn-sm">重新生成</button>
+              </div>
+            </div>
+          </aside>
+          <section class="outline-main">
+            <h3 class="sub"><span>细纲</span></h3>
+            <ul class="bare">${detailed}</ul>
+          </section>
+        </div>
+      </div>`
+    }
+
+    function renderCharacters() {
+      const grouped = {}
+      CHARACTERS.forEach(c => {
+        const b = bucketOf(c)
+        if (!grouped[b.label]) grouped[b.label] = { cls: b.cls, list: [] }
+        grouped[b.label].list.push(c)
+      })
+      const sections = Object.entries(grouped).map(([label, g]) => `
+        <section class="char-group">
+          <h4 class="char-group-title">${label} <span class="count">${g.list.length}</span></h4>
+          <ul class="bare">
+            ${g.list.map(c => `
+              <li class="card">
+                <div class="char-card">
+                  <div class="char-avatar">${avatarOf(c.name)}</div>
+                  <div>
+                    <div class="char-name-row">
+                      <span class="char-name">${c.name}</span>
+                      ${c.role ? `<span class="chip ${g.cls}">${c.role}</span>` : ''}
+                      ${(c.tags||[]).slice(0,3).map(t => `<span class="chip">${t}</span>`).join('')}
+                    </div>
+                    <div class="char-meta">
+                      ${c.identity ? `<span><span class="label">身份</span><span class="val"> · ${c.identity}</span></span>` : ''}
+                      ${c.personality ? `<span><span class="label">性格</span><span class="val"> · ${c.personality}</span></span>` : ''}
+                      ${c.abilities ? `<span><span class="label">能力</span><span class="val"> · ${c.abilities}</span></span>` : ''}
+                    </div>
+                    ${c.synopsis ? `<p class="char-body">${c.synopsis}</p>` : ''}
+                    ${c.id === 'c1' ? `<div class="outline-tags" style="margin-top:8px">
+                      <span class="outline-tag">出场</span>
+                      <span class="outline-tag emotion">第 1 章</span>
+                      <span class="outline-tag emotion">第 2 章</span>
+                    </div>` : ''}
+                  </div>
+                  <div class="char-actions">
+                    <button class="btn btn-sm">编辑</button>
+                    <button class="btn btn-sm btn-danger">删除</button>
+                  </div>
+                </div>
+              </li>
+            `).join('')}
+          </ul>
+        </section>
+      `).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 记忆中心</button>
+          <button class="btn btn-primary btn-sm">+ 新人物</button>
+        </div>
+        <h2 class="section mt">人物</h2>
+        <div class="toolbar">
+          <div class="filters">
+            <span class="filter-chip active">全部 · 4</span>
+            <span class="filter-chip">主角 · 1</span>
+            <span class="filter-chip">重要角色 · 2</span>
+            <span class="filter-chip">反派 · 1</span>
+          </div>
+          <input class="input" style="max-width:220px" placeholder="搜索名字 / 性格 / 标签" />
+        </div>
+        ${sections}
+      </div>`
+    }
+
+    function renderMemoryCenter() {
+      const cards = [
+        { icon:'🧑', label:'人物', desc:'角色档案 · 性格 · 出场章节', n: CHARACTERS.length, sub: '' },
+        { icon:'📌', label:'伏笔', desc:'埋设与回收 · 状态看板', n: FORESHADOWS.length, sub:'<span style="color:var(--warning)">待处理 3</span>' },
+        { icon:'🔗', label:'人物关系', desc:'师徒 · 敌我 · 情缘', n: RELATIONSHIPS.length, sub:'' },
+        { icon:'🏯', label:'地点', desc:'城池 · 山川 · 门派 · 场所', n: LOCATIONS.length, sub:'' },
+        { icon:'☯', label:'世界观', desc:'体系 · 势力 · 规则 · 设定', n: 0, sub:'' },
+        { icon:'⌛', label:'时间线', desc:'按章铺陈的关键事件', n: TIMELINES.length, sub:'' },
+        { icon:'✦', label:'剧情点', desc:'故事弧 · 转折 · 高潮', n: PLOT_POINTS.length, sub:'' }
+      ]
+      const cardHtml = cards.map(c => `
+        <div class="card card-hover">
+          <div class="memory-card">
+            <div class="memory-icon">${c.icon}</div>
+            <div>
+              <strong style="font-size:16px">${c.label}</strong>
+              <div class="muted">${c.desc}</div>
+              <div class="memory-stats">
+                <span><span class="num">${c.n}</span>条</span>
+                ${c.sub}
+              </div>
+            </div>
+          </div>
+        </div>`).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <button class="btn btn-ghost btn-sm">‹ 章节</button>
+        <h2 class="section mt">记忆中心</h2>
+        <div class="card-grid">${cardHtml}</div>
+      </div>`
+    }
+
+    function renderTimeline() {
+      const items = TIMELINES.map(t => {
+        const m = (t.notes||'').match(/第\s*(\d+)\s*章/)
+        const ch = m ? `<span class="outline-tag emotion" style="cursor:pointer">第 ${m[1]} 章 · ${chapterTitle(Number(m[1]))}</span>` : ''
+        return `<li class="card">
+          <div class="row" style="align-items:baseline">
+            <strong style="font-size:15px">${t.name}</strong>
+            ${t.category ? `<span class="chip chip-accent" style="margin-left:6px">${t.category}</span>` : ''}
+            ${ch}
+            <div style="margin-left:auto" class="btn-group">
+              <button class="btn btn-sm">编辑</button>
+              <button class="btn btn-sm btn-danger">删除</button>
+            </div>
+          </div>
+          ${t.notes ? `<pre class="body">${t.notes}</pre>` : ''}
+        </li>`
+      }).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 记忆中心</button>
+          <button class="btn btn-primary btn-sm">+ 新建</button>
+        </div>
+        <h2 class="section mt">时间线</h2>
+        <ul class="bare">${items}</ul>
+      </div>`
+    }
+
+    function renderPlotPoints() {
+      const items = PLOT_POINTS.map(p => {
+        const persons = [...(p.notes.matchAll(/@(\S+)/g) || [])].map(m => m[1])
+        const fores = [...(p.notes.matchAll(/#伏笔\s*[:：]?\s*(\S+)/g) || [])].map(m => m[1])
+        const tags = [
+          ...persons.slice(0,4).map(t => `<span class="outline-tag emotion">👤 ${t}</span>`),
+          ...fores.slice(0,2).map(t => `<span class="outline-tag cool">📌 ${t}</span>`)
+        ].join('')
+        return `<li class="card">
+          <div class="row" style="align-items:baseline">
+            <strong style="font-size:15px">${p.name}</strong>
+            ${p.category ? `<span class="chip chip-accent" style="margin-left:6px">${p.category}</span>` : ''}
+            <div class="outline-tags" style="margin-left:8px">${tags}</div>
+            <div style="margin-left:auto" class="btn-group">
+              <button class="btn btn-sm">编辑</button>
+              <button class="btn btn-sm btn-danger">删除</button>
+            </div>
+          </div>
+          ${p.notes ? `<pre class="body">${p.notes}</pre>` : ''}
+        </li>`
+      }).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 记忆中心</button>
+          <button class="btn btn-primary btn-sm">+ 新建</button>
+        </div>
+        <h2 class="section mt">剧情点</h2>
+        <ul class="bare">${items}</ul>
+      </div>`
+    }
+
+    function renderForeshadow() {
+      const cols = ['pending','planted','collected','missed']
+      const overdueCh = 20
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 记忆中心</button>
+          <button class="btn btn-primary btn-sm">+ 新伏笔</button>
+        </div>
+        <h2 class="section mt">伏笔看板</h2>
+        <div class="toolbar" style="margin-bottom:14px">
+          <div class="filters">
+            <span class="filter-chip">总计 5</span>
+            <span class="filter-chip">待埋 1</span>
+            <span class="filter-chip">已埋 2</span>
+            <span class="filter-chip">已收 1</span>
+            <span class="filter-chip active" style="color:var(--danger)">逾期 1</span>
+          </div>
+        </div>
+        <div class="kanban">
+          ${cols.map(st => {
+            const list = FORESHADOWS.filter(f => f.status === st)
+            const cfg = FORESHADOW_STATUS[st]
+            return `<div class="kanban-col">
+              <h4 style="color:${cfg.tone}">${cfg.label}<span class="pill">${list.length}</span></h4>
+              ${list.map(f => {
+                const overdue = st === 'planted' && f.expectedCollect && f.expectedCollect < overdueCh
+                return `<div class="card kanban-card">
+                  <div class="content">${f.content}</div>
+                  <div class="meta-row">
+                    ${f.plantChapter ? `<span class="ch plant">埋 · 第 ${f.plantChapter} 章</span>` : ''}
+                    ${f.expectedCollect ? `<span class="ch ${overdue ? 'overdue' : 'collect'}">${overdue ? '⚠ 逾期 · 第 ' : '预收 · 第 '}${f.expectedCollect} 章</span>` : ''}
+                    ${f.actualCollect ? `<span class="ch collect">实收 · 第 ${f.actualCollect} 章</span>` : ''}
+                  </div>
+                  ${f.note ? `<div class="muted" style="font-size:12px">${f.note}</div>` : ''}
+                  <div class="actions">
+                    ${st === 'pending' ? '<button class="btn btn-sm">埋设</button>' : ''}
+                    ${st === 'planted' ? '<button class="btn btn-sm">回收</button><button class="btn btn-sm">遗漏</button>' : ''}
+                    <button class="btn btn-sm">编辑</button>
+                    <button class="btn btn-sm btn-danger">删</button>
+                  </div>
+                </div>`
+              }).join('')}
+            </div>`
+          }).join('')}
+        </div>
+      </div>`
+    }
+
+    function renderRelationship() {
+      const cx = 360, cy = 260
+      const grouped = {}
+      CHARACTERS.forEach(c => {
+        const f = c.role || '其他'
+        if (!grouped[f]) grouped[f] = []
+        grouped[f].push(c)
+      })
+      const factions = Object.entries(grouped)
+      const positions = {}
+      factions.forEach(([f, list], gi) => {
+        const fAngle = (gi / factions.length) * Math.PI * 2 - Math.PI / 2
+        const fx = cx + Math.cos(fAngle) * 180
+        const fy = cy + Math.sin(fAngle) * 140
+        list.forEach((c, i) => {
+          const a = (i / Math.max(list.length,1)) * Math.PI * 2
+          positions[c.id] = {
+            x: fx + Math.cos(a) * 35,
+            y: fy + Math.sin(a) * 35
+          }
+        })
+      })
+      const factionRects = factions.map(([f, list]) => {
+        const xs = list.map(c => positions[c.id].x)
+        const ys = list.map(c => positions[c.id].y)
+        const minX = Math.min(...xs) - 38, maxX = Math.max(...xs) + 38
+        const minY = Math.min(...ys) - 30, maxY = Math.max(...ys) + 48
+        return `<rect class="faction-halo" x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="10"></rect>
+          <text x="${(minX+maxX)/2}" y="${minY - 4}" text-anchor="middle" style="font-size:11px;fill:var(--ink-3);font-family:var(--font-sans)">${f}</text>`
+      }).join('')
+      const edges = RELATIONSHIPS.map(r => {
+        const a = positions[r.characterAId], b = positions[r.characterBId]
+        if (!a || !b) return ''
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+        return `<g>
+          <line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="rel-edge selected" />
+          <rect x="${mx - r.relationType.length * 6}" y="${my - 9}" width="${r.relationType.length * 12}" height="18" rx="4" fill="var(--paper-card)" stroke="var(--accent)" />
+          <text x="${mx}" y="${my + 4}" class="rel-edge-label">${r.relationType}</text>
+        </g>`
+      }).join('')
+      const nodes = CHARACTERS.map(c => {
+        const p = positions[c.id]
+        const sel = c.id === 'c1'
+        return `<g>
+          <circle cx="${p.x}" cy="${p.y}" r="22" class="rel-node-circle ${sel ? 'selected' : ''}" />
+          <text x="${p.x}" y="${p.y + 4}" class="rel-node-label">${avatarOf(c.name)}</text>
+          <text x="${p.x}" y="${p.y + 38}" class="rel-node-label" style="font-size:11.5px;fill:var(--ink-2)">${c.name}</text>
+        </g>`
+      }).join('')
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <div class="row">
+          <button class="btn btn-ghost btn-sm">‹ 记忆中心</button>
+          <div class="btn-group">
+            <button class="btn btn-sm" title="重新排布节点">⟳ 重新排布</button>
+            <button class="btn btn-sm" title="让 AI 扫描近期章节，推断人物关系">🤖 AI 推断关系</button>
+            <button class="btn btn-primary btn-sm">+ 新关系</button>
+          </div>
+        </div>
+        <h2 class="section mt">人物关系</h2>
+        <div class="rel-layout">
+          <div class="relation-graph" style="height:520px">
+            <svg viewBox="0 0 720 520" preserveAspectRatio="xMidYMid meet">
+              ${factionRects}
+              ${edges}
+              ${nodes}
+            </svg>
+          </div>
+          <aside class="rel-detail">
+            <h3 class="sub" style="margin-top:0">陆沉</h3>
+            <span class="chip chip-accent">主角</span>
+            <p class="muted" style="font-size:13px;margin-top:8px">身份：剑冢遗孤</p>
+            <p class="muted" style="font-size:13px">性格：沉默寡言</p>
+            <hr class="soft" />
+            <h4 class="sub" style="margin-top:0">关系</h4>
+            <div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer">
+              <span class="chip chip-accent">恋人</span> 沈清漪
+            </div>
+            <div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer">
+              <span class="chip chip-accent">仇人</span> 姜北辰
+            </div>
+            <div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer">
+              <span class="chip chip-accent">主仆</span> 姜老仆
+            </div>
+          </aside>
+        </div>
+
+        <div class="dialog-overlay" style="position:relative;inset:auto;padding:0;background:transparent;margin-top:14px">
+          <div class="card" style="padding:14px;max-width:520px">
+            <div class="row" style="margin-bottom:6px">
+              <strong style="font-size:14px">🤖 AI 关系推断</strong>
+              <button class="btn btn-ghost btn-sm">关闭</button>
+            </div>
+            <div style="background:var(--paper-soft);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px;margin-bottom:10px">
+              <strong style="font-size:12.5px;color:var(--warning)">⚠ 1 条涉及未知人物（名字未匹配人物库）</strong>
+              <p class="muted" style="font-size:12px;margin-top:4px">陆沉↔黑袍人</p>
+            </div>
+            <div class="row" style="margin-bottom:8px">
+              <span class="meta">共 ${REL_SUGGESTIONS.length} 条 · 可新增 2</span>
+              <button class="btn btn-primary btn-sm">全部新增（2）</button>
+            </div>
+            ${REL_SUGGESTIONS.map(s => {
+              const status = s.exists ? '已存在' : (s.known ? '可新增' : '人物未知')
+              const border = s.exists ? 'var(--success)' : (s.known ? 'var(--accent)' : 'var(--warning)')
+              return `<div class="cast-suggestion" style="border-left:3px solid ${border}">
+                <div class="row" style="align-items:baseline">
+                  <span class="name">${s.characterA} <span class="muted">↔</span> ${s.characterB}</span>
+                  <span class="meta" style="margin-left:auto;font-size:11.5px">${status}</span>
+                </div>
+                <div style="margin-top:4px">
+                  <span class="chip chip-accent">${s.relationType}</span>
+                  <span class="chip" style="margin-left:4px">强度 ${s.strength}</span>
+                </div>
+                <div class="reason">${s.description}</div>
+              </div>`
+            }).join('')}
+          </div>
+        </div>
+      </div>`
+    }
+
+    function renderSettings() {
+      return pageHeader('本地创作 · AI 辅助 · 温暖纸笺') + `
+        <button class="btn btn-ghost btn-sm">‹ 返回</button>
+        <h2 class="section mt">设置</h2>
+        <div class="card" style="max-width:560px">
+          <h3 class="sub">外观</h3>
+          <p class="muted" style="margin-top:4px;font-size:13px">切换浅色/深色主题，或跟随系统设置。</p>
+          <div class="theme-toggle" style="margin-top:8px">
+            <button class="active" onclick="setThemePreview('light')">☀ 浅色</button>
+            <button onclick="setThemePreview('dark')">☾ 深色</button>
+            <button onclick="setThemePreview('system')">◐ 跟随系统</button>
+          </div>
+        </div>
+        <div class="card" style="max-width:560px;margin-top:16px">
+          <h3 class="sub">书籍保存位置</h3>
+          <p class="muted" style="word-break:break-all;margin-bottom:10px;font-size:13px">
+            C:\Users\Administrator\.ai-writer\projects
+          </p>
+          <button class="btn btn-ghost">更改保存位置</button>
+          <p class="meta" style="margin-top:10px">新建项目将保存到此位置。已有项目不受影响。</p>
+        </div>
+        <div class="card" style="max-width:560px;margin-top:16px">
+          <div class="row" style="margin-bottom:4px">
+            <h3 class="sub" style="margin:0">MiniMax API Key</h3>
+            <span class="chip chip-success" style="margin-left:8px">✓ 已配置</span>
+          </div>
+          <p class="muted" style="margin-top:6px">用于大纲生成、细纲生成、章节续写、改稿建议。Key 仅在你本机加密保存，不会上传。</p>
+          <div class="field">
+            <label>API Key</label>
+            <input class="input" type="password" placeholder="已配置 · 留空保持不变" />
+          </div>
+          <div class="row" style="gap:8px">
+            <button class="btn btn-primary">保存</button>
+            <button class="btn">测试连通</button>
+          </div>
+          <p style="color:var(--success);margin-top:12px;font-size:13px;font-family:ui-monospace,Consolas,monospace">✓ 连通 · 模型 MiniMax-Text-01</p>
+          <p class="meta" style="margin-top:16px">Key 经 Electron safeStorage（Windows DPAPI / macOS Keychain）加密后存于本地 <code>config/providers.enc</code>，源码不含任何密钥。</p>
+        </div>
+
+        <div class="card" style="max-width:560px;margin-top:16px">
+          <div class="row" style="margin-bottom:4px">
+            <h3 class="sub" style="margin:0">用量与费用</h3>
+            <button class="btn btn-ghost btn-sm">刷新</button>
+          </div>
+          <p class="muted" style="font-size:12px;margin-top:4px">统计本地记录的所有 AI 调用，费用按下方价格估算。</p>
+          <div class="usage-grid">
+            <div class="usage-cell">
+              <div class="label">今日</div>
+              <div class="tokens">${fmtTokens(USAGE_SUMMARY.today.total)}</div>
+              <div class="cost">${fmtCost(USAGE_SUMMARY.today.cost)}</div>
+            </div>
+            <div class="usage-cell">
+              <div class="label">本月</div>
+              <div class="tokens">${fmtTokens(USAGE_SUMMARY.month.total)}</div>
+              <div class="cost">${fmtCost(USAGE_SUMMARY.month.cost)}</div>
+            </div>
+            <div class="usage-cell">
+              <div class="label">累计</div>
+              <div class="tokens">${fmtTokens(USAGE_SUMMARY.allTime.total)}</div>
+              <div class="cost">${fmtCost(USAGE_SUMMARY.allTime.cost)}</div>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <strong style="font-size:12.5px">按功能分布</strong>
+            ${(() => {
+              const max = Math.max(...USAGE_SUMMARY.byFeature.map(f => f.total), 1)
+              return USAGE_SUMMARY.byFeature.map(f => `
+                <div class="usage-feature-row">
+                  <span style="min-width:72px">${f.feature}</span>
+                  <div class="bar-wrap"><div class="bar-fill" style="width:${(f.total / max) * 100}%"></div></div>
+                  <span class="meta" style="min-width:90px;text-align:right">${fmtTokens(f.total)} · ${fmtCost(f.cost)} · ${f.calls}次</span>
+                </div>`).join('')
+            })()}
+          </div>
+          <div class="row" style="margin-top:12px">
+            <span class="meta">价格（元 / 百万 token，仅用于估算）</span>
+            <button class="btn btn-ghost btn-sm">清空记录</button>
+          </div>
+          <div class="row" style="gap:8px;margin-top:6px">
+            <label class="field" style="flex:1;margin:0">
+              <span class="meta">输入</span>
+              <input class="input" type="number" step="0.1" value="1" />
+            </label>
+            <label class="field" style="flex:1;margin:0">
+              <span class="meta">输出</span>
+              <input class="input" type="number" step="0.1" value="3" />
+            </label>
+            <button class="btn btn-sm" style="align-self:flex-end">保存价格</button>
+          </div>
+        </div>
+
+        <div class="card" style="max-width:560px;margin-top:16px">
+          <h3 class="sub">写作节奏</h3>
+          <div class="field" style="margin-top:8px">
+            <label>每日字数目标</label>
+            <div class="row" style="gap:8px">
+              <input class="input" type="number" step="100" value="3000" style="flex:1" />
+              <button class="btn btn-sm">保存</button>
+            </div>
+          </div>
+          <div class="row" style="gap:12px">
+            <div class="field" style="flex:1">
+              <label>专注分钟</label>
+              <input class="input" type="number" min="1" value="25" />
+            </div>
+            <div class="field" style="flex:1">
+              <label>休息分钟</label>
+              <input class="input" type="number" min="1" value="5" />
+            </div>
+          </div>
+          <button class="btn btn-sm">保存番茄钟</button>
+        </div>
+      </div>`
+    }
+
+    // =================== 路由 ===================
+    const PAGES = {
+      projects: { title:'项目列表', render: renderProjects },
+      chapters: { title:'章节列表', render: renderChapters },
+      editor:   { title:'章节编辑器 ✦', render: renderEditor },
+      outline:  { title:'大纲', render: renderOutline },
+      characters: { title:'人物', render: renderCharacters },
+      'memory-center': { title:'记忆中心', render: renderMemoryCenter },
+      timeline: { title:'时间线', render: renderTimeline },
+      'plot-points': { title:'剧情点', render: renderPlotPoints },
+      foreshadow: { title:'伏笔看板', render: renderForeshadow },
+      relationship: { title:'人物关系', render: renderRelationship },
+      settings: { title:'设置', render: renderSettings }
+    }
+    function render() {
+      const page = (location.hash || '#editor').slice(1)
+      const p = PAGES[page] || PAGES.editor
+      root.innerHTML = p.render()
+    }
+    window.addEventListener('hashchange', render)
+
+    const nav = document.getElementById('nav')
+    Object.entries(PAGES).forEach(([k, v]) => {
+      const a = document.createElement('a')
+      a.href = '#' + k
+      a.textContent = v.title
+      nav.appendChild(a)
+    })
+
+    // 主题切换
+    let isDark = false
+    function setThemePreview(mode) {
+      if (mode === 'dark') {
+        document.documentElement.classList.add('dark')
+        isDark = true
+      } else if (mode === 'light') {
+        document.documentElement.classList.remove('dark')
+        isDark = false
+      } else if (mode === 'system') {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        document.documentElement.classList.toggle('dark', prefersDark)
+        isDark = prefersDark
+      }
+    }
+    document.getElementById('themeBtn').onclick = () => {
+      setThemePreview(isDark ? 'light' : 'dark')
+    }
+    window.setThemePreview = setThemePreview
+
+    render()
+  </script>
+</body>
+</html>

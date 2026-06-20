@@ -169,6 +169,8 @@ function buildStreamRequest(
 function anthropicHeaders(apiKey: string): Record<string, string> {
   return {
     'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+    'api-key': apiKey,
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-15',
     'anthropic-dangerous-direct-browser-access': 'true'

@@ -67,8 +67,11 @@ function parseRelJson(text: string): Omit<RelSuggestion, 'aId' | 'bId' | 'exists
   }
 }
 
-const WIDTH = 720
-const HEIGHT = 520
+const GRAPH_WIDTH = 1120
+const GRAPH_HEIGHT = 720
+const NODE_RADIUS = 30
+const NODE_MIN_DISTANCE = 78
+const EDGE_TARGET_DISTANCE = 230
 
 const ROLE_BUCKETS = [
   { match: ['主角'], label: '主角', cls: 'role-protagonist' },
@@ -131,8 +134,8 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   const nodes = useMemo<Node[]>(() => {
     const n = characters.length
     if (n === 0) return []
-    const cx = WIDTH / 2
-    const cy = HEIGHT / 2
+    const cx = GRAPH_WIDTH / 2
+    const cy = GRAPH_HEIGHT / 2
     // 用向日葵（phyllotaxis）分布 + 种子抖动，避免初始圆环；
     // 同势力节点尽量相邻（按势力排序后再铺）
     const grouped = new Map<string, Character[]>()
@@ -145,7 +148,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
     const ordered: Character[] = []
     for (const list of grouped.values()) ordered.push(...list)
     const golden = Math.PI * (3 - Math.sqrt(5))
-    const baseR = 16
+    const baseR = Math.max(46, Math.min(90, 28 + n * 4))
     // 基于种子的确定性伪随机，保证同 seed 下稳定
     const seedRand = (i: number) => {
       const x = Math.sin(i * 374.761 + layoutSeed * 91.13) * 43758.5453
@@ -195,8 +198,8 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
     // 预热：同步跑若干步，让首屏即接近稳定布局（消除初始散点）
     const map0 = nodeMapRef.current
     const arr0 = [...map0.values()]
-    const cx0 = WIDTH / 2
-    const cy0 = HEIGHT / 2
+    const cx0 = GRAPH_WIDTH / 2
+    const cy0 = GRAPH_HEIGHT / 2
     const settle = (steps: number) => {
       for (let s = 0; s < steps; s++) {
         const cur = [...map0.values()]
@@ -208,8 +211,10 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
             const dy = b.y - a.y
             const d2 = dx * dx + dy * dy + 0.01
             const d = Math.sqrt(d2)
-            let force = 1800 / d2
-            if (d < 54) force += ((54 - d) / 54) * 60
+            let force = 3600 / d2
+            if (d < NODE_MIN_DISTANCE) {
+              force += ((NODE_MIN_DISTANCE - d) / NODE_MIN_DISTANCE) * 80
+            }
             const fx = (dx / d) * force
             const fy = (dy / d) * force
             a.vx -= fx * 0.05
@@ -225,7 +230,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
           const dx = b.x - a.x
           const dy = b.y - a.y
           const d = Math.sqrt(dx * dx + dy * dy) + 0.01
-          const k = 0.03 * (d - 140)
+          const k = 0.03 * (d - EDGE_TARGET_DISTANCE)
           const fx = (dx / d) * k
           const fy = (dy / d) * k
           a.vx += fx
@@ -240,8 +245,8 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
           n.vy *= 0.7
           n.x += n.vx
           n.y += n.vy
-          n.x = Math.max(40, Math.min(WIDTH - 40, n.x))
-          n.y = Math.max(30, Math.min(HEIGHT - 30, n.y))
+          n.x = Math.max(64, Math.min(GRAPH_WIDTH - 64, n.x))
+          n.y = Math.max(52, Math.min(GRAPH_HEIGHT - 60, n.y))
         }
       }
     }
@@ -255,10 +260,10 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
       last = now
       const map = nodeMapRef.current
       const arr = [...map.values()]
-      const cx = WIDTH / 2
-      const cy = HEIGHT / 2
+      const cx = GRAPH_WIDTH / 2
+      const cy = GRAPH_HEIGHT / 2
       // 排斥 + 碰撞（节点半径 ~26，小于此距离强力推开避免重叠）
-      const MIN_DIST = 54
+      const MIN_DIST = NODE_MIN_DISTANCE
       for (let i = 0; i < arr.length; i++) {
         for (let j = i + 1; j < arr.length; j++) {
           const a = arr[i]
@@ -268,7 +273,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
           const d2 = dx * dx + dy * dy + 0.01
           const d = Math.sqrt(d2)
           // 远距：温和排斥
-          let force = 1800 / d2
+          let force = 3600 / d2
           // 近距：碰撞硬排斥
           if (d < MIN_DIST) {
             force += ((MIN_DIST - d) / MIN_DIST) * 60
@@ -293,7 +298,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
         const dx = b.x - a.x
         const dy = b.y - a.y
         const d = Math.sqrt(dx * dx + dy * dy) + 0.01
-        const target = 140
+        const target = EDGE_TARGET_DISTANCE
         const k = 0.012 * (d - target)
         const fx = (dx / d) * k
         const fy = (dy / d) * k
@@ -320,8 +325,8 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
         n.x += n.vx * (dt / 16)
         n.y += n.vy * (dt / 16)
         // 边界
-        n.x = Math.max(40, Math.min(WIDTH - 40, n.x))
-        n.y = Math.max(30, Math.min(HEIGHT - 30, n.y))
+        n.x = Math.max(64, Math.min(GRAPH_WIDTH - 64, n.x))
+        n.y = Math.max(52, Math.min(GRAPH_HEIGHT - 60, n.y))
       }
       setTick((t) => (t + 1) % 1_000_000)
       raf = requestAnimationFrame(step)
@@ -410,15 +415,25 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   const selectedChar = selectedNode ? charOf(selectedNode) : null
   const selectedEdgeObj = selectedEdge ? edges.find((e) => e.id === selectedEdge) : null
 
+  const clientPointToSvg = (clientX: number, clientY: number) => {
+    if (!svgRef.current) return null
+    const rect = svgRef.current.getBoundingClientRect()
+    return {
+      x: ((clientX - rect.left) / rect.width) * GRAPH_WIDTH,
+      y: ((clientY - rect.top) / rect.height) * GRAPH_HEIGHT
+    }
+  }
+
   const onPointerDown = (e: React.PointerEvent<SVGCircleElement>, id: string) => {
     e.stopPropagation()
     const node = nodeMapRef.current.get(id)
     if (!node || !svgRef.current) return
-    const rect = svgRef.current.getBoundingClientRect()
+    const point = clientPointToSvg(e.clientX, e.clientY)
+    if (!point) return
     dragRef.current = {
       id,
-      offsetX: e.clientX - rect.left - node.x,
-      offsetY: e.clientY - rect.top - node.y
+      offsetX: point.x - node.x,
+      offsetY: point.y - node.y
     }
     setSelectedNode(id)
     setSelectedEdge(null)
@@ -426,11 +441,12 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   }
   const onPointerMove = (e: React.PointerEvent<SVGCircleElement>) => {
     if (!dragRef.current || !svgRef.current) return
-    const rect = svgRef.current.getBoundingClientRect()
+    const point = clientPointToSvg(e.clientX, e.clientY)
+    if (!point) return
     const n = nodeMapRef.current.get(dragRef.current.id)
     if (!n) return
-    n.x = e.clientX - rect.left - dragRef.current.offsetX
-    n.y = e.clientY - rect.top - dragRef.current.offsetY
+    n.x = point.x - dragRef.current.offsetX
+    n.y = point.y - dragRef.current.offsetY
   }
   const onPointerUp = (e: React.PointerEvent<SVGCircleElement>) => {
     dragRef.current = null
@@ -486,7 +502,6 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
         <div className="rel-layout">
           <div
             className="relation-graph"
-            style={{ height: HEIGHT }}
             onClick={() => {
               setSelectedNode(null)
               setSelectedEdge(null)
@@ -494,7 +509,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
           >
             <svg
               ref={svgRef}
-              viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+              viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
               preserveAspectRatio="xMidYMid meet"
             >
               {factionList.length > 0 && characters.length > 0
@@ -580,7 +595,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
                     <circle
                       cx={live.x}
                       cy={live.y}
-                      r={22}
+                      r={NODE_RADIUS}
                       className={`rel-node-circle ${selected ? 'selected' : ''}`}
                       onPointerDown={(e) => onPointerDown(e, n.id)}
                       onPointerMove={onPointerMove}
@@ -599,9 +614,9 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
                     </text>
                     <text
                       x={live.x}
-                      y={live.y + 38}
+                      y={live.y + 48}
                       className="rel-node-label"
-                      style={{ fontSize: 11.5, fill: 'var(--ink-2)' }}
+                      style={{ fontSize: 12.5, fill: 'var(--ink-2)' }}
                     >
                       {n.name}
                     </text>

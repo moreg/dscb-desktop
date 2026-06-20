@@ -10,6 +10,7 @@ import type {
 } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type { DetailedOutlineItem } from '../../shared/types'
+import { buildForeshadowingReminders } from './foreshadowingReminders'
 
 interface Props {
   projectId: string
@@ -495,6 +496,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   const suggestions = useMemo(() => (reviewText ? parseSuggestions(reviewText) : []), [reviewText])
+  const foreshadowingReminders = useMemo(
+    () => buildForeshadowingReminders(chapterNumber, chapterOutline, foreshadowings),
+    [chapterNumber, chapterOutline, foreshadowings]
+  )
+  const foreshadowingReminderCount =
+    foreshadowingReminders.outline.length +
+    foreshadowingReminders.toPlant.length +
+    foreshadowingReminders.toCollect.length
 
   if (!data) return <p className="empty">展卷中…</p>
 
@@ -657,6 +666,34 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           )}
         </div>
       ) : null}
+
+      <div className="chapter-outline-panel" style={{ marginTop: 10, marginBottom: 10 }}>
+        <div className="row" style={{ alignItems: 'baseline' }}>
+          <strong style={{ fontSize: 13.5 }}>本章伏笔提醒</strong>
+          <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+            {foreshadowingReminderCount > 0
+              ? `${foreshadowingReminderCount} 条待关注`
+              : '暂无本章伏笔任务'}
+          </span>
+        </div>
+        {foreshadowingReminderCount > 0 ? (
+          <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+            {foreshadowingReminders.outline.length > 0 ? (
+              <ReminderGroup title="细纲提示" items={foreshadowingReminders.outline} tone="hook" />
+            ) : null}
+            {foreshadowingReminders.toPlant.length > 0 ? (
+              <ReminderGroup title="待埋 / 待强化" items={foreshadowingReminders.toPlant} tone="cool" />
+            ) : null}
+            {foreshadowingReminders.toCollect.length > 0 ? (
+              <ReminderGroup title="本章待回收" items={foreshadowingReminders.toCollect} tone="emotion" />
+            ) : null}
+          </div>
+        ) : (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+            细纲和伏笔库里没有匹配到当前章节的铺设或回收任务。
+          </p>
+        )}
+      </div>
 
       <textarea
         className="editor-text"
@@ -873,6 +910,27 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           }}
         />
       ) : null}
+    </div>
+  )
+}
+
+function ReminderGroup({
+  title,
+  items,
+  tone
+}: {
+  title: string
+  items: string[]
+  tone: 'hook' | 'cool' | 'emotion'
+}) {
+  return (
+    <div className="outline-tags">
+      <span className={`outline-tag ${tone}`}>{title}</span>
+      {items.map((item) => (
+        <span key={item} className="outline-tag">
+          {item}
+        </span>
+      ))}
     </div>
   )
 }

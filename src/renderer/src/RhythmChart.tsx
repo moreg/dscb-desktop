@@ -7,12 +7,12 @@ interface Props {
   onSelectChapter?: (n: number) => void
 }
 
-const VB_W = 1200
-const VB_H = 420
-const PAD_L = 50
-const PAD_R = 30
-const PAD_T = 30
-const PAD_B = 50
+const VB_W = 1440
+const VB_H = 640
+const PAD_L = 64
+const PAD_R = 42
+const PAD_T = 52
+const PAD_B = 76
 const PLOT_W = VB_W - PAD_L - PAD_R
 const PLOT_H = VB_H - PAD_T - PAD_B
 
@@ -94,6 +94,7 @@ export default function RhythmChart({ data, volumes, onSelectChapter }: Props) {
 
       <div className="rhythm-chart" style={{ position: 'relative' }}>
         <svg
+          className="rhythm-chart-svg"
           viewBox={`0 0 ${VB_W} ${VB_H}`}
           width="100%"
           preserveAspectRatio="xMidYMid meet"

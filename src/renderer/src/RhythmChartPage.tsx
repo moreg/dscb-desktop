@@ -82,7 +82,7 @@ export default function RhythmChartPage({ projectId, onBack, onOpenChapter }: Pr
       {loading ? (
         <p className="empty">展卷中…</p>
       ) : (
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card rhythm-chart-card">
           <RhythmChart data={rhythm} volumes={volumes} onSelectChapter={onOpenChapter} />
           <p className="meta" style={{ marginTop: 12, textAlign: 'center' }}>
             点击节点跳转到对应章节

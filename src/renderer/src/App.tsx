@@ -120,6 +120,7 @@ export default function App() {
   }
 
   const go = (v: View) => setView(v)
+  const mainInnerClass = `main-inner ${view.kind === 'editor' ? 'wide' : view.kind === 'relationships' ? 'relationship-wide' : view.kind === 'rhythm' ? 'rhythm-wide' : view.kind === 'foreshadowingBoard' ? 'foreshadowing-wide' : ''}`
 
   return (
     <div className="app-shell">
@@ -278,7 +279,7 @@ export default function App() {
 
       {/* ============ 主内容区 ============ */}
       <main className="main-content">
-        <div className={`main-inner ${view.kind === 'editor' ? 'wide' : ''}`}>
+        <div className={mainInnerClass}>
           {diagnostics.length > 0 && !diagDismissed && currentProjectId ? (
             <div className="diag-banner">
               <div className="diag-banner-head">

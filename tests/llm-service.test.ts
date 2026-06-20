@@ -94,7 +94,7 @@ describe('LlmService', () => {
     // 真要做 ipc 端脱敏验证，见后续 ipc.llm.test.ts
   })
 
-  it('Anthropic protocol hits /v1/messages with x-api-key and parses content_block_delta', async () => {
+  it('Anthropic protocol hits /v1/messages with bearer auth and parses content_block_delta', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-ant-'))
     const antStore = new SecretStore(path.join(dir, 'providers.enc'))
     await antStore.write({
@@ -131,9 +131,10 @@ describe('LlmService', () => {
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://api.minimaxi.com/anthropic/v1/messages')
     const headers = init.headers as Record<string, string>
+    expect(headers['Authorization']).toBe('Bearer sk-ant-key')
+    expect(headers['api-key']).toBe('sk-ant-key')
     expect(headers['x-api-key']).toBe('sk-ant-key')
     expect(headers['anthropic-version']).toBe('2023-06-15')
-    expect(headers['Authorization']).toBeUndefined()
     const body = JSON.parse(init.body as string)
     expect(body.model).toBe('MiniMax-M3')
     expect(body.max_tokens).toBeGreaterThan(0)

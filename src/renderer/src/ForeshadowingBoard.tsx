@@ -113,105 +113,109 @@ export default function ForeshadowingBoard({ projectId, onOpenChapter }: Props) 
                   {col.label}
                   <span className="pill">{list.length}</span>
                 </h4>
-                {list.length === 0 ? (
-                  <p className="muted" style={{ fontSize: 12, fontStyle: 'italic' }}>—</p>
-                ) : null}
-                {list.map((f) => {
-                  const overdue =
-                    f.status === 'planted' &&
-                    f.expectedCollect != null &&
-                    maxChapter > 0 &&
-                    f.expectedCollect < maxChapter
-                  return (
-                    <div key={f.id} className="card kanban-card">
-                      <div className="content">{f.content}</div>
-                      <div className="meta-row">
-                        {f.plantChapter ? (
-                          <span
-                            className="ch plant"
-                            style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
-                            onClick={() => onOpenChapter?.(f.plantChapter!)}
-                          >
-                            埋 · 第 {f.plantChapter} 章
-                          </span>
+                <div className="kanban-list">
+                  {list.length === 0 ? (
+                    <p className="muted" style={{ fontSize: 12, fontStyle: 'italic' }}>—</p>
+                  ) : null}
+                  {list.map((f) => {
+                    const overdue =
+                      f.status === 'planted' &&
+                      f.expectedCollect != null &&
+                      maxChapter > 0 &&
+                      f.expectedCollect < maxChapter
+                    return (
+                      <div key={f.id} className="card kanban-card">
+                        <div className="content" title={f.content}>{f.content}</div>
+                        <div className="meta-row">
+                          {f.plantChapter ? (
+                            <span
+                              className="ch plant"
+                              style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
+                              onClick={() => onOpenChapter?.(f.plantChapter!)}
+                            >
+                              埋 · 第 {f.plantChapter} 章
+                            </span>
+                          ) : null}
+                          {f.expectedCollect ? (
+                            <span
+                              className={`ch ${overdue ? 'overdue' : 'collect'}`}
+                              style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
+                              onClick={() => onOpenChapter?.(f.expectedCollect!)}
+                            >
+                              {overdue ? '⚠ 逾期 · 第 ' : '预收 · 第 '}
+                              {f.expectedCollect} 章
+                            </span>
+                          ) : null}
+                          {f.actualCollect ? (
+                            <span
+                              className="ch collect"
+                              style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
+                              onClick={() => onOpenChapter?.(f.actualCollect!)}
+                            >
+                              实收 · 第 {f.actualCollect} 章
+                            </span>
+                          ) : null}
+                        </div>
+                        {f.note ? (
+                          <div className="muted kanban-card-note" title={f.note}>{f.note}</div>
                         ) : null}
-                        {f.expectedCollect ? (
-                          <span
-                            className={`ch ${overdue ? 'overdue' : 'collect'}`}
-                            style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
-                            onClick={() => onOpenChapter?.(f.expectedCollect!)}
-                          >
-                            {overdue ? '⚠ 逾期 · 第 ' : '预收 · 第 '}
-                            {f.expectedCollect} 章
-                          </span>
-                        ) : null}
-                        {f.actualCollect ? (
-                          <span
-                            className="ch collect"
-                            style={{ cursor: onOpenChapter ? 'pointer' : 'default' }}
-                            onClick={() => onOpenChapter?.(f.actualCollect!)}
-                          >
-                            实收 · 第 {f.actualCollect} 章
-                          </span>
-                        ) : null}
-                      </div>
-                      {f.note ? <div className="muted" style={{ fontSize: 12 }}>{f.note}</div> : null}
-                      <div className="actions">
-                        {f.status === 'pending' ? (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => {
-                              const ch = f.plantChapter ?? chapters[0]?.chapterNumber ?? 1
-                              void window.api
-                                .plantForeshadowing(projectId, f.id, ch)
-                                .then(refresh)
-                            }}
-                          >
-                            埋设
-                          </button>
-                        ) : null}
-                        {f.status === 'planted' ? (
-                          <>
+                        <div className="actions">
+                          {f.status === 'pending' ? (
                             <button
                               className="btn btn-sm"
                               onClick={() => {
-                                const ch =
-                                  f.expectedCollect ?? f.plantChapter ?? chapters[0]?.chapterNumber ?? 1
+                                const ch = f.plantChapter ?? chapters[0]?.chapterNumber ?? 1
                                 void window.api
-                                  .collectForeshadowing(projectId, f.id, ch)
+                                  .plantForeshadowing(projectId, f.id, ch)
                                   .then(refresh)
                               }}
                             >
-                              回收
+                              埋设
                             </button>
-                            <button
-                              className="btn btn-sm"
-                              onClick={async () => {
-                                if (!window.confirm('标记为遗漏？')) return
-                                await window.api.markForeshadowingMissed(projectId, f.id)
-                                refresh()
-                              }}
-                            >
-                              遗漏
-                            </button>
-                          </>
-                        ) : null}
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => setEditing(f)}
-                        >
-                          编辑
-                        </button>
-                        <button
-                          className="btn btn-sm btn-danger"
-                          onClick={() => remove(f)}
-                        >
-                          删
-                        </button>
+                          ) : null}
+                          {f.status === 'planted' ? (
+                            <>
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => {
+                                  const ch =
+                                    f.expectedCollect ?? f.plantChapter ?? chapters[0]?.chapterNumber ?? 1
+                                  void window.api
+                                    .collectForeshadowing(projectId, f.id, ch)
+                                    .then(refresh)
+                                }}
+                              >
+                                回收
+                              </button>
+                              <button
+                                className="btn btn-sm"
+                                onClick={async () => {
+                                  if (!window.confirm('标记为遗漏？')) return
+                                  await window.api.markForeshadowingMissed(projectId, f.id)
+                                  refresh()
+                                }}
+                              >
+                                遗漏
+                              </button>
+                            </>
+                          ) : null}
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setEditing(f)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => remove(f)}
+                          >
+                            删
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )
-                })}
+                    )
+                  })}
+                </div>
               </div>
             )
           })}
