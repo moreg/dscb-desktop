@@ -12,7 +12,10 @@ import type {
   CreateForeshadowingInput,
   UpdateForeshadowingInput,
   CreateRelationshipInput,
-  UpdateRelationshipInput
+  UpdateRelationshipInput,
+  MainOutline,
+  ProviderConfig,
+  ListProvidersResult
 } from '../shared/types'
 
 const api = {
@@ -80,6 +83,11 @@ const api = {
     ipcRenderer.invoke('memory:relationship:delete', id, rid),
   configureLlm: (apiKey: string) => ipcRenderer.invoke('llm:configure', apiKey),
   hasLlmKey: () => ipcRenderer.invoke('llm:hasKey'),
+  pingLlm: () => ipcRenderer.invoke('llm:ping'),
+  listProviders: () => ipcRenderer.invoke('llm:listProviders'),
+  upsertProvider: (p: ProviderConfig) => ipcRenderer.invoke('llm:upsertProvider', p),
+  deleteProvider: (id: string) => ipcRenderer.invoke('llm:deleteProvider', id),
+  setActiveProvider: (id: string) => ipcRenderer.invoke('llm:setActive', id),
   generateStream: (
     prompt: string,
     onToken: (token: string, done: boolean) => void
@@ -97,6 +105,8 @@ const api = {
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getMainOutline: (id: string) => ipcRenderer.invoke('outline:getMain', id),
+  updateMainOutline: (id: string, patch: Partial<MainOutline>) =>
+    ipcRenderer.invoke('outline:updateMain', id, patch),
   generateMainOutline: (id: string) => ipcRenderer.invoke('outline:generateMain', id),
   listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
   generateDetailedOutline: (id: string, n: number) =>
@@ -117,7 +127,82 @@ const api = {
     return ipcRenderer
       .invoke('write:generateChapter', { projectId, chapterNumber, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
-  }
+  },
+  getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
+  setProjectsRoot: (path: string) => ipcRenderer.invoke('settings:setProjectsRoot', path),
+  getTheme: () => ipcRenderer.invoke('settings:getTheme'),
+  setTheme: (mode: 'light' | 'dark' | 'system') =>
+    ipcRenderer.invoke('settings:setTheme', mode),
+  selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),
+  reviewChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:reviewChapter', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  detectCastStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:detectCast', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  detectRelationshipsStream: (
+    projectId: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:detectRelationships', { projectId, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  getUsageSummary: () => ipcRenderer.invoke('usage:summary'),
+  clearUsage: () => ipcRenderer.invoke('usage:clear'),
+  getPricing: async () => {
+    const all = await ipcRenderer.invoke('settings:getAll')
+    return all.pricing
+  },
+  setPricing: (patch: { inputRate?: number; outputRate?: number }) =>
+    ipcRenderer.invoke('settings:setPricing', patch),
+  getDailyWordGoal: async () => {
+    const all = await ipcRenderer.invoke('settings:getAll')
+    return all.dailyWordGoal ?? 3000
+  },
+  setDailyWordGoal: (goal: number) => ipcRenderer.invoke('settings:setDailyGoal', goal),
+  getPomodoroConfig: async () => {
+    const all = await ipcRenderer.invoke('settings:getAll')
+    return { focus: all.pomodoroFocus ?? 25, brk: all.pomodoroBreak ?? 5 }
+  },
+  setPomodoroConfig: (cfg: { focus: number; brk: number }) =>
+    ipcRenderer.invoke('settings:setPomodoro', cfg)
 }
 
 contextBridge.exposeInMainWorld('api', api)

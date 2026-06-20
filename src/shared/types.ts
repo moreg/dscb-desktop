@@ -21,6 +21,39 @@ export interface CreateProjectInput {
 
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
+/** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
+export interface ProviderConfig {
+  id: string
+  /** 展示名（用户可改），例如「主力 / 备用 / DeepSeek」 */
+  label: string
+  /** 厂商主页，仅展示用 */
+  homepage?: string
+  /** 形如 https://api.example.com/v1；请求时会拼上 /chat/completions */
+  baseUrl: string
+  /** 模型名，传给请求体里的 model 字段 */
+  model: string
+  /** API Key；空字符串表示未配置（保留旧值时由 main 端处理） */
+  apiKey: string
+}
+
+/** 列表接口返回的脱敏 provider —— 永不返回明文 apiKey */
+export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
+  hasKey: boolean
+  keyMasked: string
+}
+
+export interface ProvidersConfig {
+  /** 当前选中的 provider id */
+  activeId: string
+  providers: ProviderConfig[]
+}
+
+/** 列表接口的返回结构（脱敏） */
+export interface ListProvidersResult {
+  activeId: string
+  providers: ProviderSummary[]
+}
+
 export interface ProjectData {
   schemaVersion: number
   updatedAt: string
@@ -43,6 +76,8 @@ export interface ChapterMeta {
   status: ChapterStatus
   synopsis?: string
   hook?: string
+  /** 在本章登场的人物 id 列表（用于人物卡 ↔ 章节联动） */
+  appearingCharacters?: string[]
 }
 
 export interface ChapterContent {
@@ -56,6 +91,7 @@ export interface CreateProjectDataInput {
   description?: string
   targetChapters?: number
   chapterWordCount?: number
+  customPath?: string
 }
 
 export interface CreateChapterInput {
@@ -67,6 +103,7 @@ export interface UpdateChapterMetaInput {
   status?: ChapterStatus
   synopsis?: string
   hook?: string
+  appearingCharacters?: string[]
 }
 
 export interface RendererApi {
@@ -131,11 +168,17 @@ export interface RendererApi {
   deleteRelationship: (projectId: string, id: string) => Promise<void>
   configureLlm: (apiKey: string) => Promise<boolean>
   hasLlmKey: () => Promise<boolean>
+  pingLlm: () => Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }>
+  listProviders: () => Promise<ListProvidersResult>
+  upsertProvider: (p: ProviderConfig) => Promise<ProviderConfig>
+  deleteProvider: (id: string) => Promise<void>
+  setActiveProvider: (id: string) => Promise<string>
   generateStream: (
     prompt: string,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   getMainOutline: (projectId: string) => Promise<MainOutline | null>
+  updateMainOutline: (projectId: string, patch: Partial<MainOutline>) => Promise<MainOutline>
   generateMainOutline: (projectId: string) => Promise<MainOutline>
   listDetailedOutline: (projectId: string) => Promise<DetailedOutlineItem[]>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
@@ -144,6 +187,33 @@ export interface RendererApi {
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
+  getProjectsRoot: () => Promise<string>
+  setProjectsRoot: (path: string) => Promise<string>
+  getTheme: () => Promise<'light' | 'dark' | 'system'>
+  setTheme: (mode: 'light' | 'dark' | 'system') => Promise<'light' | 'dark' | 'system'>
+  selectDirectory: () => Promise<string | null>
+  reviewChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  detectCastStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  detectRelationshipsStream: (
+    projectId: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  getUsageSummary: () => Promise<UsageSummary>
+  clearUsage: () => Promise<boolean>
+  getPricing: () => Promise<{ inputRate: number; outputRate: number }>
+  setPricing: (patch: { inputRate?: number; outputRate?: number }) => Promise<{ inputRate: number; outputRate: number }>
+  getDailyWordGoal: () => Promise<number>
+  setDailyWordGoal: (goal: number) => Promise<number>
+  getPomodoroConfig: () => Promise<{ focus: number; brk: number }>
+  setPomodoroConfig: (cfg: { focus: number; brk: number }) => Promise<{ focus: number; brk: number }>
 }
 
 export interface Character {
@@ -300,4 +370,18 @@ export interface DetailedOutline {
   schemaVersion: number
   updatedAt: string
   items: DetailedOutlineItem[]
+}
+
+export interface UsageBucket {
+  input: number
+  output: number
+  total: number
+  cost: number
+}
+
+export interface UsageSummary {
+  today: UsageBucket
+  month: UsageBucket
+  allTime: UsageBucket
+  byFeature: { feature: string; total: number; cost: number; calls: number }[]
 }

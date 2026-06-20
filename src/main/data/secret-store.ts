@@ -1,18 +1,83 @@
 import { safeStorage } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname } from 'path'
+import type { ProvidersConfig, ProviderConfig } from '../../shared/types'
 
-export interface ProvidersConfig {
-  activeProvider: string
-  providers: {
-    minimax?: { apiKey: string }
-    openai?: { apiKey: string }
-    claude?: { apiKey: string }
-    deepseek?: { apiKey: string }
-  }
+export type { ProviderConfig } from '../../shared/types'
+
+const EMPTY: ProvidersConfig = { activeId: '', providers: [] }
+
+interface LegacyShape {
+  activeProvider?: string
+  providers?: Record<string, { apiKey?: string }>
 }
 
-const EMPTY: ProvidersConfig = { activeProvider: 'minimax', providers: {} }
+function isNewShape(o: unknown): o is ProvidersConfig {
+  if (!o || typeof o !== 'object') return false
+  const p = o as Record<string, unknown>
+  if (!Array.isArray(p.providers)) return false
+  if (typeof p.activeId !== 'string') return false
+  for (const item of p.providers) {
+    if (!item || typeof item !== 'object') return false
+    const it = item as Record<string, unknown>
+    if (typeof it.id !== 'string') return false
+    if (typeof it.baseUrl !== 'string') return false
+    if (typeof it.model !== 'string') return false
+    if (typeof it.apiKey !== 'string') return false
+  }
+  return true
+}
+
+/**
+ * 把旧 schema（minimax/openai/claude/deepseek 分桶）转成新 schema（数组）。
+ * 若文件无法解析 / 损坏，调用方会拿到 SCHEMA_INVALID 错误（通过抛 Error）。
+ */
+function migrate(legacy: LegacyShape | unknown): ProvidersConfig {
+  if (isNewShape(legacy)) return legacy as ProvidersConfig
+  const providers: ProviderConfig[] = []
+  const lp: Record<string, { apiKey?: string }> =
+    legacy && typeof legacy === 'object' && (legacy as LegacyShape).providers
+      ? (legacy as LegacyShape).providers!
+      : {}
+  if (lp.minimax?.apiKey) {
+    providers.push({
+      id: 'p_legacy_minimax',
+      label: 'minimax（旧）',
+      baseUrl: 'https://api.minimaxi.com/v1',
+      model: 'MiniMax-M3',
+      apiKey: lp.minimax.apiKey
+    })
+  }
+  if (lp.openai?.apiKey) {
+    providers.push({
+      id: 'p_legacy_openai',
+      label: 'OpenAI（旧）',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+      apiKey: lp.openai.apiKey
+    })
+  }
+  if (lp.claude?.apiKey) {
+    providers.push({
+      id: 'p_legacy_claude',
+      label: 'Claude（旧）',
+      baseUrl: 'https://api.anthropic.com/v1',
+      model: 'claude-3-5-sonnet-latest',
+      apiKey: lp.claude.apiKey
+    })
+  }
+  if (lp.deepseek?.apiKey) {
+    providers.push({
+      id: 'p_legacy_deepseek',
+      label: 'DeepSeek（旧）',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      apiKey: lp.deepseek.apiKey
+    })
+  }
+  const activeId = providers[0]?.id ?? ''
+  return { activeId, providers }
+}
 
 export class SecretStore {
   constructor(private readonly file: string) {}
@@ -23,14 +88,24 @@ export class SecretStore {
       buf = await fs.readFile(this.file)
     } catch (err) {
       const e = err as NodeJS.ErrnoException
-      if (e.code === 'ENOENT') return { ...EMPTY }
+      if (e.code === 'ENOENT') return { ...EMPTY, providers: [] }
       throw err
     }
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error('OS secure storage unavailable')
     }
-    const json = safeStorage.decryptString(buf)
-    return JSON.parse(json) as ProvidersConfig
+    let json: string
+    let parsed: unknown
+    try {
+      json = safeStorage.decryptString(buf)
+      parsed = JSON.parse(json)
+    } catch (err) {
+      // 解密失败 / JSON 损坏 → 视为不兼容，提示用户重新配置
+      throw new Error('SCHEMA_INVALID: providers.enc is corrupted or unreadable')
+    }
+    if (isNewShape(parsed)) return parsed
+    // 旧 schema：尝试迁移
+    return migrate(parsed)
   }
 
   async write(config: ProvidersConfig): Promise<void> {
