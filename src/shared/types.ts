@@ -390,6 +390,8 @@ export interface MainOutline {
 
 export interface DetailedOutlineItem {
   chapterNumber: number
+  /** 章节标题（来自细纲 H2「## 第N章：标题」） */
+  title?: string
   plotSummary?: string
   emotionPoint?: string
   coolPoint?: string

@@ -46,12 +46,15 @@ describe('WriteService', () => {
     await new ChapterRepository(dir).updateContent(1, '前一章的正文内容。')
 
     const service = new WriteService(ps, mockLlm('正文'))
-    const prompt = await service.buildChapterPrompt(projectId, 2)
-    expect(prompt).toContain('青云志')
-    expect(prompt).toContain('少年修仙主线')
-    expect(prompt).toContain('林远突破')
-    expect(prompt).toContain('林远')
-    expect(prompt).toContain('前一章的正文内容')
+    const { system, user } = await service.buildChapterPrompt(projectId, 2)
+    expect(user).toContain('青云志')
+    expect(user).toContain('少年修仙主线')
+    expect(user).toContain('林远突破')
+    expect(user).toContain('林远')
+    expect(user).toContain('前一章的正文内容')
+    // 新的 system prompt 含技能守则
+    expect(system).toContain('章末结尾硬性原则')
+    expect(system).toContain('禁用高频词')
   })
 
   it('generateChapterStream calls llm with assembled prompt', async () => {

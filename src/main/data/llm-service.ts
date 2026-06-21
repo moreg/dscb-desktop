@@ -7,6 +7,13 @@ export interface GenerateOptions {
   signal?: AbortSignal
   /** 调用方上下文，用于用量归属 */
   meta?: { feature: string; projectId?: string }
+  /**
+   * 可选 system prompt。
+   * - OpenAI 协议：作为 messages 数组首项 { role: 'system', content }
+   * - Anthropic 协议：作为请求体顶层 system 字段
+   * 未提供时退化为旧行为（仅 user 单条消息）。
+   */
+  systemPrompt?: string
 }
 
 interface UsageInfo {
@@ -65,7 +72,7 @@ export class LlmService {
     const p = await this.activeProvider()
     if (!p || !p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
-    const { url, init } = buildStreamRequest(p, prompt, opts.signal)
+    const { url, init } = buildStreamRequest(p, prompt, opts.signal, opts.systemPrompt)
     const res = await fetch(url, init)
 
     if (!res.ok) {
@@ -140,26 +147,33 @@ function buildPingRequest(p: ProviderConfig): { url: string; init: RequestInit }
 function buildStreamRequest(
   p: ProviderConfig,
   prompt: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  systemPrompt?: string
 ): { url: string; init: RequestInit } {
   const url = endpointOf(p)
   const init: RequestInit = { method: 'POST', signal }
+  const hasSystem = !!systemPrompt && systemPrompt.trim().length > 0
   if (protocolOf(p) === 'anthropic') {
     init.headers = anthropicHeaders(p.apiKey)
-    init.body = JSON.stringify({
+    const body: Record<string, unknown> = {
       model: p.model,
       max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
       stream: true
-    })
+    }
+    if (hasSystem) body.system = systemPrompt
+    init.body = JSON.stringify(body)
   } else {
     init.headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${p.apiKey}`
     }
+    const messages: Array<{ role: string; content: string }> = []
+    if (hasSystem) messages.push({ role: 'system', content: systemPrompt as string })
+    messages.push({ role: 'user', content: prompt })
     init.body = JSON.stringify({
       model: p.model,
-      messages: [{ role: 'user', content: prompt }],
+      messages,
       stream: true
     })
   }

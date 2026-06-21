@@ -159,6 +159,102 @@ describe('LlmService', () => {
     fetchSpy.mockRestore()
   })
 
+  it('OpenAI: systemPrompt 插入 messages[0] 作为 role:system', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await service.generateStream('user-msg', { systemPrompt: 'you are a system' })
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.messages).toEqual([
+      { role: 'system', content: 'you are a system' },
+      { role: 'user', content: 'user-msg' }
+    ])
+    fetchSpy.mockRestore()
+  })
+
+  it('OpenAI: 未传 systemPrompt 时仅一条 user 消息（向后兼容）', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await service.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
+    fetchSpy.mockRestore()
+  })
+
+  it('OpenAI: 空白 systemPrompt 视为未提供', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await service.generateStream('hi', { systemPrompt: '   ' })
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
+    fetchSpy.mockRestore()
+  })
+
+  it('Anthropic: systemPrompt 落到 body.system 顶层字段', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-ants-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [
+        {
+          id: 'p',
+          label: 't',
+          baseUrl: 'https://example.com/v1',
+          model: 'm',
+          apiKey: 'k',
+          protocol: 'anthropic'
+        }
+      ]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['event: message_stop\ndata: {}\n\n'])
+    } as never)
+    await svc.generateStream('user-msg', { systemPrompt: 'sys-text' })
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.system).toBe('sys-text')
+    expect(body.messages).toEqual([{ role: 'user', content: 'user-msg' }])
+    fetchSpy.mockRestore()
+  })
+
+  it('Anthropic: 未传 systemPrompt 时 body 不含 system 字段', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-ants2-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [
+        {
+          id: 'p',
+          label: 't',
+          baseUrl: 'https://example.com/v1',
+          model: 'm',
+          apiKey: 'k',
+          protocol: 'anthropic'
+        }
+      ]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['event: message_stop\ndata: {}\n\n'])
+    } as never)
+    await svc.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.system).toBeUndefined()
+    fetchSpy.mockRestore()
+  })
+
   it('Anthropic baseUrl with trailing /v1 does not double up', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-antv1-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
