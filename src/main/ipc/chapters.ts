@@ -16,6 +16,7 @@ import type {
   UpdateChapterMetaInput,
   CreateChapterVersionInput
 } from '../../shared/types'
+import { z } from 'zod'
 import {
   validateInput,
   projectIdSchema,

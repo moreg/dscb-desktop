@@ -5,6 +5,8 @@ import type { MemoryExtraction, RhythmEvaluation } from '../../shared/types'
 import { validateInput, projectIdSchema, chapterNumberSchema, chapterContentSchema } from './validation'
 import { z } from 'zod'
 
+const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
+
 export function registerWriteIpc(service: WriteService): void {
   safeHandle(
     'write:auditChapter',
@@ -46,18 +48,40 @@ export function registerWriteIpc(service: WriteService): void {
 
   ipcMain.handle(
     'write:generateChapter',
-    async (e, payload: { projectId: string; chapterNumber: number; requestId: string }) => {
+    async (
+      e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        styleProfileId?: string | null
+        requestId: string
+      }
+    ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.generateChapterStream(payload.projectId, payload.chapterNumber, {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            chapterNumber: chapterNumberSchema,
+            styleProfileId: styleProfileIdSchema,
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
+        await service.generateChapterStream(
+          validated.projectId,
+          validated.chapterNumber,
+          validated.styleProfileId,
+          {
           onToken: (token) =>
             win?.webContents.send('llm:token', {
-              requestId: payload.requestId,
+              requestId: validated.requestId,
               token,
               done: false
             })
-        })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+          }
+        )
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -295,32 +319,44 @@ export function registerWriteIpc(service: WriteService): void {
         projectId: string
         fromChapter: number
         toChapter: number
+        styleProfileId?: string | null
         requestId: string
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            fromChapter: chapterNumberSchema,
+            toChapter: chapterNumberSchema,
+            styleProfileId: styleProfileIdSchema,
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
         const progress = await service.generateChaptersBatch(
-          payload.projectId,
-          payload.fromChapter,
-          payload.toChapter,
+          validated.projectId,
+          validated.fromChapter,
+          validated.toChapter,
           (chapter, result) => {
             win?.webContents.send('write:batchChapterComplete', {
-              requestId: payload.requestId,
+              requestId: validated.requestId,
               chapter,
               result
             })
           },
+          validated.styleProfileId,
           {
             onToken: (token) =>
               win?.webContents.send('llm:token', {
-                requestId: payload.requestId,
+                requestId: validated.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true, progress }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -336,32 +372,44 @@ export function registerWriteIpc(service: WriteService): void {
         projectId: string
         fromChapter: number
         toChapter: number
+        styleProfileId?: string | null
         requestId: string
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            fromChapter: chapterNumberSchema,
+            toChapter: chapterNumberSchema,
+            styleProfileId: styleProfileIdSchema,
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
         const progress = await service.resumeChaptersBatch(
-          payload.projectId,
-          payload.fromChapter,
-          payload.toChapter,
+          validated.projectId,
+          validated.fromChapter,
+          validated.toChapter,
           (chapter, result) => {
             win?.webContents.send('write:batchChapterComplete', {
-              requestId: payload.requestId,
+              requestId: validated.requestId,
               chapter,
               result
             })
           },
+          validated.styleProfileId,
           {
             onToken: (token) =>
               win?.webContents.send('llm:token', {
-                requestId: payload.requestId,
+                requestId: validated.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true, progress }
       } catch (err) {
         return { ok: false, error: (err as Error).message }

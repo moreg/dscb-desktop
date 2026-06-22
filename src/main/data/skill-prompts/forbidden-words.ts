@@ -1,21 +1,48 @@
 /**
  * 12 类禁用高频词清单。
- * 出自「正文写作」技能 SKILL.md 「禁用高频词」节，是 AI 味的高频成因。
+ * 出自「正文写作」技能 SKILL.md 「禁用高频词」节 + zh-humanizer v3.1.1。
  * Prompt 注入时把全表喂给 LLM，要求"出现即视作 AI 味"。
  *
  * 维护原则：
  * - 只增不删（一旦判定某词是 AI 套路，就长期禁用）
  * - 类别内按字面排序，便于人眼审阅
  * - 每个词条都是字面匹配片段，不写正则——LLM 读字面更容易理解
+ * - 题材例外：allowedGenres 列出的题材里该词降为 info（不阻断），其余题材仍为 warn
+ *
+ * 字面词 vs 正则：forbiddenPatterns 字段允许声明正则。
+ *   - 用例：「嘴角+弧度」的底层模式（任何变体动词/量词都算）
+ *   - 命中时 word 字段填正则 source id，便于 renderer 标记
  */
+
+import type { GenreKey } from './genre-voice'
+
+export type ForbiddenWordSeverity = 'warn' | 'info'
 
 export interface ForbiddenWordCategory {
   /** 类别名，对应技能文档里的"第N类" */
   name: string
   /** 类别描述，1 句话说明命中场景 */
   hint: string
-  /** 字面词条 */
+  /** 字面词条（命中时记入 word 字段） */
   words: readonly string[]
+  /**
+   * 正则模式（命中时不计入 word 字段，word 字段填 pattern.source.id）。
+   * 用例：嘴角+弧度 底层模式（嘴角带了点弧度 / 嘴角微微上扬 / 嘴角弯了弯 / 嘴角挂着一丝笑）
+   */
+  patterns?: readonly ForbiddenPattern[]
+  /**
+   * 题材例外：这些题材里该类词降为 info（不阻断）。
+   * 出处：技能「古风/仙侠特殊规则」节——古风允许的虚词清单。
+   */
+  allowedGenres?: readonly GenreKey[]
+}
+
+export interface ForbiddenPattern {
+  /** 模式 id，命中时作为 word 字段的值 */
+  id: string
+  /** 模式说明，用于 message */
+  reason: string
+  pattern: RegExp
 }
 
 export const FORBIDDEN_WORD_CATEGORIES: readonly ForbiddenWordCategory[] = [
@@ -46,6 +73,20 @@ export const FORBIDDEN_WORD_CATEGORIES: readonly ForbiddenWordCategory[] = [
       '眼底闪过',
       '涌上心头',
       '眼中流露'
+    ],
+    // 「嘴角+弧度」底层模式：任何动词/量词变体都算 AI 味。
+    // 技能说：无论动词/量词怎么换都算 AI 味（嘴角带了点弧度 / 嘴角微微上扬 / 嘴角弯了弯）。
+    patterns: [
+      {
+        id: '嘴角_弧度_底层模式',
+        reason: '"嘴角+弧度"底层模式：直接写"笑了"',
+        pattern: /嘴角[^。\n]{0,12}弧度/
+      },
+      {
+        id: '嘴角_上扬变体',
+        reason: '"嘴角+动词"套路：直接写"笑了"',
+        pattern: /嘴角[^。\n]{0,8}(微微|轻轻|轻轻一|淡淡|缓缓)?(上扬|上翘|微扬|一弯|一翘|带了点|弯了弯|勾了|微微一勾)/
+      }
     ]
   },
   {
@@ -107,7 +148,9 @@ export const FORBIDDEN_WORD_CATEGORIES: readonly ForbiddenWordCategory[] = [
   {
     name: '时间频率',
     hint: '"接下来/此刻/这一刻"过渡套话',
-    words: ['接下来', '渐渐', '更是', '一定', '再次', '一时之间', '这一刻', '此刻', '暂时']
+    words: ['接下来', '渐渐', '更是', '一定', '再次', '一时之间', '这一刻', '此刻', '暂时'],
+    // 技能「古风/仙侠特殊规则」：渐渐/此刻/一时之间 是古风正常时间词
+    allowedGenres: ['xianxia', 'fantasy', 'minguo', 'historical']
   },
   {
     name: '对比结构',
@@ -164,7 +207,9 @@ export const FORBIDDEN_WORD_CATEGORIES: readonly ForbiddenWordCategory[] = [
       '弥漫着',
       '表象之下',
       '显得格外'
-    ]
+    ],
+    // 技能「古风/仙侠特殊规则」：一丝/一抹 在古风里可用（但要少，且不能和 AI 模板组合）
+    allowedGenres: ['xianxia', 'minguo', 'historical']
   },
   {
     name: 'AI 套话与成语堆砌',
@@ -190,9 +235,39 @@ export const FORBIDDEN_WORD_CATEGORIES: readonly ForbiddenWordCategory[] = [
   }
 ] as const
 
-/** 拍平所有词条供正则扫描（PR2 用） */
+/** 拍平所有字面词条供正则扫描（PR2 用） */
 export function flattenForbiddenWords(): string[] {
   return FORBIDDEN_WORD_CATEGORIES.flatMap((c) => c.words as string[])
+}
+
+/** 拍平所有正则模式（含 source id）供 chapter-audit 扫描 */
+export function flattenForbiddenPatterns(): Array<{
+  category: string
+  id: string
+  reason: string
+  pattern: RegExp
+  allowedGenres?: readonly GenreKey[]
+}> {
+  const out: Array<{
+    category: string
+    id: string
+    reason: string
+    pattern: RegExp
+    allowedGenres?: readonly GenreKey[]
+  }> = []
+  for (const cat of FORBIDDEN_WORD_CATEGORIES) {
+    if (!cat.patterns) continue
+    for (const p of cat.patterns) {
+      out.push({
+        category: cat.name,
+        id: p.id,
+        reason: p.reason,
+        pattern: p.pattern,
+        allowedGenres: cat.allowedGenres
+      })
+    }
+  }
+  return out
 }
 
 /** 渲染为 markdown 表格，供 system prompt 注入 */

@@ -7,7 +7,10 @@ import type {
   ChapterStatus,
   Character,
   Foreshadowing,
-  MemoryEntity
+  MemoryEntity,
+  ProjectData,
+  StyleProfile,
+  WriteStyleSelection
 } from '../../shared/types'
 import {
   pushEntry,
@@ -118,6 +121,12 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
   const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
+  const [projectData, setProjectData] = useState<ProjectData | null>(null)
+  const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
+  const [styleSelection, setStyleSelection] = useState<WriteStyleSelection>({
+    mode: 'projectDefault',
+    styleProfileId: null
+  })
 
   // 番茄钟默认值
   const DEFAULT_POMODORO_FOCUS_MINUTES = 25
@@ -379,6 +388,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     void window.api.listForeshadowings(projectId).then(setForeshadowings)
     void window.api.listMemoryEntities(projectId, 'location').then(setLocations)
   }
+  const refreshProjectStyleData = () => {
+    void window.api.getProject(projectId).then(setProjectData)
+    void window.api.listStyleProfiles(projectId).then(setStyleProfiles)
+  }
 
   const refreshChapterOutline = () => {
     void window.api.listDetailedOutline(projectId).then((items) => {
@@ -411,6 +424,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshCharacters()
     refreshMemory()
     refreshChapterOutline()
+    refreshProjectStyleData()
+    setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
   }, [projectId, chapterNumber])
 
   // P9-A：debounced 持久化。rewriteHistory 或 redoStack 变化时延迟 200ms 写入 localStorage。
@@ -460,6 +475,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       }
     })
   }, [projectId, chapterNumber, data?.content]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const defaultStyleProfile = projectData?.defaultStyleProfileId
+    ? styleProfiles.find((item) => item.id === projectData.defaultStyleProfileId) ?? null
+    : null
+  const activeStyleProfile =
+    styleSelection.mode === 'custom'
+      ? styleProfiles.find((item) => item.id === styleSelection.styleProfileId) ?? null
+      : defaultStyleProfile
+  const requestedStyleProfileId =
+    styleSelection.mode === 'custom' ? styleSelection.styleProfileId : null
 
   // P19-A：正式保存（💾 Save）成功后清掉 draft（已生效，不再需要备份）
   // 实现：包装 save 为 saveAndClearDraft（用 ref 避免循环引用）
@@ -649,6 +674,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       const result = await window.api.generateChapterStream(
         projectId,
         chapterNumber,
+        requestedStyleProfileId,
         (token, done) => {
           if (genRef.current !== myGen) return
           if (token) {
@@ -1264,6 +1290,56 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       </div>
 
       {/* P19-B：7 日热力图 + 跨章节今日字数 */}
+      <div className="card" style={{ marginBottom: 12, padding: 12 }}>
+        <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <strong style={{ fontSize: 13.5 }}>文风</strong>
+          <span className="chip">
+            {activeStyleProfile?.name ?? defaultStyleProfile?.name ?? '无'}
+          </span>
+          <span className="meta" style={{ fontSize: 12 }}>
+            {styleSelection.mode === 'custom' ? '本章临时文风' : '项目默认文风'}
+          </span>
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+          <select
+            className="select"
+            value={
+              styleSelection.mode === 'custom'
+                ? styleSelection.styleProfileId ?? ''
+                : '__project_default__'
+            }
+            onChange={(e) => {
+              const value = e.target.value
+              if (value === '__project_default__') {
+                setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
+                return
+              }
+              setStyleSelection({ mode: 'custom', styleProfileId: value || null })
+            }}
+            style={{ minWidth: 240 }}
+          >
+            <option value="__project_default__">
+              使用项目默认{defaultStyleProfile ? `（${defaultStyleProfile.name}）` : '（无）'}
+            </option>
+            {styleProfiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setStyleSelection({ mode: 'projectDefault', styleProfileId: null })}
+            disabled={styleSelection.mode === 'projectDefault'}
+          >
+            恢复默认
+          </button>
+          <span className="meta" style={{ fontSize: 12 }}>
+            {activeStyleProfile?.identifiedStyle ?? '未指定文风'}
+          </span>
+        </div>
+      </div>
+
       <WeeklyWritingStats projectId={projectId} dailyTarget={dailyGoal} />
 
       {/* 本章细纲 */}

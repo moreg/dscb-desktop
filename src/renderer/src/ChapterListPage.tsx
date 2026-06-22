@@ -4,7 +4,9 @@ import type {
   Character,
   ChapterStatus,
   BatchProgress,
-  ChapterFlowResult
+  ChapterFlowResult,
+  ProjectData,
+  StyleProfile
 } from '../../shared/types'
 
 interface Props {
@@ -311,10 +313,19 @@ function BatchWriteDialog({
   const [lastResult, setLastResult] = useState<ChapterFlowResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [streamingText, setStreamingText] = useState('')
+  const [projectData, setProjectData] = useState<ProjectData | null>(null)
+  const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
+  const [styleProfileId, setStyleProfileId] = useState<string | null>(null)
 
   const status = progress?.status ?? 'pending'
   const isFinished = status === 'completed' || status === 'failed'
   const isPaused = status === 'paused'
+
+  useEffect(() => {
+    void window.api.getProject(projectId).then(setProjectData)
+    void window.api.listStyleProfiles(projectId).then(setStyleProfiles)
+    setStyleProfileId(null)
+  }, [projectId])
 
   const startBatch = async () => {
     if (fromChapter > toChapter) {
@@ -335,6 +346,7 @@ function BatchWriteDialog({
         projectId,
         fromChapter,
         toChapter,
+        styleProfileId,
         (chapter, result) => {
           setLastResult(result)
           onChapterCompleted()
@@ -370,6 +382,7 @@ function BatchWriteDialog({
         projectId,
         progress.currentChapter,
         progress.toChapter,
+        styleProfileId,
         (chapter, result) => {
           setLastResult(result)
           onChapterCompleted()
@@ -410,6 +423,39 @@ function BatchWriteDialog({
         <p className="desc" style={{ margin: '0 0 12px' }}>
           逐章生成正文并自动跑质检/细纲对照/记忆/节奏/图解流程，每章完成后暂停等你确认。
         </p>
+
+        <div className="field">
+          <label>文风</label>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <select
+              className="select"
+              value={styleProfileId ?? '__project_default__'}
+              onChange={(e) => {
+                const value = e.target.value
+                setStyleProfileId(value === '__project_default__' ? null : value)
+              }}
+              disabled={running}
+              style={{ flex: 1, minWidth: 220 }}
+            >
+              <option value="__project_default__">
+                使用项目默认
+                {projectData?.defaultStyleProfileId
+                  ? `（${styleProfiles.find((item) => item.id === projectData.defaultStyleProfileId)?.name ?? '已设置'}）`
+                  : '（无）'}
+              </option>
+              {styleProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+            <span className="meta" style={{ fontSize: 12 }}>
+              {styleProfileId
+                ? styleProfiles.find((item) => item.id === styleProfileId)?.identifiedStyle ?? '自定义文风'
+                : '跟随项目默认'}
+            </span>
+          </div>
+        </div>
 
         <div className="field-row">
           <div className="field" style={{ flex: 1 }}>

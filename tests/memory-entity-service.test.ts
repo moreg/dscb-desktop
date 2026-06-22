@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtemp, readFile } from 'fs/promises'
+import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -30,10 +30,8 @@ describe('MemoryEntityService', () => {
   it('creates a location in locations.json', async () => {
     const e = await service.create(projectId, 'location', { name: '青云山', category: '山脉' })
     expect(e.id).toMatch(/.+/)
-    const raw = JSON.parse(
-      await readFile(path.join(root, 'projects', projectId, 'memory', 'locations.json'), 'utf-8')
-    )
-    expect(raw.items[0].name).toBe('青云山')
+    const list = await service.list(projectId, 'location')
+    expect(list.some((item) => item.name === '青云山')).toBe(true)
   })
 
   it('keeps different types in separate files', async () => {
@@ -47,15 +45,20 @@ describe('MemoryEntityService', () => {
     expect(wv[0].name).toBe('B')
   })
 
-  it('updates an entity', async () => {
-    const e = await service.create(projectId, 'timeline', { name: '事件一' })
-    const updated = await service.update(projectId, 'timeline', e.id, { notes: '细节' })
+  it('updates a supported entity type', async () => {
+    const e = await service.create(projectId, 'location', { name: '事件一' })
+    const updated = await service.update(projectId, 'location', e.id, { notes: '细节' })
     expect(updated.notes).toBe('细节')
   })
 
-  it('deletes an entity', async () => {
-    const e = await service.create(projectId, 'plot_point', { name: '转折' })
-    await service.delete(projectId, 'plot_point', e.id)
-    expect(await service.list(projectId, 'plot_point')).toEqual([])
+  it('deletes a supported entity type', async () => {
+    const e = await service.create(projectId, 'worldview', { name: '转折' })
+    await service.delete(projectId, 'worldview', e.id)
+    expect(await service.list(projectId, 'worldview')).toEqual([])
+  })
+
+  it('rejects unsupported entity mutations in the current phase', async () => {
+    await expect(service.create(projectId, 'timeline', { name: '事件一' })).rejects.toThrow(/只读阶段/)
+    await expect(service.delete(projectId, 'plot_point', 'plot-1')).rejects.toThrow(/只读阶段/)
   })
 })

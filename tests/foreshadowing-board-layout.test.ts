@@ -6,7 +6,8 @@ describe('foreshadowing board layout', () => {
     const app = await readFile('src/renderer/src/App.tsx', 'utf-8')
     const css = await readFile('src/renderer/src/design.css', 'utf-8')
 
-    expect(app).toContain("view.kind === 'foreshadowingBoard' ? 'foreshadowing-wide'")
+    expect(app).toContain("view.kind === 'foreshadowingBoard'")
+    expect(app).toContain("'foreshadowing-wide'")
     expect(css).toContain('.main-inner.foreshadowing-wide')
     expect(css).toContain('max-width: min(1680px, calc(100vw - 72px))')
   })

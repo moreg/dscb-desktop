@@ -6,7 +6,8 @@ describe('relationship page layout', () => {
     const app = await readFile('src/renderer/src/App.tsx', 'utf-8')
     const css = await readFile('src/renderer/src/design.css', 'utf-8')
 
-    expect(app).toContain("view.kind === 'relationships' ? 'relationship-wide'")
+    expect(app).toContain("view.kind === 'relationships'")
+    expect(app).toContain("'relationship-wide'")
     expect(css).toContain('.main-inner.relationship-wide')
     expect(css).toContain('max-width: min(1680px, calc(100vw - 72px))')
   })

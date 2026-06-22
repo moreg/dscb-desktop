@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
+import { ChapterService } from './data/chapter-service'
 import { MemoryService } from './data/memory-service'
 import { MemoryEntityService } from './data/memory-entity-service'
 import { SecretStore } from './data/secret-store'
@@ -12,6 +13,7 @@ import { OutlineService } from './data/outline-service'
 import { WriteService } from './data/write-service'
 import { DiagnosticsService } from './data/diagnostics-service'
 import { FigureService } from './data/figure-service'
+import { StyleProfileService } from './data/style-profile-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
@@ -23,6 +25,7 @@ import { registerSettingsIpc } from './ipc/settings'
 import { registerUsageIpc } from './ipc/usage'
 import { registerDiagnosticsIpc } from './ipc/diagnostics'
 import { registerFigureIpc } from './ipc/figure'
+import { registerStyleIpc } from './ipc/styles'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -32,6 +35,7 @@ function createWindow(): void {
     height: 800,
     show: false,
     autoHideMenuBar: true,
+    icon: join(__dirname, '../../build/icon.ico'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -68,7 +72,8 @@ app.whenReady().then(async () => {
 
   registerLibraryIpc(projectService)
   registerProjectsIpc(projectService)
-  registerChaptersIpc(projectService)
+  const chapterService = new ChapterService(projectService)
+  registerChaptersIpc(projectService, chapterService)
   registerSettingsIpc(settings, defaultProjectsRoot)
   registerUsageIpc(usageRepo, settings)
   const memoryService = new MemoryService(projectService)
@@ -80,12 +85,14 @@ app.whenReady().then(async () => {
   registerLlmIpc(secret, llmService)
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
-  const writeService = new WriteService(projectService, llmService)
+  const writeService = new WriteService(projectService, llmService, undefined, chapterService)
   registerWriteIpc(writeService)
   const diagnosticsService = new DiagnosticsService(projectService)
   registerDiagnosticsIpc(diagnosticsService)
   const figureService = new FigureService(projectService)
   registerFigureIpc(figureService)
+  const styleProfileService = new StyleProfileService(projectService, llmService)
+  registerStyleIpc(styleProfileService, projectService)
 
   if (!process.env['ELECTRON_RENDERER_URL']) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {

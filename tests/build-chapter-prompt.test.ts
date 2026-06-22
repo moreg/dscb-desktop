@@ -6,9 +6,10 @@ import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { OutlineRepository } from '../src/main/data/outline-repository'
 import { CharacterRepository } from '../src/main/data/character-repository'
-import { ChapterRepository } from '../src/main/data/chapter-repository'
 import { ForeshadowingRepository } from '../src/main/data/foreshadowing-repository'
 import { WriteService } from '../src/main/data/write-service'
+import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
+import { WriteFlowService } from '../src/main/data/write-flow-service'
 import type { LlmService, GenerateOptions } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 
@@ -93,10 +94,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
 
   it('user prompt includes prev chapter content tail when available', async () => {
     const dir = await ps.resolveDir(projectId)
-    await new ChapterRepository(dir).create({ title: '第一章' })
-    await new ChapterRepository(dir).create({ title: '第二章' })
+    // 新数据源：上一章正文写入 ProseRepo
     const longPrev = '开头无关内容。'.repeat(200) + '上一章末尾的关键悬念。'
-    await new ChapterRepository(dir).updateContent(1, longPrev)
+    await new ProseRepo(dir).write(1, longPrev)
 
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 2)
@@ -191,5 +191,52 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     expect(opts.systemPrompt).toBeDefined()
     expect(opts.systemPrompt).toContain('章末结尾硬性原则')
     expect(opts.meta?.feature).toBe('chapter')
+  })
+})
+
+describe('buildChapterPrompt with structured prev ending state (Phase 12 Task 1)', () => {
+  let root: string
+  let projectId: string
+  let ps: ProjectService
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'aw-p12t1-'))
+    const library = new LibraryRepository(path.join(root, 'library.json'))
+    ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
+    projectId = (await ps.create({ name: '青云志', genre: '玄幻修真' })).id
+  })
+
+  it('injects structured prev ending state into user prompt', async () => {
+    const dir = await ps.resolveDir(projectId)
+    // 新数据源：上一章正文写入 ProseRepo
+    await new ProseRepo(dir).write(1, '林远在客栈打坐。门外传来脚步声。')
+
+    // mock LLM：extractEndingState 调用返回结构化 JSON
+    const endingJson = JSON.stringify({
+      characterPositions: [{ name: '林远', location: '客栈', action: '打坐' }],
+      characterStates: [{ name: '林远', emotion: '警觉', body: '无伤', items: '长剑' }],
+      timePoint: '深夜',
+      unfinished: ['门外脚步声未确认身份'],
+      suspense: '门外脚步声',
+      props: ['师父留下的玉佩']
+    })
+    const flow = new WriteFlowService(mockLlm(endingJson))
+    const service = new WriteService(ps, mockLlm('正文'), flow)
+    const { user } = await service.buildChapterPrompt(projectId, 2)
+
+    expect(user).toContain('上一章结尾状态')
+    expect(user).toContain('林远')
+    expect(user).toContain('客栈')
+    expect(user).toContain('深夜')
+    expect(user).toContain('门外脚步声')
+    expect(user).toContain('师父留下的玉佩')
+    expect(user).toContain('本章必须回应')
+    expect(user).toContain('本章必须处理')
+  })
+
+  it('omits structured state section when prevTail is empty', async () => {
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 1)
+    expect(user).not.toContain('上一章结尾状态')
   })
 })

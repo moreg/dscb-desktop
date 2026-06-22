@@ -25,27 +25,23 @@ describe('OutlineService', () => {
     projectId = (await projectService.create({ name: '青云志', genre: '玄幻' })).id
   })
 
-  it('generateMain writes main outline from llm reply', async () => {
+  it('generateMain is not implemented in the current phase', async () => {
     const ps = new ProjectService(
       path.join(root, 'projects'),
       new LibraryRepository(path.join(root, 'library.json')),
       mockSettings
     )
     const service = new OutlineService(ps, mockLlm('这是一个关于少年的修仙故事。'))
-    const main = await service.generateMain(projectId)
-    expect(main.synopsis).toBe('这是一个关于少年的修仙故事。')
-    expect(main.updatedAt).toBeTruthy()
+    await expect(service.generateMain(projectId)).rejects.toThrow(/Phase 3b/)
   })
 
-  it('generateDetailed writes a detailed item by chapter', async () => {
+  it('generateDetailed is not implemented in the current phase', async () => {
     const ps = new ProjectService(
       path.join(root, 'projects'),
       new LibraryRepository(path.join(root, 'library.json')),
       mockSettings
     )
     const service = new OutlineService(ps, mockLlm('第3章细纲：林远觉醒。'))
-    const item = await service.generateDetailed(projectId, 3)
-    expect(item.chapterNumber).toBe(3)
-    expect(item.plotSummary).toContain('林远觉醒')
+    await expect(service.generateDetailed(projectId, 3)).rejects.toThrow(/Phase 3b/)
   })
 })

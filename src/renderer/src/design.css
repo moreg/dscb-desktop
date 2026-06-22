@@ -2334,3 +2334,696 @@ pre.body {
 :root.dark pre.body { color: var(--ink); }
 :root.dark .kanban-col { background: var(--surface-2); }
 :root.dark .timeline-item::before { background: var(--surface); border-color: var(--vermilion); }
+
+/* =========================================================
+   批量续写对话框（Phase 12 Task 9）
+   ========================================================= */
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.batch-progress {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-size: 13px;
+}
+.batch-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.batch-progress-count {
+  color: var(--ink-2);
+  font-family: var(--font-kai);
+  letter-spacing: 0.04em;
+}
+.batch-progress-current {
+  color: var(--ink);
+  margin: 4px 0;
+}
+.batch-progress-reason {
+  color: var(--vermilion);
+  font-size: 12px;
+  margin-top: 4px;
+}
+.batch-progress-error {
+  color: var(--danger, var(--vermilion));
+  font-size: 12px;
+  margin-top: 4px;
+}
+.batch-progress-completed {
+  color: var(--ink-3);
+  font-size: 12px;
+  margin-top: 6px;
+  font-family: var(--font-kai);
+}
+.batch-last-result {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-size: 13px;
+}
+.batch-last-result-head {
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 6px;
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+.batch-last-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--ink-2);
+}
+.batch-last-result-list li {
+  padding: 2px 0;
+}
+.batch-streaming {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  max-height: 200px;
+  overflow: auto;
+}
+.batch-streaming-head {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+  font-family: var(--font-kai);
+}
+.batch-streaming-text {
+  margin: 0;
+  font-family: var(--font-kai);
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.6;
+}
+.error-text {
+  color: var(--vermilion);
+  font-size: 13px;
+  margin: 8px 0;
+  font-family: var(--font-kai);
+}
+.chip.status-pending     { background: var(--surface-2); color: var(--ink-2); }
+.chip.status-generating  { background: var(--inkstone-soft); color: var(--inkstone); border-color: transparent; }
+.chip.status-flow        { background: var(--inkstone-soft); color: var(--inkstone); border-color: transparent; }
+.chip.status-paused      { background: var(--vermilion-soft); color: var(--vermilion); border-color: transparent; }
+.chip.status-completed   { background: var(--success-soft); color: var(--success); border-color: transparent; }
+.chip.status-failed      { background: var(--vermilion-soft); color: var(--vermilion); border-color: transparent; }
+
+/* =========================================================
+   AI 味检查面板（PR2 + zh-humanizer 增量）
+   ========================================================= */
+.audit-panel {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface-1);
+  padding: 8px 10px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.audit-panel-idle { color: var(--ink-2); }
+.audit-panel-blocked { border-color: var(--vermilion); }
+.audit-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.audit-panel-title { font-weight: 600; }
+.audit-counts { display: inline-flex; gap: 6px; font-size: 12px; }
+.audit-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+.audit-pill-error { background: var(--vermilion-soft); color: var(--vermilion); border-color: transparent; }
+.audit-pill-warn  { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+.audit-pill-info  { background: var(--inkstone-soft); color: var(--inkstone); border-color: transparent; }
+.audit-wordcount { font-size: 12px; color: var(--ink-2); }
+.audit-blocked-hint { color: var(--vermilion); font-size: 12px; }
+.audit-section { margin-top: 8px; }
+.audit-section-title { margin: 0 0 4px; font-size: 12.5px; font-weight: 600; }
+.audit-list { margin: 0; padding-left: 16px; list-style: disc; }
+.audit-item { margin: 4px 0; line-height: 1.5; }
+.audit-item-error  { color: var(--vermilion); }
+.audit-item-warn   { color: var(--ink-1); }
+.audit-item-info   { color: var(--ink-2); }
+.audit-message { margin-left: 4px; }
+.audit-snippet {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 1px 4px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  font-family: var(--font-kai);
+  font-size: 12px;
+  color: var(--ink-1);
+  max-width: 100%;
+  word-break: break-all;
+}
+.audit-suggestion { display: block; margin-top: 2px; color: var(--ink-2); font-size: 12px; }
+.audit-rewrite-result { margin-top: 6px; }
+.audit-rewrite-diff {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 6px;
+  align-items: stretch;
+}
+.audit-rewrite-side { display: flex; flex-direction: column; min-width: 0; }
+.audit-rewrite-side-label {
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+.audit-rewrite-side-label.rewritten-label { color: var(--success); }
+.audit-rewrite-side-text {
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-family: var(--font-kai);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--line-soft);
+}
+.audit-rewrite-side-text.original { background: var(--vermilion-soft); color: var(--ink-1); border-color: transparent; }
+.audit-rewrite-side-text.rewritten { background: var(--success-soft); color: var(--ink-1); border-color: transparent; }
+.audit-rewrite-arrow {
+  align-self: center;
+  color: var(--ink-2);
+  font-size: 18px;
+  padding: 0 4px;
+}
+.audit-rewrite-reason {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: var(--surface-2);
+  border-left: 2px solid var(--inkstone);
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* =========================================================
+   撤销历史下拉菜单（P4-B）
+   ========================================================= */
+.audit-undo-menu-root {
+  display: inline-block;
+}
+.audit-undo-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  min-width: 280px;
+  max-width: 360px;
+  background: var(--surface-1);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 4px 0;
+  font-size: 12.5px;
+}
+.audit-undo-dropdown-title {
+  padding: 4px 10px;
+  color: var(--ink-2);
+  font-size: 11px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 2px;
+}
+.audit-undo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.audit-undo-item {
+  margin: 0;
+  padding: 0;
+}
+.audit-undo-item-btn {
+  display: flex !important;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 4px 10px !important;
+  border-radius: 0 !important;
+  text-align: left;
+  font-size: 12px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  justify-content: flex-start !important;
+}
+.audit-undo-item-btn:hover {
+  background: var(--surface-2) !important;
+}
+.audit-undo-from { color: var(--vermilion); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.audit-undo-arrow { color: var(--ink-2); flex: 0 0 auto; }
+.audit-undo-to { color: var(--success); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.audit-undo-dropdown-footer {
+  border-top: 1px solid var(--line-soft);
+  padding: 4px 6px;
+  margin-top: 2px;
+  text-align: center;
+}
+.audit-applied-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--success);
+  background: var(--success-soft);
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+/* =========================================================
+   撤销失败 toast（P6-C）
+   ========================================================= */
+.undo-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 100;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: var(--font-kai);
+  max-width: 360px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  animation: undo-toast-in 0.2s ease-out;
+}
+.undo-toast-warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border: 1px solid var(--warning);
+}
+.undo-toast-error {
+  background: var(--vermilion-soft);
+  color: var(--vermilion);
+  border: 1px solid var(--vermilion);
+}
+@keyframes undo-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* =========================================================
+   用量统计 popover（P10-A）
+   ========================================================= */
+.usage-popover-root {
+  display: inline-block;
+}
+.usage-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 280px;
+  background: var(--surface-1);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+.usage-popover-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.usage-popover-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.usage-popover-cell {
+  text-align: center;
+  padding: 4px;
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+.usage-popover-cell .label {
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-bottom: 2px;
+}
+.usage-popover-cell .tokens {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.usage-popover-cell .cost {
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-top: 2px;
+}
+.usage-popover-features {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
+}
+.usage-popover-section-title {
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.usage-popover-row {
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  padding: 2px 0;
+  color: var(--ink-1);
+}
+
+/* =========================================================
+   用量趋势图（P15-A：7 日小柱状图）
+   ========================================================= */
+.usage-popover-trend {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.usage-trend-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 80px;
+  margin-top: 4px;
+}
+.usage-trend-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+}
+.usage-trend-bar-wrap {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.usage-trend-bar {
+  width: 80%;
+  background: var(--inkstone-soft);
+  border-top: 2px solid var(--inkstone);
+  border-radius: 2px 2px 0 0;
+  min-height: 2px;
+  transition: height 0.2s ease;
+}
+.usage-trend-label {
+  font-size: 9px;
+  color: var(--ink-2);
+  margin-top: 2px;
+}
+.usage-trend-value {
+  font-size: 9px;
+  color: var(--ink-1);
+  font-weight: 600;
+}
+.usage-trend-col {
+  cursor: pointer;
+}
+.usage-trend-col:hover .usage-trend-bar {
+  background: var(--vermilion-soft);
+  border-top-color: var(--vermilion);
+}
+.usage-trend-col.selected .usage-trend-bar {
+  background: var(--vermilion-soft);
+  border-top-color: var(--vermilion);
+  box-shadow: 0 0 0 1px var(--vermilion);
+}
+.usage-trend-col.selected .usage-trend-label,
+.usage-trend-col.selected .usage-trend-value {
+  color: var(--vermilion);
+  font-weight: 700;
+}
+
+/* =========================================================
+   单日详情（P16-C：趋势图下钻）
+   ========================================================= */
+.usage-day-detail {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
+  margin-top: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.usage-day-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+}
+.usage-day-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--surface-2);
+}
+.usage-day-list-item:last-child {
+  border-bottom: none;
+}
+.usage-day-time {
+  color: var(--ink-2);
+  font-family: var(--font-mono, monospace);
+  min-width: 36px;
+}
+.usage-day-feature {
+  color: var(--ink-1);
+  font-weight: 600;
+  min-width: 56px;
+}
+.usage-day-meta {
+  color: var(--ink-2);
+  margin-left: auto;
+  font-size: 10.5px;
+}
+
+/* =========================================================
+   按项目 / 按章节统计（P17-A）
+   ========================================================= */
+.by-project-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11.5px;
+}
+.by-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--surface-2);
+}
+.by-project-row:last-child {
+  border-bottom: none;
+}
+.by-project-row .project-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--ink-1);
+  font-size: 11px;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.by-project-row .chapter-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  color: var(--inkstone);
+  background: var(--inkstone-soft);
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+.by-project-row .meta {
+  margin-left: auto;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+/* =========================================================
+   自动保存草稿 banner（P19-A）
+   ========================================================= */
+.draft-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-top: 8px;
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--warning);
+}
+
+/* =========================================================
+   7 日热力图（P19-B）
+   ========================================================= */
+.weekly-stats {
+  margin-top: 6px;
+}
+.weekly-heatmap {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  align-items: flex-end;
+}
+.heatmap-cell {
+  width: 18px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  font-size: 8px;
+  color: var(--ink-2);
+  cursor: default;
+}
+.heatmap-cell.today {
+  border-color: var(--vermilion);
+}
+.heatmap-cell.heat-1 { background: var(--success-soft); }
+.heatmap-cell.heat-2 { background: var(--inkstone-soft); border-color: var(--inkstone); }
+.heatmap-cell.heat-3 { background: var(--success); color: var(--surface-1); border-color: var(--success); }
+.heatmap-cell.heat-4 { background: var(--vermilion); color: var(--surface-1); border-color: var(--vermilion); }
+.heatmap-day-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 8px;
+  padding-bottom: 1px;
+}
+
+/* =========================================================
+   快捷键面板（P19-C：Cmd+/ 弹出）
+   ========================================================= */
+.shortcut-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.shortcut-panel {
+  background: var(--surface-1);
+  border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.15);
+  padding: 16px 20px;
+  min-width: 380px;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.shortcut-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.shortcut-group { margin-bottom: 12px; }
+.shortcut-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 6px;
+}
+.shortcut-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.shortcut-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12.5px;
+}
+.shortcut-desc { color: var(--ink-1); }
+.shortcut-keys {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  color: var(--ink-1);
+}
+
+/* =========================================================
+   本章出场角色速查（P19-D）
+   ========================================================= */
+.outline-characters-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.character-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--inkstone);
+  background: var(--inkstone-soft);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: default;
+}
+.character-chip:hover {
+  border-color: var(--inkstone);
+}
+
+/* =========================================================
+   保存指示器（P11-A）
+   ========================================================= */
+.save-indicator {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--success);
+  background: var(--success-soft);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  white-space: nowrap;
+}

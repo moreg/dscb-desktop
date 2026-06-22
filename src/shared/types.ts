@@ -68,6 +68,7 @@ export interface ProjectData {
   id: string
   name: string
   genre?: string
+  defaultStyleProfileId?: string
   description?: string
   targetChapters?: number
   chapterWordCount?: number
@@ -108,6 +109,55 @@ export interface CreateProjectDataInput {
   customPath?: string
 }
 
+export type StyleSourceType = 'sampleText'
+
+export interface StyleAnalysisResult {
+  identifiedStyle: string
+  sentencePatterns: string[]
+  vocabularyPreferences: string[]
+  punctuationAndRhythm: string[]
+  narrativePerspective: string[]
+  tone: string[]
+  narrativeTemplates: string[]
+  dos: string[]
+  donts: string[]
+  stylePrompt: string
+}
+
+export interface StyleProfile extends StyleAnalysisResult {
+  id: string
+  name: string
+  sourceType: StyleSourceType
+  sampleText: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateStyleProfileInput {
+  name: string
+  sourceType: StyleSourceType
+  sampleText: string
+  identifiedStyle: string
+  sentencePatterns: string[]
+  vocabularyPreferences: string[]
+  punctuationAndRhythm: string[]
+  narrativePerspective: string[]
+  tone: string[]
+  narrativeTemplates: string[]
+  dos: string[]
+  donts: string[]
+  stylePrompt: string
+}
+
+export interface UpdateStyleProfileInput {
+  name?: string
+}
+
+export interface WriteStyleSelection {
+  mode: 'projectDefault' | 'custom'
+  styleProfileId: string | null
+}
+
 export interface CreateChapterInput {
   title: string
 }
@@ -126,10 +176,48 @@ export interface RendererApi {
   scanProjects: () => Promise<ProjectMeta[]>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
+  listStyleProfiles: (projectId: string) => Promise<StyleProfile[]>
+  createStyleProfile: (projectId: string, input: CreateStyleProfileInput) => Promise<StyleProfile>
+  updateStyleProfile: (
+    projectId: string,
+    styleProfileId: string,
+    patch: UpdateStyleProfileInput
+  ) => Promise<StyleProfile>
+  deleteStyleProfile: (projectId: string, styleProfileId: string) => Promise<void>
+  extractStyleProfile: (
+    projectId: string,
+    sampleText: string,
+    name?: string
+  ) => Promise<StyleAnalysisResult>
+  setProjectDefaultStyleProfile: (
+    projectId: string,
+    styleProfileId: string | null
+  ) => Promise<ProjectData>
   listChapters: (projectId: string) => Promise<ChapterMeta[]>
   getChapter: (projectId: string, n: number) => Promise<ChapterContent>
   createChapter: (projectId: string, input: CreateChapterInput) => Promise<ChapterMeta>
   updateChapterContent: (projectId: string, n: number, content: string) => Promise<ChapterMeta>
+  /** P19-A：自动保存草稿（写 / 读 / 清空） */
+  saveDraft: (projectId: string, chapterNumber: number, content: string) => Promise<{ at: number }>
+  readDraft: (
+    projectId: string,
+    chapterNumber: number
+  ) => Promise<{ content: string; at: number; different: boolean } | null>
+  discardDraft: (projectId: string, chapterNumber: number) => Promise<boolean>
+  /** P19-E：字数汇总（节奏图谱 + 章节进度笔记） */
+  getChapterWordSummary: (projectId: string) => Promise<{
+    chapters: Array<{
+      chapterNumber: number
+      title: string
+      emotion: number
+      wordCount: number
+      status: 'unknown' | 'outline' | 'drafted' | 'finished'
+    }>
+    totalWords: number
+    estimatedTotal: number
+    progress: number
+    byStatus: Record<'unknown' | 'outline' | 'drafted' | 'finished', number>
+  } | null>
   updateChapterMeta: (projectId: string, n: number, patch: UpdateChapterMetaInput) => Promise<ChapterMeta>
   deleteChapter: (projectId: string, n: number) => Promise<void>
   listCharacters: (projectId: string) => Promise<Character[]>
@@ -197,6 +285,11 @@ export interface RendererApi {
   updateMainOutline: (projectId: string, patch: Partial<MainOutline>) => Promise<MainOutline>
   generateMainOutline: (projectId: string) => Promise<MainOutline>
   listDetailedOutline: (projectId: string) => Promise<DetailedOutlineItem[]>
+  updateDetailedOutline: (
+    projectId: string,
+    chapterNumber: number,
+    patch: Partial<DetailedOutlineItem>
+  ) => Promise<DetailedOutlineItem>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
   getRhythm: (projectId: string) => Promise<RhythmEntry[]>
   getVolumes: (projectId: string) => Promise<Volume[]>
@@ -208,6 +301,7 @@ export interface RendererApi {
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
+    styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   getProjectsRoot: () => Promise<string>
@@ -229,7 +323,86 @@ export interface RendererApi {
     projectId: string,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
+  checkOutlineStream: (
+    projectId: string,
+    chapterNumber: number,
+    outline: string,
+    content: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  /** 记忆提取（流式）：从正文提取新增角色/地点/情节/伏笔/状态变化 */
+  extractMemoryStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
+  applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
+  /** 用户确认后：应用新增角色 */
+  applyNewCharacters: (
+    projectId: string,
+    chars: MemoryExtraction['newCharacters']
+  ) => Promise<number>
+  /** 用户确认后：应用新增地点 */
+  applyNewLocations: (
+    projectId: string,
+    locs: MemoryExtraction['newLocations']
+  ) => Promise<number>
+  /** 用户确认后：应用新增伏笔 */
+  applyNewForeshadowings: (
+    projectId: string,
+    fs: MemoryExtraction['newForeshadowings']
+  ) => Promise<number>
+  /** 节奏评估（流式）：LLM 评估实际情绪值 */
+  evaluateRhythmStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  /** 节奏回填：把评估值写回节奏图谱.html */
+  applyRhythmEvaluation: (
+    projectId: string,
+    evaluation: RhythmEvaluation
+  ) => Promise<RhythmApplyResult>
+  /** 图解生成（流式）：LLM 判断关键转折点并生成 Mermaid */
+  generateFigureStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  /** 保存图解 HTML 到 图解/ 目录 */
+  saveFigure: (
+    projectId: string,
+    fileName: string,
+    html: string
+  ) => Promise<string>
+  /** 批量续写：从 fromChapter 到 toChapter 逐章生成，每章完成后暂停等用户确认 */
+  generateBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    styleProfileId: string | null | undefined,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    onToken?: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
+  /** 继续批量续写：从 fromChapter+1 开始继续 */
+  resumeBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    styleProfileId: string | null | undefined,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    onToken?: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   getUsageSummary: () => Promise<UsageSummary>
+  /** P16-C：按日期获取 LLM 调用详情（点击趋势图某天柱状图） */
+  getUsageDayDetail: (date: string) => Promise<UsageRecord[]>
+  /** P17-A：按项目聚合（所有项目） */
+  getUsageByProject: () => Promise<ProjectUsage[]>
+  /** P17-A：按项目+章节聚合（所有项目的所有章节） */
+  getUsageByChapter: () => Promise<ChapterUsage[]>
+  /** P17-A：单章 LLM 调用详情 */
+  getUsageChapterDetail: (projectId: string, chapterNumber: number) => Promise<UsageRecord[]>
   clearUsage: () => Promise<boolean>
   getPricing: () => Promise<{ inputRate: number; outputRate: number }>
   setPricing: (patch: { inputRate?: number; outputRate?: number }) => Promise<{ inputRate: number; outputRate: number }>
@@ -237,6 +410,20 @@ export interface RendererApi {
   setDailyWordGoal: (goal: number) => Promise<number>
   getPomodoroConfig: () => Promise<{ focus: number; brk: number }>
   setPomodoroConfig: (cfg: { focus: number; brk: number }) => Promise<{ focus: number; brk: number }>
+  /** 续写质检（PR2）：对正文文本跑章末/禁用词/字数三项检查 */
+  auditChapter: (projectId: string, content: string) => Promise<AuditReport>
+  /** AI 改写命中段：按 humanizer 技能 prompt 改写一段文本 */
+  humanizeSegment: (
+    projectId: string,
+    snippet: string,
+    violationType: string,
+    chapterNumber?: number
+  ) => Promise<{ rewritten: string; reason: string }>
+  getWriteAuditConfig: () => Promise<WriteAuditConfig>
+  setWriteAuditConfig: (cfg: Partial<WriteAuditConfig>) => Promise<WriteAuditConfig>
+  /** P13-C：用量预警配置（当月 AI 费用阈值） */
+  getCostAlertConfig: () => Promise<CostAlertConfig>
+  setCostAlertConfig: (cfg: Partial<CostAlertConfig>) => Promise<CostAlertConfig>
 }
 
 export interface Character {
@@ -505,6 +692,75 @@ export interface ChapterFigure {
   sections: FigureSection[]
 }
 
+/* ==========================================================
+   续写质检（PR2）
+   ========================================================== */
+
+export type AuditSeverity = 'error' | 'warn' | 'info'
+
+/**
+ * 质检类别。与「正文写作」技能的章末/禁用词/字数 + zh-humanizer 1-16 规则 + 题材例外检查项对应。
+ * - ending: 章末形式（对话/事件 vs 说教/AI 抒怀）
+ * - forbidden_word: 12 类禁用高频词命中（含正则模式）
+ * - word_count: 字数偏离 1500-3500 区间
+ * - rule: zh-humanizer 识别规则 1-16（破折号/三段式/Emoji/聊天语残留/空洞结尾等算法可检测项）
+ */
+export type AuditCategory = 'ending' | 'forbidden_word' | 'word_count' | 'rule'
+
+export interface AuditViolation {
+  category: AuditCategory
+  severity: AuditSeverity
+  /** 用户可读的简短描述（如"章末未以对话或事件结尾"） */
+  message: string
+  /** 命中的原文片段（章末/禁用词上下文） */
+  snippet?: string
+  /** 在正文中的字符偏移（用于跳转高亮） */
+  offset?: number
+  /** 禁用词的类别名（如"心理描写模板"），仅 forbidden_word 用 */
+  wordCategory?: string
+  /** 命中的词条本身，仅 forbidden_word 用 */
+  word?: string
+  /** 规则 id（zh-humanizer 1-16），仅 rule 用 */
+  ruleId?: string
+  /** 替换建议 */
+  suggestion?: string
+}
+
+export interface AuditReport {
+  schemaVersion: 1
+  /** 正文中文字数 */
+  wordCount: number
+  /** 三大类是否分别通过（无 error 级违规） */
+  passed: { ending: boolean; forbiddenWords: boolean; wordCount: boolean }
+  /** 各 severity 计数（错误数即等于阻断 strict 模式所需修复数） */
+  counts: { error: number; warn: number; info: number }
+  violations: AuditViolation[]
+}
+
+export type WriteAuditMode = 'soft' | 'strict'
+
+export interface WriteAuditConfig {
+  /** 续写完成后是否自动跑质检 */
+  enabled: boolean
+  /** soft：违规标红仍可保存；strict：error 必须修复才能保存 */
+  mode: WriteAuditMode
+}
+
+/**
+ * P13-C：用量预警配置（当月 AI 费用阈值）。
+ * enabled: false → 完全不弹预警（适合测试 / 不想被打扰）
+ * warning: 达到此费用（元）弹 warning toast
+ * exceeded: 达到此费用（元）弹 error toast（更强警告）
+ * blockOnExceeded: true → aiGenerate 在 exceeded 时弹确认（用户可取消）
+ * 约束：0 < warning < exceeded；非法时降级为默认值
+ */
+export interface CostAlertConfig {
+  enabled: boolean
+  warning: number
+  exceeded: number
+  blockOnExceeded: boolean
+}
+
 export interface UsageBucket {
   input: number
   output: number
@@ -512,9 +768,226 @@ export interface UsageBucket {
   cost: number
 }
 
+/** P16-C + P17-A：单条 LLM 调用的用量记录（IPC 返回） */
+export interface UsageRecord {
+  at: string
+  feature: string
+  projectId?: string
+  chapterNumber?: number
+  model: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
+/** P15-A：单日用量（趋势图一格） */
+export interface DailyUsage {
+  /** YYYY-MM-DD */
+  date: string
+  total: number
+  cost: number
+  calls: number
+}
+
+/** P17-A：按项目聚合（一个项目一行） */
+export interface ProjectUsage {
+  projectId: string
+  total: number
+  cost: number
+  calls: number
+}
+
+/** P17-A：按项目+章节聚合（一个章节一行） */
+export interface ChapterUsage extends ProjectUsage {
+  chapterNumber: number
+}
+
 export interface UsageSummary {
   today: UsageBucket
   month: UsageBucket
   allTime: UsageBucket
   byFeature: { feature: string; total: number; cost: number; calls: number }[]
+  /** P15-A：最近 7 天每日用量（按日期升序，固定 7 条） */
+  byDay: DailyUsage[]
+}
+
+/* ==========================================================
+   Phase 12：正文写作技能流程对齐
+   ========================================================== */
+
+/** 上一章结尾状态（LLM 从 prevTail 提取） */
+export interface PrevEndingState {
+  chapterNumber: number
+  /** 人物位置：[{ name, location, action }] */
+  characterPositions: { name: string; location: string; action: string }[]
+  /** 人物状态：[{ name, emotion, body, items }] */
+  characterStates: { name: string; emotion: string; body: string; items: string }[]
+  /** 时间点：如"傍晚/子时/刚入夜" */
+  timePoint: string
+  /** 未完成事项：[对话/动作/事件] */
+  unfinished: string[]
+  /** 章末悬念/钩子 */
+  suspense: string
+  /** 关键道具 */
+  props: string[]
+  /** 提取失败时的原始尾段（兜底） */
+  rawTail?: string
+}
+
+/* ==========================================================
+   细纲对照（Phase 12 Task 3）
+   ========================================================== */
+
+/** 细纲对照差异类型（SKILL.md 5 种） */
+export type OutlineDiffType = 1 | 2 | 3 | 4 | 5
+
+export interface OutlineDiffItem {
+  /** 1=漏写 2=超纲增量 3=细节调整 4=核心事件改 5=结构性偏离 */
+  type: OutlineDiffType
+  typeLabel: '漏写' | '超纲增量' | '细节调整' | '核心事件改' | '结构性偏离'
+  /** 细纲内容 */
+  outline?: string
+  /** 正文内容 */
+  actual?: string
+  /** 处理建议 */
+  suggestion: string
+  /** 优先级 P0-P2 */
+  priority: 'P0' | 'P1' | 'P2'
+}
+
+export interface OutlineDiffReport {
+  chapterNumber: number
+  /** 5 类差异项 */
+  diffs: OutlineDiffItem[]
+  /** 总体通过判定（无 P0/P1 即通过） */
+  passed: boolean
+}
+
+/* ==========================================================
+   记忆回写（Phase 12 Task 4-6）
+   ========================================================== */
+
+/** 记忆提取结果（LLM 从正文提取） */
+export interface MemoryExtraction {
+  chapterNumber: number
+  /** 新增角色（需确认） */
+  newCharacters: { name: string; role: string; identity: string; personality: string }[]
+  /** 新增地点（需确认） */
+  newLocations: { name: string; category: string; notes: string }[]
+  /** 新增伏笔（需确认） */
+  newForeshadowings: { content: string; expectedCollect?: number; note?: string }[]
+  /** 新增情节（自动追加到核心情节.md） */
+  newPlotPoints: { title: string; event: string; coolPoint?: string }[]
+  /** 角色状态变化（自动更新） */
+  characterStateChanges: { name: string; field: string; oldValue: string; newValue: string }[]
+  /** 伏笔回收（自动更新） */
+  collectedForeshadowings: { content: string; chapter: number }[]
+}
+
+/** 记忆应用结果 */
+export interface MemoryApplyResult {
+  applied: {
+    characters: number
+    locations: number
+    foreshadowings: number
+    plotPoints: number
+    stateChanges: number
+    collected: number
+  }
+  errors: string[]
+}
+
+/* ==========================================================
+   节奏图谱回填（Phase 12 Task 7）
+   ========================================================== */
+
+/** LLM 评估的实际节奏值（用于回填节奏图谱） */
+export interface RhythmEvaluation {
+  chapterNumber: number
+  /** LLM 评估的实际情绪值（0-10） */
+  actualEmotion: number
+  /** 细纲预期情绪值（从节奏图谱读取） */
+  expectedEmotion: number
+  /** 差异绝对值 |actual - expected| */
+  diff: number
+  /** 是否自动回写（diff ≤ 1 时 true） */
+  autoApply: boolean
+  /** LLM 评估理由（一句话） */
+  reason: string
+}
+
+/** 节奏回填应用结果 */
+export interface RhythmApplyResult {
+  /** 是否已回写（autoApply=true 或用户确认） */
+  applied: boolean
+  /** 回写前的情绪值 */
+  previousEmotion: number
+  /** 回写后的情绪值 */
+  newEmotion: number
+  /** actualized 标记是否已置为 true */
+  actualized: boolean
+}
+
+/* ==========================================================
+   Mermaid 图解生成（Phase 12 Task 8）
+   ========================================================== */
+
+/** LLM 生成的图解草稿（关键转折点触发） */
+export interface FigureDraft {
+  chapterNumber: number
+  /** 是否触发图解生成 */
+  shouldGenerate: boolean
+  /** 图解类型：战斗/势力/突破/关系/剧情/伏笔回收 */
+  type: string
+  /** 主题描述（用于文件名） */
+  topic: string
+  /** 文件名：[类型]_[主题].html */
+  fileName: string
+  /** Mermaid HTML 完整内容 */
+  html: string
+  /** LLM 判断理由 */
+  reason: string
+}
+
+/* ==========================================================
+   多章批量续写（Phase 12 Task 9）
+   ========================================================== */
+
+/** 批量续写进度 */
+export interface BatchProgress {
+  /** 总章数 */
+  total: number
+  /** 当前是第几章（1-based） */
+  current: number
+  /** 当前章号 */
+  currentChapter: number
+  /** 起始章号 */
+  fromChapter: number
+  /** 结束章号 */
+  toChapter: number
+  /** 状态 */
+  status: 'pending' | 'generating' | 'flow' | 'paused' | 'completed' | 'failed'
+  /** 暂停原因（差异/失败等） */
+  pauseReason?: string
+  /** 已完成章节 */
+  completed: number[]
+  /** 错误信息 */
+  error?: string
+}
+
+/** 单章完整流程结果（生成→质检→细纲对照→记忆→节奏→图解） */
+export interface ChapterFlowResult {
+  chapterNumber: number
+  /** 生成的正文 */
+  content: string
+  /** 质检报告 */
+  audit: AuditReport
+  /** 细纲对照差异 */
+  outlineDiff: OutlineDiffReport
+  /** 记忆提取 */
+  memory: MemoryExtraction
+  /** 节奏评估（可能为 null，LLM 失败时） */
+  rhythm: RhythmEvaluation | null
+  /** 图解草稿 */
+  figure: FigureDraft
 }

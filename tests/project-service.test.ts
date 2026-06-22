@@ -53,6 +53,7 @@ describe('ProjectService', () => {
 
   it('resolveDir caches directory across calls', async () => {
     const meta = await service.create({ name: 'X' })
+    ;(service as unknown as { dirCache: Map<string, string> }).dirCache.delete(meta.id)
     const listSpy = vi.spyOn(service['library'], 'list')
     await service.resolveDir(meta.id)
     await service.resolveDir(meta.id)

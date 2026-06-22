@@ -19,7 +19,8 @@ import type {
   ProviderConfig,
   RhythmEvaluation,
   ChapterFlowResult,
-  ListProvidersResult
+  ListProvidersResult,
+  CreateStyleProfileInput
 } from '../shared/types'
 
 const api = {
@@ -27,6 +28,17 @@ const api = {
   scanProjects: () => ipcRenderer.invoke('library:scan'),
   createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
   getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
+  listStyleProfiles: (projectId: string) => ipcRenderer.invoke('styles:list', projectId),
+  createStyleProfile: (projectId: string, input: CreateStyleProfileInput) =>
+    ipcRenderer.invoke('styles:create', { projectId, input }),
+  updateStyleProfile: (projectId: string, styleProfileId: string, patch: { name?: string }) =>
+    ipcRenderer.invoke('styles:update', { projectId, styleProfileId, patch }),
+  deleteStyleProfile: (projectId: string, styleProfileId: string) =>
+    ipcRenderer.invoke('styles:delete', { projectId, styleProfileId }),
+  extractStyleProfile: (projectId: string, sampleText: string, name?: string) =>
+    ipcRenderer.invoke('styles:extract', { projectId, sampleText, name }),
+  setProjectDefaultStyleProfile: (projectId: string, styleProfileId: string | null) =>
+    ipcRenderer.invoke('projects:setDefaultStyleProfile', { projectId, styleProfileId }),
   listChapters: (id: string) => ipcRenderer.invoke('chapters:list', id),
   getChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:get', id, n),
   createChapter: (id: string, input: CreateChapterInput) =>
@@ -138,6 +150,7 @@ const api = {
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
+    styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void
   ) => {
     const requestId = crypto.randomUUID()
@@ -149,7 +162,7 @@ const api = {
     }
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
-      .invoke('write:generateChapter', { projectId, chapterNumber, requestId })
+      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
@@ -300,6 +313,7 @@ const api = {
     projectId: string,
     fromChapter: number,
     toChapter: number,
+    styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void
   ) => {
@@ -323,7 +337,13 @@ const api = {
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
     return ipcRenderer
-      .invoke('write:generateBatch', { projectId, fromChapter, toChapter, requestId })
+      .invoke('write:generateBatch', {
+        projectId,
+        fromChapter,
+        toChapter,
+        styleProfileId,
+        requestId
+      })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
@@ -333,6 +353,7 @@ const api = {
     projectId: string,
     fromChapter: number,
     toChapter: number,
+    styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void
   ) => {
@@ -356,7 +377,13 @@ const api = {
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
     return ipcRenderer
-      .invoke('write:resumeBatch', { projectId, fromChapter, toChapter, requestId })
+      .invoke('write:resumeBatch', {
+        projectId,
+        fromChapter,
+        toChapter,
+        styleProfileId,
+        requestId
+      })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)

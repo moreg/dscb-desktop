@@ -6,6 +6,7 @@ export interface UsageRecord {
   at: string
   feature: string
   projectId?: string
+  chapterNumber?: number
   model: string
   inputTokens: number
   outputTokens: number

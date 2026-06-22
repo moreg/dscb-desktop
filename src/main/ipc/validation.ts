@@ -57,7 +57,11 @@ export function validateInput<T>(schema: z.ZodSchema<T>, input: unknown): T {
     return schema.parse(input)
   } catch (err) {
     if (err instanceof z.ZodError) {
-      throw new Error(`IPC_INPUT_INVALID: ${err.errors.map(e => e.path.join('.') + ': ' + e.message).join(', ')}`)
+      throw new Error(
+        `IPC_INPUT_INVALID: ${err.issues
+          .map((issue) => issue.path.join('.') + ': ' + issue.message)
+          .join(', ')}`
+      )
     }
     throw err
   }

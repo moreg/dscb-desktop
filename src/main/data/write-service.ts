@@ -9,6 +9,7 @@ import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { ProseRepo } from './skill-format/prose-repo'
 import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
+import { StyleProfileRepository } from './style-profile-repository'
 import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
 import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
 import { WriteFlowService } from './write-flow-service'
@@ -28,7 +29,8 @@ import type {
   PrevEndingState,
   RhythmApplyResult,
   RhythmEntry,
-  RhythmEvaluation
+  RhythmEvaluation,
+  StyleProfile
 } from '../../shared/types'
 import {
   parseFigureDraftJson,
@@ -62,13 +64,21 @@ export class WriteService {
     private readonly chapterService: ChapterService = new ChapterService(projectService)
   ) {}
 
-  async buildChapterPrompt(projectId: string, chapterNumber: number): Promise<ChapterPrompt> {
+  async buildChapterPrompt(
+    projectId: string,
+    chapterNumber: number,
+    styleProfileId?: string | null
+  ): Promise<ChapterPrompt> {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
+    const style = await this.loadStyleProfile(
+      dir,
+      styleProfileId ?? project.defaultStyleProfileId ?? null
+    )
 
     const ctx = await this.loadChapterContext(dir, chapterNumber)
 
-    const system = buildSystemPrompt(project.genre)
+    const system = buildSystemPrompt(project.genre, style)
     const user = renderUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -89,9 +99,11 @@ export class WriteService {
   async generateChapterStream(
     projectId: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    styleProfileIdOrOpts?: string | null | GenerateOptions,
+    maybeOpts: GenerateOptions = {}
   ): Promise<string> {
-    const prompt = await this.buildChapterPrompt(projectId, chapterNumber)
+    const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    const prompt = await this.buildChapterPrompt(projectId, chapterNumber, styleProfileId)
     return this.llm.generateStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
@@ -546,8 +558,10 @@ export class WriteService {
     fromChapter: number,
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    opts: GenerateOptions = {}
+    styleProfileIdOrOpts?: string | null | GenerateOptions,
+    maybeOpts: GenerateOptions = {}
   ): Promise<BatchProgress> {
+    const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     const total = toChapter - fromChapter + 1
     const completed: number[] = []
     const dir = await this.projectService.resolveDir(projectId)
@@ -561,7 +575,10 @@ export class WriteService {
           () => {
             // progress 内部回调，批量场景不细推
           },
-          opts
+          {
+            ...opts,
+            styleProfileId
+          } as GenerateOptions
         )
         // 保存正文
         await proseRepo.write(ch, result.content)
@@ -613,13 +630,16 @@ export class WriteService {
     fromChapter: number,
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    opts: GenerateOptions = {}
+    styleProfileIdOrOpts?: string | null | GenerateOptions,
+    maybeOpts: GenerateOptions = {}
   ): Promise<BatchProgress> {
+    const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     return this.generateChaptersBatch(
       projectId,
       fromChapter + 1,
       toChapter,
       onChapterComplete,
+      styleProfileId,
       opts
     )
   }
@@ -726,6 +746,15 @@ export class WriteService {
       ...opts,
       meta: { feature: 'relationship', projectId }
     })
+  }
+
+  private async loadStyleProfile(
+    projectDir: string,
+    styleProfileId: string | null
+  ): Promise<StyleProfile | null> {
+    if (!styleProfileId) return null
+    const data = await new StyleProfileRepository(projectDir).read()
+    return data.items.find((item) => item.id === styleProfileId) ?? null
   }
 
   /**
@@ -895,6 +924,21 @@ interface RenderInput {
   foreshadowings: Foreshadowing[]
   characters: Character[]
   chapterNumber: number
+}
+
+function normalizeStyleGenerateArgs(
+  styleProfileIdOrOpts?: string | null | GenerateOptions,
+  maybeOpts: GenerateOptions = {}
+): { styleProfileId: string | null; opts: GenerateOptions } {
+  if (
+    styleProfileIdOrOpts &&
+    typeof styleProfileIdOrOpts === 'object' &&
+    !Array.isArray(styleProfileIdOrOpts)
+  ) {
+    const styleOpts = styleProfileIdOrOpts as GenerateOptions & { styleProfileId?: string | null }
+    return { styleProfileId: styleOpts.styleProfileId ?? null, opts: styleOpts }
+  }
+  return { styleProfileId: (styleProfileIdOrOpts as string | null | undefined) ?? null, opts: maybeOpts }
 }
 
 function renderUserPrompt(input: RenderInput): string {

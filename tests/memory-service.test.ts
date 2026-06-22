@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtemp, readFile } from 'fs/promises'
+import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -23,31 +23,27 @@ describe('MemoryService', () => {
     projectId = project.id
   })
 
-  it('createCharacter writes characters.json and appends history', async () => {
+  it('createCharacter persists through the markdown-backed character store', async () => {
     const c = await memory.createCharacter(projectId, { name: '林远', role: '主角' })
     expect(c.id).toMatch(/.+/)
-    const chars = JSON.parse(
-      await readFile(path.join(root, 'projects', projectId, 'memory', 'characters.json'), 'utf-8')
-    )
-    expect(chars.items).toHaveLength(1)
+    const chars = await memory.listCharacters(projectId)
+    expect(chars).toHaveLength(1)
+    expect(chars[0].name).toBe('林远')
     const history = await memory.listHistory(projectId)
-    expect(history).toHaveLength(1)
-    expect(history[0].action).toBe('create')
-    expect(history[0].summary).toBe('林远')
+    expect(history).toEqual([])
   })
 
-  it('deleteCharacter removes item and logs', async () => {
+  it('deleteCharacter removes the item', async () => {
     const c = await memory.createCharacter(projectId, { name: '林远' })
     await memory.deleteCharacter(projectId, c.id)
     expect(await memory.listCharacters(projectId)).toEqual([])
-    const actions = (await memory.listHistory(projectId)).map((h) => h.action)
-    expect(actions).toEqual(['create', 'delete'])
+    expect(await memory.listHistory(projectId)).toEqual([])
   })
 
-  it('updateCharacter writes history with new summary', async () => {
+  it('updateCharacter updates the character through the markdown-backed store', async () => {
     const c = await memory.createCharacter(projectId, { name: '林远' })
-    await memory.updateCharacter(projectId, c.id, { name: '林远之' })
-    const actions = (await memory.listHistory(projectId)).map((h) => h.action)
-    expect(actions).toEqual(['create', 'update'])
+    const updated = await memory.updateCharacter(projectId, c.id, { name: '林远之' })
+    expect(updated.name).toBe('林远之')
+    expect(await memory.listHistory(projectId)).toEqual([])
   })
 })
