@@ -2,6 +2,7 @@ import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
+import { DetailedOutlineWriter, type DetailedOutlinePatch } from './skill-format/detailed-outline-writer'
 import { readText } from './skill-format/md-parser'
 import { writeTextAtomic } from './atomic'
 import { join } from 'path'
@@ -65,6 +66,57 @@ export class OutlineService {
       climax: e.climax,
       hook: ''
     }))
+  }
+
+  /**
+   * 更新指定章节的细纲。
+   * 写入 细纲/第NN卷.md，更新后重新读取返回最新值。
+   */
+  async updateDetailed(
+    projectId: string,
+    chapterNumber: number,
+    patch: Partial<DetailedOutlineItem>
+  ): Promise<DetailedOutlineItem> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const writer = new DetailedOutlineWriter(dir)
+
+    // 将 DetailedOutlineItem 的字段映射为 DetailedOutlinePatch
+    const patchForWriter: DetailedOutlinePatch = {
+      title: patch.title,
+      plotSummary: patch.plotSummary,
+      coolPoint: patch.coolPoint,
+      hook: patch.hook,
+      charactersAppearing: patch.charactersAppearing,
+      foreshadowings: patch.foreshadowings,
+      wordEstimate: patch.wordEstimate,
+      goldenLine: patch.goldenLine,
+      emotion: patch.emotion,
+      climax: patch.climax
+    }
+
+    await writer.update(chapterNumber, patchForWriter)
+
+    // 重新读取返回最新值
+    const items = await new DetailedOutlineMdRepo(dir).listAll()
+    const updated = items.find((d) => d.chapterNumber === chapterNumber)
+    if (!updated) {
+      throw new Error(`DETAILED_NOT_FOUND: 更新后找不到第 ${chapterNumber} 章的细纲`)
+    }
+
+    return {
+      chapterNumber: updated.chapterNumber,
+      title: updated.title,
+      plotSummary: updated.plotSummary,
+      coolPoint: updated.coolPoint,
+      hook: updated.hook,
+      charactersAppearing: updated.charactersAppearing,
+      foreshadowings: updated.foreshadowings,
+      wordEstimate: updated.wordEstimate,
+      goldenLine: updated.goldenLine,
+      volume: updated.volume,
+      emotion: updated.emotion,
+      climax: updated.climax
+    }
   }
 
   private async readOutline(projectId: string) {

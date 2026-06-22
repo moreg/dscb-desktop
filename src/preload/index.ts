@@ -14,7 +14,11 @@ import type {
   CreateRelationshipInput,
   UpdateRelationshipInput,
   MainOutline,
+  DetailedOutlineItem,
+  MemoryExtraction,
   ProviderConfig,
+  RhythmEvaluation,
+  ChapterFlowResult,
   ListProvidersResult
 } from '../shared/types'
 
@@ -29,6 +33,16 @@ const api = {
     ipcRenderer.invoke('chapters:create', id, input),
   updateChapterContent: (id: string, n: number, content: string) =>
     ipcRenderer.invoke('chapters:updateContent', id, n, content),
+  // P19-A：自动保存草稿
+  saveDraft: (projectId: string, chapterNumber: number, content: string) =>
+    ipcRenderer.invoke('chapters:saveDraft', projectId, chapterNumber, content),
+  readDraft: (projectId: string, chapterNumber: number) =>
+    ipcRenderer.invoke('chapters:readDraft', projectId, chapterNumber),
+  discardDraft: (projectId: string, chapterNumber: number) =>
+    ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber),
+  /** P19-E：字数汇总（节奏图谱 + 章节进度笔记） */
+  getChapterWordSummary: (projectId: string) =>
+    ipcRenderer.invoke('chapters:wordSummary', projectId),
   updateChapterMeta: (id: string, n: number, patch: UpdateChapterMetaInput) =>
     ipcRenderer.invoke('chapters:updateMeta', id, n, patch),
   deleteChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:delete', id, n),
@@ -110,6 +124,8 @@ const api = {
     ipcRenderer.invoke('outline:updateMain', id, patch),
   generateMainOutline: (id: string) => ipcRenderer.invoke('outline:generateMain', id),
   listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
+  updateDetailedOutline: (id: string, chapterNumber: number, patch: Partial<DetailedOutlineItem>) =>
+    ipcRenderer.invoke('outline:updateDetailed', id, chapterNumber, patch),
   generateDetailedOutline: (id: string, n: number) =>
     ipcRenderer.invoke('outline:generateDetailed', id, n),
   getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
@@ -192,7 +208,166 @@ const api = {
       .invoke('write:detectRelationships', { projectId, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
+  checkOutlineStream: (
+    projectId: string,
+    chapterNumber: number,
+    outline: string,
+    content: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:checkOutline', { projectId, chapterNumber, outline, content, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  extractMemoryStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:extractMemory', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  applyMemory: (projectId: string, extraction: MemoryExtraction) =>
+    ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
+  applyNewCharacters: (
+    projectId: string,
+    chars: MemoryExtraction['newCharacters']
+  ) => ipcRenderer.invoke('write:applyNewCharacters', { projectId, chars }),
+  applyNewLocations: (
+    projectId: string,
+    locs: MemoryExtraction['newLocations']
+  ) => ipcRenderer.invoke('write:applyNewLocations', { projectId, locs }),
+  applyNewForeshadowings: (
+    projectId: string,
+    fs: MemoryExtraction['newForeshadowings']
+  ) => ipcRenderer.invoke('write:applyNewForeshadowings', { projectId, fs }),
+  evaluateRhythmStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  applyRhythmEvaluation: (projectId: string, evaluation: RhythmEvaluation) =>
+    ipcRenderer.invoke('write:applyRhythmEvaluation', { projectId, evaluation }),
+  generateFigureStream: (
+    projectId: string,
+    chapterNumber: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:generateFigure', { projectId, chapterNumber, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  saveFigure: (projectId: string, fileName: string, html: string) =>
+    ipcRenderer.invoke('write:saveFigure', { projectId, fileName, html }),
+  generateBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    onToken?: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const chapterHandler = (
+      _e: unknown,
+      payload: { requestId: string; chapter: number; result: ChapterFlowResult }
+    ) => {
+      if (payload.requestId === requestId) {
+        onChapterComplete(payload.chapter, payload.result)
+      }
+    }
+    const tokenHandler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId && onToken) {
+        onToken(payload.token, payload.done)
+      }
+    }
+    ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
+    if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
+    return ipcRenderer
+      .invoke('write:generateBatch', { projectId, fromChapter, toChapter, requestId })
+      .finally(() => {
+        ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
+        if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
+      })
+  },
+  resumeBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    onToken?: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const chapterHandler = (
+      _e: unknown,
+      payload: { requestId: string; chapter: number; result: ChapterFlowResult }
+    ) => {
+      if (payload.requestId === requestId) {
+        onChapterComplete(payload.chapter, payload.result)
+      }
+    }
+    const tokenHandler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId && onToken) {
+        onToken(payload.token, payload.done)
+      }
+    }
+    ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
+    if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
+    return ipcRenderer
+      .invoke('write:resumeBatch', { projectId, fromChapter, toChapter, requestId })
+      .finally(() => {
+        ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
+        if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
+      })
+  },
   getUsageSummary: () => ipcRenderer.invoke('usage:summary'),
+  getUsageDayDetail: (date: string) => ipcRenderer.invoke('usage:dayDetail', date),
+  getUsageByProject: () => ipcRenderer.invoke('usage:byProject'),
+  getUsageByChapter: () => ipcRenderer.invoke('usage:byChapter'),
+  getUsageChapterDetail: (projectId: string, chapterNumber: number) =>
+    ipcRenderer.invoke('usage:chapterDetail', projectId, chapterNumber),
   clearUsage: () => ipcRenderer.invoke('usage:clear'),
   getPricing: async () => {
     const all = await ipcRenderer.invoke('settings:getAll')
@@ -210,8 +385,35 @@ const api = {
     return { focus: all.pomodoroFocus ?? 25, brk: all.pomodoroBreak ?? 5 }
   },
   setPomodoroConfig: (cfg: { focus: number; brk: number }) =>
-    ipcRenderer.invoke('settings:setPomodoro', cfg)
-}
+    ipcRenderer.invoke('settings:setPomodoro', cfg),
+  auditChapter: (projectId: string, content: string) =>
+    ipcRenderer.invoke('write:auditChapter', { projectId, content }),
+  humanizeSegment: (
+    projectId: string,
+    snippet: string,
+    violationType: string,
+    chapterNumber?: number
+  ) =>
+    ipcRenderer.invoke('write:humanizeSegment', {
+      projectId,
+      snippet,
+      violationType,
+      chapterNumber
+    }),
+  getWriteAuditConfig: async () => {
+    const all = await ipcRenderer.invoke('settings:getAll')
+    return {
+      enabled: all.writeAudit?.enabled ?? true,
+      mode: all.writeAudit?.mode ?? 'soft'
+    }
+  },
+  setWriteAuditConfig: (cfg: { enabled?: boolean; mode?: 'soft' | 'strict' }) =>
+    ipcRenderer.invoke('settings:setWriteAudit', cfg),
+  // P13-C：用量预警配置
+  getCostAlertConfig: () => ipcRenderer.invoke('settings:getCostAlert'),
+  setCostAlertConfig: (cfg: { enabled?: boolean; warning?: number; exceeded?: number }) =>
+    ipcRenderer.invoke('settings:setCostAlert', cfg)
+} as const
 
 contextBridge.exposeInMainWorld('api', api)
 

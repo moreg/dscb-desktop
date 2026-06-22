@@ -1,6 +1,6 @@
 import { safeHandle } from './safe-handle'
 import { OutlineService } from '../data/outline-service'
-import type { MainOutline } from '../../shared/types'
+import type { MainOutline, DetailedOutlineItem } from '../../shared/types'
 
 export function registerOutlineIpc(service: OutlineService): void {
   safeHandle('outline:getMain', (_e, projectId: string) => service.getMain(projectId))
@@ -12,6 +12,11 @@ export function registerOutlineIpc(service: OutlineService): void {
   )
   safeHandle('outline:listDetailed', (_e, projectId: string) =>
     service.listDetailed(projectId)
+  )
+  safeHandle(
+    'outline:updateDetailed',
+    (_e, projectId: string, chapterNumber: number, patch: Partial<DetailedOutlineItem>) =>
+      service.updateDetailed(projectId, chapterNumber, patch)
   )
   safeHandle('outline:generateDetailed', (_e, projectId: string, chapterNumber: number) =>
     service.generateDetailed(projectId, chapterNumber)

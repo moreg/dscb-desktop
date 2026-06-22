@@ -34,6 +34,11 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
   const [activeDetailedVolume, setActiveDetailedVolume] = useState('all')
   const [detailedPage, setDetailedPage] = useState(1)
 
+  // 细纲编辑状态
+  const [editingChapter, setEditingChapter] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState<Partial<DetailedOutlineItem>>({})
+  const [savingEdit, setSavingEdit] = useState(false)
+
   const refresh = () => {
     void window.api.getMainOutline(projectId).then(setMain)
     void window.api.listDetailedOutline(projectId).then(setItems)
@@ -84,6 +89,44 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
       alert((err as Error).message)
     } finally {
       setSavingMain(false)
+    }
+  }
+
+  // 细纲编辑函数
+  const startEditDetailed = (item: DetailedOutlineItem) => {
+    setEditingChapter(item.chapterNumber)
+    setEditDraft({
+      title: item.title,
+      plotSummary: item.plotSummary,
+      coolPoint: item.coolPoint,
+      hook: item.hook,
+      charactersAppearing: item.charactersAppearing ?? [],
+      foreshadowings: item.foreshadowings ?? [],
+      wordEstimate: item.wordEstimate,
+      goldenLine: item.goldenLine,
+      emotion: item.emotion,
+      climax: item.climax
+    })
+  }
+
+  const cancelEditDetailed = () => {
+    setEditingChapter(null)
+    setEditDraft({})
+  }
+
+  const saveEditDetailed = async () => {
+    if (editingChapter === null) return
+    setSavingEdit(true)
+    try {
+      await window.api.updateDetailedOutline(projectId, editingChapter, editDraft)
+      // 刷新列表
+      void window.api.listDetailedOutline(projectId).then(setItems)
+      setEditingChapter(null)
+      setEditDraft({})
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setSavingEdit(false)
     }
   }
 
@@ -325,35 +368,208 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
                 {pagedDetailedItems.map((it) => {
                   const title = chapterTitleOf(it.chapterNumber)
                   const rows = getOutlineDetailRows(it)
+                  const isEditing = editingChapter === it.chapterNumber
                   return (
                     <li key={it.chapterNumber} className="card">
-                      <div className="outline-item">
-                        <div className="num">{String(it.chapterNumber).padStart(3, '0')}</div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div className="row" style={{ marginBottom: 6, alignItems: 'baseline' }}>
-                            <strong
-                              style={{
-                                fontSize: 15,
-                                cursor: onOpenChapter ? 'pointer' : 'default',
-                                color: onOpenChapter ? 'var(--accent)' : 'var(--ink)'
-                              }}
-                              onClick={() => onOpenChapter?.(it.chapterNumber)}
-                            >
-                              {title}
+                      {isEditing ? (
+                        // 编辑模式
+                        <div style={{ padding: '12px 0' }}>
+                          <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
+                            <strong style={{ fontSize: 15 }}>
+                              第 {it.chapterNumber} 章 · 编辑细纲
                             </strong>
-                            {it.volume ? (
-                              <span className="outline-tag" style={{ marginLeft: 4 }}>
-                                第 {it.volume} 卷
-                              </span>
-                            ) : null}
                           </div>
-                          <div className="outline-detail-fields">
-                            {rows.map((row) => (
-                              <OutlineDetailField key={row.label} row={row} />
-                            ))}
+                          <div className="field">
+                            <label>章节标题</label>
+                            <input
+                              className="input"
+                              value={editDraft.title ?? ''}
+                              onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
+                              placeholder="章节标题"
+                            />
+                          </div>
+                          <div className="field">
+                            <label>核心事件</label>
+                            <textarea
+                              className="textarea"
+                              value={editDraft.plotSummary ?? ''}
+                              onChange={(e) => setEditDraft({ ...editDraft, plotSummary: e.target.value })}
+                              rows={2}
+                              placeholder="本章核心事件描述"
+                            />
+                          </div>
+                          <div className="field">
+                            <label>爽点/打脸</label>
+                            <textarea
+                              className="textarea"
+                              value={editDraft.coolPoint ?? ''}
+                              onChange={(e) => setEditDraft({ ...editDraft, coolPoint: e.target.value })}
+                              rows={2}
+                              placeholder="爽点或打脸情节"
+                            />
+                          </div>
+                          <div className="field">
+                            <label>角色出场（逗号分隔）</label>
+                            <input
+                              className="input"
+                              value={(editDraft.charactersAppearing ?? []).join('，')}
+                              onChange={(e) =>
+                                setEditDraft({
+                                  ...editDraft,
+                                  charactersAppearing: e.target.value
+                                    .split(/[,，]/)
+                                    .map((s) => s.trim())
+                                    .filter((s) => s)
+                                })
+                              }
+                              placeholder="林凡，老王，..."
+                            />
+                          </div>
+                          <div className="field">
+                            <label>伏笔铺设（逗号分隔）</label>
+                            <input
+                              className="input"
+                              value={(editDraft.foreshadowings ?? []).join('，')}
+                              onChange={(e) =>
+                                setEditDraft({
+                                  ...editDraft,
+                                  foreshadowings: e.target.value
+                                    .split(/[,，]/)
+                                    .map((s) => s.trim())
+                                    .filter((s) => s)
+                                })
+                              }
+                              placeholder="神秘盒子，符文，..."
+                            />
+                          </div>
+                          <div className="field">
+                            <label>章末钩子</label>
+                            <textarea
+                              className="textarea"
+                              value={editDraft.hook ?? ''}
+                              onChange={(e) => setEditDraft({ ...editDraft, hook: e.target.value })}
+                              rows={2}
+                              placeholder="章节结尾的悬念"
+                            />
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <div className="field">
+                              <label>字数预估</label>
+                              <input
+                                className="input"
+                                value={editDraft.wordEstimate ?? ''}
+                                onChange={(e) =>
+                                  setEditDraft({ ...editDraft, wordEstimate: e.target.value })
+                                }
+                                placeholder="2500"
+                              />
+                            </div>
+                            <div className="field">
+                              <label>情绪值（1-10）</label>
+                              <input
+                                className="input"
+                                type="number"
+                                min={1}
+                                max={10}
+                                value={editDraft.emotion ?? ''}
+                                onChange={(e) =>
+                                  setEditDraft({
+                                    ...editDraft,
+                                    emotion: e.target.value ? Number(e.target.value) : undefined
+                                  })
+                                }
+                                placeholder="5"
+                              />
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <div className="field">
+                              <label>爽点类型</label>
+                              <select
+                                className="input"
+                                value={editDraft.climax ?? ''}
+                                onChange={(e) =>
+                                  setEditDraft({
+                                    ...editDraft,
+                                    climax: e.target.value ? Number(e.target.value) : undefined
+                                  })
+                                }
+                              >
+                                <option value="">未设置</option>
+                                <option value="0">0 - 无爽点</option>
+                                <option value="1">1 - 小打脸</option>
+                                <option value="2">2 - 中打脸</option>
+                                <option value="3">3 - 大高潮</option>
+                                <option value="3.5">3.5 - 卷中决战</option>
+                                <option value="4">4 - 卷终决战</option>
+                              </select>
+                            </div>
+                            <div className="field">
+                              <label>金句</label>
+                              <input
+                                className="input"
+                                value={editDraft.goldenLine ?? ''}
+                                onChange={(e) =>
+                                  setEditDraft({ ...editDraft, goldenLine: e.target.value })
+                                }
+                                placeholder="本章金句"
+                              />
+                            </div>
+                          </div>
+                          <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={cancelEditDetailed}
+                              disabled={savingEdit}
+                            >
+                              取消
+                            </button>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              onClick={saveEditDetailed}
+                              disabled={savingEdit}
+                            >
+                              {savingEdit ? '保存中…' : '保存'}
+                            </button>
                           </div>
                         </div>
-                      </div>
+                      ) : (
+                        // 查看模式
+                        <div className="outline-item">
+                          <div className="num">{String(it.chapterNumber).padStart(3, '0')}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="row" style={{ marginBottom: 6, alignItems: 'baseline' }}>
+                              <strong
+                                style={{
+                                  fontSize: 15,
+                                  cursor: onOpenChapter ? 'pointer' : 'default',
+                                  color: onOpenChapter ? 'var(--accent)' : 'var(--ink)'
+                                }}
+                                onClick={() => onOpenChapter?.(it.chapterNumber)}
+                              >
+                                {title}
+                              </strong>
+                              {it.volume ? (
+                                <span className="outline-tag" style={{ marginLeft: 4 }}>
+                                  第 {it.volume} 卷
+                                </span>
+                              ) : null}
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                style={{ marginLeft: 'auto', padding: '2px 8px' }}
+                                onClick={() => startEditDetailed(it)}
+                              >
+                                编辑
+                              </button>
+                            </div>
+                            <div className="outline-detail-fields">
+                              {rows.map((row) => (
+                                <OutlineDetailField key={row.label} row={row} />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   )
                 })}
