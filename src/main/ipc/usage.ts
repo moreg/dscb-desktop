@@ -1,13 +1,21 @@
 import { safeHandle } from './safe-handle'
 import { UsageRepository } from '../data/usage-repository'
 import { SettingsRepository } from '../data/settings-repository'
-
-export interface UsageSummary {
-  today: { input: number; output: number; total: number; cost: number }
-  month: { input: number; output: number; total: number; cost: number }
-  allTime: { input: number; output: number; total: number; cost: number }
-  byFeature: { feature: string; total: number; cost: number; calls: number }[]
-}
+import {
+  aggregateByDayWithCost,
+  aggregateByProject,
+  aggregateByChapter,
+  filterByDate,
+  filterByChapter
+} from '../data/usage-summary'
+import type {
+  UsageSummary,
+  UsageRecord,
+  ProjectUsage,
+  ChapterUsage
+} from '../../shared/types'
+import { validateInput, projectIdSchema, chapterNumberSchema } from './validation'
+import { z } from 'zod'
 
 const FEATURE_LABELS: Record<string, string> = {
   'outline-main': '总纲生成',
@@ -77,7 +85,19 @@ export function registerUsageIpc(
       allTime,
       byFeature: [...byFeatureMap.entries()]
         .map(([feature, v]) => ({ feature, ...v }))
-        .sort((a, b) => b.total - a.total)
+        .sort((a, b) => b.total - a.total),
+      byDay: aggregateByDayWithCost(
+        records.map((r) => ({
+          at: r.at,
+          feature: r.feature,
+          model: r.model,
+          inputTokens: r.inputTokens,
+          outputTokens: r.outputTokens,
+          totalTokens: r.totalTokens
+        })),
+        pricing,
+        now
+      )
     }
     return summary
   })
@@ -86,4 +106,41 @@ export function registerUsageIpc(
     await usage.clear()
     return true
   })
+
+  // P16-C：单日详情（点击趋势图某天柱状图 → 弹当天所有 LLM 调用）
+  safeHandle('usage:dayDetail', async (_e, date: string): Promise<UsageRecord[]> => {
+    const validatedDate = validateInput(z.string().regex(/^\d{4}-\d{2}-\d{2}$/), date)
+    const records = await usage.list()
+    return filterByDate(records, validatedDate)
+  })
+
+  // P17-A：按项目聚合（用于"哪个项目花了多少钱"列表）
+  safeHandle('usage:byProject', async (): Promise<ProjectUsage[]> => {
+    const records = await usage.list()
+    const pricing = await settings.getPricing()
+    return aggregateByProject(records, pricing)
+  })
+
+  // P17-A：按项目+章节聚合（用于"这章花了多少钱"列表）
+  safeHandle('usage:byChapter', async (): Promise<ChapterUsage[]> => {
+    const records = await usage.list()
+    const pricing = await settings.getPricing()
+    return aggregateByChapter(records, pricing)
+  })
+
+  // P17-A：单章详情（所有 LLM 调用）
+  safeHandle(
+    'usage:chapterDetail',
+    async (_e, projectId: string, chapterNumber: number): Promise<UsageRecord[]> => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema
+        }),
+        { projectId, chapterNumber }
+      )
+      const records = await usage.list()
+      return filterByChapter(records, validated.projectId, validated.chapterNumber)
+    }
+  )
 }

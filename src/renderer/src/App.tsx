@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ErrorBoundary } from './ErrorBoundary'
+import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
+export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
 import ChapterListPage from './ChapterListPage'
 import ChapterEditor from './ChapterEditor'
@@ -88,6 +90,7 @@ export default function App() {
   const [projectName, setProjectName] = useState<string>('')
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [diagDismissed, setDiagDismissed] = useState(false)
+  const { open: shortcutOpen, show: showShortcut, hide: hideShortcut } = useShortcutPanelToggle()
 
   useEffect(() => {
     void window.api.getTheme().then((t) => {
@@ -104,13 +107,17 @@ export default function App() {
       setDiagnostics([])
       return
     }
-    void window.api.listProjects().then((list: ProjectMeta[]) => {
-      const p = list.find((x) => x.id === currentProjectId)
-      setProjectName(p?.name ?? '')
-    })
+    void window.api.listProjects()
+      .then((list: ProjectMeta[]) => {
+        const p = list.find((x) => x.id === currentProjectId)
+        setProjectName(p?.name ?? '')
+      })
+      .catch((err) => console.error('[App] Failed to list projects:', err))
     // 格式体检：进入项目时扫描一次（文件有内容但解析为空 → 静默丢数据风险）
     setDiagDismissed(false)
-    void window.api.getDiagnostics(currentProjectId).then(setDiagnostics)
+    void window.api.getDiagnostics(currentProjectId)
+      .then(setDiagnostics)
+      .catch((err) => console.error('[App] Failed to get diagnostics:', err))
   }, [currentProjectId])
 
   const onThemeChange = (t: ThemeMode) => {
@@ -422,6 +429,9 @@ export default function App() {
           ) : null}
         </div>
       </main>
+
+      {/* P19-C：全局快捷键面板（Cmd+/ / Ctrl+/ 打开） */}
+      <ShortcutPanel open={shortcutOpen} onClose={hideShortcut} />
     </div>
   )
 }

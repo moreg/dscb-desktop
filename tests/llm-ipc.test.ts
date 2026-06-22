@@ -20,6 +20,9 @@ const { SecretStore } = await import('../src/main/data/secret-store')
 const { registerLlmIpc } = await import('../src/main/ipc/llm')
 const { LlmService } = await import('../src/main/data/llm-service')
 
+// Test API key placeholder - never use real credentials in tests
+const TEST_API_KEY = 'test-api-key-placeholder'
+
 /** 模拟 ipcMain.handle 注册的 handler 池 */
 const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>()
 
@@ -67,7 +70,7 @@ describe('registerLlmIpc handlers', () => {
           label: 'OpenAI',
           baseUrl: 'https://api.openai.com/v1',
           model: 'gpt-4o-mini',
-          apiKey: 'sk-abcdefghijklmnop'
+          apiKey: TEST_API_KEY
         }
       ]
     })
@@ -79,11 +82,11 @@ describe('registerLlmIpc handlers', () => {
     }
     expect(out.activeId).toBe('p1')
     expect(out.providers[0].hasKey).toBe(true)
-    expect(out.providers[0].keyMasked).toBe('sk-a••••mnop')
+    expect(out.providers[0].keyMasked).toBe('test••••lder')
     // apiKey 字段必须不存在
     expect(out.providers[0].apiKey).toBeUndefined()
     // 整个对象序列化后也不应含明文
-    expect(JSON.stringify(out)).not.toContain('sk-abcdefghijklmnop')
+    expect(JSON.stringify(out)).not.toContain(TEST_API_KEY)
   })
 
   it('llm:upsertProvider sanitizes payload (rejects invalid url)', async () => {
@@ -95,7 +98,7 @@ describe('registerLlmIpc handlers', () => {
         label: 'bad',
         baseUrl: 'not-a-url',
         model: 'm',
-        apiKey: 'k'
+        apiKey: TEST_API_KEY
       })
     ).rejects.toThrow(/PROVIDER_INVALID/)
   })
@@ -107,7 +110,7 @@ describe('registerLlmIpc handlers', () => {
       label: 'minimax',
       baseUrl: 'https://api.minimaxi.com/anthropic',
       model: 'MiniMax-M3',
-      apiKey: 'sk-x',
+      apiKey: TEST_API_KEY,
       protocol: 'anthropic'
     })
     const cfg = await store.read()
@@ -121,7 +124,7 @@ describe('registerLlmIpc handlers', () => {
       label: 'OpenAI',
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-4o-mini',
-      apiKey: 'sk-x'
+      apiKey: TEST_API_KEY
     })
     const cfg = await store.read()
     expect(cfg.providers[0].protocol).toBe('openai')
@@ -134,7 +137,7 @@ describe('registerLlmIpc handlers', () => {
       label: 'x',
       baseUrl: 'https://api.example.com/v1',
       model: 'm',
-      apiKey: 'k',
+      apiKey: TEST_API_KEY,
       protocol: 'mystery-protocol'
     })
     const cfg = await store.read()
@@ -149,7 +152,7 @@ describe('registerLlmIpc handlers', () => {
         label: 'bad',
         baseUrl: 'ftp://example.com/v1',
         model: 'm',
-        apiKey: 'k'
+        apiKey: TEST_API_KEY
       })
     ).rejects.toThrow(/PROVIDER_INVALID/)
   })
@@ -161,7 +164,7 @@ describe('registerLlmIpc handlers', () => {
       label: 'trim',
       baseUrl: 'https://api.example.com/v1///',
       model: 'm',
-      apiKey: 'k'
+      apiKey: TEST_API_KEY
     })
     const cfg = await store.read()
     expect(cfg.providers[0].baseUrl).toBe('https://api.example.com/v1')
@@ -174,7 +177,7 @@ describe('registerLlmIpc handlers', () => {
       label: 'first',
       baseUrl: 'https://api.example.com/v1',
       model: 'm1',
-      apiKey: 'sk-original'
+      apiKey: TEST_API_KEY
     })
     // 第二次更新只改 label / model，apiKey 留空
     await handler!(null, {
@@ -185,7 +188,7 @@ describe('registerLlmIpc handlers', () => {
       apiKey: ''
     })
     const cfg = await store.read()
-    expect(cfg.providers[0].apiKey).toBe('sk-original')
+    expect(cfg.providers[0].apiKey).toBe(TEST_API_KEY)
     expect(cfg.providers[0].label).toBe('renamed')
     expect(cfg.providers[0].model).toBe('m2')
   })
@@ -194,8 +197,8 @@ describe('registerLlmIpc handlers', () => {
     await store.write({
       activeId: 'p1',
       providers: [
-        { id: 'p1', label: 'A', baseUrl: 'https://a.example.com/v1', model: 'm', apiKey: 'k' },
-        { id: 'p2', label: 'B', baseUrl: 'https://b.example.com/v1', model: 'm', apiKey: 'k' }
+        { id: 'p1', label: 'A', baseUrl: 'https://a.example.com/v1', model: 'm', apiKey: TEST_API_KEY },
+        { id: 'p2', label: 'B', baseUrl: 'https://b.example.com/v1', model: 'm', apiKey: TEST_API_KEY }
       ]
     })
     const handler = handlers.get('llm:deleteProvider')
@@ -214,8 +217,8 @@ describe('registerLlmIpc handlers', () => {
     await store.write({
       activeId: 'p1',
       providers: [
-        { id: 'p1', label: 'A', baseUrl: 'https://a.example.com/v1', model: 'm', apiKey: 'k' },
-        { id: 'p2', label: 'B', baseUrl: 'https://b.example.com/v1', model: 'm', apiKey: 'k' }
+        { id: 'p1', label: 'A', baseUrl: 'https://a.example.com/v1', model: 'm', apiKey: TEST_API_KEY },
+        { id: 'p2', label: 'B', baseUrl: 'https://b.example.com/v1', model: 'm', apiKey: TEST_API_KEY }
       ]
     })
     const handler = handlers.get('llm:setActive')

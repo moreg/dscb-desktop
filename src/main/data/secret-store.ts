@@ -2,10 +2,30 @@ import { safeStorage } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname } from 'path'
 import type { ProvidersConfig, ProviderConfig } from '../../shared/types'
+import { z } from 'zod'
+import { validateInput } from '../ipc/validation'
 
 export type { ProviderConfig } from '../../shared/types'
 
 const EMPTY: ProvidersConfig = { activeId: '', providers: [] }
+
+// Provider 配置验证模式
+const providerConfigSchema = z.object({
+  id: z.string().min(1).max(100),
+  label: z.string().min(1).max(100),
+  baseUrl: z.string().url().max(2048).refine(
+    (url) => url.startsWith('http://') || url.startsWith('https://'),
+    { message: 'baseUrl must use HTTP or HTTPS protocol' }
+  ),
+  model: z.string().min(1).max(255),
+  apiKey: z.string().max(1000),
+  protocol: z.enum(['openai', 'anthropic']).optional()
+})
+
+const providersConfigSchema = z.object({
+  activeId: z.string().max(100),
+  providers: z.array(providerConfigSchema)
+})
 
 interface LegacyShape {
   activeProvider?: string
@@ -81,9 +101,16 @@ function migrate(legacy: LegacyShape | unknown): ProvidersConfig {
 }
 
 export class SecretStore {
+  private writePromise: Promise<void> | null = null
+
   constructor(private readonly file: string) {}
 
   async read(): Promise<ProvidersConfig> {
+    // 等待任何待处理的写操作完成
+    if (this.writePromise) {
+      await this.writePromise
+    }
+
     let buf: Buffer
     try {
       buf = await fs.readFile(this.file)
@@ -110,11 +137,31 @@ export class SecretStore {
   }
 
   async write(config: ProvidersConfig): Promise<void> {
+    // 验证输入
+    const validated = validateInput(providersConfigSchema, config)
+
+    // 额外验证：API 密钥非空
+    for (const provider of validated.providers) {
+      if (!provider.apiKey || provider.apiKey.trim().length === 0) {
+        throw new Error(`Provider ${provider.id} has empty API key`)
+      }
+    }
+
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error('OS secure storage unavailable')
     }
-    await fs.mkdir(dirname(this.file), { recursive: true })
-    const encrypted = safeStorage.encryptString(JSON.stringify(config))
-    await fs.writeFile(this.file, encrypted)
+
+    // 使用队列保证写操作顺序
+    this.writePromise = (async () => {
+      await fs.mkdir(dirname(this.file), { recursive: true })
+      const encrypted = safeStorage.encryptString(JSON.stringify(validated))
+      await fs.writeFile(this.file, encrypted)
+    })()
+
+    try {
+      await this.writePromise
+    } finally {
+      this.writePromise = null
+    }
   }
 }

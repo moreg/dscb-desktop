@@ -3,7 +3,9 @@ import type {
   UsageSummary,
   ListProvidersResult,
   ProviderSummary,
-  ProviderProtocol
+  ProviderProtocol,
+  ProjectUsage,
+  ChapterUsage
 } from '../../shared/types'
 
 interface Props {
@@ -41,19 +43,45 @@ export default function SettingsPage(_: Props) {
   const [pingResult, setPingResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [theme, setTheme] = useState<ThemeMode>('system')
   const [usage, setUsage] = useState<UsageSummary | null>(null)
+  // P13-C + P14-C：用量预警配置
+  const [costAlert, setCostAlert] = useState<{
+    enabled: boolean
+    warning: number
+    exceeded: number
+    blockOnExceeded: boolean
+  }>({
+    enabled: true,
+    warning: 10,
+    exceeded: 30,
+    blockOnExceeded: false
+  })
   const [pricing, setPricing] = useState({ inputRate: 1, outputRate: 3 })
   const [dailyGoal, setDailyGoal] = useState(3000)
-  const [pomoFocus, setPomoFocus] = useState(25)
-  const [pomoBreak, setPomoBreak] = useState(5)
+
+  // 番茄钟默认值
+  const DEFAULT_POMODORO_FOCUS_MINUTES = 25
+  const DEFAULT_POMODORO_BREAK_MINUTES = 5
+
+  const [pomoFocus, setPomoFocus] = useState(DEFAULT_POMODORO_FOCUS_MINUTES)
+  const [pomoBreak, setPomoBreak] = useState(DEFAULT_POMODORO_BREAK_MINUTES)
 
   const refreshProviders = () => void window.api.listProviders().then(setProviders)
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
   const refreshUsage = () => void window.api.getUsageSummary().then(setUsage)
+  const refreshCostAlert = () => void window.api.getCostAlertConfig().then(setCostAlert)
+  // P17-A：按项目 / 按章节聚合
+  const [byProject, setByProject] = useState<ProjectUsage[]>([])
+  const [byChapter, setByChapter] = useState<ChapterUsage[]>([])
+  const refreshByProject = () => void window.api.getUsageByProject().then(setByProject)
+  const refreshByChapter = () => void window.api.getUsageByChapter().then(setByChapter)
 
   useEffect(() => {
     refreshProviders()
     refreshRoot()
     refreshUsage()
+    refreshCostAlert()
+    refreshByProject()
+    refreshByChapter()
     void window.api.getTheme().then(setTheme)
     void window.api.getPricing().then(setPricing)
     void window.api.getDailyWordGoal().then(setDailyGoal)
@@ -335,6 +363,8 @@ export default function SettingsPage(_: Props) {
                   if (!window.confirm('清空所有用量记录？此操作不可撤销。')) return
                   await window.api.clearUsage()
                   refreshUsage()
+                  refreshByProject()
+                  refreshByChapter()
                 }}
               >
                 清空记录
@@ -378,6 +408,131 @@ export default function SettingsPage(_: Props) {
         ) : (
           <div className="placeholder" style={{ padding: 12 }}>加载中…</div>
         )}
+
+        {/* P13-C：用量预警阈值配置 */}
+        <div className="cost-alert-config" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
+          <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>用量预警阈值</h4>
+          <p className="muted" style={{ fontSize: 11.5, margin: '0 0 8px' }}>
+            当月 AI 费用达到阈值时弹 toast 提醒。warning 是温和提醒，exceeded 是强警告。
+          </p>
+          <div className="row" style={{ alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
+              <input
+                type="checkbox"
+                checked={costAlert.enabled}
+                onChange={(e) => setCostAlert({ ...costAlert, enabled: e.target.checked })}
+              />
+              启用预警
+            </label>
+            <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
+              warning ¥
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={costAlert.warning}
+                onChange={(e) => setCostAlert({ ...costAlert, warning: Number(e.target.value) || 0 })}
+                style={{ width: 60 }}
+                disabled={!costAlert.enabled}
+              />
+            </label>
+            <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
+              exceeded ¥
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={costAlert.exceeded}
+                onChange={(e) => setCostAlert({ ...costAlert, exceeded: Number(e.target.value) || 0 })}
+                style={{ width: 60 }}
+                disabled={!costAlert.enabled}
+              />
+            </label>
+            <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
+              <input
+                type="checkbox"
+                checked={costAlert.blockOnExceeded}
+                onChange={(e) => setCostAlert({ ...costAlert, blockOnExceeded: e.target.checked })}
+                disabled={!costAlert.enabled}
+              />
+              exceeded 时弹确认（用户可取消）
+            </label>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={async () => {
+                if (costAlert.warning >= costAlert.exceeded) {
+                  setMsg({ kind: 'err', text: 'warning 必须小于 exceeded' })
+                  return
+                }
+                setMsg(null)
+                const next = await window.api.setCostAlertConfig(costAlert)
+                setCostAlert(next)
+                setMsg({ kind: 'ok', text: '预警配置已保存' })
+                setTimeout(() => setMsg(null), 2000)
+              }}
+            >
+              保存阈值
+            </button>
+            {msg && msg.kind === 'ok' ? <span className="muted" style={{ fontSize: 12 }}>{msg.text}</span> : null}
+            {msg && msg.kind === 'err' && msg.text.includes('warning') ? (
+              <span style={{ color: 'var(--danger)', fontSize: 12 }}>{msg.text}</span>
+            ) : null}
+          </div>
+        </div>
+
+        {/* P17-A：按项目 / 按章节 用量统计 */}
+        <div
+          className="by-project-stats"
+          style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}
+        >
+          <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>按项目统计</h4>
+          {byProject.length === 0 ? (
+            <div className="muted" style={{ fontSize: 11.5 }}>
+              还没有项目用量记录（开始续写后会自动汇总）
+            </div>
+          ) : (
+            <ul className="by-project-list">
+              {byProject.map((p) => (
+                <li key={p.projectId} className="by-project-row">
+                  <span className="project-id" title={p.projectId}>
+                    {p.projectId.length > 20 ? p.projectId.slice(0, 20) + '…' : p.projectId}
+                  </span>
+                  <span className="meta">
+                    {(p.total / 1000).toFixed(1)}k ·{' '}
+                    {p.cost < 1 ? `¥${p.cost.toFixed(3)}` : `¥${p.cost.toFixed(2)}`} · {p.calls}次
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <h4 style={{ margin: '12px 0 6px', fontSize: 12.5 }}>按章节统计</h4>
+          {byChapter.length === 0 ? (
+            <div className="muted" style={{ fontSize: 11.5 }}>
+              还没有章节用量记录
+            </div>
+          ) : (
+            <ul className="by-project-list">
+              {byChapter.slice(0, 10).map((c) => (
+                <li key={`${c.projectId}-${c.chapterNumber}`} className="by-project-row">
+                  <span className="project-id" title={c.projectId}>
+                    {c.projectId.length > 14 ? c.projectId.slice(0, 14) + '…' : c.projectId}
+                  </span>
+                  <span className="chapter-tag">第 {c.chapterNumber} 章</span>
+                  <span className="meta">
+                    {(c.total / 1000).toFixed(1)}k ·{' '}
+                    {c.cost < 1 ? `¥${c.cost.toFixed(3)}` : `¥${c.cost.toFixed(2)}`} · {c.calls}次
+                  </span>
+                </li>
+              ))}
+              {byChapter.length > 10 && (
+                <li className="muted" style={{ fontSize: 11, padding: '4px 0' }}>
+                  …还有 {byChapter.length - 10} 章未展示
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
       </div>
 
       {/* 写作目标 + 番茄钟 */}

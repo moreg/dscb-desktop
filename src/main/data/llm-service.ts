@@ -6,7 +6,7 @@ export interface GenerateOptions {
   onToken?: (token: string) => void
   signal?: AbortSignal
   /** 调用方上下文，用于用量归属 */
-  meta?: { feature: string; projectId?: string }
+  meta?: { feature: string; projectId?: string; chapterNumber?: number }
   /**
    * 可选 system prompt。
    * - OpenAI 协议：作为 messages 数组首项 { role: 'system', content }
@@ -72,37 +72,63 @@ export class LlmService {
     const p = await this.activeProvider()
     if (!p || !p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
-    const { url, init } = buildStreamRequest(p, prompt, opts.signal, opts.systemPrompt)
-    const res = await fetch(url, init)
+    // 重试配置：针对瞬态网络错误
+    const MAX_RETRIES = 2
+    const RETRY_DELAYS_MS = [1000, 2000]
 
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) throw new Error('LLM_AUTH_FAILED')
-      if (res.status === 429) throw new Error('LLM_RATE_LIMIT')
-      throw new Error('LLM_REQUEST_FAILED')
-    }
-
-    const proto = protocolOf(p)
-    const { full, usage } =
-      proto === 'anthropic'
-        ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
-        : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
-
-    if (this.usage && usage) {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        await this.usage.add({
-          at: new Date().toISOString(),
-          feature: opts.meta?.feature ?? 'other',
-          projectId: opts.meta?.projectId,
-          model: p.model,
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          totalTokens: usage.totalTokens
-        })
-      } catch {
-        // 用量记录失败不影响主流程
+        const { url, init } = buildStreamRequest(p, prompt, opts.signal, opts.systemPrompt)
+        const res = await fetch(url, init)
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) throw new Error('LLM_AUTH_FAILED')
+          if (res.status === 429) throw new Error('LLM_RATE_LIMIT')
+          // 5xx 错误可重试
+          if (res.status >= 500 && attempt < MAX_RETRIES) {
+            console.warn(`[llm-service] Server error ${res.status}, retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
+            continue
+          }
+          throw new Error('LLM_REQUEST_FAILED')
+        }
+
+        const proto = protocolOf(p)
+        const { full, usage } =
+          proto === 'anthropic'
+            ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
+            : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
+
+        if (this.usage && usage) {
+          try {
+            await this.usage.add({
+              at: new Date().toISOString(),
+              feature: opts.meta?.feature ?? 'other',
+              projectId: opts.meta?.projectId,
+              chapterNumber: opts.meta?.chapterNumber,
+              model: p.model,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              totalTokens: usage.totalTokens
+            })
+          } catch (err) {
+            console.error('[llm-service] Failed to record usage:', err)
+            // 用量记录失败不影响主流程
+          }
+        }
+        return full
+      } catch (err) {
+        // 网络错误可重试
+        const isNetworkError = err instanceof TypeError && err.message.includes('fetch')
+        if (isNetworkError && attempt < MAX_RETRIES) {
+          console.warn(`[llm-service] Network error, retrying in ${RETRY_DELAYS_MS[attempt]}ms...`, err)
+          await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
+          continue
+        }
+        throw err
       }
     }
-    return full
+    throw new Error('LLM_REQUEST_FAILED')
   }
 }
 
@@ -186,14 +212,20 @@ function anthropicHeaders(apiKey: string): Record<string, string> {
     Authorization: `Bearer ${apiKey}`,
     'api-key': apiKey,
     'x-api-key': apiKey,
-    'anthropic-version': '2023-06-15',
-    'anthropic-dangerous-direct-browser-access': 'true'
+    'anthropic-version': '2023-06-15'
   }
 }
 
 /* =========================================================
    SSE 解析：OpenAI / Anthropic 两种格式
    ========================================================= */
+
+/**
+ * LLM 响应最大字符数。
+ * 防止恶意或错误的 LLM 响应导致内存耗尽。
+ * 基于典型章节长度（约 5000 字符）的 40 倍安全边际。
+ */
+const MAX_RESPONSE_CHARS = 200_000
 
 async function parseOpenAiSse(
   body: ReadableStream<Uint8Array>,
@@ -204,7 +236,7 @@ async function parseOpenAiSse(
   let buffer = ''
   let full = ''
   let usage: UsageInfo | null = null
-  const MAX = 200_000
+  const MAX = MAX_RESPONSE_CHARS
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -232,7 +264,8 @@ async function parseOpenAiSse(
             totalTokens: Number(u.total_tokens ?? 0) || 0
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[llm-service] Failed to parse SSE chunk:', data.substring(0, 100), err)
         // skip malformed chunk
       }
     }
@@ -263,7 +296,7 @@ async function parseAnthropicSse(
   let full = ''
   let inputTokens = 0
   let outputTokens = 0
-  const MAX = 200_000
+  const MAX = MAX_RESPONSE_CHARS
 
   const flushEvent = (eventLines: string[]): void => {
     if (eventLines.length === 0) return
@@ -278,7 +311,8 @@ async function parseAnthropicSse(
     let json: Record<string, unknown>
     try {
       json = JSON.parse(dataStr)
-    } catch {
+    } catch (err) {
+      console.warn('[llm-service] Failed to parse Anthropic SSE event:', dataStr.substring(0, 100), err)
       return
     }
     // token 文本：content_block_delta.delta.text

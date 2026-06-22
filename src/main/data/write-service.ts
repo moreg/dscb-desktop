@@ -3,32 +3,63 @@ import type { LlmService, GenerateOptions } from './llm-service'
 import { OutlineRepository } from './outline-repository'
 import { CharacterRepository } from './character-repository'
 import { ForeshadowingRepository } from './foreshadowing-repository'
-import { ChapterRepository } from './chapter-repository'
+import { ChapterService } from './chapter-service'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { ProseRepo } from './skill-format/prose-repo'
 import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
-import { buildSystemPrompt } from './skill-prompts'
+import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
+import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
+import { WriteFlowService } from './write-flow-service'
+import { MemoryWriter } from './memory-writer'
+import { FigureHtmlRepo } from './skill-format/figure-html-repo'
 import type {
+  AuditReport,
+  BatchProgress,
+  ChapterFlowResult,
   Character,
   ChapterDetail,
+  FigureDraft,
   Foreshadowing,
-  RhythmEntry
+  MemoryExtraction,
+  MemoryApplyResult,
+  OutlineDiffReport,
+  PrevEndingState,
+  RhythmApplyResult,
+  RhythmEntry,
+  RhythmEvaluation
 } from '../../shared/types'
+import {
+  parseFigureDraftJson,
+  parseMemoryExtractionJson,
+  parseOutlineDiffJson,
+  parseRhythmEvaluationJson
+} from '../../shared/parsers'
 
 export interface ChapterPrompt {
   system: string
   user: string
 }
 
+/**
+ * 上一章正文尾部取用字符数。
+ * 平衡上下文需求与 token 成本：太少无法衔接，太多浪费 token。
+ */
 const PREV_TAIL_CHARS = 1500
+
+/**
+ * 每章目标字数。
+ * 基于典型网文节奏设定，约 2500 字/章。
+ */
 const TARGET_WORDS = 2500
 
 export class WriteService {
   constructor(
     private readonly projectService: ProjectService,
-    private readonly llm: LlmService
+    private readonly llm: LlmService,
+    private readonly flow: WriteFlowService = new WriteFlowService(llm),
+    private readonly chapterService: ChapterService = new ChapterService(projectService)
   ) {}
 
   async buildChapterPrompt(projectId: string, chapterNumber: number): Promise<ChapterPrompt> {
@@ -45,6 +76,7 @@ export class WriteService {
       chapterDetail: ctx.detail,
       prevDetail: ctx.prevDetail,
       prevTail: ctx.prevTail,
+      prevEndingState: ctx.prevEndingState,
       rhythmEntry: ctx.rhythmEntry,
       foreshadowings: ctx.foreshadowings,
       characters: ctx.characters,
@@ -63,14 +95,537 @@ export class WriteService {
     return this.llm.generateStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
-      meta: { feature: 'chapter', projectId }
+      meta: { feature: 'chapter', projectId, chapterNumber }
     })
   }
 
-  async buildReviewPrompt(projectId: string, chapterNumber: number): Promise<string> {
+  /**
+   * 续写质检。
+   * 接受文本（而非章号）——这样既能 audit 还未保存的流式 draft，
+   * 也能 audit 已保存正文（由调用方先 getChapter 取 content）。
+   * 纯函数转发，主进程层不持有状态。
+   * 题材（genre）由调用方提供，缺省时按 urban 兜底。
+   */
+  async auditChapter(
+    projectId: string,
+    content: string,
+    opts?: AuditOptions
+  ): Promise<AuditReport> {
+    let genre = opts?.genre
+    if (genre === undefined) {
+      try {
+        const project = await this.projectService.getProjectData(projectId)
+        genre = project.genre
+      } catch (err) {
+        console.warn('[auditChapter] Failed to get project genre, falling back to urban:', err)
+        // skip：fallback to urban
+      }
+    }
+    return runAudit(content, { ...opts, genre })
+  }
+
+  /**
+   * AI 改写命中段：把质检命中的原文片段（带上下文）发给 LLM，
+   * 让它按 humanizer 技能改写，返回结构化 { rewritten, reason }。
+   * 失败兜底返回空对象。
+   */
+  async humanizeSegment(
+    projectId: string,
+    snippet: string,
+    violationType: string,
+    chapterNumber?: number
+  ): Promise<{ rewritten: string; reason: string }> {
+    if (!snippet.trim()) return { rewritten: '', reason: '原文片段为空' }
+    let genre: string | undefined
+    try {
+      const project = await this.projectService.getProjectData(projectId)
+      genre = project.genre
+    } catch (err) {
+      console.warn('[humanizeSegment] Failed to get project genre:', err)
+      // skip
+    }
+    const system = buildHumanizerPrompt(genre, violationType, snippet)
+    const user = '请按 system 中的规则改写上面那段话。直接输出【改写后】+【改动说明】。'
+    try {
+      const raw = await this.llm.generateStream(user, {
+        systemPrompt: system,
+        meta: { feature: 'humanize', projectId, chapterNumber }
+      })
+      return parseHumanizerOutput(raw)
+    } catch (err) {
+      return { rewritten: '', reason: `LLM 调用失败：${(err as Error).message}` }
+    }
+  }
+
+  /**
+   * 细纲对照：转发到 WriteFlowService。
+   * 若 outline 为空，则自动加载本章细纲文本。
+   */
+  async checkOutlineStream(
+    projectId: string,
+    chapterNumber: number,
+    outline: string,
+    content: string,
+    opts: GenerateOptions = {}
+  ): Promise<string> {
+    let outlineText = outline
+    if (!outlineText) {
+      try {
+        const dir = await this.projectService.resolveDir(projectId)
+        const all = await new DetailedOutlineMdRepo(dir).listAll()
+        const d = all.find((x) => x.chapterNumber === chapterNumber)
+        if (d) {
+          const lines: string[] = []
+          if (d.title) lines.push(`标题：${d.title}`)
+          if (d.plotSummary) lines.push(`核心事件：${d.plotSummary}`)
+          if (d.coolPoint) lines.push(`爽点：${d.coolPoint}`)
+          if (d.hook) lines.push(`钩子：${d.hook}`)
+          if (d.charactersAppearing?.length) lines.push(`角色出场：${d.charactersAppearing.join('、')}`)
+          if (d.foreshadowings?.length) lines.push(`伏笔铺设：${d.foreshadowings.join('；')}`)
+          outlineText = lines.join('\n')
+        }
+      } catch {
+        // skip
+      }
+    }
+    return this.flow.checkOutlineStream(outlineText, content, chapterNumber, opts)
+  }
+
+  /**
+   * 记忆提取：转发到 WriteFlowService。
+   * 自动加载本章正文 + 已知人物名列表（避免重复提取既有角色）。
+   */
+  async extractMemoryStream(
+    projectId: string,
+    chapterNumber: number,
+    opts: GenerateOptions = {}
+  ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
-    const chapterRepo = new ChapterRepository(dir)
-    const chapter = await chapterRepo.get(chapterNumber)
+    // 取正文：优先 md 仓储，回退 ChapterRepository
+    let content = ''
+    try {
+      const md = await new ProseRepo(dir).read(chapterNumber)
+      if (md) content = md
+    } catch (err) {
+      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
+      // skip
+    }
+    if (!content) {
+      try {
+        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+        if (chapter.content) content = chapter.content
+      } catch (err) {
+        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        // skip
+      }
+    }
+    // 取已知人物名
+    let knownCharacters: string[] = []
+    try {
+      const list = await new CharacterCardMdRepo(dir).list()
+      if (list.length > 0) knownCharacters = list.map((c) => c.name)
+    } catch (err) {
+      console.warn('[extractMemoryStream] Failed to list character cards:', err)
+      // skip
+    }
+    if (knownCharacters.length === 0) {
+      try {
+        knownCharacters = (await new CharacterRepository(dir).list()).map((c) => c.name)
+      } catch (err) {
+        console.warn('[extractMemoryStream] Failed to list characters from repository:', err)
+        // skip
+      }
+    }
+    return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, opts)
+  }
+
+  /**
+   * 记忆应用：混合策略。
+   * - 自动应用：状态变化 + 情节追加 + 伏笔回收
+   * - 新增内容（角色/地点/伏笔）：由 UI 调 applyNewCharacters/Locations/Foreshadowings
+   */
+  async applyMemory(
+    projectId: string,
+    extraction: MemoryExtraction
+  ): Promise<MemoryApplyResult> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const writer = new MemoryWriter(dir)
+    return writer.applyAutomatic(extraction)
+  }
+
+  /** 用户确认后：应用新增角色 */
+  async applyNewCharacters(
+    projectId: string,
+    chars: MemoryExtraction['newCharacters']
+  ): Promise<number> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new MemoryWriter(dir).applyNewCharacters(chars)
+  }
+
+  /** 用户确认后：应用新增地点 */
+  async applyNewLocations(
+    projectId: string,
+    locs: MemoryExtraction['newLocations']
+  ): Promise<number> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new MemoryWriter(dir).applyNewLocations(locs)
+  }
+
+  /** 用户确认后：应用新增伏笔 */
+  async applyNewForeshadowings(
+    projectId: string,
+    fs: MemoryExtraction['newForeshadowings']
+  ): Promise<number> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new MemoryWriter(dir).applyNewForeshadowings(fs)
+  }
+
+  /**
+   * 节奏评估：转发到 WriteFlowService。
+   * 自动加载本章正文 + 节奏图谱中的预期情绪值。
+   * 返回 LLM 原始输出（JSON 字符串），由 renderer 解析。
+   */
+  async evaluateRhythmStream(
+    projectId: string,
+    chapterNumber: number,
+    opts: GenerateOptions = {}
+  ): Promise<string> {
+    const dir = await this.projectService.resolveDir(projectId)
+    // 取正文
+    let content = ''
+    try {
+      const md = await new ProseRepo(dir).read(chapterNumber)
+      if (md) content = md
+    } catch (err) {
+      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
+      // skip
+    }
+    if (!content) {
+      try {
+        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+        if (chapter.content) content = chapter.content
+      } catch (err) {
+        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        // skip
+      }
+    }
+    // 取预期情绪值
+    let expectedEmotion = 5
+    try {
+      const rhythm = await new RhythmHtmlRepo(dir).read()
+      const entry = rhythm?.find((r) => r.chapter === chapterNumber)
+      if (entry) expectedEmotion = entry.emotion
+    } catch (err) {
+      console.warn('[evaluateRhythmStream] Failed to read rhythm data, using default:', err)
+      // skip：用默认值 5
+    }
+    return this.flow.evaluateRhythmStream(content, chapterNumber, expectedEmotion, opts)
+  }
+
+  /**
+   * 节奏回填：把评估的实际情绪值写回节奏图谱.html。
+   * 调用方应先检查 evaluation.autoApply；若 false，需用户确认后再调用。
+   */
+  async applyRhythmEvaluation(
+    projectId: string,
+    evaluation: RhythmEvaluation
+  ): Promise<RhythmApplyResult> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const repo = new RhythmHtmlRepo(dir)
+    const result = await repo.updateEmotion(evaluation.chapterNumber, evaluation.actualEmotion)
+    if (!result) {
+      return {
+        applied: false,
+        previousEmotion: evaluation.expectedEmotion,
+        newEmotion: evaluation.expectedEmotion,
+        actualized: false
+      }
+    }
+    return {
+      applied: true,
+      previousEmotion: result.previousEmotion,
+      newEmotion: result.newEmotion,
+      actualized: true
+    }
+  }
+
+  /**
+   * 图解生成：转发到 WriteFlowService。
+   * 自动加载本章正文。
+   */
+  async generateFigureStream(
+    projectId: string,
+    chapterNumber: number,
+    opts: GenerateOptions = {}
+  ): Promise<string> {
+    const dir = await this.projectService.resolveDir(projectId)
+    let content = ''
+    try {
+      const md = await new ProseRepo(dir).read(chapterNumber)
+      if (md) content = md
+    } catch (err) {
+      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
+      // skip
+    }
+    if (!content) {
+      try {
+        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+        if (chapter.content) content = chapter.content
+      } catch (err) {
+        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        // skip
+      }
+    }
+    return this.flow.generateFigureStream(content, chapterNumber, opts)
+  }
+
+  /** 保存图解 HTML 到 图解/ 目录 */
+  async saveFigure(projectId: string, fileName: string, html: string): Promise<string> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const repo = new FigureHtmlRepo(dir)
+    return repo.write(fileName, html)
+  }
+
+  /**
+   * 单章完整流程：生成 → 质检 → 细纲对照 → 记忆提取 → 节奏评估 → 图解生成。
+   * 不保存正文（由调用方决定）；不自动应用记忆/节奏（由 UI 决定）。
+   * onProgress 用于推送当前步骤，UI 可显示进度。
+   *
+   * 重要：步骤 3-6 直接调用 this.flow.* 并显式传入内存中的 content，
+   * 绕过 WriteService 包装方法的磁盘重载逻辑（此时正文尚未落盘）。
+   */
+  async runFullFlowForChapter(
+    projectId: string,
+    chapterNumber: number,
+    onProgress: (step: string, detail?: string) => void,
+    opts: GenerateOptions = {}
+  ): Promise<ChapterFlowResult> {
+    const dir = await this.projectService.resolveDir(projectId)
+
+    // 1. 生成正文（流式 token 由 opts.onToken 推送）
+    onProgress('generating')
+    const content = await this.generateChapterStream(projectId, chapterNumber, opts)
+
+    // 2. 质检
+    onProgress('audit')
+    const audit = await this.auditChapter(projectId, content)
+
+    // 预加载步骤 3-6 所需的支撑数据（只读磁盘一次）
+    let outlineText = ''
+    let knownCharacters: string[] = []
+    let expectedEmotion = 5
+    try {
+      const all = await new DetailedOutlineMdRepo(dir).listAll()
+      const d = all.find((x) => x.chapterNumber === chapterNumber)
+      if (d) {
+        const lines: string[] = []
+        if (d.title) lines.push(`标题：${d.title}`)
+        if (d.plotSummary) lines.push(`核心事件：${d.plotSummary}`)
+        if (d.coolPoint) lines.push(`爽点：${d.coolPoint}`)
+        if (d.hook) lines.push(`钩子：${d.hook}`)
+        if (d.charactersAppearing?.length)
+          lines.push(`角色出场：${d.charactersAppearing.join('、')}`)
+        if (d.foreshadowings?.length)
+          lines.push(`伏笔铺设：${d.foreshadowings.join('；')}`)
+        outlineText = lines.join('\n')
+      }
+    } catch {
+      // skip：无细纲
+    }
+    try {
+      const list = await new CharacterCardMdRepo(dir).list()
+      if (list.length > 0) knownCharacters = list.map((c) => c.name)
+      else knownCharacters = (await new CharacterRepository(dir).list()).map((c) => c.name)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to load characters:', err)
+      // skip
+    }
+    try {
+      const rhythm = await new RhythmHtmlRepo(dir).read()
+      const entry = rhythm?.find((r) => r.chapter === chapterNumber)
+      if (entry) expectedEmotion = entry.emotion
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to read rhythm data, using default:', err)
+      // skip：用默认值 5
+    }
+
+    // 3. 细纲对照（直接传 content，不经过磁盘重载）
+    onProgress('outlineCheck')
+    let outlineDiff: OutlineDiffReport = {
+      chapterNumber,
+      diffs: [],
+      passed: true
+    }
+    if (outlineText) {
+      try {
+        const outlineRaw = await this.flow.checkOutlineStream(
+          outlineText,
+          content,
+          chapterNumber,
+          { meta: { feature: 'batchOutline', projectId } }
+        )
+        outlineDiff = parseOutlineDiffJson(outlineRaw, chapterNumber)
+      } catch (err) {
+        console.warn('[runFullFlowForChapter] Failed to check outline:', err)
+        // skip：用空报告
+      }
+    }
+
+    // 4. 记忆提取（直接传 content）
+    onProgress('memoryExtract')
+    let memory: MemoryExtraction = {
+      chapterNumber,
+      newCharacters: [],
+      newLocations: [],
+      newForeshadowings: [],
+      newPlotPoints: [],
+      characterStateChanges: [],
+      collectedForeshadowings: []
+    }
+    try {
+      const memRaw = await this.flow.extractMemoryStream(
+        content,
+        chapterNumber,
+        knownCharacters,
+        { meta: { feature: 'batchMemory', projectId } }
+      )
+      memory = parseMemoryExtractionJson(memRaw, chapterNumber)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to extract memory:', err)
+      // skip
+    }
+
+    // 5. 节奏评估（直接传 content）
+    onProgress('rhythmEval')
+    let rhythm: RhythmEvaluation | null = null
+    try {
+      const rhythmRaw = await this.flow.evaluateRhythmStream(
+        content,
+        chapterNumber,
+        expectedEmotion,
+        { meta: { feature: 'batchRhythm', projectId } }
+      )
+      rhythm = parseRhythmEvaluationJson(rhythmRaw, chapterNumber, expectedEmotion)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to evaluate rhythm:', err)
+      // skip：rhythm 保持 null
+    }
+
+    // 6. 图解生成（直接传 content）
+    onProgress('figureGen')
+    let figure: FigureDraft = {
+      chapterNumber,
+      shouldGenerate: false,
+      type: '',
+      topic: '',
+      fileName: '',
+      html: '',
+      reason: '未执行'
+    }
+    try {
+      const figRaw = await this.flow.generateFigureStream(content, chapterNumber, {
+        meta: { feature: 'batchFigure', projectId }
+      })
+      figure = parseFigureDraftJson(figRaw, chapterNumber)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to generate figure:', err)
+      // skip
+    }
+
+    onProgress('done')
+    return { chapterNumber, content, audit, outlineDiff, memory, rhythm, figure }
+  }
+
+  /**
+   * 批量续写：从 fromChapter 到 toChapter 逐章生成。
+   * 每章完成后暂停（status='paused'），等用户确认后由 UI 调 resumeBatch 继续。
+   * onChapterComplete 在每章完成时回调（用于推送结果到 UI）。
+   */
+  async generateChaptersBatch(
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    opts: GenerateOptions = {}
+  ): Promise<BatchProgress> {
+    const total = toChapter - fromChapter + 1
+    const completed: number[] = []
+    const dir = await this.projectService.resolveDir(projectId)
+    const proseRepo = new ProseRepo(dir)
+
+    for (let ch = fromChapter; ch <= toChapter; ch++) {
+      try {
+        const result = await this.runFullFlowForChapter(
+          projectId,
+          ch,
+          () => {
+            // progress 内部回调，批量场景不细推
+          },
+          opts
+        )
+        // 保存正文
+        await proseRepo.write(ch, result.content)
+        completed.push(ch)
+        onChapterComplete(ch, result)
+        // 暂停等用户确认（除非已是最后一章）
+        if (ch < toChapter) {
+          return {
+            total,
+            current: ch - fromChapter + 1,
+            currentChapter: ch,
+            fromChapter,
+            toChapter,
+            status: 'paused',
+            pauseReason: '等待用户确认后继续下一章',
+            completed
+          }
+        }
+      } catch (err) {
+        return {
+          total,
+          current: ch - fromChapter + 1,
+          currentChapter: ch,
+          fromChapter,
+          toChapter,
+          status: 'failed',
+          completed,
+          error: (err as Error).message
+        }
+      }
+    }
+    return {
+      total,
+      current: total,
+      currentChapter: toChapter,
+      fromChapter,
+      toChapter,
+      status: 'completed',
+      completed
+    }
+  }
+
+  /**
+   * 继续批量续写：从 fromChapter 的下一章开始，到 toChapter。
+   * 用于用户确认 paused 状态后继续。
+   */
+  async resumeChaptersBatch(
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    opts: GenerateOptions = {}
+  ): Promise<BatchProgress> {
+    return this.generateChaptersBatch(
+      projectId,
+      fromChapter + 1,
+      toChapter,
+      onChapterComplete,
+      opts
+    )
+  }
+
+  async buildReviewPrompt(projectId: string, chapterNumber: number): Promise<string> {
+    const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
     const trimmed = chapter.content.length > 8000
       ? chapter.content.slice(0, 8000) + '\n\n…（后文已省略）'
       : chapter.content
@@ -107,8 +662,7 @@ export class WriteService {
     opts: GenerateOptions = {}
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
-    const chapterRepo = new ChapterRepository(dir)
-    const chapter = await chapterRepo.get(chapterNumber)
+    const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
     const characters = await new CharacterRepository(dir).list()
     const known = characters.map((c) => `${c.name}（${c.role ?? ''}）`).join('、')
     const trimmed = chapter.content.length > 6000
@@ -144,16 +698,15 @@ export class WriteService {
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
     const characters = await new CharacterRepository(dir).list()
-    const chapterRepo = new ChapterRepository(dir)
-    const chapters = await chapterRepo.list()
+    const chapterMetas = await this.chapterService.listChapters(projectId)
     // 取最近 5 章非空正文片段作为依据
-    const recent = [...chapters]
+    const recent = [...chapterMetas]
       .filter((c) => c.wordCount > 0)
       .slice(-5)
     const excerpts: string[] = []
     for (const c of recent) {
-      const content = await chapterRepo.get(c.chapterNumber)
-      excerpts.push(`【第 ${c.chapterNumber} 章】${content.content.slice(0, 600)}`)
+      const ch = await this.chapterService.getChapter(projectId, c.chapterNumber)
+      excerpts.push(`【第 ${c.chapterNumber} 章】${ch.content.slice(0, 600)}`)
     }
     const known = characters.map((c) => c.name).join('、')
     const prompt = [
@@ -191,7 +744,8 @@ export class WriteService {
       const all = await new DetailedOutlineMdRepo(dir).listAll()
       detail = all.find((d) => d.chapterNumber === chapterNumber)
       prevDetail = all.find((d) => d.chapterNumber === chapterNumber - 1)
-    } catch {
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load detailed outline from md:', err)
       // fall through to JSON fallback
     }
     if (!detail) {
@@ -214,7 +768,8 @@ export class WriteService {
             climax: item.climax
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load detailed outline from repository:', err)
         // detail stays undefined
       }
     }
@@ -224,7 +779,8 @@ export class WriteService {
     try {
       const rhythm = await new RhythmHtmlRepo(dir).read()
       rhythmEntry = rhythm?.find((r) => r.chapter === chapterNumber)
-    } catch {
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load rhythm data:', err)
       // skip
     }
 
@@ -233,24 +789,19 @@ export class WriteService {
     try {
       const main = await new OutlineRepository(dir).readMain()
       mainSynopsis = main?.synopsis ?? ''
-    } catch {
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load main outline synopsis:', err)
       // skip
     }
 
-    // 上一章正文末尾：先尝试 md 仓储 ProseRepo，回退 ChapterRepository
+    // 上一章正文末尾：使用新数据源 ProseRepo；写第 1 章时 chapterNumber-1=0，没有上一章，直接跳过
     let prevTail = ''
-    try {
-      const md = await new ProseRepo(dir).read(chapterNumber - 1)
-      if (md) prevTail = tail(md, PREV_TAIL_CHARS)
-    } catch {
-      // skip
-    }
-    if (!prevTail) {
+    if (chapterNumber > 1) {
       try {
-        const chapterRepo = new ChapterRepository(dir)
-        const prev = await chapterRepo.get(chapterNumber - 1)
-        if (prev.content) prevTail = tail(prev.content, PREV_TAIL_CHARS)
-      } catch {
+        const md = await new ProseRepo(dir).read(chapterNumber - 1)
+        if (md) prevTail = tail(md, PREV_TAIL_CHARS)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load previous chapter prose:', err)
         // skip
       }
     }
@@ -260,13 +811,15 @@ export class WriteService {
     try {
       const list = await new CharacterCardMdRepo(dir).list()
       if (list.length > 0) characters = list
-    } catch {
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load character cards:', err)
       // skip
     }
     if (characters.length === 0) {
       try {
         characters = await new CharacterRepository(dir).list()
-      } catch {
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load characters from repository:', err)
         // skip
       }
     }
@@ -276,14 +829,27 @@ export class WriteService {
     try {
       const list = await new ForeshadowingMdRepo(dir).list()
       if (list.length > 0) foreshadowings = list
-    } catch {
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load foreshadowing cards:', err)
       // skip
     }
     if (foreshadowings.length === 0) {
       try {
         foreshadowings = await new ForeshadowingRepository(dir).list()
-      } catch {
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load foreshadowings from repository:', err)
         // skip
+      }
+    }
+
+    // 上一章结尾状态结构化提取（Phase 12 Task 1）
+    let prevEndingState: PrevEndingState | undefined
+    if (prevTail) {
+      try {
+        prevEndingState = await this.flow.extractEndingState(prevTail, chapterNumber - 1)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to extract ending state:', err)
+        // skip：用原文尾段兜底
       }
     }
 
@@ -292,6 +858,7 @@ export class WriteService {
       detail,
       prevDetail,
       prevTail,
+      prevEndingState,
       rhythmEntry,
       foreshadowings,
       characters
@@ -304,6 +871,7 @@ interface ChapterContext {
   detail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
+  prevEndingState?: PrevEndingState
   rhythmEntry?: RhythmEntry
   foreshadowings: Foreshadowing[]
   characters: Character[]
@@ -322,6 +890,7 @@ interface RenderInput {
   chapterDetail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
+  prevEndingState?: PrevEndingState
   rhythmEntry?: RhythmEntry
   foreshadowings: Foreshadowing[]
   characters: Character[]
@@ -372,6 +941,34 @@ function renderUserPrompt(input: RenderInput): string {
       parts.push(input.prevTail)
       parts.push('```')
     }
+  }
+
+  // 4.1 上一章结尾状态结构化提取（Phase 12 Task 1）
+  if (
+    input.prevEndingState &&
+    (input.prevEndingState.characterPositions.length > 0 ||
+      input.prevEndingState.suspense ||
+      input.prevEndingState.unfinished.length > 0)
+  ) {
+    parts.push('---')
+    parts.push(`# 上一章结尾状态（结构化提取，本章开头必须对接）`)
+    const s = input.prevEndingState
+    if (s.characterPositions.length > 0) {
+      parts.push('**人物位置**：')
+      for (const p of s.characterPositions) parts.push(`- ${p.name}：在${p.location}，${p.action}`)
+    }
+    if (s.characterStates.length > 0) {
+      parts.push('**人物状态**：')
+      for (const c of s.characterStates)
+        parts.push(`- ${c.name}：${c.emotion}，${c.body}，持有${c.items}`)
+    }
+    if (s.timePoint) parts.push(`**时间点**：${s.timePoint}`)
+    if (s.unfinished.length > 0) {
+      parts.push('**未完成事项**（本章必须处理）：')
+      for (const u of s.unfinished) parts.push(`- ${u}`)
+    }
+    if (s.suspense) parts.push(`**章末悬念**（本章必须回应）：${s.suspense}`)
+    if (s.props.length > 0) parts.push(`**关键道具**：${s.props.join('、')}`)
   }
 
   // 5. 角色卡
@@ -460,4 +1057,31 @@ function renderCharacterDetail(c: Character): string {
 
 function normalizeName(name: string): string {
   return name.trim().replace(/\s+/g, '')
+}
+
+/**
+ * 解析 LLM 返回的 humanizer 输出。
+ * 格式：先【改写后】+ 段落，再【改动说明】+ 列表。
+ * 容错：没标签时整段作为 rewritten。
+ */
+export function parseHumanizerOutput(raw: string): { rewritten: string; reason: string } {
+  const empty: { rewritten: string; reason: string } = { rewritten: '', reason: '' }
+  if (!raw.trim()) return empty
+  // 1. 截取【改写后】到【改动说明】之间的内容
+  const reRewrite = /【改写后】\s*([\s\S]*?)(?=【改动说明】|$)/
+  const reReason = /【改动说明】\s*([\s\S]*?)$/
+  const m1 = raw.match(reRewrite)
+  const m2 = raw.match(reReason)
+  let rewritten = m1 ? m1[1].trim() : ''
+  let reason = m2 ? m2[1].trim() : ''
+  // 2. 去掉前后的 markdown 围栏
+  rewritten = rewritten.replace(/^```[a-zA-Z]*\s*/m, '').replace(/```\s*$/m, '').trim()
+  // 3. 容错：完全没标签时整段作为 rewritten
+  if (!rewritten && !reason) {
+    rewritten = raw.trim()
+    reason = '（LLM 未按预期格式输出，已取整段）'
+  }
+  // 4. 兜底：reason 为空时给默认说明
+  if (rewritten && !reason) reason = '（未提供改动说明）'
+  return { rewritten, reason }
 }

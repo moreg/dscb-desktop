@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ChapterMeta, Character, ChapterStatus } from '../../shared/types'
+import type {
+  ChapterMeta,
+  Character,
+  ChapterStatus,
+  BatchProgress,
+  ChapterFlowResult
+} from '../../shared/types'
 
 interface Props {
   projectId: string
@@ -32,17 +38,25 @@ export default function ChapterListPage({
   const [characters, setCharacters] = useState<Character[]>([])
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
+  const [showBatch, setShowBatch] = useState(false)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
 
   const refresh = () => {
     setLoading(true)
-    void window.api.listChapters(projectId).then((list) => {
-      setChapters(list)
-      setLoading(false)
-    })
+    void window.api.listChapters(projectId)
+      .then((list) => {
+        setChapters(list)
+        setLoading(false)
+      })
+      .catch((err) => {
+        console.error('[ChapterListPage] Failed to load chapters:', err)
+        setLoading(false)
+      })
   }
   const refreshCharacters = () => {
-    void window.api.listCharacters(projectId).then(setCharacters)
+    void window.api.listCharacters(projectId)
+      .then(setCharacters)
+      .catch((err) => console.error('[ChapterListPage] Failed to load characters:', err))
   }
 
   useEffect(() => {
@@ -89,9 +103,19 @@ export default function ChapterListPage({
               {chapters.length} 章 · {totalWords.toLocaleString()} 字
             </p>
           </div>
-          <button className="btn btn-primary" onClick={() => setShowNew(true)}>
-            + 新章
-          </button>
+          <div className="page-head-actions">
+            <button
+              className="btn btn-ghost"
+              onClick={() => setShowBatch(true)}
+              disabled={chapters.length === 0}
+              title={chapters.length === 0 ? '需先创建章节' : '批量续写多章'}
+            >
+              批量续写
+            </button>
+            <button className="btn btn-primary" onClick={() => setShowNew(true)}>
+              + 新章
+            </button>
+          </div>
         </div>
       </div>
 
@@ -197,6 +221,19 @@ export default function ChapterListPage({
           projectId={projectId}
         />
       ) : null}
+
+      {showBatch ? (
+        <BatchWriteDialog
+          projectId={projectId}
+          maxChapter={
+            chapters.length > 0
+              ? Math.max(...chapters.map((c) => c.chapterNumber))
+              : 0
+          }
+          onClose={() => setShowBatch(false)}
+          onChapterCompleted={() => refresh()}
+        />
+      ) : null}
     </div>
   )
 }
@@ -249,6 +286,248 @@ function NewChapterDialog({
           <button className="btn btn-primary" onClick={submit} disabled={saving || !title.trim()}>
             {saving ? '创建中…' : '落笔'}
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BatchWriteDialog({
+  projectId,
+  maxChapter,
+  onClose,
+  onChapterCompleted
+}: {
+  projectId: string
+  maxChapter: number
+  onClose: () => void
+  onChapterCompleted: () => void
+}) {
+  // 默认从最后一章的下一章开始
+  const [fromChapter, setFromChapter] = useState(maxChapter + 1)
+  const [toChapter, setToChapter] = useState(maxChapter + 3)
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<BatchProgress | null>(null)
+  const [lastResult, setLastResult] = useState<ChapterFlowResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [streamingText, setStreamingText] = useState('')
+
+  const status = progress?.status ?? 'pending'
+  const isFinished = status === 'completed' || status === 'failed'
+  const isPaused = status === 'paused'
+
+  const startBatch = async () => {
+    if (fromChapter > toChapter) {
+      setError('起始章号不能大于结束章号')
+      return
+    }
+    if (fromChapter < 1) {
+      setError('起始章号不能小于 1')
+      return
+    }
+    setRunning(true)
+    setError(null)
+    setProgress(null)
+    setLastResult(null)
+    setStreamingText('')
+    try {
+      const res = await window.api.generateBatch(
+        projectId,
+        fromChapter,
+        toChapter,
+        (chapter, result) => {
+          setLastResult(result)
+          onChapterCompleted()
+          setStreamingText('')
+        },
+        (token, done) => {
+          if (!done && token) {
+            setStreamingText((prev) => prev + token)
+          }
+        }
+      )
+      if (res.ok && res.progress) {
+        setProgress(res.progress)
+      } else if (!res.ok) {
+        setError(res.error ?? '批量续写失败')
+      }
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setRunning(false)
+      setStreamingText('')
+    }
+  }
+
+  const resumeBatch = async () => {
+    if (!progress) return
+    setRunning(true)
+    setError(null)
+    // 保留 lastResult 直到新结果到达（M3 修复）
+    setStreamingText('')
+    try {
+      const res = await window.api.resumeBatch(
+        projectId,
+        progress.currentChapter,
+        progress.toChapter,
+        (chapter, result) => {
+          setLastResult(result)
+          onChapterCompleted()
+          setStreamingText('')
+        },
+        (token, done) => {
+          if (!done && token) {
+            setStreamingText((prev) => prev + token)
+          }
+        }
+      )
+      if (res.ok && res.progress) {
+        setProgress(res.progress)
+      } else if (!res.ok) {
+        setError(res.error ?? '继续批量续写失败')
+      }
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setRunning(false)
+      setStreamingText('')
+    }
+  }
+
+  const statusLabel: Record<BatchProgress['status'], string> = {
+    pending: '待开始',
+    generating: '生成中',
+    flow: '流程中',
+    paused: '已暂停',
+    completed: '已完成',
+    failed: '失败'
+  }
+
+  return (
+    <div className="dialog-overlay" onClick={running ? undefined : onClose}>
+      <div className="dialog" style={{ minWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <h3>批量续写</h3>
+        <p className="desc" style={{ margin: '0 0 12px' }}>
+          逐章生成正文并自动跑质检/细纲对照/记忆/节奏/图解流程，每章完成后暂停等你确认。
+        </p>
+
+        <div className="field-row">
+          <div className="field" style={{ flex: 1 }}>
+            <label>起始章号</label>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={fromChapter}
+              onChange={(e) => setFromChapter(Number(e.target.value))}
+              disabled={running}
+            />
+          </div>
+          <div className="field" style={{ flex: 1 }}>
+            <label>结束章号</label>
+            <input
+              className="input"
+              type="number"
+              min={fromChapter}
+              value={toChapter}
+              onChange={(e) => setToChapter(Number(e.target.value))}
+              disabled={running}
+            />
+          </div>
+        </div>
+
+        {progress ? (
+          <div className="batch-progress">
+            <div className="batch-progress-head">
+              <span className={`chip status-${status}`}>{statusLabel[status]}</span>
+              <span className="batch-progress-count">
+                {progress.completed.length} / {progress.total} 章完成
+              </span>
+            </div>
+            {progress.currentChapter ? (
+              <div className="batch-progress-current">
+                当前：第 {progress.currentChapter} 章
+              </div>
+            ) : null}
+            {progress.pauseReason ? (
+              <div className="batch-progress-reason">{progress.pauseReason}</div>
+            ) : null}
+            {progress.error ? (
+              <div className="batch-progress-error">{progress.error}</div>
+            ) : null}
+            {progress.completed.length > 0 ? (
+              <div className="batch-progress-completed">
+                已完成章节：{progress.completed.join(', ')}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {streamingText ? (
+          <div className="batch-streaming">
+            <div className="batch-streaming-head">正在生成…</div>
+            <pre className="batch-streaming-text">{streamingText}</pre>
+          </div>
+        ) : null}
+
+        {lastResult ? (
+          <div className="batch-last-result">
+            <div className="batch-last-result-head">
+              第 {lastResult.chapterNumber} 章结果
+            </div>
+            <ul className="batch-last-result-list">
+              <li>
+                字数：{lastResult.content.length}
+              </li>
+              <li>
+                质检：
+                {lastResult.audit.counts.error > 0
+                  ? `${lastResult.audit.counts.error} 错误`
+                  : lastResult.audit.counts.warn > 0
+                    ? `${lastResult.audit.counts.warn} 警告`
+                    : '通过'}
+              </li>
+              <li>
+                细纲差异：{lastResult.outlineDiff.diffs.length} 项
+                {lastResult.outlineDiff.diffs.some((d) => d.priority === 'P0')
+                  ? '（含 P0）'
+                  : ''}
+              </li>
+              <li>
+                记忆：角色 {lastResult.memory.newCharacters.length} / 地点{' '}
+                {lastResult.memory.newLocations.length} / 伏笔{' '}
+                {lastResult.memory.newForeshadowings.length} / 状态变化{' '}
+                {lastResult.memory.characterStateChanges.length}
+              </li>
+              <li>
+                节奏：{lastResult.rhythm ? `实际情绪 ${lastResult.rhythm.actualEmotion}` : '未评估'}
+              </li>
+              <li>
+                图解：{lastResult.figure.shouldGenerate ? `生成 ${lastResult.figure.fileName}` : '本章无关键转折'}
+              </li>
+            </ul>
+          </div>
+        ) : null}
+
+        {error ? <div className="error-text">{error}</div> : null}
+
+        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+          <button className="btn btn-ghost" onClick={onClose} disabled={running}>
+            {isFinished ? '关闭' : '取消'}
+          </button>
+          {!progress || status === 'pending' ? (
+            <button
+              className="btn btn-primary"
+              onClick={startBatch}
+              disabled={running || fromChapter < 1 || toChapter < fromChapter}
+            >
+              {running ? '生成中…' : '开始批量续写'}
+            </button>
+          ) : isPaused ? (
+            <button className="btn btn-primary" onClick={resumeBatch} disabled={running}>
+              {running ? '生成中…' : '继续下一章'}
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

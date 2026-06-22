@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type {
+  AuditReport,
   ChapterContent,
   ChapterVersion,
   ChapterSource,
@@ -8,9 +9,40 @@ import type {
   Foreshadowing,
   MemoryEntity
 } from '../../shared/types'
+import {
+  pushEntry,
+  popEntry,
+  popEntryAt,
+  revertInDraft,
+  applyToDraft,
+  findEntryByViolationKey,
+  pushRedo,
+  popRedo,
+  clearRedoStack,
+  detectUndoRedoShortcut,
+  type RewriteEntry
+} from '../../main/data/rewrite-history'
+import {
+  loadState,
+  saveState,
+  getLocalStorage
+} from '../../main/data/rewrite-persistence'
+import {
+  formatTokens,
+  formatCost,
+  formatRelativeTime,
+  evaluateCostAlert,
+  shouldBlockAiGenerate,
+  DEFAULT_COST_THRESHOLDS,
+  type CostAlertLevel
+} from '../../main/data/usage-summary'
+import type { UsageSummary, CostAlertConfig, UsageRecord } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type { DetailedOutlineItem } from '../../shared/types'
 import { buildForeshadowingReminders } from './foreshadowingReminders'
+import ChapterFlowPanel from './ChapterFlowPanel'
+import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
+import { getOutlineDetailRows } from './outlineDetailFields'
 
 interface Props {
   projectId: string
@@ -86,8 +118,13 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
   const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
-  const [pomoFocus, setPomoFocus] = useState(25)
-  const [pomoBreak, setPomoBreak] = useState(5)
+
+  // 番茄钟默认值
+  const DEFAULT_POMODORO_FOCUS_MINUTES = 25
+  const DEFAULT_POMODORO_BREAK_MINUTES = 5
+
+  const [pomoFocus, setPomoFocus] = useState(DEFAULT_POMODORO_FOCUS_MINUTES)
+  const [pomoBreak, setPomoBreak] = useState(DEFAULT_POMODORO_BREAK_MINUTES)
   const [pomoMode, setPomoMode] = useState<'focus' | 'break'>('focus')
   const [pomoSecs, setPomoSecs] = useState(25 * 60)
   const [pomoRunning, setPomoRunning] = useState(false)
@@ -101,6 +138,213 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [castSuggestions, setCastSuggestions] = useState<CastSuggestion[]>([])
   const [castApplied, setCastApplied] = useState(false)
   const [showCastPanel, setShowCastPanel] = useState(false)
+  const [flowPanelOpen, setFlowPanelOpen] = useState(false)
+  const [autoAudit, setAutoAudit] = useState<AuditReport | null>(null)
+  const [reAuditLoading, setReAuditLoading] = useState(false)
+  const [writeAuditMode, setWriteAuditMode] = useState<'soft' | 'strict'>('soft')
+  /**
+   * P11-A：上次持久化时间戳（毫秒）。null = 从未保存过。
+   * 显示"已保存 X 秒前"小指示器，让用户知道"工作已自动保存"。
+   * 切章时重置。
+   */
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
+  /** 持久化是否正在 debounce 等待中（用于"保存中…"指示器） */
+  const [isSaving, setIsSaving] = useState(false)
+  /**
+   * P10-A：用量统计 — 工具栏显示"今日 ¥X.XX"小徽章，点击展开 popover。
+   * aiGenerate 完成时自动刷新（自动累加 LLM 调用）。
+   */
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [usagePopoverOpen, setUsagePopoverOpen] = useState(false)
+  // P16-C：点击趋势图某一天 → 显示当天 LLM 调用详情
+  const [dayDetail, setDayDetail] = useState<{ date: string; records: UsageRecord[] } | null>(null)
+  const [dayDetailLoading, setDayDetailLoading] = useState(false)
+  // P12-C：用量预警（默认阈值；可后续接设置项做用户自定义）
+  // P13-C + P14-C：从 settings 加载 costAlert config（用户在 SettingsPage 设置）
+  const [costAlertConfig, setCostAlertConfig] = useState<CostAlertConfig>({
+    enabled: true,
+    warning: DEFAULT_COST_THRESHOLDS.warning,
+    exceeded: DEFAULT_COST_THRESHOLDS.exceeded,
+    blockOnExceeded: false
+  })
+  const [costAlertDismissed, setCostAlertDismissed] = useState<CostAlertLevel | null>(null)
+  const refreshUsage = () => {
+    void window.api.getUsageSummary().then((s) => {
+      setUsage(s)
+      // P12-C + P13-C：刷新后检查用量预警（用加载的 config，禁用时不检查）
+      if (!costAlertConfig.enabled) return
+      const alert = evaluateCostAlert(s.month.cost, {
+        warning: costAlertConfig.warning,
+        exceeded: costAlertConfig.exceeded
+      })
+      // 已 dismiss 同一等级不重复弹
+      if (alert.level !== 'ok' && alert.level !== costAlertDismissed) {
+        const message =
+          alert.level === 'exceeded'
+            ? `本月 AI 费用已达 ${formatCost(alert.cost)}，超过预警线 ${formatCost(alert.threshold!)}！建议检查用量或暂停续写。`
+            : `本月 AI 费用已达 ${formatCost(alert.cost)}，接近预警线 ${formatCost(alert.threshold!)}。`
+        setUndoToast({ message, type: alert.level === 'exceeded' ? 'error' : 'warning' })
+        setCostAlertDismissed(alert.level)
+      }
+    })
+  }
+  /**
+   * P16-C：点击趋势图某一天 → 拉取当天所有 LLM 调用记录。
+   * 复用现有 popover 展示（节省模态框），用户可点 ✕ 关闭。
+   */
+  const loadDayDetail = async (date: string) => {
+    setDayDetailLoading(true)
+    setDayDetail({ date, records: [] }) // 占位（loading 状态）
+    try {
+      const records = await window.api.getUsageDayDetail(date)
+      setDayDetail({ date, records })
+    } catch {
+      setDayDetail({ date, records: [] })
+    } finally {
+      setDayDetailLoading(false)
+    }
+  }
+
+  /**
+   * P6-C：撤销失败时显示的 toast 提示。
+   * 简单实现：3 秒后自动消失。type 区分 warning（黄色）/ error（朱红）。
+   */
+  const [undoToast, setUndoToast] = useState<{ message: string; type: 'warning' | 'error' } | null>(null)
+  useEffect(() => {
+    if (!undoToast) return
+    const id = setTimeout(() => setUndoToast(null), 3000)
+    return () => clearTimeout(id)
+  }, [undoToast])
+  /**
+   * 改写应用历史：每条 { oldSnippet, newText } 是一次 apply 操作。
+   * "↶ 撤销" 弹最近一条（栈顶），把正文中的 newText 还原为 oldSnippet。
+   * 容量上限 10 条，纯函数封装在 src/main/data/rewrite-history.ts（便于单测）。
+   */
+  const [rewriteHistory, setRewriteHistory] = useState<RewriteEntry[]>([])
+  /**
+   * P7-A：重做栈——undo 时把条目推入，redo 时弹出。
+   * 任何新 apply 都清空 redoStack（标准编辑器行为）。
+   */
+  const [redoStack, setRedoStack] = useState<RewriteEntry[]>([])
+
+  /**
+   * 把一次成功的"应用到正文"压栈。
+   * 切章/project 时清空（避免跨项目串台）。
+   * P6-B：传 violationKey（来自 ChapterAuditPanel），用于 per-violation 精确撤销。
+   */
+  const pushRewrite = (oldSnippet: string, newText: string, violationKey?: string) => {
+    setRewriteHistory((s) => pushEntry(s, oldSnippet, newText, Date.now(), violationKey))
+    setRedoStack(clearRedoStack())
+  }
+
+  /**
+   * 撤销最近一次改写：把 draft 中上一次应用的新文本还原成原文。
+   * 还原后调用 reAudit 刷新违例清单。
+   * 失败（P6-C）显示 toast 提示用户。
+   */
+  const undoLastRewrite = async () => {
+    let popped: RewriteEntry | null = null
+    setRewriteHistory((s) => {
+      const r = popEntry(s)
+      popped = r.popped
+      return r.next
+    })
+    if (!popped) return
+    applyRevert(popped)
+  }
+
+  /**
+   * 撤销指定位置的改写（0 = 栈顶最近一次，1 = 次新...）。
+   * 用于面板下拉菜单"撤销任意一条"。
+   */
+  const undoRewriteAt = async (fromTop: number) => {
+    let popped: RewriteEntry | null = null
+    setRewriteHistory((s) => {
+      const r = popEntryAt(s, fromTop)
+      popped = r.popped
+      return r.next
+    })
+    if (!popped) return
+    applyRevert(popped)
+  }
+
+  /**
+   * P6-B：按 violationKey 找到最近一条对应条目并撤销。
+   * 用于"↶ 撤销这次"按钮——只撤销用户实际点的那条应用，不影响其他已应用条目。
+   */
+  const undoRewriteByKey = async (violationKey: string) => {
+    let popped: RewriteEntry | null = null
+    let poppedIdx = -1
+    setRewriteHistory((s) => {
+      const idx = findEntryByViolationKey(s, violationKey)
+      if (idx < 0) {
+        // 找不到对应条目（可能已被撤销或 violationKey 未传）
+        return s
+      }
+      popped = s[idx]
+      poppedIdx = idx
+      return [...s.slice(0, idx), ...s.slice(idx + 1)]
+    })
+    if (!popped) {
+      setUndoToast({ message: '未找到这条改写的记录（可能已被撤销）', type: 'warning' })
+      return
+    }
+    applyRevert(popped)
+  }
+
+  /**
+   * P7-A：重做最近一次被撤销的应用。
+   * 把 redoStack 顶部条目推回 history，并在 draft 中应用 oldSnippet → newText。
+   * 失败（draft 中找不到 oldSnippet）显示 toast 并把条目塞回 redoStack。
+   */
+  const redoLastRewrite = async () => {
+    let popped: RewriteEntry | null = null
+    setRedoStack((s) => {
+      const r = popRedo(s)
+      popped = r.popped
+      return r.next
+    })
+    if (!popped) return
+    // 重做：把 newText 重新应用到 draft
+    setDraft((d) => {
+      const next = applyToDraft(d, popped!.oldSnippet, popped!.newText)
+      if (next === d) {
+        // 找不到 oldSnippet（可能用户手动改过）— toast 提示并把条目塞回 redoStack
+        setRedoStack((rs) => pushRedo(rs, popped!))
+        setUndoToast({
+          message: '重做失败：正文中找不到原片段（可能被手动改过）',
+          type: 'warning'
+        })
+        return d
+      }
+      // 成功：把条目推回 history
+      setRewriteHistory((h) => pushEntry(h, popped!.oldSnippet, popped!.newText, popped!.at, popped!.violationKey))
+      return next
+    })
+    setDirty(true)
+    setTimeout(() => void reAudit(), 0)
+  }
+
+  /** 内部：把 popped 的 newText 还原成 oldSnippet，再触发 reAudit */
+  const applyRevert = (popped: RewriteEntry) => {
+    setDraft((d) => {
+      const next = revertInDraft(d, popped.newText, popped.oldSnippet)
+      if (next === d) {
+        // 找不到新文本（可能用户手动改过）— P6-C 显示 toast
+        setUndoToast({
+          message: '撤销失败：正文中找不到改写片段（可能被手动改过）',
+          type: 'warning'
+        })
+        return d
+      }
+      // 成功：把条目推到 redoStack 供 P7-A 重做
+      setRedoStack((rs) => pushRedo(rs, popped))
+      return next
+    })
+    setDirty(true)
+    // 给 setDraft 一点时间生效再重跑（react 18 batching）
+    setTimeout(() => void reAudit(), 0)
+  }
   const reviewRef = useRef(0)
   const castRef = useRef(0)
   const genRef = useRef(0)
@@ -145,6 +389,18 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     ++genRef.current
     setGenerating(false)
+    // 切章/project 时清空内存中的改写历史（避免跨章串台）
+    setRewriteHistory([])
+    setRedoStack([])
+    setLastSavedAt(null) // P11-A：切章时重置"上次保存"指示
+    // P9-A：从 localStorage 加载该章的持久化改写历史（如果存在）
+    const storage = getLocalStorage()
+    const persisted = loadState(storage, projectId, chapterNumber)
+    if (persisted) {
+      setRewriteHistory(persisted.history)
+      setRedoStack(persisted.redoStack)
+      setLastSavedAt(Date.now()) // P11-A：刚加载时也算"已保存"
+    }
     void window.api.getChapter(projectId, chapterNumber).then((c) => {
       setData(c)
       setDraft(c.content)
@@ -157,7 +413,67 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshChapterOutline()
   }, [projectId, chapterNumber])
 
-  // 加载番茄钟配置 + 每日目标
+  // P9-A：debounced 持久化。rewriteHistory 或 redoStack 变化时延迟 200ms 写入 localStorage。
+  // 延迟合并：连续 apply/undo/redo 操作只在用户停手后写一次。
+  useEffect(() => {
+    const storage = getLocalStorage()
+    if (!storage) return
+    setIsSaving(true) // P11-A：标记正在 debounce
+    const timer = setTimeout(() => {
+      const ok = saveState(storage, projectId, chapterNumber, {
+        version: 1,
+        history: rewriteHistory,
+        redoStack
+      })
+      if (ok) setLastSavedAt(Date.now()) // P11-A：成功后更新指示器
+      setIsSaving(false)
+    }, 200)
+    return () => {
+      clearTimeout(timer)
+      // 注意：不要在这里 setIsSaving(false)，因为可能下一个 useEffect run 还在 debouncing
+      // 真正的 false 在 setTimeout 回调里设置
+    }
+  }, [rewriteHistory, redoStack, projectId, chapterNumber])
+
+  // P19-A：自动保存草稿。draft 变化时延迟 800ms 写入 `.draft-NNN.md`。
+  // 与正式保存（💾 Save）独立——正式保存会清掉 draft。
+  const [draftBanner, setDraftBanner] = useState<{ content: string; at: number } | null>(null)
+  useEffect(() => {
+    // 跳过"刚加载章节"和"切章中"的初始化写
+    if (!data) return
+    // 跳过未变更的"setDraft(c.content)"——data.content === draft 时没必要写
+    if (data.content === draft) return
+    const timer = setTimeout(() => {
+      void window.api.saveDraft(projectId, chapterNumber, draft)
+    }, 800)
+    return () => clearTimeout(timer)
+  }, [draft, projectId, chapterNumber, data])
+
+  // P19-A：打开章节时检查 draft，存在且与正文不同则提示恢复
+  useEffect(() => {
+    if (!data) return
+    void window.api.readDraft(projectId, chapterNumber).then((d) => {
+      if (d && d.different) {
+        setDraftBanner({ content: d.content, at: d.at })
+      } else {
+        setDraftBanner(null)
+      }
+    })
+  }, [projectId, chapterNumber, data?.content]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // P19-A：正式保存（💾 Save）成功后清掉 draft（已生效，不再需要备份）
+  // 实现：包装 save 为 saveAndClearDraft（用 ref 避免循环引用）
+  const saveRef = useRef<() => Promise<void>>(async () => {})
+  const saveAndClearDraft = useCallback(async () => {
+    await saveRef.current()
+    // P19-B：上报保存 delta 到 weekly stats
+    const delta = (data?.content.length ?? 0) - draft.length
+    reportSaveDelta(-delta) // 注意：save 后的字 = data.content.length（旧的），增量 = 新字 - 旧字 = -delta
+    await window.api.discardDraft(projectId, chapterNumber)
+    setDraftBanner(null)
+  }, [projectId, chapterNumber, data, draft])
+
+  // 加载番茄钟配置 + 每日目标 + 写作品质模式
   useEffect(() => {
     void window.api.getPomodoroConfig().then((cfg) => {
       setPomoFocus(cfg.focus)
@@ -165,9 +481,123 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setPomoSecs(cfg.focus * 60)
     })
     void window.api.getDailyWordGoal().then(setDailyGoal)
+    void window.api.getWriteAuditConfig().then((cfg) => setWriteAuditMode(cfg.mode))
+    // P13-C：加载用量预警配置
+    void window.api.getCostAlertConfig().then(setCostAlertConfig)
   }, [])
 
+  // P10-A：加载用量统计（页面打开时 + 切章时刷新）
+  useEffect(() => {
+    refreshUsage()
+  }, [projectId])
+
+  // P10-A：点 popover 外区域关闭
+  useEffect(() => {
+    if (!usagePopoverOpen) return
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && target.closest('.usage-popover-root')) return
+      setUsagePopoverOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [usagePopoverOpen])
+
+  // P11-A：每 10 秒重渲染一次，让"X 秒前"指示器保持新鲜
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 10_000)
+    return () => clearInterval(id)
+  }, [])
+
+  // 全局快捷键：Ctrl+Shift+A 重新质检 + Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // 重新质检：Ctrl+Shift+A
+      if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
+        e.preventDefault()
+        void reAudit()
+        return
+      }
+      // Undo/Redo：通过纯函数判断（跨平台兼容 + 不在 textarea 内拦截）
+      const intent = detectUndoRedoShortcut({
+        ctrl: e.ctrlKey,
+        meta: e.metaKey,
+        shift: e.shiftKey,
+        alt: e.altKey,
+        key: e.key,
+        targetTag: (e.target as HTMLElement | null)?.tagName ?? ''
+      })
+      if (intent === 'undo' && rewriteHistory.length > 0) {
+        e.preventDefault()
+        void undoLastRewrite()
+      } else if (intent === 'redo' && redoStack.length > 0) {
+        e.preventDefault()
+        void redoLastRewrite()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // 闭包依赖 rewriteHistory.length + redoStack.length + reAudit/undoLastRewrite/redoLastRewrite；
+  }, [draft, rewriteHistory.length, redoStack.length])
+
+  // P19-A：离开页面/切章前提醒未保存内容
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (dirty) {
+        e.preventDefault()
+        e.returnValue = '' // 触发浏览器原生确认弹窗
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [dirty])
+
+  /**
+   * 手动重新跑 AI 味检查（写完之后任何时候都能重看违例清单）。
+   * 不修改正文，只刷新 autoAudit 并打开 flowPanel 让用户看结果。
+   */
+  const reAudit = async () => {
+    setReAuditLoading(true)
+    try {
+      const report = await window.api.auditChapter(projectId, draft)
+      setAutoAudit(report)
+      setFlowPanelOpen(true)
+    } catch {
+      // 静默失败
+    } finally {
+      setReAuditLoading(false)
+    }
+  }
+
   const save = async () => {
+    // 保存前自动跑一次检查；strict 模式下若 error > 0 弹窗确认
+    let preAudit: AuditReport | null = null
+    if (writeAuditMode === 'strict') {
+      try {
+        preAudit = await window.api.auditChapter(projectId, draft)
+        setAutoAudit(preAudit)
+        if (preAudit.counts.error > 0) {
+          const proceed = window.confirm(
+            `检测到 ${preAudit.counts.error} 处 error 级违例（章末/禁用词/规则等）。strict 模式要求修复后再保存，是否仍要保存？`
+          )
+          if (!proceed) {
+            setFlowPanelOpen(true)
+            return
+          }
+        }
+      } catch {
+        // skip：检查失败不阻断保存
+      }
+    } else {
+      // soft 模式：保存前静默跑一次，刷新 audit 面板即可
+      try {
+        preAudit = await window.api.auditChapter(projectId, draft)
+        setAutoAudit(preAudit)
+      } catch {
+        // skip
+      }
+    }
     setSaving(true)
     try {
       const meta = await window.api.updateChapterContent(projectId, chapterNumber, draft)
@@ -177,6 +607,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setSaving(false)
     }
   }
+  saveRef.current = save // P19-A：让 saveAndClearDraft 在保存后清掉 draft
 
   const saveAsVersion = async () => setShowVersionDialog(true)
 
@@ -200,17 +631,34 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
       return
     }
+    // P14-C：硬上限拦截——若 usage 已超阈值且用户开启 blockOnExceeded，弹确认
+    if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
+      const proceed = window.confirm(
+        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续续写？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
+      )
+      if (!proceed) return
+    }
     setGenerating(true)
     setDraft('')
+    setFlowPanelOpen(false)
+    setAutoAudit(null)
+    setReviewText('')
     const myGen = ++genRef.current
+    let finalDraft = ''
     try {
       const result = await window.api.generateChapterStream(
         projectId,
         chapterNumber,
         (token, done) => {
           if (genRef.current !== myGen) return
-          if (token) setDraft((d) => d + token)
-          if (done) setGenerating(false)
+          if (token) {
+            finalDraft += token
+            setDraft((d) => d + token)
+          }
+          if (done) {
+            setGenerating(false)
+            refreshUsage() // P10-A：续写完成更新今日用量
+          }
         }
       )
       if (genRef.current !== myGen) return
@@ -226,6 +674,48 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         return
       }
       setDirty(true)
+      // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核
+      try {
+        const report = await window.api.auditChapter(projectId, finalDraft)
+        if (genRef.current !== myGen) return
+        setAutoAudit(report)
+      } catch {
+        // 质检失败不阻断
+      }
+      if (await window.api.hasLlmKey()) {
+        setReviewOpen(true)
+        setReviewing(true)
+        setReviewText('')
+        const myReview = ++reviewRef.current
+        try {
+          const r = await window.api.reviewChapterStream(
+            projectId,
+            chapterNumber,
+            (token, done) => {
+              if (reviewRef.current !== myReview) return
+              if (token) setReviewText((t) => t + token)
+              if (done) {
+                setReviewing(false)
+                refreshUsage() // P10-A：审稿完成更新今日用量
+              }
+            }
+          )
+          if (reviewRef.current !== myReview) return
+          if (!r.ok) {
+            setReviewing(false)
+            setReviewText(
+              (t) =>
+                t +
+                (r.error === 'LLM_AUTH_FAILED'
+                  ? '\n\n⚠ 认证失败，请检查 API Key'
+                  : '\n\n⚠ 生成失败：' + (r.error ?? '未知错误'))
+            )
+          }
+        } catch {
+          if (reviewRef.current === myReview) setReviewing(false)
+        }
+      }
+      setFlowPanelOpen(true)
     } catch {
       if (genRef.current === myGen) setGenerating(false)
     }
@@ -541,9 +1031,43 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
       </div>
 
+      {/* P19-A：草稿恢复 banner（检测到比正文更新的 draft 时显示） */}
+      {draftBanner ? (
+        <div className="draft-banner">
+          <span>
+            📝 检测到 {formatRelativeTime(draftBanner.at, Date.now())} 的未保存草稿（{draftBanner.content.length} 字）
+          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                setDraft(draftBanner.content)
+                setDirty(true)
+                setDraftBanner(null)
+              }}
+            >
+              恢复
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                void window.api.discardDraft(projectId, chapterNumber)
+                setDraftBanner(null)
+              }}
+            >
+              丢弃
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* 操作工具栏 */}
       <div className="editor-toolbar">
-        <button className="btn btn-sm" onClick={save} disabled={!dirty || saving}>
+        <button
+          className="btn btn-sm"
+          onClick={saveAndClearDraft}
+          disabled={!dirty || saving}
+        >
           {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
         </button>
         <button className="btn btn-sm" onClick={saveAsVersion} disabled={savingVersion}>
@@ -560,6 +1084,136 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           {showPreview ? '收起预览' : '👁 预览'}
         </button>
         <span className="spacer" />
+        {/* P11-A：保存指示器 — 让用户知道"工作已自动保存" */}
+        {lastSavedAt !== null ? (
+          <span
+            className="save-indicator"
+            title={isSaving ? '正在保存…' : `上次保存：${new Date(lastSavedAt).toLocaleTimeString()}`}
+          >
+            {isSaving ? '⟳ 保存中…' : `✓ 已保存 ${formatRelativeTime(lastSavedAt, Date.now())}`}
+          </span>
+        ) : null}
+        {/* P10-A：用量徽章 — 显示今日费用，点击展开 popover */}
+        <div className="usage-popover-root" style={{ position: 'relative' }}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setUsagePopoverOpen((o) => !o)}
+            title="今日 AI 用量（点击查看详情）"
+          >
+            📊 今日{usage ? ` ${formatCost(usage.today.cost)}` : '…'}
+          </button>
+          {usagePopoverOpen && usage ? (
+            <div className="usage-popover">
+              <div className="usage-popover-title">用量统计</div>
+              <div className="usage-popover-grid">
+                <div className="usage-popover-cell">
+                  <div className="label">今日</div>
+                  <div className="tokens">{formatTokens(usage.today.total)}</div>
+                  <div className="cost">{formatCost(usage.today.cost)}</div>
+                </div>
+                <div className="usage-popover-cell">
+                  <div className="label">本月</div>
+                  <div className="tokens">{formatTokens(usage.month.total)}</div>
+                  <div className="cost">{formatCost(usage.month.cost)}</div>
+                </div>
+                <div className="usage-popover-cell">
+                  <div className="label">累计</div>
+                  <div className="tokens">{formatTokens(usage.allTime.total)}</div>
+                  <div className="cost">{formatCost(usage.allTime.cost)}</div>
+                </div>
+              </div>
+              {usage.byFeature.length > 0 ? (
+                <div className="usage-popover-features">
+                  <div className="usage-popover-section-title">按功能</div>
+                  {usage.byFeature.map((f) => (
+                    <div key={f.feature} className="usage-popover-row">
+                      <span style={{ minWidth: 70 }}>{f.feature}</span>
+                      <span className="meta" style={{ marginLeft: 'auto' }}>
+                        {formatTokens(f.total)} · {formatCost(f.cost)} · {f.calls}次
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {/* P15-A：最近 7 天趋势图 */}
+              {usage.byDay && usage.byDay.length > 0 ? (
+                <div className="usage-popover-trend">
+                  <div className="usage-popover-section-title">最近 7 天（点击查看详情）</div>
+                  <div className="usage-trend-chart">
+                    {(() => {
+                      const max = Math.max(...usage.byDay.map((d) => d.cost), 0.01)
+                      return usage.byDay.map((d) => {
+                        const pct = (d.cost / max) * 100
+                        const dateLabel = d.date.slice(5) // MM-DD
+                        const isSelected = dayDetail?.date === d.date
+                        return (
+                          <div
+                            key={d.date}
+                            className={`usage-trend-col${isSelected ? ' selected' : ''}`}
+                            title={`${d.date}: ${formatCost(d.cost)} · ${d.calls}次（点击查看详情）`}
+                            onClick={() => loadDayDetail(d.date)}
+                          >
+                            <div className="usage-trend-bar-wrap">
+                              <div
+                                className="usage-trend-bar"
+                                style={{ height: `${Math.max(pct, 2)}%` }}
+                              />
+                            </div>
+                            <div className="usage-trend-label">{dateLabel}</div>
+                            <div className="usage-trend-value">{formatCost(d.cost)}</div>
+                          </div>
+                        )
+                      })
+                    })()}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* P16-C：单日详情 */}
+              {dayDetail ? (
+                <div className="usage-day-detail">
+                  <div className="usage-popover-section-title" style={{ display: 'flex', alignItems: 'center' }}>
+                    <span>{dayDetail.date} 的 LLM 调用</span>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setDayDetail(null)}
+                      style={{ marginLeft: 'auto', padding: '0 6px', fontSize: 11 }}
+                      title="关闭详情"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {dayDetailLoading ? (
+                    <div className="muted" style={{ fontSize: 11, padding: '4px 0' }}>加载中…</div>
+                  ) : dayDetail.records.length === 0 ? (
+                    <div className="muted" style={{ fontSize: 11, padding: '4px 0' }}>这天没有 LLM 调用</div>
+                  ) : (
+                    <ul className="usage-day-list">
+                      {dayDetail.records.map((r, i) => (
+                        <li key={i} className="usage-day-list-item">
+                          <span className="usage-day-time">{r.at.slice(11, 16)}</span>
+                          <span className="usage-day-feature">{r.feature}</span>
+                          <span className="usage-day-meta">
+                            {formatTokens(r.totalTokens)} · {r.model}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <button
+          className="btn btn-sm"
+          onClick={reAudit}
+          disabled={reAuditLoading}
+          title="对当前 draft 重新跑 AI 味检查（章末/禁用词/规则/字数）"
+        >
+          {reAuditLoading ? '检查中…' : '🔍 重新质检'}
+        </button>
         <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
           {reviewing ? '审稿中…' : '✎ AI 改稿'}
         </button>
@@ -609,6 +1263,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
       </div>
 
+      {/* P19-B：7 日热力图 + 跨章节今日字数 */}
+      <WeeklyWritingStats projectId={projectId} dailyTarget={dailyGoal} />
+
       {/* 本章细纲 */}
       <div className="row" style={{ marginBottom: 8 }}>
         <button
@@ -644,20 +1301,27 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           </div>
           {chapterOutline ? (
             <>
-              <p className="body-text">{chapterOutline.plotSummary}</p>
-              {(chapterOutline.emotionPoint ||
-                chapterOutline.coolPoint ||
-                chapterOutline.hook) ? (
-                <div className="outline-tags" style={{ marginTop: 8 }}>
-                  {chapterOutline.emotionPoint ? (
-                    <span className="outline-tag emotion">情绪 · {chapterOutline.emotionPoint}</span>
-                  ) : null}
-                  {chapterOutline.coolPoint ? (
-                    <span className="outline-tag cool">爽点 · {chapterOutline.coolPoint}</span>
-                  ) : null}
-                  {chapterOutline.hook ? (
-                    <span className="outline-tag hook">钩子 · {chapterOutline.hook}</span>
-                  ) : null}
+              <div className="outline-detail-fields">
+                {getOutlineDetailRows(chapterOutline).map((row) => (
+                  <OutlineDetailField key={row.label} row={row} />
+                ))}
+              </div>
+              {/* P19-D：本章出场角色速查 */}
+              {chapterOutline.charactersAppearing?.length ? (
+                <div className="outline-characters-row" style={{ marginTop: 6 }}>
+                  <span className="muted" style={{ fontSize: 11.5 }}>本章出场：</span>
+                  {chapterOutline.charactersAppearing.map((name) => {
+                    const c = characters.find((x) => x.name === name)
+                    return (
+                      <span
+                        key={name}
+                        className="character-chip"
+                        title={c ? `${c.role ?? '角色'}` : '本章规划出场'}
+                      >
+                        {name}
+                      </span>
+                    )
+                  })}
                 </div>
               ) : null}
             </>
@@ -694,6 +1358,48 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           </p>
         )}
       </div>
+
+      {flowPanelOpen ? (
+        <ChapterFlowPanel
+          projectId={projectId}
+          chapterNumber={chapterNumber}
+          draft={draft}
+          auditReport={autoAudit}
+          reviewText={reviewText}
+          reviewing={reviewing}
+          onClose={() => setFlowPanelOpen(false)}
+          onRunAudit={reAudit}
+          onApplyRewrite={(snippet, rewritten, violationKey) => {
+            // 用改写后的文本替换 draft 中的命中段（保留前后原文）
+            if (!snippet) return
+            const idx = draft.indexOf(snippet)
+            if (idx < 0) {
+              window.alert('未在正文中找到原片段（可能已被改写），请手动应用')
+              return
+            }
+            const next = draft.slice(0, idx) + rewritten + draft.slice(idx + snippet.length)
+            setDraft(next)
+            setDirty(true)
+            // 压栈：记录这次 apply 用于"↶ 撤销"。P6-B 传 violationKey 用于 per-violation 撤销。
+            pushRewrite(snippet, rewritten, violationKey)
+            // 应用后自动重跑一次，让违例清单反映新正文
+            void reAudit()
+          }}
+          rewriteHistory={rewriteHistory}
+          redoStackCount={redoStack.length}
+          onUndoRewrite={undoLastRewrite}
+          onUndoRewriteAt={undoRewriteAt}
+          onUndoRewriteByKey={undoRewriteByKey}
+          onRedoRewrite={redoLastRewrite}
+        />
+      ) : null}
+
+      {/* P6-C：撤销失败 toast（fixed 定位，不被面板遮挡） */}
+      {undoToast ? (
+        <div className={`undo-toast undo-toast-${undoToast.type}`} role="status">
+          {undoToast.message}
+        </div>
+      ) : null}
 
       <textarea
         className="editor-text"
@@ -911,6 +1617,22 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         />
       ) : null}
     </div>
+  )
+}
+
+function OutlineDetailField({ row }: { row: { label: string; value?: string; items?: string[] } }) {
+  return (
+    <section className="outline-detail-field">
+      <div className="outline-detail-label">{row.label}</div>
+      {row.value ? <div className="outline-detail-value">{row.value}</div> : null}
+      {row.items && row.items.length > 0 ? (
+        <ul className="outline-detail-list">
+          {row.items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   )
 }
 

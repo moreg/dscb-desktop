@@ -2,6 +2,9 @@ import { dialog, type IpcMainInvokeEvent } from 'electron'
 import { safeHandle } from './safe-handle'
 import { SettingsRepository } from '../data/settings-repository'
 import type { ThemeMode, PricingConfig } from '../data/settings-repository'
+import type { WriteAuditConfig } from '../../shared/types'
+import { z } from 'zod'
+import { validateInput, dailyWordGoalSchema } from './validation'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -14,8 +17,9 @@ export function registerSettingsIpc(
   safeHandle(
     'settings:setProjectsRoot',
     async (_e: IpcMainInvokeEvent, path: string): Promise<string> => {
-      await repo.update({ projectsRoot: path })
-      return path
+      const validatedPath = validateInput(z.string().min(1).max(1000), path)
+      await repo.update({ projectsRoot: validatedPath })
+      return validatedPath
     }
   )
 
@@ -26,7 +30,8 @@ export function registerSettingsIpc(
   safeHandle(
     'settings:setTheme',
     async (_e: IpcMainInvokeEvent, theme: ThemeMode): Promise<ThemeMode> => {
-      return repo.setTheme(theme)
+      const validatedTheme = validateInput(z.enum(['light', 'dark', 'system']), theme)
+      return repo.setTheme(validatedTheme)
     }
   )
 
@@ -45,8 +50,9 @@ export function registerSettingsIpc(
   safeHandle(
     'settings:setDailyGoal',
     async (_e: IpcMainInvokeEvent, goal: number): Promise<number> => {
-      await repo.update({ dailyWordGoal: goal })
-      return goal
+      const validatedGoal = validateInput(dailyWordGoalSchema, goal)
+      await repo.update({ dailyWordGoal: validatedGoal })
+      return validatedGoal
     }
   )
 
@@ -56,8 +62,47 @@ export function registerSettingsIpc(
       _e: IpcMainInvokeEvent,
       cfg: { focus: number; brk: number }
     ): Promise<{ focus: number; brk: number }> => {
-      await repo.update({ pomodoroFocus: cfg.focus, pomodoroBreak: cfg.brk })
-      return cfg
+      const validated = validateInput(
+        z.object({
+          focus: z.number().int().min(1).max(120),
+          brk: z.number().int().min(1).max(60)
+        }),
+        cfg
+      )
+      await repo.update({ pomodoroFocus: validated.focus, pomodoroBreak: validated.brk })
+      return validated
+    }
+  )
+
+  safeHandle(
+    'settings:setWriteAudit',
+    async (
+      _e: IpcMainInvokeEvent,
+      patch: Partial<WriteAuditConfig>
+    ): Promise<WriteAuditConfig> => {
+      return repo.setWriteAudit(patch)
+    }
+  )
+
+  // P13-C：用量预警配置
+  safeHandle('settings:getCostAlert', async () => {
+    return repo.getCostAlert()
+  })
+  safeHandle(
+    'settings:setCostAlert',
+    async (
+      _e: IpcMainInvokeEvent,
+      patch: Partial<{ enabled: boolean; warning: number; exceeded: number }>
+    ): Promise<{ enabled: boolean; warning: number; exceeded: number }> => {
+      const validated = validateInput(
+        z.object({
+          enabled: z.boolean().optional(),
+          warning: z.number().min(0).max(1_000_000).optional(),
+          exceeded: z.number().min(0).max(10_000_000).optional()
+        }),
+        patch
+      )
+      return repo.setCostAlert(validated)
     }
   )
 
