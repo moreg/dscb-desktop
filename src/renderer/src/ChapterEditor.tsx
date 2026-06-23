@@ -225,6 +225,7 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
+  const [flowSyncTrigger, setFlowSyncTrigger] = useState(0)
   const [detecting, setDetecting] = useState(false)
   const [castSuggestions, setCastSuggestions] = useState<CastSuggestion[]>([])
   const [castApplied, setCastApplied] = useState(false)
@@ -836,6 +837,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         }
       }
       setFlowPanelOpen(true)
+      setFlowSyncTrigger((t) => t + 1)
     } catch {
       if (genRef.current === myGen) setGenerating(false)
     }
@@ -1566,6 +1568,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onUndoRewriteAt={undoRewriteAt}
           onUndoRewriteByKey={undoRewriteByKey}
           onRedoRewrite={redoLastRewrite}
+          syncAllTrigger={flowSyncTrigger}
         />
       ) : null}
 
