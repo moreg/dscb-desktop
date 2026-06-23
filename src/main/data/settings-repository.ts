@@ -1,5 +1,11 @@
 import { readJson, writeJsonAtomic } from './atomic'
-import type { WriteAuditConfig, WriteAuditMode, CostAlertConfig } from '../../shared/types'
+import type {
+  WriteAuditConfig,
+  WriteAuditMode,
+  CostAlertConfig,
+  AiHighFreqConfig,
+  AiHighFreqWord
+} from '../../shared/types'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -24,6 +30,8 @@ export interface AppSettings {
   writeAudit?: Partial<WriteAuditConfig>
   /** P13-C：用量预警配置 */
   costAlert?: Partial<CostAlertConfig>
+  /** AI 高频词配置 */
+  aiHighFreq?: Partial<AiHighFreqConfig>
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -44,13 +52,20 @@ const DEFAULT_COST_ALERT: CostAlertConfig = {
   blockOnExceeded: false
 }
 
+/** 默认 AI 高频词配置 */
+const DEFAULT_AI_HIGH_FREQ: AiHighFreqConfig = {
+  enabled: true,
+  words: []
+}
+
 const DEFAULTS: AppSettings = {
   pricing: DEFAULT_PRICING,
   dailyWordGoal: 3000,
   pomodoroFocus: 25,
   pomodoroBreak: 5,
   writeAudit: DEFAULT_WRITE_AUDIT,
-  costAlert: DEFAULT_COST_ALERT
+  costAlert: DEFAULT_COST_ALERT,
+  aiHighFreq: DEFAULT_AI_HIGH_FREQ
 }
 
 export class SettingsRepository {
@@ -64,7 +79,11 @@ export class SettingsRepository {
       ...stored,
       pricing: { ...DEFAULT_PRICING, ...(stored.pricing ?? {}) },
       writeAudit: { ...DEFAULT_WRITE_AUDIT, ...(stored.writeAudit ?? {}) },
-      costAlert: { ...DEFAULT_COST_ALERT, ...(stored.costAlert ?? {}) }
+      costAlert: { ...DEFAULT_COST_ALERT, ...(stored.costAlert ?? {}) },
+      aiHighFreq: {
+        enabled: DEFAULT_AI_HIGH_FREQ.enabled,
+        words: Array.isArray(stored.aiHighFreq?.words) ? stored.aiHighFreq!.words! : []
+      }
     }
   }
 
@@ -73,6 +92,7 @@ export class SettingsRepository {
       pricing?: Partial<PricingConfig>
       writeAudit?: Partial<WriteAuditConfig>
       costAlert?: Partial<CostAlertConfig>
+      aiHighFreq?: Partial<AiHighFreqConfig>
     }
   ): Promise<AppSettings> {
     const current = await this.get()
@@ -87,10 +107,43 @@ export class SettingsRepository {
         : current.writeAudit,
       costAlert: patch.costAlert
         ? { ...current.costAlert, ...patch.costAlert }
-        : current.costAlert
+        : current.costAlert,
+      aiHighFreq: patch.aiHighFreq
+        ? { ...current.aiHighFreq, ...patch.aiHighFreq }
+        : current.aiHighFreq
     }
     await writeJsonAtomic(this.settingsFile, next)
     return next
+  }
+
+  /** 获取 AI 高频词配置 */
+  async getAiHighFreq(): Promise<AiHighFreqConfig> {
+    const s = await this.get()
+    return {
+      enabled: s.aiHighFreq?.enabled ?? DEFAULT_AI_HIGH_FREQ.enabled,
+      words: Array.isArray(s.aiHighFreq?.words) ? s.aiHighFreq!.words! : []
+    }
+  }
+
+  /** 更新 AI 高频词配置（过滤非法词条） */
+  async setAiHighFreq(patch: Partial<AiHighFreqConfig>): Promise<AiHighFreqConfig> {
+    const sanitized: Partial<AiHighFreqConfig> = {}
+    if (typeof patch.enabled === 'boolean') sanitized.enabled = patch.enabled
+    if (Array.isArray(patch.words)) {
+      sanitized.words = patch.words
+        .filter(
+          (w): w is AiHighFreqWord =>
+            !!w && typeof w.word === 'string' && w.word.trim().length > 0
+        )
+        .map((w) => ({
+          word: w.word.trim(),
+          ...(typeof w.example === 'string' && w.example.trim().length > 0
+            ? { example: w.example.trim() }
+            : {})
+        }))
+    }
+    await this.update({ aiHighFreq: sanitized })
+    return this.getAiHighFreq()
   }
 
   async getProjectsRoot(fallback: string): Promise<string> {

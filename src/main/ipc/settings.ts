@@ -5,6 +5,7 @@ import type { ThemeMode, PricingConfig } from '../data/settings-repository'
 import type { WriteAuditConfig } from '../../shared/types'
 import { z } from 'zod'
 import { validateInput, dailyWordGoalSchema } from './validation'
+import type { AiHighFreqConfig } from '../../shared/types'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -114,4 +115,30 @@ export function registerSettingsIpc(
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]
   })
+
+  /** AI 高频词配置 */
+  safeHandle('settings:getAiHighFreq', async () => {
+    return repo.getAiHighFreq()
+  })
+  safeHandle(
+    'settings:setAiHighFreq',
+    async (_e: IpcMainInvokeEvent, patch: Partial<AiHighFreqConfig>): Promise<AiHighFreqConfig> => {
+      const validated = validateInput(
+        z.object({
+          enabled: z.boolean().optional(),
+          words: z
+            .array(
+              z.object({
+                word: z.string().min(1).max(100),
+                example: z.string().max(500).optional()
+              })
+            )
+            .max(200)
+            .optional()
+        }),
+        patch
+      )
+      return repo.setAiHighFreq(validated)
+    }
+  )
 }

@@ -181,3 +181,126 @@ ${mermaid}
 </body>
 </html>`
 }
+
+/* =========================================================
+   伏笔回执（foreshadow receipt）
+   续写 prompt 要求 LLM 在正文末尾另起一段写一行 JSON：
+   【本章伏笔回执】{"planted":["..."],"collected":["..."]}
+   renderer 端解析后调 IPC 同步到伏笔库。
+   ========================================================= */
+
+export interface ForeshadowReceipt {
+  planted: string[]
+  collected: string[]
+  raw: string
+}
+
+/**
+ * 在文本中定位"【本章伏笔回执】"标签后的 JSON。
+ * 用栈式大括号平衡匹配，**不依赖**非贪婪正则，规避 LLM 在字符串值里出现 "}" 时的截断 bug。
+ * 失败返回 null（不抛）。
+ */
+function findReceiptJson(raw: string): { jsonStr: string; start: number; end: number } | null {
+  const tag = '【本章伏笔回执】'
+  const tagIdx = raw.indexOf(tag)
+  if (tagIdx < 0) return null
+  // 从标签后第一个 '{' 开始
+  const startSearch = raw.indexOf('{', tagIdx + tag.length)
+  if (startSearch < 0) return null
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = startSearch; i < raw.length; i++) {
+    const ch = raw[i]
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+    } else if (ch === '{') {
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        return { jsonStr: raw.slice(startSearch, i + 1), start: tagIdx, end: i + 1 }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 解析 LLM 在正文末尾写下的【本章伏笔回执】。
+ * - 没找到标签 → 返回 { receipt: null, stripped: 原文本 }
+ * - 找到但 JSON 解析失败 → 返回 { receipt: { planted: [], collected: [], raw }, stripped }
+ * - 找到且解析成功 → 返回 { receipt, stripped: 剥离回执后的纯正文 }
+ */
+export function parseForeshadowReceipt(raw: string): {
+  receipt: ForeshadowReceipt | null
+  stripped: string
+} {
+  const empty = { receipt: null as ForeshadowReceipt | null, stripped: raw }
+  const found = findReceiptJson(raw)
+  if (!found) return empty
+  const jsonStr = found.jsonStr.trim()
+  // 剥离：标签到 JSON 结束 + 收尾换行整理
+  const stripped = raw
+    .slice(0, found.start)
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd()
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    return { receipt: { planted: [], collected: [], raw: jsonStr }, stripped }
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { receipt: { planted: [], collected: [], raw: jsonStr }, stripped }
+  }
+  const obj = parsed as Record<string, unknown>
+  const sanitize = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : []
+  return {
+    receipt: {
+      planted: sanitize(obj.planted),
+      collected: sanitize(obj.collected),
+      raw: jsonStr
+    },
+    stripped
+  }
+}
+
+/**
+ * 严格匹配两个伏笔文本是否指同一件事。
+ * 用于 applyForeshadowReceipt 的"模糊匹配"：LLM 在回执里可能改写了原文。
+ *
+ * 规则（全部满足才视为匹配）：
+ * - 长度过滤：两边都 ≥ 2 字符
+ * - 长度比：较短串 / 较长串 ≥ 0.5（防止"图" 命中"图书"）
+ * - 包含关系：a.includes(b) 或 b.includes(a)
+ *
+ * 例：
+ *   "旧钥匙" vs "那把生锈的旧钥匙" → 长度比 0.5 ✓ "旧钥匙".includes("旧钥匙") → 匹配
+ *   "图" vs "图书" → 长度比 0.25 ✗ 不匹配
+ *   "眼睛" vs "她的眼睛闪着光" → 长度比 0.5 ✓ 匹配
+ */
+export function isForeshadowMatch(a: string, b: string): boolean {
+  const sa = a.trim()
+  const sb = b.trim()
+  if (sa.length < 2 || sb.length < 2) return false
+  const shorter = Math.min(sa.length, sb.length)
+  const longer = Math.max(sa.length, sb.length)
+  if (longer === 0) return false
+  if (shorter / longer < 0.5) return false
+  return sa.includes(sb) || sb.includes(sa)
+}

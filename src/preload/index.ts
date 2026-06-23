@@ -20,7 +20,8 @@ import type {
   RhythmEvaluation,
   ChapterFlowResult,
   ListProvidersResult,
-  CreateStyleProfileInput
+  CreateStyleProfileInput,
+  UpdateStyleProfileInput
 } from '../shared/types'
 
 const api = {
@@ -31,7 +32,7 @@ const api = {
   listStyleProfiles: (projectId: string) => ipcRenderer.invoke('styles:list', projectId),
   createStyleProfile: (projectId: string, input: CreateStyleProfileInput) =>
     ipcRenderer.invoke('styles:create', { projectId, input }),
-  updateStyleProfile: (projectId: string, styleProfileId: string, patch: { name?: string }) =>
+  updateStyleProfile: (projectId: string, styleProfileId: string, patch: UpdateStyleProfileInput) =>
     ipcRenderer.invoke('styles:update', { projectId, styleProfileId, patch }),
   deleteStyleProfile: (projectId: string, styleProfileId: string) =>
     ipcRenderer.invoke('styles:delete', { projectId, styleProfileId }),
@@ -39,6 +40,9 @@ const api = {
     ipcRenderer.invoke('styles:extract', { projectId, sampleText, name }),
   setProjectDefaultStyleProfile: (projectId: string, styleProfileId: string | null) =>
     ipcRenderer.invoke('projects:setDefaultStyleProfile', { projectId, styleProfileId }),
+  /** 选择本地文本文件用于文风提取 */
+  selectTextFile: () =>
+    ipcRenderer.invoke('dialog:selectTextFile'),
   listChapters: (id: string) => ipcRenderer.invoke('chapters:list', id),
   getChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:get', id, n),
   createChapter: (id: string, input: CreateChapterInput) =>
@@ -271,6 +275,17 @@ const api = {
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
   ) => ipcRenderer.invoke('write:applyNewForeshadowings', { projectId, fs }),
+  /** 应用 LLM 在正文末尾写下的【本章伏笔回执】到伏笔库 */
+  applyForeshadowReceipt: (
+    projectId: string,
+    chapterNumber: number,
+    receipt: { planted?: string[]; collected?: string[] }
+  ) =>
+    ipcRenderer.invoke('write:applyForeshadowReceipt', {
+      projectId,
+      chapterNumber,
+      receipt
+    }) as Promise<{ planted: number; collected: number; skipped: string[] }>,
   evaluateRhythmStream: (
     projectId: string,
     chapterNumber: number,
@@ -439,7 +454,13 @@ const api = {
   // P13-C：用量预警配置
   getCostAlertConfig: () => ipcRenderer.invoke('settings:getCostAlert'),
   setCostAlertConfig: (cfg: { enabled?: boolean; warning?: number; exceeded?: number }) =>
-    ipcRenderer.invoke('settings:setCostAlert', cfg)
+    ipcRenderer.invoke('settings:setCostAlert', cfg),
+  /** AI 高频词配置 */
+  getAiHighFreqConfig: () => ipcRenderer.invoke('settings:getAiHighFreq'),
+  setAiHighFreqConfig: (cfg: {
+    enabled?: boolean
+    words?: { word: string; example?: string }[]
+  }) => ipcRenderer.invoke('settings:setAiHighFreq', cfg)
 } as const
 
 contextBridge.exposeInMainWorld('api', api)

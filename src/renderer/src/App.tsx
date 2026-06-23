@@ -127,7 +127,7 @@ export default function App() {
 
   const mainInnerClass = `main-inner ${
     view.kind === 'editor'
-      ? 'wide'
+      ? 'editor-wide'
       : view.kind === 'relationships'
         ? 'relationship-wide'
         : view.kind === 'rhythm'

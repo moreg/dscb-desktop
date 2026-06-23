@@ -323,7 +323,11 @@ a:hover { color: var(--vermilion); }
   margin: 0 auto;
   padding: 32px 36px 80px;
 }
-.main-inner.wide { max-width: 1280px; }
+.main-inner.wide { max-width: min(1580px, calc(100vw - 72px)); }
+.main-inner.editor-wide {
+  max-width: none;
+  margin: 0 12px;
+}
 .main-inner.relationship-wide,
 .main-inner.rhythm-wide,
 .main-inner.foreshadowing-wide {
@@ -398,7 +402,7 @@ a:hover { color: var(--vermilion); }
   color: var(--accent);
   background: var(--surface);
 }
-.btn:active { transform: translateY(0); }
+.btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
 .btn-primary {
@@ -1246,6 +1250,102 @@ a:hover { color: var(--vermilion); }
   border-bottom: 1px solid var(--line);
 }
 
+.confirm-dialog-overlay {
+  z-index: 80;
+  background:
+    radial-gradient(circle at top, rgba(255, 253, 247, 0.12), transparent 42%),
+    rgba(30, 24, 14, 0.48);
+}
+
+.confirm-dialog {
+  width: min(460px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+.confirm-dialog-head {
+  display: flex;
+  gap: 16px;
+  padding: 24px 24px 18px;
+  align-items: flex-start;
+}
+
+.confirm-dialog-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 40px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--danger);
+  background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px rgba(168, 56, 40, 0.12);
+}
+
+.confirm-dialog-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.confirm-dialog-copy h3 {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  letter-spacing: 0.02em;
+}
+
+.confirm-dialog-copy p {
+  margin: 0;
+  color: var(--ink-2);
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 24px 20px;
+  border-top: 1px solid var(--line-soft);
+  background: linear-gradient(180deg, transparent 0%, var(--surface-2) 100%);
+}
+
+.confirm-dialog-submit {
+  min-width: 104px;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff6f2;
+  font-weight: 600;
+  box-shadow: 0 6px 16px rgba(168, 56, 40, 0.18);
+}
+
+.confirm-dialog-submit:hover {
+  background: #bf4534;
+  border-color: #bf4534;
+  color: #fff6f2;
+}
+
+.confirm-dialog-submit:focus-visible,
+.confirm-dialog-actions .btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--vermilion-soft);
+}
+
+:root.dark .confirm-dialog-overlay {
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.04), transparent 42%),
+    rgba(0, 0, 0, 0.62);
+}
+
+:root.dark .confirm-dialog-submit:focus-visible,
+:root.dark .confirm-dialog-actions .btn:focus-visible {
+  box-shadow: 0 0 0 3px rgba(214, 80, 58, 0.28);
+}
+
 /* =========================================================
    空状态 / 占位
    ========================================================= */
@@ -1312,6 +1412,9 @@ hr.soft {
    ========================================================= */
 .editor-text {
   width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  display: block;
   min-height: 56vh;
   padding: 32px 40px;
   border: 1px solid var(--line);
@@ -1334,6 +1437,67 @@ hr.soft {
   color: var(--ink-3);
   font-family: var(--font-kai);
   font-style: italic;
+}
+
+.chapter-editor-shell {
+  transition: padding 0.2s ease;
+}
+
+.chapter-editor-shell.review-open {
+  padding-right: 396px;
+}
+
+.chapter-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.chapter-main-pane {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chapter-side-block {
+  min-width: 0;
+  grid-column: 2;
+}
+
+.chapter-main-pane .editor-text {
+  margin-top: 0 !important;
+  min-height: calc(100vh - 210px);
+  max-height: calc(100vh - 210px);
+  resize: none;
+}
+
+.chapter-main-preview .editor-preview {
+  max-height: 240px;
+}
+
+@media (max-width: 1360px) {
+  .chapter-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .chapter-side-block {
+    grid-column: auto;
+  }
+
+  .chapter-main-pane .editor-text {
+    min-height: 58vh;
+    max-height: none;
+    resize: vertical;
+  }
+
+  .chapter-main-pane {
+    grid-column: auto;
+    grid-row: auto;
+  }
 }
 
 /* =========================================================
@@ -1697,6 +1861,102 @@ pre.body {
 .outline-tag.cool    { color: var(--inkstone); border-color: transparent; background: var(--inkstone-soft); }
 .outline-tag.hook    { color: var(--success); border-color: transparent; background: var(--success-soft); }
 
+/* =========================================================
+   本章伏笔提醒表（plant / reinforce / collect 三段式）
+   - 左侧 4px 色条强提示动作类型
+   - 每条用色块徽标代替混排的色 tag
+   ========================================================= */
+.fs-reminder-table {
+  display: grid;
+  gap: 10px;
+}
+.fs-reminder-section {
+  border: 1px solid var(--line-soft);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: var(--surface-1);
+  padding: 8px 10px 10px;
+}
+.fs-reminder-plant     { border-left-color: var(--success); }
+.fs-reminder-reinforce { border-left-color: var(--info, #2196f3); }
+.fs-reminder-collect   { border-left-color: var(--vermilion); }
+
+.fs-reminder-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.fs-reminder-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 50%;
+  color: #fff;
+  font-family: var(--font-display, inherit);
+}
+.fs-reminder-badge-plant     { background: var(--success); }
+.fs-reminder-badge-reinforce { background: var(--info, #2196f3); }
+.fs-reminder-badge-collect   { background: var(--vermilion); }
+
+.fs-reminder-title {
+  font-size: 12.5px;
+  color: var(--ink-1, inherit);
+}
+.fs-reminder-hint {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.fs-reminder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.fs-reminder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+}
+.fs-reminder-content {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-1, inherit);
+  word-break: break-word;
+}
+.fs-reminder-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.fs-reminder-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  background: var(--bg-soft, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.fs-reminder-chip-muted {
+  color: var(--ink-3);
+  font-style: italic;
+}
+
 .outline-detail-fields {
   display: grid;
   gap: 8px;
@@ -1980,6 +2240,8 @@ pre.body {
 .editor-preview .hl.char      { background: var(--hl-char);      color: var(--hl-char-text); }
 .editor-preview .hl.foreshadow { background: var(--hl-foreshadow); color: var(--hl-foreshadow-text); }
 .editor-preview .hl.location  { background: var(--hl-location);  color: var(--hl-location-text); }
+.editor-preview .hl.aiword    { background: var(--hl-aiword, #fff3bf); color: var(--hl-aiword-text, #8a5a00); text-decoration: underline wavy var(--hl-aiword-text, #8a5a00); text-underline-offset: 2px; }
+.hl.aiword { background: var(--hl-aiword, #fff3bf); color: var(--hl-aiword-text, #8a5a00); border-radius: 3px; }
 .hl-toggle {
   display: inline-flex;
   align-items: center;
@@ -2164,19 +2426,6 @@ pre.body {
   border-left: 3px solid var(--vermilion);
   border-radius: 0 var(--r-md) var(--r-md) 0;
 }
-.chapter-outline-panel::before {
-  content: '细纲';
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  font-family: var(--font-display);
-  font-size: 10.5px;
-  color: var(--vermilion);
-  letter-spacing: 0.16em;
-  font-weight: 700;
-  opacity: 0.5;
-}
-.chapter-outline-panel { position: relative; }
 .chapter-outline-panel .body-text {
   font-size: 14px;
   line-height: 1.85;
@@ -2890,6 +3139,54 @@ pre.body {
 }
 
 /* =========================================================
+   未同步提醒横幅（续写后同步状态提示）
+   ========================================================= */
+.unsynced-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-top: 8px;
+  background: var(--info-soft, #e3f2fd);
+  border: 1px solid var(--info, #2196f3);
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--info, #2196f3);
+}
+
+/* =========================================================
+   伏笔回执横幅（续写完成后展示本章埋/收条数）
+   ========================================================= */
+.foreshadow-receipt-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-top: 8px;
+  background: var(--success-soft, #e2ead8);
+  border: 1px solid var(--success, #4d7048);
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--ink-1, inherit);
+}
+.fs-receipt-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+}
+.fs-receipt-chip-plant {
+  color: var(--success, #4d7048);
+  background: var(--bg-soft, rgba(0, 0, 0, 0.04));
+}
+.fs-receipt-chip-collect {
+  color: var(--vermilion, #b8331f);
+  background: var(--bg-soft, rgba(0, 0, 0, 0.04));
+}
+
+/* =========================================================
    7 日热力图（P19-B）
    ========================================================= */
 .weekly-stats {
@@ -2897,21 +3194,22 @@ pre.body {
 }
 .weekly-heatmap {
   display: flex;
-  gap: 2px;
+  gap: 4px;
   margin-top: 4px;
   align-items: flex-end;
 }
+.heatmap-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
 .heatmap-cell {
-  width: 18px;
-  height: 18px;
-  border-radius: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
   background: var(--surface-2);
   border: 1px solid transparent;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  font-size: 8px;
-  color: var(--ink-2);
   cursor: default;
 }
 .heatmap-cell.today {
@@ -2923,8 +3221,9 @@ pre.body {
 .heatmap-cell.heat-4 { background: var(--vermilion); color: var(--surface-1); border-color: var(--vermilion); }
 .heatmap-day-label {
   font-family: var(--font-mono, monospace);
-  font-size: 8px;
-  padding-bottom: 1px;
+  font-size: 9px;
+  color: var(--ink-3);
+  line-height: 1;
 }
 
 /* =========================================================

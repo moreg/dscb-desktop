@@ -46,6 +46,7 @@ import { buildForeshadowingReminders } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
+import { parseForeshadowReceipt } from '../../shared/parsers'
 
 interface Props {
   projectId: string
@@ -684,6 +685,17 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           if (done) {
             setGenerating(false)
             refreshUsage() // P10-A：续写完成更新今日用量
+            const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
+            if (receipt) {
+              setDraft(stripped)
+              window.api.applyForeshadowReceipt(projectId, chapterNumber, receipt)
+                .then(res => {
+                  if (res.planted > 0 || res.collected > 0) {
+                    setUndoToast({ message: `AI自动记录了伏笔：新增 ${res.planted} 条，回收 ${res.collected} 条`, type: 'warning' })
+                  }
+                })
+                .catch(console.error)
+            }
           }
         }
       )
@@ -1017,9 +1029,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     [chapterNumber, chapterOutline, foreshadowings]
   )
   const foreshadowingReminderCount =
-    foreshadowingReminders.outline.length +
-    foreshadowingReminders.toPlant.length +
-    foreshadowingReminders.toCollect.length
+    foreshadowingReminders.plant.length +
+    foreshadowingReminders.reinforce.length +
+    foreshadowingReminders.collect.length
 
   if (!data) return <p className="empty">展卷中…</p>
 
@@ -1037,7 +1049,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   return (
-    <div style={{ paddingRight: reviewOpen ? 396 : 0, transition: 'padding 0.2s' }}>
+    <div className={`chapter-editor-shell${reviewOpen ? ' review-open' : ''}`}>
       <div className="page-head">
         <div className="page-head-row">
           <div>
@@ -1249,6 +1261,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       </div>
 
       {/* 番茄钟 + 写作进度 */}
+      <div className="chapter-workbench">
+        <div className="chapter-side-block">
       <div className="row" style={{ marginTop: 4, marginBottom: 12, flexWrap: 'wrap' }}>
         <div className={`pomodoro ${pomoMode === 'break' ? 'break' : ''}`}>
           <span
@@ -1418,14 +1432,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
         {foreshadowingReminderCount > 0 ? (
           <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-            {foreshadowingReminders.outline.length > 0 ? (
-              <ReminderGroup title="细纲提示" items={foreshadowingReminders.outline} tone="hook" />
+            {foreshadowingReminders.plant.length > 0 ? (
+              <ReminderGroup title="细纲提示" items={foreshadowingReminders.plant.map((item) => item.content)} tone="hook" />
             ) : null}
-            {foreshadowingReminders.toPlant.length > 0 ? (
-              <ReminderGroup title="待埋 / 待强化" items={foreshadowingReminders.toPlant} tone="cool" />
+            {foreshadowingReminders.reinforce.length > 0 ? (
+              <ReminderGroup title="待埋 / 待强化" items={foreshadowingReminders.reinforce.map((item) => item.content)} tone="cool" />
             ) : null}
-            {foreshadowingReminders.toCollect.length > 0 ? (
-              <ReminderGroup title="本章待回收" items={foreshadowingReminders.toCollect} tone="emotion" />
+            {foreshadowingReminders.collect.length > 0 ? (
+              <ReminderGroup title="本章待回收" items={foreshadowingReminders.collect.map((item) => item.content)} tone="emotion" />
             ) : null}
           </div>
         ) : (
@@ -1471,6 +1485,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       ) : null}
 
       {/* P6-C：撤销失败 toast（fixed 定位，不被面板遮挡） */}
+        </div>
+
+        <div className="chapter-main-pane">
       {undoToast ? (
         <div className={`undo-toast undo-toast-${undoToast.type}`} role="status">
           {undoToast.message}
@@ -1489,7 +1506,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       />
 
       {showPreview ? (
-        <>
+        <div className="chapter-main-preview">
           <div className="row" style={{ marginTop: 16, marginBottom: 4 }}>
             <strong style={{ fontSize: 13.5 }}>联动预览</strong>
             <div className="row" style={{ gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
@@ -1518,9 +1535,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               <span className="muted">暂无可联动高亮的内容。</span>
             )}
           </div>
-        </>
+        </div>
       ) : null}
 
+        </div>
+
+        <div className="chapter-side-block">
       <div className="editor-panel">
         <div className="ep-head">
           <div className="ep-title">
@@ -1654,6 +1674,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           )}
         </div>
       ) : null}
+
+        </div>
+      </div>
 
       {viewing ? (
         <div className="dialog-overlay" onClick={() => setViewing(null)}>

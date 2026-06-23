@@ -15,6 +15,7 @@ import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
 import { WriteFlowService } from './write-flow-service'
 import { MemoryWriter } from './memory-writer'
 import { FigureHtmlRepo } from './skill-format/figure-html-repo'
+import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
 import type {
   AuditReport,
   BatchProgress,
@@ -290,6 +291,66 @@ export class WriteService {
   ): Promise<number> {
     const dir = await this.projectService.resolveDir(projectId)
     return new MemoryWriter(dir).applyNewForeshadowings(fs)
+  }
+
+  /**
+   * 应用伏笔回执：把 LLM 在正文末尾写下的【本章伏笔回执】同步到伏笔库。
+   * - planted：先去伏笔库里找匹配（content 包含 / 被包含），找不到则新建 pending
+   * - collected：按内容匹配现有 planted 伏笔，标记为 collected
+   * - 返回实际变更条数，便于 UI 反馈
+   */
+  async applyForeshadowReceipt(
+    projectId: string,
+    chapterNumber: number,
+    receipt: { planted?: string[]; collected?: string[] }
+  ): Promise<{ planted: number; collected: number; skipped: string[] }> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const repo = new ForeshadowingMdRepo(dir)
+    const result = { planted: 0, collected: 0, skipped: [] as string[] }
+
+    let list = await repo.list()
+
+    // 1. 处理回收：用严格匹配规则（长度比 + 包含关系），调用 collect()
+    for (const text of receipt.collected ?? []) {
+      const t = text.trim()
+      if (!t) continue
+      const found = list.find(
+        (x) => x.status === 'planted' && isForeshadowMatch(x.content, t)
+      )
+      if (!found) {
+        result.skipped.push(`回收未匹配：${t}`)
+        continue
+      }
+      try {
+        await repo.collect(found.id, chapterNumber)
+        result.collected++
+        list = await repo.list()
+      } catch (e) {
+        result.skipped.push(`回收失败：${t} (${(e as Error).message})`)
+      }
+    }
+
+    // 2. 处理埋设：先尝试匹配已有 pending 伏笔（更新 plantChapter），找不到则新建
+    for (const text of receipt.planted ?? []) {
+      const t = text.trim()
+      if (!t) continue
+      const found = list.find(
+        (x) => x.status === 'pending' && isForeshadowMatch(x.content, t)
+      )
+      try {
+        if (found) {
+          await repo.plant(found.id, chapterNumber)
+        } else {
+          await repo.create({ content: t, expectedCollect: undefined, note: undefined })
+        }
+        result.planted++
+        list = await repo.list()
+      } catch (e) {
+        result.skipped.push(`埋设失败：${t} (${(e as Error).message})`)
+      }
+    }
+
+    return result
   }
 
   /**
@@ -1041,27 +1102,42 @@ function renderUserPrompt(input: RenderInput): string {
     const pending = input.foreshadowings.filter((f) => f.status === 'pending')
     const dueNow = planted.filter((f) => f.expectedCollect === input.chapterNumber)
     if (dueNow.length > 0) {
-      parts.push('**本章预计回收的伏笔**（必须自然回收）：')
+      parts.push(`**【硬性约束 · 本章必须回收的伏笔（${dueNow.length} 条）】**`)
+      parts.push('必须在正文中给出明确回收：')
+      parts.push('- 对话揭示（角色主动说出）或物品出场 / 场景重现 / 角色回忆 / 旁白点破均可')
+      parts.push('- 若主线剧情实在无法回收，也必须在章末用一句"对话"或"事件"明确点破伏笔内容')
+      parts.push('禁止把必须回收的伏笔继续留到下一章。')
       for (const f of dueNow) parts.push(`- ${f.content}`)
     }
     if (pending.length > 0) {
-      parts.push('**等待埋设的伏笔**（如剧情合适可顺势埋下）：')
+      parts.push('**【软约束 · 建议本章铺垫的伏笔】**')
+      parts.push('如本章剧情合适，请顺势埋下 1-2 条（不要堆砌，避免生硬）：')
       for (const f of pending.slice(0, 8)) parts.push(`- ${f.content}`)
     }
     const otherPlanted = planted.filter((f) => !dueNow.includes(f))
     if (otherPlanted.length > 0) {
-      parts.push('**已埋设未回收的伏笔**（避免在本章意外暴露或矛盾）：')
+      parts.push('**【硬性约束 · 已埋设但未到本章回收的伏笔】**')
+      parts.push('必须避免在本章意外暴露、提前回收或矛盾：')
       for (const f of otherPlanted.slice(0, 8))
-        parts.push(`- ${f.content}（埋设于第 ${f.plantChapter ?? '?'} 章）`)
+        parts.push(`- ${f.content}（埋设于第 ${f.plantChapter ?? '?'} 章，预计第 ${f.expectedCollect ?? '?'} 章回收）`)
     }
   }
 
-  // 7. 输出最终指令
+  // 7. 输出最终指令 + 伏笔回执格式
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
   parts.push(
     `约 ${TARGET_WORDS} 字，按本章细纲剧情点顺序展开，章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
   )
+  // 7.1 写完后的自检回执（仅自用，会被前端自动剥离，不会出现在正文中）
+  parts.push('---')
+  parts.push('**【写完后自检 · 伏笔回执（仅自用，会被自动剥离，不会出现在正文中）】**')
+  parts.push('正文写完后，另起一段写一行 JSON 回执（**绝对不要把这行混进正文叙述**）：')
+  parts.push('【本章伏笔回执】{"planted":["伏笔原文1","伏笔原文2"],"collected":["伏笔原文3"]}')
+  parts.push('要求：')
+  parts.push('- planted：你本章新埋下的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
+  parts.push('- collected：你本章回收的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
+  parts.push('若本章无任何伏笔变动，整行可省略。')
   return parts.join('\n\n')
 }
 
@@ -1129,3 +1205,4 @@ export function parseHumanizerOutput(raw: string): { rewritten: string; reason: 
   if (rewritten && !reason) reason = '（未提供改动说明）'
   return { rewritten, reason }
 }
+

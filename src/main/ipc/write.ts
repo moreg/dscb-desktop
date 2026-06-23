@@ -249,6 +249,39 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /**
+   * 解析并应用伏笔回执：把 LLM 在正文末尾写下的【本章伏笔回执】同步到伏笔库。
+   * 输入 chapterNumber + receipt JSON；返回实际变更条数 + skipped 列表。
+   */
+  safeHandle(
+    'write:applyForeshadowReceipt',
+    async (
+      _e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        receipt: { planted?: string[]; collected?: string[] }
+      }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          receipt: z.object({
+            planted: z.array(z.string().min(1).max(500)).max(50).optional(),
+            collected: z.array(z.string().min(1).max(500)).max(50).optional()
+          })
+        }),
+        payload
+      )
+      return service.applyForeshadowReceipt(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.receipt
+      )
+    }
+  )
+
   ipcMain.handle(
     'write:evaluateRhythm',
     async (

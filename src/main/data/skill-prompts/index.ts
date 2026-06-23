@@ -142,11 +142,16 @@ function renderStyleProfileMarkdown(style: StyleProfile): string {
   if (style.narrativeTemplates.length > 0) {
     lines.push(`- 基础叙事模板：${style.narrativeTemplates.join('；')}`)
   }
-  if (style.dos.length > 0) {
-    lines.push(`- 建议：${style.dos.join('；')}`)
+  // P28：三栏约束（文风 / 人设 / 剧情）—— 告诉续写模型每条归属哪一类，便于精准遵循。
+  // 老数据只有 dos/donts 时会被解析层迁到 plotConstraints，这里优先用新三栏，老字段已弃用不再渲染。
+  if (style.styleConstraints.length > 0) {
+    lines.push(`- 【文风约束】应做：${style.styleConstraints.join('；')}`)
   }
-  if (style.donts.length > 0) {
-    lines.push(`- 禁忌：${style.donts.join('；')}`)
+  if (style.characterConstraints.length > 0) {
+    lines.push(`- 【人设约束】应做：${style.characterConstraints.join('；')}`)
+  }
+  if (style.plotConstraints.length > 0) {
+    lines.push(`- 【剧情约束】应做：${style.plotConstraints.join('；')}`)
   }
   lines.push('')
   lines.push(style.stylePrompt)

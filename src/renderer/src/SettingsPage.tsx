@@ -65,6 +65,13 @@ export default function SettingsPage(_: Props) {
   const [pomoFocus, setPomoFocus] = useState(DEFAULT_POMODORO_FOCUS_MINUTES)
   const [pomoBreak, setPomoBreak] = useState(DEFAULT_POMODORO_BREAK_MINUTES)
 
+  /** AI 高频词配置状态 */
+  const [aiHighFreq, setAiHighFreq] = useState<{
+    enabled: boolean
+    words: { word: string; example?: string }[]
+  }>({ enabled: true, words: [] })
+  const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
+
   const refreshProviders = () => void window.api.listProviders().then(setProviders)
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
   const refreshUsage = () => void window.api.getUsageSummary().then(setUsage)
@@ -80,6 +87,7 @@ export default function SettingsPage(_: Props) {
     refreshRoot()
     refreshUsage()
     refreshCostAlert()
+    refreshAiHighFreq()
     refreshByProject()
     refreshByChapter()
     void window.api.getTheme().then(setTheme)
@@ -535,6 +543,44 @@ export default function SettingsPage(_: Props) {
         </div>
       </div>
 
+      {/* AI 高频词配置 */}
+      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
+        <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
+          <h3 className="sub" style={{ margin: 0 }}>AI 高频词</h3>
+          <label
+            className="row"
+            style={{ gap: 6, fontSize: 12.5, marginLeft: 'auto', alignItems: 'center' }}
+          >
+            <input
+              type="checkbox"
+              checked={aiHighFreq.enabled}
+              onChange={(e) => {
+                const next = { ...aiHighFreq, enabled: e.target.checked }
+                setAiHighFreq(next)
+                void window.api.setAiHighFreqConfig({ enabled: e.target.checked })
+              }}
+            />
+            启用高亮
+          </label>
+        </div>
+        <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+          配置 AI 常见高频词（如"微微一笑"、"眉头一皱"），正文会高亮匹配；并为每个词附一句改写范例便于润色。
+        </p>
+        <AiHighFreqEditor
+          words={aiHighFreq.words}
+          disabled={!aiHighFreq.enabled}
+          onChange={(words) => {
+            const next = { ...aiHighFreq, words }
+            setAiHighFreq(next)
+          }}
+          onSave={async (words) => {
+            const saved = await window.api.setAiHighFreqConfig({ words })
+            setAiHighFreq(saved)
+            setMsg({ kind: 'ok', text: 'AI 高频词已保存' })
+          }}
+        />
+      </div>
+
       {/* 写作目标 + 番茄钟 */}
       <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
         <h3 className="sub">写作节奏</h3>
@@ -773,6 +819,145 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         {err ? (
           <span style={{ color: 'var(--danger)', fontSize: 13 }}>{err}</span>
         ) : null}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- AI 高频词编辑 ---------- */
+function AiHighFreqEditor({
+  words,
+  disabled,
+  onChange,
+  onSave
+}: {
+  words: { word: string; example?: string }[]
+  disabled: boolean
+  onChange: (words: { word: string; example?: string }[]) => void
+  onSave: (words: { word: string; example?: string }[]) => Promise<void>
+}) {
+  const [draftWord, setDraftWord] = useState('')
+  const [draftExample, setDraftExample] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const add = () => {
+    const w = draftWord.trim()
+    if (!w) {
+      setErr('请输入词条')
+      return
+    }
+    if (words.some((x) => x.word === w)) {
+      setErr('已存在该词条')
+      return
+    }
+    const next = [...words, { word: w, example: draftExample.trim() || undefined }]
+    onChange(next)
+    setDraftWord('')
+    setDraftExample('')
+    setErr(null)
+  }
+
+  const remove = (idx: number) => {
+    onChange(words.filter((_, i) => i !== idx))
+  }
+
+  const save = async () => {
+    setSaving(true)
+    setErr(null)
+    try {
+      await onSave(words)
+    } catch (e) {
+      setErr((e as Error).message || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      {words.length > 0 ? (
+        <ul className="bare" style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+          {words.map((w, i) => (
+            <li
+              key={`${w.word}-${i}`}
+              className="row"
+              style={{
+                alignItems: 'center',
+                gap: 8,
+                border: '1px solid var(--line-soft)',
+                borderRadius: 4,
+                padding: 8
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <strong style={{ fontSize: 13 }}>{w.word}</strong>
+                {w.example ? (
+                  <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                    改写示例：{w.example}
+                  </div>
+                ) : null}
+              </div>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => remove(i)}
+                disabled={disabled || saving}
+                title="删除该词条"
+              >
+                删除
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          暂无词条。在下方添加后保存即可生效。
+        </p>
+      )}
+
+      <div
+        className="row"
+        style={{ gap: 6, alignItems: 'flex-end', flexWrap: 'wrap' }}
+      >
+        <div className="field" style={{ flex: '1 1 140px', margin: 0 }}>
+          <label style={{ fontSize: 11.5 }}>词或短语</label>
+          <input
+            className="input"
+            value={draftWord}
+            onChange={(e) => setDraftWord(e.target.value)}
+            placeholder="如：微微一笑"
+            disabled={disabled}
+          />
+        </div>
+        <div className="field" style={{ flex: '2 1 220px', margin: 0 }}>
+          <label style={{ fontSize: 11.5 }}>改写示例（可选）</label>
+          <input
+            className="input"
+            value={draftExample}
+            onChange={(e) => setDraftExample(e.target.value)}
+            placeholder="如：嘴角微微上扬，没有说话"
+            disabled={disabled}
+          />
+        </div>
+        <button
+          className="btn btn-sm"
+          onClick={add}
+          disabled={disabled || !draftWord.trim()}
+        >
+          添加
+        </button>
+      </div>
+      {err ? (
+        <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 6 }}>{err}</p>
+      ) : null}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={save}
+          disabled={disabled || saving}
+        >
+          {saving ? '保存中…' : '保存词条'}
+        </button>
       </div>
     </div>
   )

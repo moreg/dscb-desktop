@@ -111,6 +111,11 @@ export interface CreateProjectDataInput {
 
 export type StyleSourceType = 'sampleText'
 
+export interface SelectedTextFile {
+  content: string
+  fileName: string
+}
+
 export interface StyleAnalysisResult {
   identifiedStyle: string
   sentencePatterns: string[]
@@ -119,7 +124,29 @@ export interface StyleAnalysisResult {
   narrativePerspective: string[]
   tone: string[]
   narrativeTemplates: string[]
+  /**
+   * 文风约束：跨题材、跨角色都能复用的写作手法层。
+   * 例：保持现实质感、情感克制优先用动作/细节/环境/简短对话传递、对话口语化、
+   * 注重生活场景与物件的细节描写、节奏做到"紧张-缓和"交替。
+   */
+  styleConstraints: string[]
+  /**
+   * 人设约束：与主角/角色性格、行为模式绑定的写作准则。换主角/换题材需重写。
+   * 例：保持主角冷静与逻辑性、避免冗长内心独白、避免情绪失控大喊大叫。
+   */
+  characterConstraints: string[]
+  /**
+   * 剧情约束：与本作品题材/设定绑定的剧情手法。换书需重写。
+   * 例：穿插对过去（重生前）的闪回、避免完全脱离现实逻辑的"金手指"或巧合、
+   * 避免温情场景过度煽情、避免上帝视角随意评价。
+   */
+  plotConstraints: string[]
+  /**
+   * @deprecated 自 P28 起拆分为 styleConstraints / characterConstraints / plotConstraints。
+   * 解析时仍兜底读取，渲染时不再使用。保留字段以兼容旧 styles.json。
+   */
   dos: string[]
+  /** @deprecated 同上。 */
   donts: string[]
   stylePrompt: string
 }
@@ -144,13 +171,27 @@ export interface CreateStyleProfileInput {
   narrativePerspective: string[]
   tone: string[]
   narrativeTemplates: string[]
-  dos: string[]
-  donts: string[]
+  styleConstraints: string[]
+  characterConstraints: string[]
+  plotConstraints: string[]
+  dos?: string[]
+  donts?: string[]
   stylePrompt: string
 }
 
 export interface UpdateStyleProfileInput {
   name?: string
+  identifiedStyle?: string
+  sentencePatterns?: string[]
+  vocabularyPreferences?: string[]
+  punctuationAndRhythm?: string[]
+  narrativePerspective?: string[]
+  tone?: string[]
+  narrativeTemplates?: string[]
+  styleConstraints?: string[]
+  characterConstraints?: string[]
+  plotConstraints?: string[]
+  stylePrompt?: string
 }
 
 export interface WriteStyleSelection {
@@ -193,6 +234,8 @@ export interface RendererApi {
     projectId: string,
     styleProfileId: string | null
   ) => Promise<ProjectData>
+  /** 选择本地文本文件用于文风提取，返回文件内容和文件名 */
+  selectTextFile: () => Promise<SelectedTextFile[] | null>
   listChapters: (projectId: string) => Promise<ChapterMeta[]>
   getChapter: (projectId: string, n: number) => Promise<ChapterContent>
   createChapter: (projectId: string, input: CreateChapterInput) => Promise<ChapterMeta>
@@ -353,6 +396,12 @@ export interface RendererApi {
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
   ) => Promise<number>
+  /** 应用 LLM 在正文末尾写下的【本章伏笔回执】到伏笔库 */
+  applyForeshadowReceipt: (
+    projectId: string,
+    chapterNumber: number,
+    receipt: { planted?: string[]; collected?: string[] }
+  ) => Promise<{ planted: number; collected: number; skipped: string[] }>
   /** 节奏评估（流式）：LLM 评估实际情绪值 */
   evaluateRhythmStream: (
     projectId: string,
@@ -424,6 +473,9 @@ export interface RendererApi {
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
   getCostAlertConfig: () => Promise<CostAlertConfig>
   setCostAlertConfig: (cfg: Partial<CostAlertConfig>) => Promise<CostAlertConfig>
+  /** AI 高频词配置：开关 + 词条 + 改写示例 */
+  getAiHighFreqConfig: () => Promise<AiHighFreqConfig>
+  setAiHighFreqConfig: (cfg: Partial<AiHighFreqConfig>) => Promise<AiHighFreqConfig>
 }
 
 export interface Character {
@@ -759,6 +811,24 @@ export interface CostAlertConfig {
   warning: number
   exceeded: number
   blockOnExceeded: boolean
+}
+
+/**
+ * AI 高频词配置
+ * - enabled: 是否启用高亮
+ * - words: 需要高亮的词列表
+ * - examples: 每个词的修改示例（可选）
+ */
+export interface AiHighFreqWord {
+  /** 词或短语 */
+  word: string
+  /** 修改示例（一句简短的重写范例） */
+  example?: string
+}
+
+export interface AiHighFreqConfig {
+  enabled: boolean
+  words: AiHighFreqWord[]
 }
 
 export interface UsageBucket {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type {
   AuditReport,
   FigureDraft,
@@ -40,6 +40,19 @@ interface Props {
   redoStackCount?: number
   /** P7-A：重做最近一次被撤销的应用 */
   onRedoRewrite?: () => void | Promise<void>
+  /** 细纲对照完成后回调 */
+  onCompleteOutline?: () => void
+  /** 记忆提取完成后回调 */
+  onCompleteMemory?: () => void
+  /** 节奏评估完成后回调 */
+  onCompleteRhythm?: () => void
+  /** 图解生成完成后回调 */
+  onCompleteFigure?: () => void
+  /**
+   * 一键同步触发器：值变化时自动触发所有同步操作。
+   * 用于从外部（如未同步提醒横幅）触发"一键同步"。
+   */
+  syncAllTrigger?: number
 }
 
 /**
@@ -62,7 +75,12 @@ export default function ChapterFlowPanel(props: Props) {
     onUndoRewriteByKey,
     onRedoRewrite,
     redoStackCount,
-    rewriteHistory
+    rewriteHistory,
+    onCompleteOutline,
+    onCompleteMemory,
+    onCompleteRhythm,
+    onCompleteFigure,
+    syncAllTrigger
   } = props
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
@@ -118,6 +136,7 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       setOutlineDiff(parseOutlineDiffJson(buffer, chapterNumber))
+      onCompleteOutline?.()
     } catch (e) {
       setOutlineError((e as Error).message)
       setOutlineChecking(false)
@@ -152,6 +171,7 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       setMemoryExtraction(parseMemoryExtractionJson(buffer, chapterNumber))
+      onCompleteMemory?.()
     } catch (e) {
       setMemoryError((e as Error).message)
       setMemoryExtracting(false)
@@ -227,6 +247,7 @@ export default function ChapterFlowPanel(props: Props) {
       // parseRhythmEvaluationJson 优先用 LLM 输出的 expectedEmotion（透传字段）
       const evaluation = parseRhythmEvaluationJson(buffer, chapterNumber, 5)
       setRhythmEvaluation(evaluation)
+      onCompleteRhythm?.()
       // 自动应用（diff ≤ 1）
       if (evaluation?.autoApply) {
         await applyRhythm(evaluation)
@@ -270,6 +291,7 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       setFigureDraft(parseFigureDraftJson(buffer, chapterNumber))
+      onCompleteFigure?.()
     } catch (e) {
       setFigureError((e as Error).message)
       setFigureGenerating(false)
@@ -306,13 +328,53 @@ export default function ChapterFlowPanel(props: Props) {
       memoryExtraction.newPlotPoints.length > 0 ||
       memoryExtraction.collectedForeshadowings.length > 0)
 
+  /**
+   * 一键同步：依次触发四个同步操作，每个操作独立 try/catch 确保互不影响。
+   * 注意：这只是启动生成流程，应用操作（如 applyMemory）仍需用户确认。
+   */
+  const runAllSync = async () => {
+    if (!draft.trim()) return
+    // 并发执行四个操作，内部均已处理异常与状态设置
+    await Promise.allSettled([
+      runOutlineCheck(),
+      runMemoryExtract(),
+      runRhythmEvaluate(),
+      runFigureGenerate()
+    ])
+  }
+
+  /**
+   * 一键同步：当 syncAllTrigger 变化时，依次触发四个同步操作。
+   * 使用 useRef 避免首次渲染时触发。
+   */
+  const prevSyncAllTrigger = useRef(syncAllTrigger)
+  useEffect(() => {
+    // 跳过首次渲染
+    if (prevSyncAllTrigger.current === syncAllTrigger) return
+    prevSyncAllTrigger.current = syncAllTrigger
+    void runAllSync()
+    // 只关心 syncAllTrigger 变化，runAllSync 在组件内定义且引用稳定
+  }, [syncAllTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="editor-panel" style={{ marginTop: 12 }}>
       <div className="ep-head">
         <div className="ep-title">续写流程面板</div>
-        <button className="btn btn-ghost btn-sm" onClick={onClose}>
-          收起
-        </button>
+        <div className="btn-group">
+          <button
+            className="btn btn-sm"
+            onClick={() => void runAllSync()}
+            disabled={
+              outlineChecking || memoryExtracting || rhythmEvaluating || figureGenerating
+            }
+            title="依次触发细纲对照、记忆提取、节奏评估、图解生成"
+          >
+            ⟳ 一键同步
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>
+            收起
+          </button>
+        </div>
       </div>
 
       {auditReport ? (

@@ -71,10 +71,13 @@ export default function WeeklyWritingStats({ projectId, dailyTarget }: Props) {
           return (
             <div
               key={d.date}
-              className={`heatmap-cell heat-${lvl}${isToday ? ' today' : ''}`}
-              title={`${d.date}: ${d.words} 字`}
+              className="heatmap-day"
             >
-              <span className="heatmap-day-label">{d.date.slice(5)}</span>
+              <div
+                className={`heatmap-cell heat-${lvl}${isToday ? ' today' : ''}`}
+                title={`${d.date}: ${d.words} 字`}
+              />
+              <span className="heatmap-day-label">{d.date.slice(8)}</span>
             </div>
           )
         })}

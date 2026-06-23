@@ -1,4 +1,7 @@
 import { z } from 'zod'
+import { basename } from 'path'
+import { dialog } from 'electron'
+import { readFile } from 'fs/promises'
 import { StyleProfileService } from '../data/style-profile-service'
 import { ProjectService } from '../data/project-service'
 import { safeHandle } from './safe-handle'
@@ -7,6 +10,22 @@ import { projectIdSchema, validateInput } from './validation'
 const styleProfileIdSchema = z.string().min(1).max(255)
 const styleSampleSchema = z.string().min(1).max(100_000)
 const styleNameSchema = z.string().min(1).max(120)
+
+const updateStyleProfileSchema = z
+  .object({
+    name: styleNameSchema.optional(),
+    identifiedStyle: z.string().min(1).max(500).optional(),
+    sentencePatterns: z.array(z.string().min(1).max(500)).max(16).optional(),
+    vocabularyPreferences: z.array(z.string().min(1).max(500)).max(16).optional(),
+    punctuationAndRhythm: z.array(z.string().min(1).max(500)).max(16).optional(),
+    narrativePerspective: z.array(z.string().min(1).max(500)).max(16).optional(),
+    tone: z.array(z.string().min(1).max(500)).max(16).optional(),
+    narrativeTemplates: z.array(z.string().min(1).max(500)).max(16).optional(),
+    styleConstraints: z.array(z.string().min(1).max(500)).max(16).optional(),
+    characterConstraints: z.array(z.string().min(1).max(500)).max(16).optional(),
+    plotConstraints: z.array(z.string().min(1).max(500)).max(16).optional(),
+    stylePrompt: z.string().min(1).max(10_000).optional()
+  })
 
 const createStyleProfileSchema = z.object({
   name: styleNameSchema,
@@ -19,8 +38,11 @@ const createStyleProfileSchema = z.object({
   narrativePerspective: z.array(z.string().min(1).max(500)).max(16),
   tone: z.array(z.string().min(1).max(500)).max(16),
   narrativeTemplates: z.array(z.string().min(1).max(500)).max(16),
-  dos: z.array(z.string().min(1).max(500)).max(16),
-  donts: z.array(z.string().min(1).max(500)).max(16),
+  styleConstraints: z.array(z.string().min(1).max(500)).max(16),
+  characterConstraints: z.array(z.string().min(1).max(500)).max(16),
+  plotConstraints: z.array(z.string().min(1).max(500)).max(16),
+  dos: z.array(z.string().min(1).max(500)).max(16).optional(),
+  donts: z.array(z.string().min(1).max(500)).max(16).optional(),
   stylePrompt: z.string().min(1).max(10_000)
 })
 
@@ -54,17 +76,11 @@ export function registerStyleIpc(
         z.object({
           projectId: projectIdSchema,
           styleProfileId: styleProfileIdSchema,
-          patch: z.object({
-            name: styleNameSchema.optional()
-          })
+          patch: updateStyleProfileSchema
         }),
         payload
       )
-      return styleService.update(
-        validated.projectId,
-        validated.styleProfileId,
-        validated.patch
-      )
+      return styleService.update(validated.projectId, validated.styleProfileId, validated.patch)
     }
   )
 
@@ -110,6 +126,39 @@ export function registerStyleIpc(
       return projectService.updateProjectData(validated.projectId, {
         defaultStyleProfileId: validated.styleProfileId ?? undefined
       })
+    }
+  )
+
+  safeHandle(
+    'dialog:selectTextFile',
+    async (): Promise<Array<{ content: string; fileName: string }> | null> => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openFile', 'multiSelections'],
+        filters: [{ name: '文本文件', extensions: ['txt', 'md'] }],
+        title: '选择样文文件'
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+
+      try {
+        const MAX_SIZE = 100_000
+        let totalSize = 0
+        const out = []
+        for (const filePath of result.filePaths) {
+          if (totalSize >= MAX_SIZE) break
+          const content = await readFile(filePath, 'utf-8')
+          const remain = MAX_SIZE - totalSize
+          const truncated = content.length > remain ? content.slice(0, remain) : content
+          totalSize += truncated.length
+          out.push({
+            content: truncated,
+            fileName: basename(filePath)
+          })
+        }
+        return out
+      } catch (err) {
+        console.error('[selectTextFile] Failed to read file:', err)
+        throw new Error('文件读取失败，请确保文件是 UTF-8 编码的文本文件')
+      }
     }
   )
 }

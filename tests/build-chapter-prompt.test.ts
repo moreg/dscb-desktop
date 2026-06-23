@@ -132,9 +132,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 3)
     expect(user).toContain('师父留下的字条')
-    expect(user).toContain('本章预计回收的伏笔')
+    expect(user).toContain('本章必须回收的伏笔')
     expect(user).toContain('神秘玉佩的来历')
-    expect(user).toContain('等待埋设的伏笔')
+    expect(user).toContain('建议本章铺垫的伏笔')
   })
 
   it('splits characters into appearing vs other based on chapter detail', async () => {

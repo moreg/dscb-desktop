@@ -40,8 +40,11 @@ export class StyleProfileService {
       narrativePerspective: normalizeList(input.narrativePerspective),
       tone: normalizeList(input.tone),
       narrativeTemplates: normalizeList(input.narrativeTemplates),
-      dos: normalizeList(input.dos),
-      donts: normalizeList(input.donts),
+      styleConstraints: normalizeList(input.styleConstraints),
+      characterConstraints: normalizeList(input.characterConstraints),
+      plotConstraints: normalizeList(input.plotConstraints),
+      dos: normalizeList(input.dos ?? []),
+      donts: normalizeList(input.donts ?? []),
       stylePrompt: input.stylePrompt.trim(),
       createdAt: now,
       updatedAt: now
@@ -61,9 +64,63 @@ export class StyleProfileService {
     const index = data.items.findIndex((item) => item.id === styleProfileId)
     if (index < 0) throw new Error(`STYLE_PROFILE_NOT_FOUND: ${styleProfileId}`)
     const current = data.items[index]
+
+    const hasAny =
+      patch.name !== undefined ||
+      patch.identifiedStyle !== undefined ||
+      patch.sentencePatterns !== undefined ||
+      patch.vocabularyPreferences !== undefined ||
+      patch.punctuationAndRhythm !== undefined ||
+      patch.narrativePerspective !== undefined ||
+      patch.tone !== undefined ||
+      patch.narrativeTemplates !== undefined ||
+      patch.styleConstraints !== undefined ||
+      patch.characterConstraints !== undefined ||
+      patch.plotConstraints !== undefined ||
+      patch.stylePrompt !== undefined
+    if (!hasAny) {
+      throw new Error('STYLE_UPDATE_EMPTY_PATCH')
+    }
+
     const next: StyleProfile = {
       ...current,
       name: patch.name?.trim() ? patch.name.trim() : current.name,
+      identifiedStyle:
+        patch.identifiedStyle?.trim() ? patch.identifiedStyle.trim() : current.identifiedStyle,
+      sentencePatterns:
+        patch.sentencePatterns !== undefined
+          ? normalizeList(patch.sentencePatterns)
+          : current.sentencePatterns,
+      vocabularyPreferences:
+        patch.vocabularyPreferences !== undefined
+          ? normalizeList(patch.vocabularyPreferences)
+          : current.vocabularyPreferences,
+      punctuationAndRhythm:
+        patch.punctuationAndRhythm !== undefined
+          ? normalizeList(patch.punctuationAndRhythm)
+          : current.punctuationAndRhythm,
+      narrativePerspective:
+        patch.narrativePerspective !== undefined
+          ? normalizeList(patch.narrativePerspective)
+          : current.narrativePerspective,
+      tone: patch.tone !== undefined ? normalizeList(patch.tone) : current.tone,
+      narrativeTemplates:
+        patch.narrativeTemplates !== undefined
+          ? normalizeList(patch.narrativeTemplates)
+          : current.narrativeTemplates,
+      styleConstraints:
+        patch.styleConstraints !== undefined
+          ? normalizeList(patch.styleConstraints)
+          : current.styleConstraints,
+      characterConstraints:
+        patch.characterConstraints !== undefined
+          ? normalizeList(patch.characterConstraints)
+          : current.characterConstraints,
+      plotConstraints:
+        patch.plotConstraints !== undefined
+          ? normalizeList(patch.plotConstraints)
+          : current.plotConstraints,
+      stylePrompt: patch.stylePrompt?.trim() ? patch.stylePrompt.trim() : current.stylePrompt,
       updatedAt: new Date().toISOString()
     }
     data.items[index] = next
@@ -143,12 +200,15 @@ function buildStyleExtractPrompt(
     name?.trim() ? `期望文风名：${name.trim()}` : '',
     '',
     '分析目标：',
-    '- 识别是什么文风',
+    '- 识别这是什么文风',
     '- 总结句式特征',
     '- 总结词汇偏好',
     '- 总结标点与节奏',
     '- 总结叙事视角与语气',
     '- 总结基础叙事模板',
+    '- 只提炼可跨书复用的文风写作约束（styleConstraints）',
+    '- 不要提取人物性格、人物关系、角色行为准则、剧情设定、题材套路、具体桥段等人设或剧情约束',
+    '- 如果样文里出现强绑定于角色或作品设定的信息，忽略它们，不要写进输出',
     '- 提炼成可直接用于续写的 stylePrompt',
     '',
     '输出要求：',
@@ -162,12 +222,15 @@ function buildStyleExtractPrompt(
     '  "narrativePerspective": string[],',
     '  "tone": string[],',
     '  "narrativeTemplates": string[],',
-    '  "dos": string[],',
-    '  "donts": string[],',
+    '  "styleConstraints": string[],',
+    '  "characterConstraints": string[],',
+    '  "plotConstraints": string[],',
     '  "stylePrompt": string',
     '}',
-    '- 每个数组给 3-8 条高价值结论，简洁具体，可执行',
-    '- stylePrompt 必须是写给续写模型的约束说明，强调应模仿的句式、词汇、节奏、视角、语气，以及不要做什么',
+    '- styleConstraints 给 3-8 条简洁、具体、可执行的文风约束',
+    '- characterConstraints 必须返回空数组 []',
+    '- plotConstraints 必须返回空数组 []',
+    '- stylePrompt 只描述文风层面的模仿要求与禁忌，不要写角色设定或剧情推进规则',
     '',
     '------ 样文开始 ------',
     sampleText,
@@ -188,6 +251,15 @@ export function parseStyleAnalysisResult(raw: string): StyleAnalysisResult {
   }
 
   const value = obj as Partial<StyleAnalysisResult>
+  const styleC = normalizeUnknownList(value.styleConstraints)
+  const dos = normalizeUnknownList(value.dos)
+  const donts = normalizeUnknownList(value.donts)
+  const fallbackStyle = [...styleC]
+  if (fallbackStyle.length === 0) {
+    if (dos.length > 0) fallbackStyle.push(...dos)
+    if (donts.length > 0) fallbackStyle.push(...donts)
+  }
+
   const result: StyleAnalysisResult = {
     identifiedStyle: typeof value.identifiedStyle === 'string' ? value.identifiedStyle.trim() : '',
     sentencePatterns: normalizeUnknownList(value.sentencePatterns),
@@ -196,8 +268,11 @@ export function parseStyleAnalysisResult(raw: string): StyleAnalysisResult {
     narrativePerspective: normalizeUnknownList(value.narrativePerspective),
     tone: normalizeUnknownList(value.tone),
     narrativeTemplates: normalizeUnknownList(value.narrativeTemplates),
-    dos: normalizeUnknownList(value.dos),
-    donts: normalizeUnknownList(value.donts),
+    styleConstraints: fallbackStyle,
+    characterConstraints: [],
+    plotConstraints: [],
+    dos,
+    donts,
     stylePrompt: typeof value.stylePrompt === 'string' ? value.stylePrompt.trim() : ''
   }
 
