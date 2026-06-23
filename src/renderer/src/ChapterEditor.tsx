@@ -235,6 +235,11 @@ export default function ChapterEditor({
   })
   const [isEditingGoal, setIsEditingGoal] = useState(false)
   const [editingGoalVal, setEditingGoalVal] = useState('3000')
+  const [findBarOpen, setFindBarOpen] = useState(false)
+  const [findText, setFindText] = useState('')
+  const [replaceText, setReplaceText] = useState('')
+  const [findResults, setFindResults] = useState<number[]>([])
+  const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
@@ -664,6 +669,19 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
         e.preventDefault()
         void reAudit()
+        return
+      }
+      // 查找：Ctrl+F
+      if (e.ctrlKey && (e.key === 'F' || e.key === 'f')) {
+        e.preventDefault()
+        setFindBarOpen(true)
+        setTimeout(() => {
+          const inp = document.getElementById('find-input') as HTMLInputElement | null
+          if (inp) {
+            inp.focus()
+            inp.select()
+          }
+        }, 60)
         return
       }
       // Undo/Redo：通过纯函数判断（跨平台兼容 + 不在 textarea 内拦截）
@@ -1267,6 +1285,91 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     const lineHeight = 32
     el.scrollTop = Math.max(0, (row - 5) * lineHeight)
   }
+
+  const highlightMatch = (start: number, length: number) => {
+    const el = textareaRef.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(start, start + length)
+    const row = draft.slice(0, start).split('\n').length
+    const lineHeight = 32
+    el.scrollTop = Math.max(0, (row - 5) * lineHeight)
+  }
+
+  const handleFind = (searchText: string) => {
+    setFindText(searchText)
+    if (!searchText) {
+      setFindResults([])
+      setCurrentResultIndex(-1)
+      return
+    }
+    const results: number[] = []
+    let idx = 0
+    const lowerDraft = draft.toLowerCase()
+    const lowerSearch = searchText.toLowerCase()
+    while ((idx = lowerDraft.indexOf(lowerSearch, idx)) >= 0) {
+      results.push(idx)
+      idx += searchText.length
+    }
+    setFindResults(results)
+    const firstIndex = results.length > 0 ? 0 : -1
+    setCurrentResultIndex(firstIndex)
+    if (results.length > 0) {
+      highlightMatch(results[0], searchText.length)
+    }
+  }
+
+  const handleFindNext = () => {
+    if (findResults.length === 0) return
+    const nextIdx = (currentResultIndex + 1) % findResults.length
+    setCurrentResultIndex(nextIdx)
+    highlightMatch(findResults[nextIdx], findText.length)
+  }
+
+  const handleFindPrev = () => {
+    if (findResults.length === 0) return
+    const prevIdx = (currentResultIndex - 1 + findResults.length) % findResults.length
+    setCurrentResultIndex(prevIdx)
+    highlightMatch(findResults[prevIdx], findText.length)
+  }
+
+  const handleReplace = () => {
+    if (currentResultIndex === -1 || findResults.length === 0) return
+    const start = findResults[currentResultIndex]
+    const nextDraft = draft.slice(0, start) + replaceText + draft.slice(start + findText.length)
+    setDraft(nextDraft)
+    setDirty(true)
+    const results: number[] = []
+    let idx = 0
+    const lowerDraft = nextDraft.toLowerCase()
+    const lowerSearch = findText.toLowerCase()
+    while ((idx = lowerDraft.indexOf(lowerSearch, idx)) >= 0) {
+      results.push(idx)
+      idx += findText.length
+    }
+    setFindResults(results)
+    if (results.length > 0) {
+      const nextIdx = currentResultIndex % results.length
+      setCurrentResultIndex(nextIdx)
+      setTimeout(() => highlightMatch(results[nextIdx], findText.length), 0)
+    } else {
+      setCurrentResultIndex(-1)
+    }
+  }
+
+  const handleReplaceAll = () => {
+    if (!findText) return
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(escaped, 'gi')
+    const matchesCount = (draft.match(regex) ?? []).length
+    if (matchesCount === 0) return
+    const nextDraft = draft.replace(regex, replaceText)
+    setDraft(nextDraft)
+    setDirty(true)
+    setFindResults([])
+    setCurrentResultIndex(-1)
+    setUndoToast({ message: `已成功替换 ${matchesCount} 处匹配项`, type: 'info' })
+  }
   const foreshadowingReminders = useMemo(
     () => buildForeshadowingReminders(chapterNumber, chapterOutline, foreshadowings),
     [chapterNumber, chapterOutline, foreshadowings]
@@ -1363,6 +1466,24 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           title="按人物/伏笔/地点高亮正文"
         >
           {showPreview ? '收起预览' : '👁 预览'}
+        </button>
+        <button
+          className={`btn btn-sm ${findBarOpen ? 'btn-primary' : ''}`}
+          onClick={() => {
+            setFindBarOpen(!findBarOpen)
+            if (!findBarOpen) {
+              setTimeout(() => {
+                const inp = document.getElementById('find-input') as HTMLInputElement | null
+                if (inp) {
+                  inp.focus()
+                  inp.select()
+                }
+              }, 60)
+            }
+          }}
+          title="查找与替换 (Ctrl+F)"
+        >
+          🔍 查找
         </button>
         <span className="spacer" />
         {/* P11-A：保存指示器 — 让用户知道"工作已自动保存" */}
@@ -1784,6 +1905,38 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
 
         <div className="chapter-main-pane">
+          {findBarOpen ? (
+            <div className="find-replace-bar" onClick={(e) => e.stopPropagation()}>
+              <div className="bar-row">
+                <input
+                  id="find-input"
+                  type="text"
+                  className="input input-sm find-input"
+                  placeholder="输入要查找的词..."
+                  value={findText}
+                  onChange={(e) => handleFind(e.target.value)}
+                />
+                <span className="results-count">
+                  {findResults.length > 0 ? `${currentResultIndex + 1} / ${findResults.length}` : '无匹配'}
+                </span>
+                <button className="btn btn-sm" onClick={handleFindPrev} disabled={findResults.length === 0}>▲</button>
+                <button className="btn btn-sm" onClick={handleFindNext} disabled={findResults.length === 0}>▼</button>
+              </div>
+              <div className="bar-row" style={{ marginTop: 6 }}>
+                <input
+                  type="text"
+                  className="input input-sm replace-input"
+                  placeholder="替换为..."
+                  value={replaceText}
+                  onChange={(e) => setReplaceText(e.target.value)}
+                />
+                <button className="btn btn-sm" onClick={handleReplace} disabled={currentResultIndex === -1}>替换</button>
+                <button className="btn btn-sm" onClick={handleReplaceAll} disabled={findResults.length === 0}>全部替换</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setFindBarOpen(false); setFindResults([]); setCurrentResultIndex(-1); }} style={{ marginLeft: 'auto' }}>✕</button>
+              </div>
+            </div>
+          ) : null}
+
       {undoToast ? (
         <div className={`undo-toast undo-toast-${undoToast.type}`} role="status">
           {undoToast.message}
