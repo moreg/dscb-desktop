@@ -757,6 +757,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         projectId,
         chapterNumber,
         requestedStyleProfileId,
+        undefined,
         (token, done) => {
           if (genRef.current !== myGen) return
           if (token) {
