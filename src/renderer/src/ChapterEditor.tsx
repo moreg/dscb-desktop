@@ -1264,7 +1264,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     el.focus()
     el.setSelectionRange(pos, pos + quote.length)
     const row = draft.slice(0, pos).split('\n').length
-    const lineHeight = 28
+    const lineHeight = 32
     el.scrollTop = Math.max(0, (row - 5) * lineHeight)
   }
   const foreshadowingReminders = useMemo(
