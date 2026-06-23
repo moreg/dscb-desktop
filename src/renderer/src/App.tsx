@@ -342,6 +342,7 @@ export default function App() {
                 onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
                 onOpenOutline={() => setView({ kind: 'outline', projectId: view.projectId })}
                 onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
+                onNavigateChapter={(n) => setView({ kind: 'editor', projectId: view.projectId, chapterNumber: n })}
               />
             </ErrorBoundary>
           ) : view.kind === 'characters' ? (

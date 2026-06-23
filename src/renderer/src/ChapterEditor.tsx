@@ -54,6 +54,7 @@ interface Props {
   onBack: () => void
   onOpenOutline?: () => void
   onOpenCharacters?: () => void
+  onNavigateChapter?: (chapterNumber: number) => void
 }
 
 const SOURCE_LABEL: Record<ChapterSource, string> = {
@@ -108,7 +109,8 @@ export default function ChapterEditor({
   chapterNumber,
   onOpenOutline,
   onOpenCharacters,
-  onBack
+  onBack,
+  onNavigateChapter
 }: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
 
@@ -244,6 +246,7 @@ export default function ChapterEditor({
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
+  const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
   const [previewCard, setPreviewCard] = useState<{
     kind: 'char' | 'foreshadow' | 'location'
     text: string
@@ -528,6 +531,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setDraft(c.content)
       setDirty(false)
       setSessionStartWords(c.meta.wordCount)
+    })
+    void window.api.getChapterWordSummary(projectId).then((res) => {
+      if (res) {
+        const sorted = res.chapters.map((c) => ({ chapterNumber: c.chapterNumber, title: c.title }))
+          .sort((a, b) => a.chapterNumber - b.chapterNumber)
+        setAllChapters(sorted)
+      }
     })
     refreshVersions()
     refreshCharacters()
@@ -1398,12 +1408,43 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     <div className={`chapter-editor-shell${reviewOpen ? ' review-open' : ''}`}>
       <div className="page-head">
         <div className="page-head-row">
-          <div>
-            <h1>第 {data.meta.chapterNumber} 章 · {data.meta.title}</h1>
-            <p className="desc">
-              <span className="num">{data.meta.wordCount.toLocaleString()}</span> 字 ·{' '}
-              <span className="num">{versions.length}</span> 版
-            </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button className="btn btn-ghost btn-sm" onClick={onBack} title="返回章节列表" style={{ marginRight: 6 }}>
+              ← 返回
+            </button>
+            {allChapters.length > 0 && onNavigateChapter && (
+              <div className="btn-group" style={{ marginRight: 12 }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    const idx = allChapters.findIndex((c) => c.chapterNumber === chapterNumber)
+                    if (idx > 0) onNavigateChapter(allChapters[idx - 1].chapterNumber)
+                  }}
+                  disabled={allChapters.findIndex((c) => c.chapterNumber === chapterNumber) <= 0}
+                >
+                  上一章
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    const idx = allChapters.findIndex((c) => c.chapterNumber === chapterNumber)
+                    if (idx !== -1 && idx < allChapters.length - 1) {
+                      onNavigateChapter(allChapters[idx + 1].chapterNumber)
+                    }
+                  }}
+                  disabled={allChapters.findIndex((c) => c.chapterNumber === chapterNumber) >= allChapters.length - 1}
+                >
+                  下一章
+                </button>
+              </div>
+            )}
+            <div>
+              <h1 style={{ display: 'inline', fontSize: 17, fontWeight: 700 }}>第 {data.meta.chapterNumber} 章 · {data.meta.title}</h1>
+              <p className="desc" style={{ marginTop: 2 }}>
+                <span className="num">{data.meta.wordCount.toLocaleString()}</span> 字 ·{' '}
+                <span className="num">{versions.length}</span> 版
+              </p>
+            </div>
           </div>
           <span
             className={`editor-status ${STATUS_CLASS[data.meta.status]}`}
