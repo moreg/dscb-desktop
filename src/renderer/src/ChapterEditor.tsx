@@ -622,6 +622,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     const saved = localStorage.getItem(`ai-writer:word-target:${projectId}:${chapterNumber}`)
     setChapterGoal(saved ? Number(saved) : 3000)
+    setIsEditingGoal(false)
   }, [projectId, chapterNumber])
 
   const handleSaveChapterGoal = (val: number) => {
