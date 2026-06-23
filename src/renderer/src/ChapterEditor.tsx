@@ -228,6 +228,12 @@ export default function ChapterEditor({
   const [pomoRunning, setPomoRunning] = useState(false)
   const [pomoSessions, setPomoSessions] = useState(0)
   const [dailyGoal, setDailyGoal] = useState(3000)
+  const [chapterGoal, setChapterGoal] = useState<number>(() => {
+    const saved = localStorage.getItem(`ai-writer:word-target:${projectId}:${chapterNumber}`)
+    return saved ? Number(saved) : 3000
+  })
+  const [isEditingGoal, setIsEditingGoal] = useState(false)
+  const [editingGoalVal, setEditingGoalVal] = useState('3000')
   const [sessionStartWords, setSessionStartWords] = useState(0)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
@@ -612,6 +618,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     refreshUsage()
   }, [projectId])
+
+  useEffect(() => {
+    const saved = localStorage.getItem(`ai-writer:word-target:${projectId}:${chapterNumber}`)
+    setChapterGoal(saved ? Number(saved) : 3000)
+  }, [projectId, chapterNumber])
+
+  const handleSaveChapterGoal = (val: number) => {
+    setChapterGoal(val)
+    localStorage.setItem(`ai-writer:word-target:${projectId}:${chapterNumber}`, String(val))
+  }
 
   // 点 popover 或预览卡片外区域关闭
   useEffect(() => {
@@ -1475,6 +1491,52 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             <div
               className={`fill ${sessionWords >= dailyGoal ? 'done' : ''}`}
               style={{ width: `${Math.min(100, (sessionWords / Math.max(1, dailyGoal)) * 100)}%` }}
+            />
+          </div>
+          <div className="goal-row" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>本章字数</span>
+            <span>
+              <span className="num">{(draft.match(/\S/g) ?? []).length}</span> /{' '}
+              {isEditingGoal ? (
+                <input
+                  type="number"
+                  className="input input-sm"
+                  value={editingGoalVal}
+                  onChange={(e) => setEditingGoalVal(e.target.value)}
+                  onBlur={() => {
+                    const val = Number(editingGoalVal) || 0
+                    handleSaveChapterGoal(val)
+                    setIsEditingGoal(false)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const val = Number(editingGoalVal) || 0
+                      handleSaveChapterGoal(val)
+                      setIsEditingGoal(false)
+                    }
+                  }}
+                  autoFocus
+                  style={{ width: 60, padding: '2px 4px', fontSize: 11, background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)' }}
+                />
+              ) : (
+                <span
+                  className="num"
+                  onClick={() => {
+                    setEditingGoalVal(String(chapterGoal))
+                    setIsEditingGoal(true)
+                  }}
+                  style={{ cursor: 'pointer', borderBottom: '1px dashed var(--ink-3)' }}
+                  title="点击修改本章字数目标"
+                >
+                  {chapterGoal}
+                </span>
+              )} 字
+            </span>
+          </div>
+          <div className="goal-bar" style={{ marginTop: 4 }}>
+            <div
+              className={`fill ${(draft.match(/\S/g) ?? []).length >= chapterGoal ? 'done' : ''}`}
+              style={{ width: `${Math.min(100, ((draft.match(/\S/g) ?? []).length / Math.max(1, chapterGoal)) * 100)}%` }}
             />
           </div>
         </div>
