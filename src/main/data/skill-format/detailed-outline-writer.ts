@@ -105,7 +105,9 @@ export class DetailedOutlineWriter {
       this.setField(newFields, newOrder, '金句', patch.goldenLine)
     }
     if (patch.writingRequirements !== undefined) {
-      const key = newFields.has('写作要求') ? '写作要求' : '本章写作要求'
+      const key = newFields.has('本章写作要求')
+        ? '本章写作要求'
+        : (newFields.has('写作要求') ? '写作要求' : '本章写作要求')
       this.setField(newFields, newOrder, key, patch.writingRequirements)
     }
 

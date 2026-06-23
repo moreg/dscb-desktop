@@ -190,10 +190,10 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const handleSaveReqs = async () => {
     setSavingReqs(true)
     try {
-      await window.api.updateDetailedOutline(projectId, chapterNumber, {
+      const updated = await window.api.updateDetailedOutline(projectId, chapterNumber, {
         writingRequirements: editingReqsText
       })
-      refreshChapterOutline()
+      setChapterOutline(updated)
       setIsEditingReqs(false)
     } catch (err) {
       console.error('Failed to save writing requirements:', err)
@@ -1658,6 +1658,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               <button
                 className="btn btn-sm"
                 onClick={() => setIsEditingReqs(true)}
+                disabled={!chapterOutline}
               >
                 编辑
               </button>
@@ -1665,7 +1666,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           </div>
         </div>
         <div className="ep-body" style={{ marginTop: 6 }}>
-          {isEditingReqs ? (
+          {!chapterOutline ? (
+            <p className="muted" style={{ fontSize: '12px', margin: 0 }}>
+              暂无本章细纲。请先在左侧「📜 本章细纲」中生成或导入细纲，之后即可配置写作要求。
+            </p>
+          ) : isEditingReqs ? (
             <textarea
               className="textarea"
               style={{
@@ -1685,7 +1690,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               onChange={(e) => setEditingReqsText(e.target.value)}
               placeholder="请输入本章写作要求（例如：展现主角果断性格、加入线索提示等）。AI 续写时将自动包含本字段内容。"
             />
-          ) : chapterOutline?.writingRequirements ? (
+          ) : chapterOutline.writingRequirements ? (
             <div
               style={{
                 fontSize: '12px',
