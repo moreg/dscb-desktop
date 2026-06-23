@@ -168,6 +168,7 @@ export default function ChapterEditor({
   }, [isDraggingSidebar])
 
   const [draft, setDraft] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [versions, setVersions] = useState<ChapterVersion[]>([])
@@ -321,7 +322,7 @@ export default function ChapterEditor({
    * P6-C：撤销失败时显示的 toast 提示。
    * 简单实现：3 秒后自动消失。type 区分 warning（黄色）/ error（朱红）。
    */
-  const [undoToast, setUndoToast] = useState<{ message: string; type: 'warning' | 'error' } | null>(null)
+  const [undoToast, setUndoToast] = useState<{ message: string; type: 'warning' | 'error' | 'info' } | null>(null)
   useEffect(() => {
     if (!undoToast) return
     const id = setTimeout(() => setUndoToast(null), 3000)
@@ -1215,6 +1216,57 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   const suggestions = useMemo(() => (reviewText ? parseSuggestions(reviewText) : []), [reviewText])
+
+  const handleApplySuggestion = (quote: string, advice: string, index: number) => {
+    if (!quote) {
+      setUndoToast({ message: '此建议无匹配原文，无法自动应用。建议直接复制。', type: 'warning' })
+      return
+    }
+    const pos = draft.indexOf(quote)
+    if (pos === -1) {
+      setUndoToast({ message: '未在正文中找到对应的原文片段，可能已被修改。', type: 'warning' })
+      return
+    }
+    const nextDraft = draft.slice(0, pos) + advice + draft.slice(pos + quote.length)
+    setDraft(nextDraft)
+    setDirty(true)
+    pushRewrite(quote, advice, `ai-review-${index}-${pos}`)
+    setUndoToast({ message: '已应用改稿建议到正文', type: 'info' })
+  }
+
+  const handleApplyAllSuggestions = () => {
+    let nextDraft = draft
+    let appliedCount = 0
+    const sorted = [...suggestions]
+      .map((s, i) => ({ ...s, originalIndex: i, pos: draft.indexOf(s.quote) }))
+      .filter(item => item.quote && item.pos !== -1)
+      .sort((a, b) => b.pos - a.pos)
+
+    for (const item of sorted) {
+      nextDraft = nextDraft.slice(0, item.pos) + item.advice + nextDraft.slice(item.pos + item.quote.length)
+      pushRewrite(item.quote, item.advice, `ai-review-${item.originalIndex}-${item.pos}`)
+      appliedCount++
+    }
+    if (appliedCount > 0) {
+      setDraft(nextDraft)
+      setDirty(true)
+      setUndoToast({ message: `已成功一键应用 ${appliedCount} 条建议`, type: 'info' })
+    } else {
+      setUndoToast({ message: '未找到可直接应用的建议', type: 'warning' })
+    }
+  }
+
+  const handleFocusSuggestion = (quote: string) => {
+    if (!quote || !textareaRef.current) return
+    const pos = draft.indexOf(quote)
+    if (pos === -1) return
+    const el = textareaRef.current
+    el.focus()
+    el.setSelectionRange(pos, pos + quote.length)
+    const row = draft.slice(0, pos).split('\n').length
+    const lineHeight = 28
+    el.scrollTop = Math.max(0, (row - 5) * lineHeight)
+  }
   const foreshadowingReminders = useMemo(
     () => buildForeshadowingReminders(chapterNumber, chapterOutline, foreshadowings),
     [chapterNumber, chapterOutline, foreshadowings]
@@ -1739,6 +1791,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       ) : null}
 
       <textarea
+        ref={textareaRef}
         className="editor-text"
         value={draft}
         onChange={(e) => {
@@ -2046,6 +2099,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onCopy={async () => {
             await navigator.clipboard.writeText(reviewText)
           }}
+          onApplySuggestion={handleApplySuggestion}
+          onApplyAll={handleApplyAllSuggestions}
+          onFocusSuggestion={handleFocusSuggestion}
         />
       ) : null}
 
@@ -2126,19 +2182,30 @@ function ReviewPanel({
   streaming,
   suggestions,
   onClose,
-  onCopy
+  onCopy,
+  onApplySuggestion,
+  onApplyAll,
+  onFocusSuggestion
 }: {
   text: string
   streaming: boolean
   suggestions: ReviewSuggestion[]
   onClose: () => void
   onCopy: () => void | Promise<void>
+  onApplySuggestion: (quote: string, advice: string, index: number) => void
+  onApplyAll: () => void
+  onFocusSuggestion: (quote: string) => void
 }) {
   return (
     <aside className="review-panel">
       <header>
         <h3>AI 改稿建议</h3>
         <div className="btn-group">
+          {suggestions.length > 0 && !streaming && (
+            <button className="btn btn-primary btn-sm" onClick={onApplyAll}>
+              应用全部
+            </button>
+          )}
           <button className="btn btn-sm" onClick={onCopy} disabled={!text}>
             复制
           </button>
@@ -2157,12 +2224,30 @@ function ReviewPanel({
         ) : (
           <>
             {suggestions.map((s, i) => (
-              <div key={i} className="review-suggestion">
+              <div
+                key={i}
+                className="review-suggestion"
+                onClick={() => onFocusSuggestion(s.quote)}
+                style={{ cursor: s.quote ? 'pointer' : 'default' }}
+              >
                 {s.quote ? <div className="quote">「{s.quote}」</div> : null}
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
                   建议 · {s.advice}
                 </div>
                 {s.why ? <div className="why">理由 · {s.why}</div> : null}
+                {s.quote && (
+                  <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onApplySuggestion(s.quote, s.advice, i)
+                      }}
+                    >
+                      应用
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
             {streaming ? (

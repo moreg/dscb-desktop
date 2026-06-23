@@ -2923,6 +2923,11 @@ pre.body {
   color: var(--warning);
   border: 1px solid var(--warning);
 }
+.undo-toast-info {
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid var(--success);
+}
 .undo-toast-error {
   background: var(--vermilion-soft);
   color: var(--vermilion);
