@@ -2149,6 +2149,11 @@ function AnalysisPanel({ text }: { text: string }) {
           <div className="label">字数</div>
           <div className="val">{stats.wordCount.toLocaleString()}</div>
         </div>
+        <div className="stat-cell" title="按普通小说平均速度 400字/分钟 估算">
+          <div className="label">阅读时间</div>
+          <div className="val">{Math.ceil(stats.wordCount / 400)}</div>
+          <div className="sub">分钟 (估算)</div>
+        </div>
         <div className="stat-cell">
           <div className="label">段落</div>
           <div className="val">{stats.paragraphCount}</div>
