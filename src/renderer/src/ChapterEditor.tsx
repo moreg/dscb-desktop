@@ -983,20 +983,61 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setData({ ...data, meta })
   }
 
+  // 请求系统通知权限
+  useEffect(() => {
+    if (pomoRunning && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [pomoRunning])
+
+  // 合成清脆的声音通知（双音符 chime）
+  const playPomoChime = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const playNote = (freq: number, start: number, duration: number) => {
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        osc.connect(gain)
+        gain.connect(ctx.destination)
+        osc.type = 'sine'
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + start)
+        gain.gain.setValueAtTime(0.25, ctx.currentTime + start)
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + start + duration)
+        osc.start(ctx.currentTime + start)
+        osc.stop(ctx.currentTime + start + duration)
+      }
+      playNote(523.25, 0, 0.3)
+      playNote(659.25, 0.15, 0.4)
+    } catch (err) {
+      console.warn('Failed to play synthesized tomato chime:', err)
+    }
+  }
+
+  const triggerPomoNotification = (message: string) => {
+    playPomoChime()
+    if (Notification.permission === 'granted') {
+      new Notification('🍅 番茄钟提示', {
+        body: message,
+        silent: true
+      })
+    }
+  }
+
   // 番茄钟计时
   useEffect(() => {
     if (!pomoRunning) return
     const id = setInterval(() => {
       setPomoSecs((s) => {
         if (s > 1) return s - 1
-        // 倒计时结束
         setPomoRunning(false)
         if (pomoMode === 'focus') {
           setPomoSessions((n) => n + 1)
           setPomoMode('break')
+          triggerPomoNotification('恭喜！一个专注番茄钟已完成。开始休息一下吧！')
           return pomoBreak * 60
         } else {
           setPomoMode('focus')
+          triggerPomoNotification('休息结束，是时候展开新一轮专注了！')
           return pomoFocus * 60
         }
       })
