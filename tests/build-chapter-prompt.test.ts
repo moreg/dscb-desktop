@@ -71,7 +71,8 @@ describe('buildChapterPrompt (new system+user format)', () => {
       plotSummary: '林远首次突破筑基',
       coolPoint: '打脸宗门长老',
       hook: '门外传来脚步声',
-      goldenLine: '我不入轮回，谁入轮回'
+      goldenLine: '我不入轮回，谁入轮回',
+      writingRequirements: '击败长老后不留活口'
     })
     await new CharacterRepository(dir).create({
       name: '林远',
@@ -88,6 +89,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('打脸宗门长老')
     expect(user).toContain('门外传来脚步声')
     expect(user).toContain('我不入轮回，谁入轮回')
+    expect(user).toContain('击败长老后不留活口')
     expect(user).toContain('林远')
     expect(user).toContain('约 2500 字')
   })

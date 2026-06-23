@@ -178,6 +178,31 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
   const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
+  const [isEditingReqs, setIsEditingReqs] = useState(false)
+  const [editingReqsText, setEditingReqsText] = useState('')
+  const [savingReqs, setSavingReqs] = useState(false)
+
+  useEffect(() => {
+    setEditingReqsText(chapterOutline?.writingRequirements ?? '')
+    setIsEditingReqs(false)
+  }, [chapterOutline])
+
+  const handleSaveReqs = async () => {
+    setSavingReqs(true)
+    try {
+      await window.api.updateDetailedOutline(projectId, chapterNumber, {
+        writingRequirements: editingReqsText
+      })
+      refreshChapterOutline()
+      setIsEditingReqs(false)
+    } catch (err) {
+      console.error('Failed to save writing requirements:', err)
+      alert('保存写作要求失败: ' + (err as Error).message)
+    } finally {
+      setSavingReqs(false)
+    }
+  }
+
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
   const [styleSelection, setStyleSelection] = useState<WriteStyleSelection>({
@@ -1605,6 +1630,85 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         />
 
         <div className="chapter-side-block">
+      <div className="editor-panel">
+        <div className="ep-head">
+          <div className="ep-title">🎯 本章写作要求</div>
+          <div className="btn-group">
+            {isEditingReqs ? (
+              <>
+                <button
+                  className="btn btn-sm btn-primary"
+                  onClick={handleSaveReqs}
+                  disabled={savingReqs}
+                >
+                  {savingReqs ? '保存中...' : '保存'}
+                </button>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setEditingReqsText(chapterOutline?.writingRequirements ?? '')
+                    setIsEditingReqs(false)
+                  }}
+                  disabled={savingReqs}
+                >
+                  取消
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn btn-sm"
+                onClick={() => setIsEditingReqs(true)}
+              >
+                编辑
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="ep-body" style={{ marginTop: 6 }}>
+          {isEditingReqs ? (
+            <textarea
+              className="textarea"
+              style={{
+                width: '100%',
+                minHeight: '80px',
+                fontSize: '12px',
+                lineHeight: '1.5',
+                padding: '6px 8px',
+                borderRadius: '4px',
+                border: '1px solid var(--line-soft)',
+                backgroundColor: 'var(--bg-card)',
+                color: 'var(--fg-main)',
+                resize: 'vertical',
+                fontFamily: 'inherit'
+              }}
+              value={editingReqsText}
+              onChange={(e) => setEditingReqsText(e.target.value)}
+              placeholder="请输入本章写作要求（例如：展现主角果断性格、加入线索提示等）。AI 续写时将自动包含本字段内容。"
+            />
+          ) : chapterOutline?.writingRequirements ? (
+            <div
+              style={{
+                fontSize: '12px',
+                lineHeight: '1.5',
+                color: 'var(--fg-main)',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all'
+              }}
+            >
+              {chapterOutline.writingRequirements}
+            </div>
+          ) : (
+            <p
+              className="muted"
+              style={{ fontSize: '12px', margin: 0, cursor: 'pointer' }}
+              onClick={() => setIsEditingReqs(true)}
+            >
+              暂无本章写作要求，点击编辑添加。AI 续写时将自动遵循该要求。
+            </p>
+          )}
+        </div>
+      </div>
+
       <div className="editor-panel">
         <div className="ep-head">
           <div className="ep-title">

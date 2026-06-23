@@ -6,6 +6,7 @@ import { CharacterCardMdRepo } from '../src/main/data/skill-format/character-car
 import { ChapterRhythmWriter } from '../src/main/data/skill-format/chapter-rhythm-writer'
 import { OutlineMdRepo } from '../src/main/data/skill-format/outline-md-repo'
 import { DetailedOutlineMdRepo } from '../src/main/data/skill-format/detailed-outline-md-repo'
+import { DetailedOutlineWriter } from '../src/main/data/skill-format/detailed-outline-writer'
 import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
 import { LocationMdRepo } from '../src/main/data/skill-format/location-md-repo'
 import { WorldviewMdRepo } from '../src/main/data/skill-format/worldview-md-repo'
@@ -120,6 +121,18 @@ describeIf('Phase 3 写入回环（真实样本复制到临时目录）', () => 
     const ch2 = details.find((d) => d.chapterNumber === 2)
     expect(ch2?.emotion).toBe(8)
     expect(ch2?.climax).toBe(4)
+  })
+
+  it('DetailedOutlineWriter round-trip：写入写作要求后重新解析一致', async () => {
+    const writer = new DetailedOutlineWriter(dir)
+    await writer.update(2, { writingRequirements: '必须引入反派线索' })
+    const details = await new DetailedOutlineMdRepo(dir).listAll()
+    const ch2 = details.find((d) => d.chapterNumber === 2)
+    expect(ch2?.writingRequirements).toBe('必须引入反派线索')
+
+    // 检查文件内容是否正确写入了本章写作要求
+    const detailText = readFileSync(join(dir, '细纲', '第01卷.md'), 'utf-8')
+    expect(detailText).toContain('- **本章写作要求**：必须引入反派线索')
   })
 
   it('大纲 round-trip：标题改后重新解析节奏回退表一致', async () => {

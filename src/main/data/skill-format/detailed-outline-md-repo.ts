@@ -85,6 +85,7 @@ function parseChapterBlock(heading: string, body: string, volumeDefault?: number
     wordEstimate: toStr(fields.get('字数预估')),
     goldenLine: toStr(fields.get('金句')),
     climaxTag: toStr(fields.get('卷终反转')) ?? toStr(fields.get('关键设定')),
+    writingRequirements: toStr(fields.get('本章写作要求')) ?? toStr(fields.get('写作要求')),
     rawFields: toRawFields(fields, order)
   }
   return detail

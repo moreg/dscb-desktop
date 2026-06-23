@@ -55,7 +55,8 @@ export class OutlineService {
         goldenLine: d.goldenLine,
         volume: d.volume,
         emotion: d.emotion,
-        climax: d.climax
+        climax: d.climax,
+        writingRequirements: d.writingRequirements
       }))
     }
     const rhythm = await this.getRhythm(projectId)
@@ -91,7 +92,8 @@ export class OutlineService {
       wordEstimate: patch.wordEstimate,
       goldenLine: patch.goldenLine,
       emotion: patch.emotion,
-      climax: patch.climax
+      climax: patch.climax,
+      writingRequirements: patch.writingRequirements
     }
 
     await writer.update(chapterNumber, patchForWriter)
@@ -115,7 +117,8 @@ export class OutlineService {
       goldenLine: updated.goldenLine,
       volume: updated.volume,
       emotion: updated.emotion,
-      climax: updated.climax
+      climax: updated.climax,
+      writingRequirements: updated.writingRequirements
     }
   }
 

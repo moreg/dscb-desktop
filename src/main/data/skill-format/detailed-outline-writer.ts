@@ -17,6 +17,7 @@ export interface DetailedOutlinePatch {
   goldenLine?: string
   emotion?: number
   climax?: number
+  writingRequirements?: string
 }
 
 /**
@@ -102,6 +103,10 @@ export class DetailedOutlineWriter {
     }
     if (patch.goldenLine !== undefined) {
       this.setField(newFields, newOrder, '金句', patch.goldenLine)
+    }
+    if (patch.writingRequirements !== undefined) {
+      const key = newFields.has('写作要求') ? '写作要求' : '本章写作要求'
+      this.setField(newFields, newOrder, key, patch.writingRequirements)
     }
 
     // 更新列表字段

@@ -855,7 +855,8 @@ export class WriteService {
             goldenLine: item.goldenLine,
             volume: item.volume,
             emotion: item.emotion,
-            climax: item.climax
+            climax: item.climax,
+            writingRequirements: item.writingRequirements
           }
         }
       } catch (err) {
@@ -1154,6 +1155,7 @@ function renderChapterDetail(d: ChapterDetail, label: string): string {
     lines.push(`- 角色出场：${d.charactersAppearing.join('、')}`)
   if (d.wordEstimate) lines.push(`- 字数预估：${d.wordEstimate}`)
   if (d.climaxTag) lines.push(`- 关键标记：${d.climaxTag}`)
+  if (d.writingRequirements) lines.push(`- 本章写作要求：${d.writingRequirements}`)
   return lines.join('\n')
 }
 

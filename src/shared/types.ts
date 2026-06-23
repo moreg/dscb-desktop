@@ -649,6 +649,8 @@ export interface DetailedOutlineItem {
   emotion?: number
   /** 爽点类型（0/1/2/3/3.5/4） */
   climax?: number
+  /** 本章写作要求 */
+  writingRequirements?: string
 }
 
 export interface DetailedOutline {
@@ -707,6 +709,8 @@ export interface ChapterDetail {
   goldenLine?: string
   /** 卷终反转 / 关键设定 等特殊标记 */
   climaxTag?: string
+  /** 本章写作要求 */
+  writingRequirements?: string
   /** 全部原始字段（兜底） */
   rawFields?: Record<string, string | string[]>
 }
