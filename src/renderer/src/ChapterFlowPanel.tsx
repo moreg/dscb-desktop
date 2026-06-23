@@ -347,12 +347,18 @@ export default function ChapterFlowPanel(props: Props) {
    * 一键同步：当 syncAllTrigger 变化时，依次触发四个同步操作。
    * 使用 useRef 避免首次渲染时触发。
    */
-  const prevSyncAllTrigger = useRef(syncAllTrigger)
+  const prevSyncAllTrigger = useRef(0)
   useEffect(() => {
-    // 跳过首次渲染
-    if (prevSyncAllTrigger.current === syncAllTrigger) return
-    prevSyncAllTrigger.current = syncAllTrigger
-    void runAllSync()
+    if (
+      syncAllTrigger !== undefined &&
+      syncAllTrigger > 0 &&
+      prevSyncAllTrigger.current !== syncAllTrigger
+    ) {
+      void runAllSync()
+    }
+    if (syncAllTrigger !== undefined) {
+      prevSyncAllTrigger.current = syncAllTrigger
+    }
     // 只关心 syncAllTrigger 变化，runAllSync 在组件内定义且引用稳定
   }, [syncAllTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
 

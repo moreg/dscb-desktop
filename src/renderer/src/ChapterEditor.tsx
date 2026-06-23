@@ -751,6 +751,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setFlowPanelOpen(false)
     setAutoAudit(null)
     setReviewText('')
+    setFlowSyncTrigger(0)
     const myGen = ++genRef.current
     let finalDraft = ''
     try {
@@ -1544,7 +1545,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           auditReport={autoAudit}
           reviewText={reviewText}
           reviewing={reviewing}
-          onClose={() => setFlowPanelOpen(false)}
+          onClose={() => {
+            setFlowPanelOpen(false)
+            setFlowSyncTrigger(0)
+          }}
           onRunAudit={reAudit}
           onApplyRewrite={(snippet, rewritten, violationKey) => {
             // 用改写后的文本替换 draft 中的命中段（保留前后原文）
