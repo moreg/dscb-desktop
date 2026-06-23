@@ -1412,11 +1412,9 @@ hr.soft {
    ========================================================= */
 .editor-text {
   width: 100%;
-  max-width: 820px;
-  margin: 0 auto;
   display: block;
   min-height: 56vh;
-  padding: 32px 40px;
+  padding: 28px 36px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -1428,6 +1426,7 @@ hr.soft {
   outline: none;
   resize: vertical;
   letter-spacing: 0.03em;
+  box-sizing: border-box;
 }
 .editor-text:focus {
   border-color: var(--vermilion);
@@ -1449,9 +1448,9 @@ hr.soft {
 
 .chapter-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 12px var(--sidebar-width, 320px);
   align-items: start;
-  gap: 18px;
+  gap: 0;
   margin-top: 16px;
 }
 
@@ -1463,9 +1462,36 @@ hr.soft {
   flex-direction: column;
 }
 
+.chapter-splitter {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  width: 12px;
+  cursor: col-resize;
+  align-self: stretch;
+  position: relative;
+  user-select: none;
+  z-index: 10;
+}
+.chapter-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: var(--line-soft, #e0e0e0);
+  transition: background-color 0.2s, width 0.2s, left 0.2s;
+}
+.chapter-splitter:hover::after,
+.chapter-splitter.dragging::after {
+  background: var(--vermilion, #ff4d4f);
+  width: 4px;
+  left: 4px;
+}
+
 .chapter-side-block {
   min-width: 0;
-  grid-column: 2;
+  grid-column: 3;
 }
 
 .chapter-main-pane .editor-text {
@@ -1482,6 +1508,10 @@ hr.soft {
 @media (max-width: 1360px) {
   .chapter-workbench {
     grid-template-columns: 1fr;
+  }
+
+  .chapter-splitter {
+    display: none;
   }
 
   .chapter-side-block {

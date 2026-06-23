@@ -104,6 +104,62 @@ function parseSuggestions(text: string): ReviewSuggestion[] {
 
 export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline }: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
+
+  // 侧边栏拖拽宽度调整逻辑
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = localStorage.getItem('ai-writer:editor-sidebar-width')
+    if (saved) {
+      const parsed = parseInt(saved, 10)
+      if (!isNaN(parsed) && parsed >= 240 && parsed <= 600) {
+        return parsed
+      }
+    }
+    return 320
+  })
+  const [isDraggingSidebar, setIsDraggingSidebar] = useState(false)
+  const dragStartRef = useRef<{ mouseX: number; width: number } | null>(null)
+  const sidebarWidthRef = useRef(sidebarWidth)
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth
+  }, [sidebarWidth])
+
+  const handleSidebarMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsDraggingSidebar(true)
+    dragStartRef.current = {
+      mouseX: e.clientX,
+      width: sidebarWidth
+    }
+  }
+
+  useEffect(() => {
+    if (!isDraggingSidebar) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragStartRef.current) return
+      const deltaX = e.clientX - dragStartRef.current.mouseX
+      let nextWidth = dragStartRef.current.width - deltaX
+      if (nextWidth < 240) nextWidth = 240
+      if (nextWidth > 600) nextWidth = 600
+      setSidebarWidth(nextWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsDraggingSidebar(false)
+      dragStartRef.current = null
+      localStorage.setItem('ai-writer:editor-sidebar-width', String(sidebarWidthRef.current))
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isDraggingSidebar])
+
   const [draft, setDraft] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1261,7 +1317,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       </div>
 
       {/* 番茄钟 + 写作进度 */}
-      <div className="chapter-workbench">
+      <div
+        className="chapter-workbench"
+        style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}
+      >
         <div className="chapter-side-block">
       <div className="row" style={{ marginTop: 4, marginBottom: 12, flexWrap: 'wrap' }}>
         <div className={`pomodoro ${pomoMode === 'break' ? 'break' : ''}`}>
@@ -1539,6 +1598,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       ) : null}
 
         </div>
+
+        <div
+          className={`chapter-splitter ${isDraggingSidebar ? 'dragging' : ''}`}
+          onMouseDown={handleSidebarMouseDown}
+        />
 
         <div className="chapter-side-block">
       <div className="editor-panel">

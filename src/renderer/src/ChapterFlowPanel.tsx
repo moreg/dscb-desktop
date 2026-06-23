@@ -382,6 +382,7 @@ export default function ChapterFlowPanel(props: Props) {
           <ChapterAuditPanel
             projectId={projectId}
             chapterNumber={chapterNumber}
+            draft={draft}
             report={auditReport}
             loading={false}
             mode="soft"

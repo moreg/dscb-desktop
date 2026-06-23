@@ -12,6 +12,7 @@ interface Props {
   projectId: string
   /** P17-A：当前章节号（用于把 humanize 调用归属到具体章节） */
   chapterNumber?: number
+  draft?: string
   report: AuditReport | null
   loading: boolean
   mode: WriteAuditMode
@@ -58,6 +59,7 @@ const SEVERITY_CLASS: Record<string, string> = {
 export default function ChapterAuditPanel({
   projectId,
   chapterNumber,
+  draft,
   report,
   loading,
   mode,
@@ -352,11 +354,28 @@ export default function ChapterAuditPanel({
                   {items.slice(0, 50).map((v, i) => {
                     const hKey = violationKey(v)
                     const hState = humanizeMap[hKey]
+                    const lineNum = v.offset != null && draft
+                      ? draft.substring(0, v.offset).split('\n').length
+                      : null
                     return (
                       <li key={i} className={`audit-item audit-item-${v.severity}`}>
                         <span className={SEVERITY_CLASS[v.severity]}>
                           {SEVERITY_LABEL[v.severity] ?? v.severity}
                         </span>
+                        {lineNum != null && (
+                          <span
+                            className="audit-pill"
+                            style={{
+                              marginLeft: 4,
+                              background: 'var(--surface-2)',
+                              color: 'var(--ink-2)',
+                              borderColor: 'var(--line-soft)',
+                              fontSize: '10.5px'
+                            }}
+                          >
+                            第 {lineNum} 行
+                          </span>
+                        )}
                         <span className="audit-message">{v.message}</span>
                         {v.snippet && (
                           <code
