@@ -54,6 +54,7 @@ export function registerWriteIpc(service: WriteService): void {
         projectId: string
         chapterNumber: number
         styleProfileId?: string | null
+        tempContext?: string
         requestId: string
       }
     ) => {
@@ -64,6 +65,7 @@ export function registerWriteIpc(service: WriteService): void {
             projectId: projectIdSchema,
             chapterNumber: chapterNumberSchema,
             styleProfileId: styleProfileIdSchema,
+            tempContext: z.string().optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -73,12 +75,13 @@ export function registerWriteIpc(service: WriteService): void {
           validated.chapterNumber,
           validated.styleProfileId,
           {
-          onToken: (token) =>
-            win?.webContents.send('llm:token', {
-              requestId: validated.requestId,
-              token,
-              done: false
-            })
+            tempContext: validated.tempContext,
+            onToken: (token) =>
+              win?.webContents.send('llm:token', {
+                requestId: validated.requestId,
+                token,
+                done: false
+              })
           }
         )
         win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })

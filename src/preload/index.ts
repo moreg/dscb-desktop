@@ -155,6 +155,7 @@ const api = {
     projectId: string,
     chapterNumber: number,
     styleProfileId: string | null | undefined,
+    tempContext: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => {
     const requestId = crypto.randomUUID()
@@ -166,7 +167,7 @@ const api = {
     }
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
-      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, requestId })
+      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),

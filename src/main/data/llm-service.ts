@@ -14,6 +14,7 @@ export interface GenerateOptions {
    * 未提供时退化为旧行为（仅 user 单条消息）。
    */
   systemPrompt?: string
+  tempContext?: string // 临时续写上下文指导语
 }
 
 interface UsageInfo {

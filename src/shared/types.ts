@@ -345,6 +345,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number,
     styleProfileId: string | null | undefined,
+    tempContext: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   getProjectsRoot: () => Promise<string>

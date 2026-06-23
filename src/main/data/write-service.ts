@@ -68,7 +68,8 @@ export class WriteService {
   async buildChapterPrompt(
     projectId: string,
     chapterNumber: number,
-    styleProfileId?: string | null
+    styleProfileId?: string | null,
+    tempContext?: string
   ): Promise<ChapterPrompt> {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
@@ -91,7 +92,8 @@ export class WriteService {
       rhythmEntry: ctx.rhythmEntry,
       foreshadowings: ctx.foreshadowings,
       characters: ctx.characters,
-      chapterNumber
+      chapterNumber,
+      tempContext
     })
 
     return { system, user }
@@ -104,7 +106,7 @@ export class WriteService {
     maybeOpts: GenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const prompt = await this.buildChapterPrompt(projectId, chapterNumber, styleProfileId)
+    const prompt = await this.buildChapterPrompt(projectId, chapterNumber, styleProfileId, opts.tempContext)
     return this.llm.generateStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
@@ -986,6 +988,7 @@ interface RenderInput {
   foreshadowings: Foreshadowing[]
   characters: Character[]
   chapterNumber: number
+  tempContext?: string
 }
 
 function normalizeStyleGenerateArgs(
@@ -1015,6 +1018,9 @@ function renderUserPrompt(input: RenderInput): string {
   // 2. 本章细纲
   parts.push('---')
   parts.push(`# 第 ${input.chapterNumber} 章 写作任务`)
+  if (input.tempContext) {
+    parts.push(`**【本章临时写作要求（临时上下文）】**：\n${input.tempContext}`)
+  }
   if (input.chapterDetail) {
     parts.push(renderChapterDetail(input.chapterDetail, '本章细纲'))
   } else {
