@@ -53,6 +53,7 @@ interface Props {
   chapterNumber: number
   onBack: () => void
   onOpenOutline?: () => void
+  onOpenCharacters?: () => void
 }
 
 const SOURCE_LABEL: Record<ChapterSource, string> = {
@@ -102,7 +103,13 @@ function parseSuggestions(text: string): ReviewSuggestion[] {
   return out
 }
 
-export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline }: Props) {
+export default function ChapterEditor({
+  projectId,
+  chapterNumber,
+  onOpenOutline,
+  onOpenCharacters,
+  onBack
+}: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
 
   // 侧边栏拖拽宽度调整逻辑
@@ -225,6 +232,13 @@ export default function ChapterEditor({ projectId, chapterNumber, onOpenOutline 
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
+  const [previewCard, setPreviewCard] = useState<{
+    kind: 'char' | 'foreshadow' | 'location'
+    text: string
+    x: number
+    y: number
+    details: { title: string; subtitle?: string; content?: string }
+  } | null>(null)
   const [flowSyncTrigger, setFlowSyncTrigger] = useState(0)
   const [detecting, setDetecting] = useState(false)
   const [castSuggestions, setCastSuggestions] = useState<CastSuggestion[]>([])
@@ -599,17 +613,24 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshUsage()
   }, [projectId])
 
-  // P10-A：点 popover 外区域关闭
+  // 点 popover 或预览卡片外区域关闭
   useEffect(() => {
-    if (!usagePopoverOpen) return
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null
-      if (target && target.closest('.usage-popover-root')) return
-      setUsagePopoverOpen(false)
+      if (usagePopoverOpen) {
+        if (!(target && target.closest('.usage-popover-root'))) {
+          setUsagePopoverOpen(false)
+        }
+      }
+      if (previewCard) {
+        if (!(target && target.closest('.preview-inline-card'))) {
+          setPreviewCard(null)
+        }
+      }
     }
     document.addEventListener('mousedown', onClick)
     return () => document.removeEventListener('mousedown', onClick)
-  }, [usagePopoverOpen])
+  }, [usagePopoverOpen, previewCard])
 
   // P11-A：每 10 秒重渲染一次，让"X 秒前"指示器保持新鲜
   const [, setTick] = useState(0)
@@ -1136,16 +1157,43 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     return out
   }, [showPreview, draft, characters, foreshadowings, locations])
 
-  const onPreviewClick = (kind: string, text: string) => {
+  const onPreviewClick = (kind: 'char' | 'foreshadow' | 'location', text: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    let details: { title: string; subtitle?: string; content?: string } | null = null
     if (kind === 'char') {
       const c = characters.find((x) => x.name === text)
-      if (c) window.alert(`人物 · ${c.name}\n身份：${c.identity ?? '—'}\n性格：${c.personality ?? '—'}`)
+      if (c) {
+        details = {
+          title: `人物 · ${c.name}`,
+          subtitle: c.identity ? `身份: ${c.identity}` : undefined,
+          content: c.personality ? `性格: ${c.personality}` : undefined
+        }
+      }
     } else if (kind === 'foreshadow') {
       const f = foreshadowings.find((x) => x.content === text)
-      if (f) window.alert(`伏笔 · ${f.content}\n状态：${f.status}`)
+      if (f) {
+        details = {
+          title: `伏笔 · ${f.content}`,
+          subtitle: `状态: ${f.status === 'planted' ? '已埋设' : f.status === 'pending' ? '未埋设' : '已回收'}`
+        }
+      }
     } else if (kind === 'location') {
       const l = locations.find((x) => x.name === text)
-      if (l) window.alert(`地点 · ${l.name}\n分类：${l.category ?? '—'}`)
+      if (l) {
+        details = {
+          title: `地点 · ${l.name}`,
+          subtitle: l.category ? `分类: ${l.category}` : undefined
+        }
+      }
+    }
+    if (details) {
+      setPreviewCard({
+        kind,
+        text,
+        x: e.clientX,
+        y: e.clientY,
+        details
+      })
     }
   }
 
@@ -1656,7 +1704,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                     key={i}
                     className={`hl ${seg.hl.kind}`}
                     title={`${seg.hl.label} · ${seg.text}`}
-                    onClick={() => onPreviewClick(seg.hl!.kind, seg.text)}
+                    onClick={(e) => onPreviewClick(seg.hl!.kind, seg.text, e)}
                   >
                     {seg.text}
                   </span>
@@ -1936,6 +1984,38 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             await navigator.clipboard.writeText(reviewText)
           }}
         />
+      ) : null}
+
+      {previewCard ? (
+        <div
+          className="preview-inline-card"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'fixed',
+            left: Math.min(previewCard.x, window.innerWidth - 300),
+            top: Math.min(previewCard.y + 12, window.innerHeight - 180),
+            zIndex: 9999
+          }}
+        >
+          <header className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <strong style={{ fontSize: 13 }}>{previewCard.details.title}</strong>
+            <button className="btn btn-ghost btn-sm close-btn" onClick={() => setPreviewCard(null)}>✕</button>
+          </header>
+          <div className="card-body">
+            {previewCard.details.subtitle && <p className="subtitle">{previewCard.details.subtitle}</p>}
+            {previewCard.details.content && <p className="desc">{previewCard.details.content}</p>}
+          </div>
+          {previewCard.kind === 'char' && onOpenCharacters && (
+            <footer className="card-footer">
+              <button className="btn btn-ghost btn-sm link-btn" onClick={() => {
+                setPreviewCard(null)
+                onOpenCharacters()
+              }}>
+                查看人物卡 ↗
+              </button>
+            </footer>
+          )}
+        </div>
       ) : null}
     </div>
   )
