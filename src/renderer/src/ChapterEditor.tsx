@@ -1363,7 +1363,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     const regex = new RegExp(escaped, 'gi')
     const matchesCount = (draft.match(regex) ?? []).length
     if (matchesCount === 0) return
-    const nextDraft = draft.replace(regex, replaceText)
+    const nextDraft = draft.replace(regex, () => replaceText)
     setDraft(nextDraft)
     setDirty(true)
     setFindResults([])
@@ -1950,6 +1950,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         onChange={(e) => {
           setDraft(e.target.value)
           setDirty(true)
+          if (findResults.length > 0) {
+            setFindResults([])
+            setCurrentResultIndex(-1)
+          }
         }}
         placeholder="此处落笔，或点「续写」让 AI 接续成文……"
         style={{ marginTop: 16 }}
