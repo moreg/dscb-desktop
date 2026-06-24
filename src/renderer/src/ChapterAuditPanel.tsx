@@ -6,6 +6,7 @@ interface RewriteEntry {
   oldSnippet: string
   newText: string
   at: number
+  violationKey?: string
 }
 
 interface Props {
@@ -273,39 +274,63 @@ export default function ChapterAuditPanel({
               </button>
             )}
             {undoMenuOpen && rewriteHistory && (
-              <div className="audit-undo-dropdown">
+              <div className="audit-undo-dropdown" style={{ background: 'var(--surface-2)', border: '1px solid var(--line)', boxShadow: 'var(--shadow-lg)', width: '340px' }}>
                 <div className="audit-undo-dropdown-title">
                   选择要撤销的改写（最近的在最上）
                 </div>
                 <ul className="audit-undo-list">
-                  {rewriteHistory
-                    .slice()
-                    .reverse()
-                    .map((e, i) => {
-                      const fromTop = rewriteHistory.length - 1 - i
-                      const oldPreview = e.oldSnippet.length > 24
-                        ? e.oldSnippet.slice(0, 24) + '…'
-                        : e.oldSnippet
-                      const newPreview = e.newText.length > 24
-                        ? e.newText.slice(0, 24) + '…'
-                        : e.newText
-                      return (
-                        <li key={e.at} className="audit-undo-item">
-                          <button
-                            className="btn btn-ghost btn-sm audit-undo-item-btn"
-                            onClick={() => {
-                              setUndoMenuOpen(false)
-                              void onUndoRewriteAt?.(fromTop)
-                            }}
-                            title={`撤销：${oldPreview} → ${newPreview}`}
-                          >
-                            <span className="audit-undo-from">原：{oldPreview}</span>
-                            <span className="audit-undo-arrow">→</span>
-                            <span className="audit-undo-to">改：{newPreview}</span>
-                          </button>
-                        </li>
-                      )
-                    })}
+                  {(() => {
+                    const getRuleName = (key?: string) => {
+                      if (!key) return '自定义改写'
+                      if (key.startsWith('ai-review-')) return 'AI 改稿建议'
+                      const v = report?.violations.find(x => violationKey(x) === key)
+                      if (v) {
+                        if (v.category === 'forbidden_word') return '禁用高频词: ' + v.word
+                        if (v.category === 'rule') return v.ruleId || '规则违例'
+                        return v.message || v.category
+                      }
+                      const parts = key.split(':')
+                      if (parts.length > 0) {
+                        const cat = parts[0]
+                        if (cat === 'forbidden_word') return '禁用高频词: ' + (parts[1] || '')
+                        if (cat === 'cliche') return '水文套路'
+                        if (cat === 'rule') return parts[1] || '规则检查'
+                        return cat
+                      }
+                      return '质检改写'
+                    }
+
+                    return rewriteHistory
+                      .slice()
+                      .reverse()
+                      .map((e, i) => {
+                        const fromTop = rewriteHistory.length - 1 - i
+                        return (
+                          <li key={e.at} className="audit-undo-card" style={{ padding: '8px 10px', borderBottom: '1px solid var(--line)' }}>
+                            <div className="undo-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                              <span className="undo-badge" style={{ background: 'var(--surface-3)', border: '1px solid var(--line)', color: 'var(--ink-2)', fontSize: '10.5px', padding: '1px 5px', borderRadius: 3 }}>{getRuleName(e.violationKey)}</span>
+                              <span className="undo-time" style={{ fontSize: '10.5px', color: 'var(--ink-3)' }}>{new Date(e.at).toLocaleTimeString()}</span>
+                            </div>
+                            <div className="undo-card-diff" style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--r-sm)', padding: '6px 8px', fontSize: 11, fontFamily: 'var(--font-serif)', lineHeight: 1.4, maxHeight: 100, overflowY: 'auto' }}>
+                              <div className="diff-line del" style={{ color: '#e5534b', textDecoration: 'line-through', marginBottom: 3, wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>- {e.oldSnippet}</div>
+                              <div className="diff-line add" style={{ color: '#2b8a3e', wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>+ {e.newText}</div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => {
+                                  setUndoMenuOpen(false)
+                                  void onUndoRewriteAt?.(fromTop)
+                                }}
+                                style={{ padding: '2px 8px', fontSize: 11 }}
+                              >
+                                ↶ 撤销此条
+                              </button>
+                            </div>
+                          </li>
+                        )
+                      })
+                  })()}
                 </ul>
                 {onUndoRewrite && (
                   <div className="audit-undo-dropdown-footer">
