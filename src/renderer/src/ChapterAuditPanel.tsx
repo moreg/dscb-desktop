@@ -286,7 +286,10 @@ export default function ChapterAuditPanel({
                       const v = report?.violations.find(x => violationKey(x) === key)
                       if (v) {
                         if (v.category === 'forbidden_word') return '禁用高频词: ' + v.word
-                        if (v.category === 'rule') return v.ruleId || '规则违例'
+                        if (v.category === 'rule') {
+                          if (v.ruleId === 'cliche') return '水文/套路检查'
+                          return v.ruleId || '规则违例'
+                        }
                         return v.message || v.category
                       }
                       const parts = key.split(':')
@@ -312,8 +315,8 @@ export default function ChapterAuditPanel({
                               <span className="undo-time" style={{ fontSize: '10.5px', color: 'var(--ink-3)' }}>{new Date(e.at).toLocaleTimeString()}</span>
                             </div>
                             <div className="undo-card-diff" style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--r-sm)', padding: '6px 8px', fontSize: 11, fontFamily: 'var(--font-serif)', lineHeight: 1.4, maxHeight: 100, overflowY: 'auto' }}>
-                              <div className="diff-line del" style={{ color: '#e5534b', textDecoration: 'line-through', marginBottom: 3, wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>- {e.oldSnippet}</div>
-                              <div className="diff-line add" style={{ color: '#2b8a3e', wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>+ {e.newText}</div>
+                              <div className="diff-line del" style={{ color: 'var(--vermilion)', textDecoration: 'line-through', marginBottom: 3, wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>- {e.oldSnippet}</div>
+                              <div className="diff-line add" style={{ color: 'var(--success)', wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>+ {e.newText}</div>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
                               <button
