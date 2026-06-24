@@ -246,6 +246,8 @@ export default function ChapterEditor({
   const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
+  const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [tempContextInput, setTempContextInput] = useState('')
   const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
   const [previewCard, setPreviewCard] = useState<{
     kind: 'char' | 'foreshadow' | 'location'
@@ -801,7 +803,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
-  const aiGenerate = async () => {
+  const aiGenerate = async (tempContextVal?: string) => {
     if (!(await window.api.hasLlmKey())) {
       window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
       return
@@ -826,7 +828,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         projectId,
         chapterNumber,
         requestedStyleProfileId,
-        undefined,
+        tempContextVal,
         (token, done) => {
           if (genRef.current !== myGen) return
           if (token) {
@@ -1663,7 +1665,19 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
           {reviewing ? '审稿中…' : '✎ AI 改稿'}
         </button>
-        <button className="btn btn-primary btn-sm" onClick={aiGenerate} disabled={generating}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={() => {
+            const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
+            if (skip) {
+              void aiGenerate()
+            } else {
+              setTempContextInput('')
+              setShowContinueDialog(true)
+            }
+          }}
+          disabled={generating}
+        >
           {generating ? '落墨中…' : '✦ 续写'}
         </button>
       </div>
@@ -2335,6 +2349,65 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               </button>
             </footer>
           )}
+        </div>
+      ) : null}
+
+      {showContinueDialog ? (
+        <div className="dialog-overlay" onClick={() => setShowContinueDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 440, background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 16, boxShadow: 'var(--shadow-lg)' }}>
+            <header>
+              <strong>✦ AI 续写</strong>
+            </header>
+            <div className="dialog-body" style={{ marginTop: 8 }}>
+              <p style={{ fontSize: 12.5, color: 'var(--ink-2)', margin: 0 }}>
+                可在下方输入临时指导要求，引导接下来的生成走向（选填）：
+              </p>
+              <textarea
+                className="textarea"
+                placeholder="例如：写林远和师尊在藏经阁的对话，暗示林远身世的线索..."
+                value={tempContextInput}
+                onChange={(e) => setTempContextInput(e.target.value)}
+                style={{ width: '100%', minHeight: 80, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
+              />
+              <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, fontSize: 11.5, color: 'var(--ink-3)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  id="skip-prompt-check"
+                  defaultChecked={localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'}
+                  onChange={(e) => {
+                    localStorage.setItem('ai-writer:skip-continue-dialog', e.target.checked ? 'true' : 'false')
+                  }}
+                />
+                下次直接续写，不再弹出此确认框
+              </label>
+            </div>
+            <footer style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setShowContinueDialog(false)}
+              >
+                取消
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  setShowContinueDialog(false)
+                  void aiGenerate()
+                }}
+              >
+                直接续写
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => {
+                  setShowContinueDialog(false)
+                  void aiGenerate(tempContextInput)
+                }}
+              >
+                指引续写
+              </button>
+            </footer>
+          </div>
         </div>
       ) : null}
     </div>
