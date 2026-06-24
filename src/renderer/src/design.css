@@ -2286,6 +2286,17 @@ pre.body {
 }
 .hl-toggle input { margin: 0; }
 
+.editor-preview .preview-paragraph {
+  text-indent: 2em;
+  margin: 0 0 16px 0;
+  text-align: justify;
+  white-space: normal;
+}
+.editor-preview h1, .editor-preview h2, .editor-preview h3 {
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
 /* =========================================================
    章节分析面板
    ========================================================= */

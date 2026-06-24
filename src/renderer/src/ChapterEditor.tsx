@@ -185,6 +185,7 @@ export default function ChapterEditor({
   const [foreshadowings, setForeshadowings] = useState<Foreshadowing[]>([])
   const [locations, setLocations] = useState<MemoryEntity[]>([])
   const [showPreview, setShowPreview] = useState(false)
+  const [previewTab, setPreviewTab] = useState<'highlight' | 'markdown'>('highlight')
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
   const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
@@ -2019,32 +2020,51 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
       {showPreview ? (
         <div className="chapter-main-preview">
-          <div className="row" style={{ marginTop: 16, marginBottom: 4 }}>
-            <strong style={{ fontSize: 13.5 }}>联动预览</strong>
-            <div className="row" style={{ gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
-              <span><span className="hl char" style={{ padding: '1px 4px' }}>人物</span></span>
-              <span><span className="hl foreshadow" style={{ padding: '1px 4px' }}>伏笔</span></span>
-              <span><span className="hl location" style={{ padding: '1px 4px' }}>地点</span></span>
+          <div className="row" style={{ marginTop: 16, marginBottom: 4, justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="btn-group">
+              <button
+                className={`btn btn-sm ${previewTab === 'highlight' ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setPreviewTab('highlight')}
+              >
+                👁 联动高亮
+              </button>
+              <button
+                className={`btn btn-sm ${previewTab === 'markdown' ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setPreviewTab('markdown')}
+              >
+                📝 Markdown 排版
+              </button>
             </div>
+            {previewTab === 'highlight' && (
+              <div className="row" style={{ gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
+                <span><span className="hl char" style={{ padding: '1px 4px' }}>人物</span></span>
+                <span><span className="hl foreshadow" style={{ padding: '1px 4px' }}>伏笔</span></span>
+                <span><span className="hl location" style={{ padding: '1px 4px' }}>地点</span></span>
+              </div>
+            )}
           </div>
           <div className="editor-preview">
-            {previewSegments && previewSegments.length > 0 ? (
-              previewSegments.map((seg, i) =>
-                seg.hl ? (
-                  <span
-                    key={i}
-                    className={`hl ${seg.hl.kind}`}
-                    title={`${seg.hl.label} · ${seg.text}`}
-                    onClick={(e) => onPreviewClick(seg.hl!.kind, seg.text, e)}
-                  >
-                    {seg.text}
-                  </span>
-                ) : (
-                  <span key={i}>{seg.text}</span>
+            {previewTab === 'highlight' ? (
+              previewSegments && previewSegments.length > 0 ? (
+                previewSegments.map((seg, i) =>
+                  seg.hl ? (
+                    <span
+                      key={i}
+                      className={`hl ${seg.hl.kind}`}
+                      title={`${seg.hl.label} · ${seg.text}`}
+                      onClick={(e) => onPreviewClick(seg.hl!.kind as any, seg.text, e)}
+                    >
+                      {seg.text}
+                    </span>
+                  ) : (
+                    <span key={i}>{seg.text}</span>
+                  )
                 )
+              ) : (
+                <span className="muted">暂无可联动高亮的内容。</span>
               )
             ) : (
-              <span className="muted">暂无可联动高亮的内容。</span>
+              renderMarkdownPreview(draft)
             )}
           </div>
         </div>
@@ -2412,6 +2432,36 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       ) : null}
     </div>
   )
+}
+
+function renderMarkdownPreview(text: string) {
+  if (!text.trim()) return <span className="muted">暂无内容排版预览。</span>
+  const paragraphs = text.split(/\n+/)
+  return paragraphs.map((p, index) => {
+    const trimmed = p.trim()
+    if (!trimmed) return null
+    if (trimmed.startsWith('### ')) return <h3 key={index} style={{ margin: '14px 0 6px 0', fontSize: '14.5px', fontWeight: 700 }}>{trimmed.slice(4)}</h3>
+    if (trimmed.startsWith('## ')) return <h2 key={index} style={{ margin: '18px 0 8px 0', fontSize: '16px', fontWeight: 700 }}>{trimmed.slice(3)}</h2>
+    if (trimmed.startsWith('# ')) return <h1 key={index} style={{ margin: '22px 0 10px 0', fontSize: '18px', fontWeight: 700 }}>{trimmed.slice(2)}</h1>
+    if (trimmed === '***' || trimmed === '---' || trimmed === '___') return <hr key={index} style={{ border: 'none', borderTop: '1px solid var(--line)', margin: '16px 0' }} />
+    
+    const parts: React.ReactNode[] = []
+    const boldRegex = /\*\*(.*?)\*\*/g
+    let lastIdx = 0
+    let m: RegExpExecArray | null
+    while ((m = boldRegex.exec(trimmed)) !== null) {
+      if (m.index > lastIdx) parts.push(trimmed.slice(lastIdx, m.index))
+      parts.push(<strong key={m.index}>{m[1]}</strong>)
+      lastIdx = boldRegex.lastIndex
+    }
+    if (lastIdx < trimmed.length) parts.push(trimmed.slice(lastIdx))
+
+    return (
+      <p key={index} className="preview-paragraph" style={{ textIndent: '2em', margin: '0 0 16px 0', textAlign: 'justify' }}>
+        {parts.length > 0 ? parts : trimmed}
+      </p>
+    )
+  })
 }
 
 function OutlineDetailField({ row }: { row: { label: string; value?: string; items?: string[] } }) {
