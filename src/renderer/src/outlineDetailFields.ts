@@ -53,6 +53,7 @@ export function getOutlineDetailRows(item: DetailedOutlineItem): OutlineDetailRo
   pushValue(rows, '章末钩子', item.hook)
   pushValue(rows, '字数预估', item.wordEstimate)
   pushValue(rows, '金句', item.goldenLine)
+  pushValue(rows, '本章写作要求', item.writingRequirements)
 
   return rows
 }

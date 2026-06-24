@@ -2,6 +2,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import { readText, parseDoc, parseBoldFields, parseVolumeNumber, parseChapterNumber, type FieldValue } from './md-parser'
 import type { ChapterDetail } from '../../../shared/types'
+import { composeWritingRequirements } from '../../../shared/writing-requirement-templates'
 
 /**
  * 读取细纲。真相源：`细纲/第NN卷.md`（每卷一个文件）。
@@ -60,6 +61,10 @@ function parseChapterBlock(heading: string, body: string, volumeDefault?: number
   const titleMatch = heading.match(/[：:]\s*([^\n（(]+)/)
   const title = titleMatch ? titleMatch[1].trim() : ''
   const { fields, order } = parseBoldFields(body)
+  const writingRequirementTemplateId = toStr(fields.get('写作要求模板'))
+  const writingRequirementCustomText = toMultilineStr(fields.get('自定义补充要求'))
+  const legacyWritingRequirements =
+    toMultilineStr(fields.get('本章写作要求')) ?? toMultilineStr(fields.get('写作要求'))
 
   const rhythmAnn = toArr(fields.get('节奏标注')) ?? []
   let emotion: number | undefined
@@ -85,7 +90,13 @@ function parseChapterBlock(heading: string, body: string, volumeDefault?: number
     wordEstimate: toStr(fields.get('字数预估')),
     goldenLine: toStr(fields.get('金句')),
     climaxTag: toStr(fields.get('卷终反转')) ?? toStr(fields.get('关键设定')),
-    writingRequirements: toStr(fields.get('本章写作要求')) ?? toStr(fields.get('写作要求')),
+    writingRequirements: composeWritingRequirements(
+      writingRequirementTemplateId,
+      writingRequirementCustomText,
+      legacyWritingRequirements
+    ),
+    writingRequirementTemplateId,
+    writingRequirementCustomText,
     rawFields: toRawFields(fields, order)
   }
   return detail
@@ -94,6 +105,11 @@ function parseChapterBlock(heading: string, body: string, volumeDefault?: number
 function toStr(v: FieldValue | undefined): string | undefined {
   if (v == null || v === '') return undefined
   return Array.isArray(v) ? v.join('；') : v
+}
+
+function toMultilineStr(v: FieldValue | undefined): string | undefined {
+  if (v == null || v === '') return undefined
+  return Array.isArray(v) ? v.join('\n') : v
 }
 
 function toArr(v: FieldValue | undefined): string[] | undefined {

@@ -90,8 +90,47 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('门外传来脚步声')
     expect(user).toContain('我不入轮回，谁入轮回')
     expect(user).toContain('击败长老后不留活口')
+    expect(user).toContain('【本章硬性写作要求】')
+    expect(user).toContain('以下要求必须全部落实到正文里')
+    expect(user).toContain('下笔前先自检一次')
     expect(user).toContain('林远')
     expect(user).toContain('约 2500 字')
+  })
+
+  it('renders chapter writing requirements as a checklist', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远夜探山门',
+      writingRequirements: '1. 开头强情绪\n- 结尾必须用对话收束\n人物对话要贴合角色'
+    })
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 2)
+
+    expect(user).toContain('【本章硬性写作要求】')
+    expect(user).toContain('- 开头强情绪')
+    expect(user).toContain('- 结尾必须用对话收束')
+    expect(user).toContain('- 人物对话要贴合角色')
+  })
+
+  it('combines selected requirement template with custom additions', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远试探师尊口风',
+      writingRequirementTemplateId: 'dialogue-character-voice',
+      writingRequirementCustomText: '结尾必须用一句试探意味很强的对话收束',
+      writingRequirements:
+        '人物对话要符合各自身份、性格和当下情绪\n台词尽量短促有来回，避免大段解释背景\n通过停顿、动作和反应补足潜台词，不要只靠直说\n关键情绪变化优先通过对话碰撞来体现\n结尾必须用一句试探意味很强的对话收束'
+    })
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 2)
+
+    expect(user).toContain('- 人物对话要符合各自身份、性格和当下情绪')
+    expect(user).toContain('- 台词尽量短促有来回，避免大段解释背景')
+    expect(user).toContain('- 结尾必须用一句试探意味很强的对话收束')
   })
 
   it('user prompt includes prev chapter content tail when available', async () => {

@@ -1,3 +1,5 @@
+import type { WritingRequirementTemplate } from './writing-requirement-templates'
+
 export interface ProjectMeta {
   id: string
   name: string
@@ -356,6 +358,7 @@ export interface RendererApi {
   reviewChapterStream: (
     projectId: string,
     chapterNumber: number,
+    content: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   detectCastStream: (
@@ -477,6 +480,10 @@ export interface RendererApi {
   /** AI 高频词配置：开关 + 词条 + 改写示例 */
   getAiHighFreqConfig: () => Promise<AiHighFreqConfig>
   setAiHighFreqConfig: (cfg: Partial<AiHighFreqConfig>) => Promise<AiHighFreqConfig>
+  getWritingRequirementTemplates: () => Promise<WritingRequirementTemplate[]>
+  setWritingRequirementTemplates: (
+    templates: WritingRequirementTemplate[]
+  ) => Promise<WritingRequirementTemplate[]>
 }
 
 export interface Character {
@@ -652,6 +659,10 @@ export interface DetailedOutlineItem {
   climax?: number
   /** 本章写作要求 */
   writingRequirements?: string
+  /** 长期写作要求模板 ID */
+  writingRequirementTemplateId?: string
+  /** 基于模板之外的自定义补充要求 */
+  writingRequirementCustomText?: string
 }
 
 export interface DetailedOutline {
@@ -712,6 +723,10 @@ export interface ChapterDetail {
   climaxTag?: string
   /** 本章写作要求 */
   writingRequirements?: string
+  /** 长期写作要求模板 ID */
+  writingRequirementTemplateId?: string
+  /** 基于模板之外的自定义补充要求 */
+  writingRequirementCustomText?: string
   /** 全部原始字段（兜底） */
   rawFields?: Record<string, string | string[]>
 }

@@ -89,6 +89,7 @@ export default function App() {
   const [projectName, setProjectName] = useState('')
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [diagDismissed, setDiagDismissed] = useState(false)
+  const [diagExpanded, setDiagExpanded] = useState(false)
   const { open: shortcutOpen, hide: hideShortcut } = useShortcutPanelToggle()
 
   useEffect(() => {
@@ -222,42 +223,6 @@ export default function App() {
                 记忆中心
               </button>
               <button
-                className={`nav-item ${isNavActive(view, 'entity:location', currentProjectId) ? 'active' : ''}`}
-                onClick={() =>
-                  setView({ kind: 'memoryEntity', projectId: currentProjectId, entityType: 'location' })
-                }
-              >
-                <span className="icon">📍</span>
-                地点
-              </button>
-              <button
-                className={`nav-item ${isNavActive(view, 'entity:worldview', currentProjectId) ? 'active' : ''}`}
-                onClick={() =>
-                  setView({ kind: 'memoryEntity', projectId: currentProjectId, entityType: 'worldview' })
-                }
-              >
-                <span className="icon">☰</span>
-                世界观
-              </button>
-              <button
-                className={`nav-item ${isNavActive(view, 'entity:timeline', currentProjectId) ? 'active' : ''}`}
-                onClick={() =>
-                  setView({ kind: 'memoryEntity', projectId: currentProjectId, entityType: 'timeline' })
-                }
-              >
-                <span className="icon">⏱</span>
-                时间线
-              </button>
-              <button
-                className={`nav-item ${isNavActive(view, 'entity:plot_point', currentProjectId) ? 'active' : ''}`}
-                onClick={() =>
-                  setView({ kind: 'memoryEntity', projectId: currentProjectId, entityType: 'plot_point' })
-                }
-              >
-                <span className="icon">✓</span>
-                剧情点
-              </button>
-              <button
                 className={`nav-item ${isNavActive(view, 'foreshadowingBoard', currentProjectId) ? 'active' : ''}`}
                 onClick={() => setView({ kind: 'foreshadowingBoard', projectId: currentProjectId })}
               >
@@ -276,17 +241,17 @@ export default function App() {
             <span className="icon">⚙</span>
             设置
           </button>
-          <div className="theme-switch">
-            <button className={theme === 'light' ? 'active' : ''} onClick={() => onThemeChange('light')}>
-              浅
-            </button>
-            <button className={theme === 'dark' ? 'active' : ''} onClick={() => onThemeChange('dark')}>
-              深
-            </button>
-            <button className={theme === 'system' ? 'active' : ''} onClick={() => onThemeChange('system')}>
-              自动
-            </button>
-          </div>
+          <button
+            className="nav-item"
+            onClick={() => {
+              const next: ThemeMode = theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'
+              onThemeChange(next)
+            }}
+            title={theme === 'light' ? '浅色模式（点击切换）' : theme === 'dark' ? '深色模式（点击切换）' : '跟随系统（点击切换）'}
+          >
+            <span className="icon">{theme === 'light' ? '☀' : theme === 'dark' ? '☾' : '◐'}</span>
+            {theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '自动'}
+          </button>
         </div>
       </aside>
 
@@ -296,22 +261,27 @@ export default function App() {
             <div className="diag-banner">
               <div className="diag-banner-head">
                 <strong>⚠ 格式体检：发现 {diagnostics.length} 处可能的格式问题</strong>
-                <button className="btn btn-ghost btn-sm" onClick={() => setDiagDismissed(true)}>
-                  忽略
-                </button>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setDiagExpanded((v) => !v)}>
+                    {diagExpanded ? '收起' : '查看详情'}
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setDiagDismissed(true)}>
+                    忽略
+                  </button>
+                </div>
               </div>
-              <ul className="diag-list">
-                {diagnostics.map((item, index) => (
-                  <li key={index} className="diag-item">
-                    <span className="diag-file">{item.file}</span>
-                    <span className="diag-msg">{item.message}</span>
-                    {item.hint ? <span className="diag-hint">修复建议：{item.hint}</span> : null}
-                  </li>
-                ))}
-              </ul>
-              <p className="diag-footer">
-                完整格式要求见 <code>docs/md-format-spec.md</code>
-              </p>
+              {diagExpanded ? (
+                <>
+                  <ul className="diag-list">
+                    {diagnostics.map((item, index) => (
+                      <li key={index} className="diag-item">
+                        <span className="diag-msg">{item.message}</span>
+                        {item.hint ? <span className="diag-hint">修复建议：{item.hint}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
             </div>
           ) : null}
 

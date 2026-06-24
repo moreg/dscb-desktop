@@ -14,7 +14,8 @@ describe('getOutlineDetailRows', () => {
       charactersAppearing: ['苏铭（首次正式登场）', '图书馆管理员老周'],
       foreshadowings: ['窗外天空突然变绿', '广播断断续续的紧急通知'],
       hook: '远处传来女生的尖叫',
-      wordEstimate: '约 2500 字'
+      wordEstimate: '约 2500 字',
+      writingRequirements: '开头强情绪\n结尾必须留钩子'
     }
 
     expect(getOutlineDetailRows(item)).toEqual([
@@ -24,7 +25,8 @@ describe('getOutlineDetailRows', () => {
       { label: '角色出场', items: ['苏铭（首次正式登场）', '图书馆管理员老周'] },
       { label: '伏笔铺设', items: ['窗外天空突然变绿', '广播断断续续的紧急通知'] },
       { label: '章末钩子', value: '远处传来女生的尖叫' },
-      { label: '字数预估', value: '约 2500 字' }
+      { label: '字数预估', value: '约 2500 字' },
+      { label: '本章写作要求', value: '开头强情绪\n结尾必须留钩子' }
     ])
   })
 })

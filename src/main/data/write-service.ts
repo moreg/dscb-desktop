@@ -39,6 +39,7 @@ import {
   parseOutlineDiffJson,
   parseRhythmEvaluationJson
 } from '../../shared/parsers'
+import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 
 export interface ChapterPrompt {
   system: string
@@ -707,11 +708,16 @@ export class WriteService {
     )
   }
 
-  async buildReviewPrompt(projectId: string, chapterNumber: number): Promise<string> {
-    const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
-    const trimmed = chapter.content.length > 8000
-      ? chapter.content.slice(0, 8000) + '\n\n…（后文已省略）'
-      : chapter.content
+  async buildReviewPrompt(
+    projectId: string,
+    chapterNumber: number,
+    contentOverride?: string
+  ): Promise<string> {
+    const content =
+      contentOverride !== undefined
+        ? contentOverride
+        : (await this.chapterService.getChapter(projectId, chapterNumber)).content
+    const trimmed = content.length > 8000 ? content.slice(0, 8000) + '\n\n…（后文已省略）' : content
     return [
       `请审阅下面的小说章节正文，针对性地给出 3-5 条具体修改建议。`,
       `要求：每条建议用「原文片段 → 建议 → 理由」三段格式；`,
@@ -726,9 +732,10 @@ export class WriteService {
   async reviewChapterStream(
     projectId: string,
     chapterNumber: number,
+    contentOverride?: string,
     opts: GenerateOptions = {}
   ): Promise<string> {
-    const prompt = await this.buildReviewPrompt(projectId, chapterNumber)
+    const prompt = await this.buildReviewPrompt(projectId, chapterNumber, contentOverride)
     return this.llm.generateStream(prompt, {
       ...opts,
       meta: { feature: 'review', projectId }
@@ -858,7 +865,13 @@ export class WriteService {
             volume: item.volume,
             emotion: item.emotion,
             climax: item.climax,
-            writingRequirements: item.writingRequirements
+            writingRequirements: composeWritingRequirements(
+              item.writingRequirementTemplateId,
+              item.writingRequirementCustomText,
+              item.writingRequirements
+            ),
+            writingRequirementTemplateId: item.writingRequirementTemplateId,
+            writingRequirementCustomText: item.writingRequirementCustomText
           }
         }
       } catch (err) {
@@ -1008,6 +1021,7 @@ function normalizeStyleGenerateArgs(
 
 function renderUserPrompt(input: RenderInput): string {
   const parts: string[] = []
+  const chapterRequirements = input.chapterDetail?.writingRequirements?.trim()
 
   // 1. 基本信息
   parts.push(
@@ -1020,6 +1034,11 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push(`# 第 ${input.chapterNumber} 章 写作任务`)
   if (input.tempContext) {
     parts.push(`**【本章临时写作要求（临时上下文）】**：\n${input.tempContext}`)
+  }
+  if (chapterRequirements) {
+    parts.push('**【本章硬性写作要求】**')
+    parts.push('以下要求必须全部落实到正文里，不能遗漏、弱化或写偏：')
+    parts.push(renderRequirementChecklist(chapterRequirements))
   }
   if (input.chapterDetail) {
     parts.push(renderChapterDetail(input.chapterDetail, '本章细纲'))
@@ -1136,6 +1155,9 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push(
     `约 ${TARGET_WORDS} 字，按本章细纲剧情点顺序展开，章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
   )
+  if (chapterRequirements) {
+    parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】。如果没有，先补足再输出。`)
+  }
   // 7.1 写完后的自检回执（仅自用，会被前端自动剥离，不会出现在正文中）
   parts.push('---')
   parts.push('**【写完后自检 · 伏笔回执（仅自用，会被自动剥离，不会出现在正文中）】**')
@@ -1146,6 +1168,22 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('- collected：你本章回收的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
   parts.push('若本章无任何伏笔变动，整行可省略。')
   return parts.join('\n\n')
+}
+
+function renderRequirementChecklist(text: string): string {
+  const normalized = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (normalized.length === 0) return '- 无'
+
+  return normalized
+    .map((line) => {
+      const cleaned = line.replace(/^[\-\*\d\.\)\s、]+/, '').trim()
+      return `- ${cleaned || line}`
+    })
+    .join('\n')
 }
 
 function renderChapterDetail(d: ChapterDetail, label: string): string {

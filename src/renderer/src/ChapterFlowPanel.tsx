@@ -26,6 +26,7 @@ interface Props {
   onClose: () => void
   /** AI 改写命中段后，把 snippet 替换为 rewritten（P6-B：第三参 violationKey 用于 per-violation 撤销） */
   onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => void
+  onJumpToOffset?: (offset: number) => void
   /** 重新跑质检（用于"立即质检"按钮） */
   onRunAudit?: () => void | Promise<void>
   /** 撤销最近一次改写（从正文回滚） */
@@ -69,6 +70,7 @@ export default function ChapterFlowPanel(props: Props) {
     reviewText,
     onClose,
     onApplyRewrite,
+    onJumpToOffset,
     onRunAudit,
     onUndoRewrite,
     onUndoRewriteAt,
@@ -393,6 +395,7 @@ export default function ChapterFlowPanel(props: Props) {
             loading={false}
             mode="soft"
             onRunAgain={onRunAudit}
+            onJumpToOffset={onJumpToOffset}
             onApplyRewrite={onApplyRewrite}
             onUndoRewrite={onUndoRewrite}
             onUndoRewriteAt={onUndoRewriteAt}

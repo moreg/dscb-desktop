@@ -2,6 +2,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import { readText, parseDoc, parseChapterNumber, parseBoldFields } from './md-parser'
 import { writeTextAtomic } from '../atomic'
+import { normalizeWritingRequirementLines } from '../../../shared/writing-requirement-templates'
 
 /**
  * 细纲更新补丁。所有字段可选，只更新提供的字段。
@@ -18,6 +19,8 @@ export interface DetailedOutlinePatch {
   emotion?: number
   climax?: number
   writingRequirements?: string
+  writingRequirementTemplateId?: string
+  writingRequirementCustomText?: string
 }
 
 /**
@@ -108,7 +111,13 @@ export class DetailedOutlineWriter {
       const key = newFields.has('本章写作要求')
         ? '本章写作要求'
         : (newFields.has('写作要求') ? '写作要求' : '本章写作要求')
-      this.setField(newFields, newOrder, key, patch.writingRequirements)
+      this.setMultilineField(newFields, newOrder, key, patch.writingRequirements)
+    }
+    if (patch.writingRequirementTemplateId !== undefined) {
+      this.setOptionalField(newFields, newOrder, '写作要求模板', patch.writingRequirementTemplateId)
+    }
+    if (patch.writingRequirementCustomText !== undefined) {
+      this.setMultilineField(newFields, newOrder, '自定义补充要求', patch.writingRequirementCustomText)
     }
 
     // 更新列表字段
@@ -146,6 +155,36 @@ export class DetailedOutlineWriter {
       order.push(key)
     }
     fields.set(key, value)
+  }
+
+  private setOptionalField(
+    fields: Map<string, string | string[]>,
+    order: string[],
+    key: string,
+    value: string
+  ): void {
+    const text = value.trim()
+    if (!text) {
+      fields.delete(key)
+      const idx = order.indexOf(key)
+      if (idx >= 0) order.splice(idx, 1)
+      return
+    }
+    this.setField(fields, order, key, text)
+  }
+
+  private setMultilineField(
+    fields: Map<string, string | string[]>,
+    order: string[],
+    key: string,
+    value: string
+  ): void {
+    const lines = normalizeWritingRequirementLines(value)
+    if (lines.length <= 1) {
+      this.setOptionalField(fields, order, key, lines[0] ?? '')
+      return
+    }
+    this.setListField(fields, order, key, lines)
   }
 
   /**

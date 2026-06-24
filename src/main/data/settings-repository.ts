@@ -6,6 +6,12 @@ import type {
   AiHighFreqConfig,
   AiHighFreqWord
 } from '../../shared/types'
+import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
+import {
+  DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
+  cloneWritingRequirementTemplates,
+  normalizeWritingRequirementLines
+} from '../../shared/writing-requirement-templates'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -32,6 +38,8 @@ export interface AppSettings {
   costAlert?: Partial<CostAlertConfig>
   /** AI 高频词配置 */
   aiHighFreq?: Partial<AiHighFreqConfig>
+  /** 长期写作要求模板 */
+  writingRequirementTemplates?: WritingRequirementTemplate[]
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -68,6 +76,38 @@ const DEFAULTS: AppSettings = {
   aiHighFreq: DEFAULT_AI_HIGH_FREQ
 }
 
+function sanitizeWritingRequirementTemplates(
+  templates: unknown
+): WritingRequirementTemplate[] {
+  if (!Array.isArray(templates)) {
+    return cloneWritingRequirementTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
+  }
+
+  const out: WritingRequirementTemplate[] = []
+  const seen = new Set<string>()
+
+  for (const item of templates) {
+    if (!item || typeof item !== 'object') continue
+    const raw = item as Partial<WritingRequirementTemplate>
+    const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+    const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+    if (!id || !name || seen.has(id)) continue
+    seen.add(id)
+    out.push({
+      id,
+      name,
+      description: typeof raw.description === 'string' ? raw.description.trim() : '',
+      requirements: normalizeWritingRequirementLines(
+        Array.isArray(raw.requirements) ? raw.requirements.join('\n') : ''
+      )
+    })
+  }
+
+  return out.length > 0
+    ? out
+    : cloneWritingRequirementTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
+}
+
 export class SettingsRepository {
   constructor(private readonly settingsFile: string) {}
 
@@ -83,7 +123,10 @@ export class SettingsRepository {
       aiHighFreq: {
         enabled: DEFAULT_AI_HIGH_FREQ.enabled,
         words: Array.isArray(stored.aiHighFreq?.words) ? stored.aiHighFreq!.words! : []
-      }
+      },
+      writingRequirementTemplates: sanitizeWritingRequirementTemplates(
+        stored.writingRequirementTemplates
+      )
     }
   }
 
@@ -110,10 +153,29 @@ export class SettingsRepository {
         : current.costAlert,
       aiHighFreq: patch.aiHighFreq
         ? { ...current.aiHighFreq, ...patch.aiHighFreq }
-        : current.aiHighFreq
+        : current.aiHighFreq,
+      writingRequirementTemplates:
+        patch.writingRequirementTemplates !== undefined
+          ? sanitizeWritingRequirementTemplates(patch.writingRequirementTemplates)
+          : current.writingRequirementTemplates
     }
     await writeJsonAtomic(this.settingsFile, next)
     return next
+  }
+
+  async getWritingRequirementTemplates(): Promise<WritingRequirementTemplate[]> {
+    const s = await this.get()
+    return cloneWritingRequirementTemplates(
+      s.writingRequirementTemplates ?? DEFAULT_WRITING_REQUIREMENT_TEMPLATES
+    )
+  }
+
+  async setWritingRequirementTemplates(
+    templates: WritingRequirementTemplate[]
+  ): Promise<WritingRequirementTemplate[]> {
+    const sanitized = sanitizeWritingRequirementTemplates(templates)
+    await this.update({ writingRequirementTemplates: sanitized })
+    return this.getWritingRequirementTemplates()
   }
 
   /** 获取 AI 高频词配置 */

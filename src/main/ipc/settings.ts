@@ -6,6 +6,7 @@ import type { WriteAuditConfig } from '../../shared/types'
 import { z } from 'zod'
 import { validateInput, dailyWordGoalSchema } from './validation'
 import type { AiHighFreqConfig } from '../../shared/types'
+import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -139,6 +140,32 @@ export function registerSettingsIpc(
         patch
       )
       return repo.setAiHighFreq(validated)
+    }
+  )
+
+  safeHandle('settings:getWritingRequirementTemplates', async () => {
+    return repo.getWritingRequirementTemplates()
+  })
+  safeHandle(
+    'settings:setWritingRequirementTemplates',
+    async (
+      _e: IpcMainInvokeEvent,
+      templates: WritingRequirementTemplate[]
+    ): Promise<WritingRequirementTemplate[]> => {
+      const validated = validateInput(
+        z
+          .array(
+            z.object({
+              id: z.string().min(1).max(100),
+              name: z.string().min(1).max(100),
+              description: z.string().max(300),
+              requirements: z.array(z.string().min(1).max(300)).max(20)
+            })
+          )
+          .max(100),
+        templates
+      )
+      return repo.setWritingRequirementTemplates(validated)
     }
   )
 }

@@ -25,6 +25,7 @@ describe('chapter-audit (PR2 baseline)', () => {
       (v) => v.category === 'ending' && v.severity === 'error'
     )
     expect(endingErr).toBeDefined()
+    expect(endingErr?.offset).toBeGreaterThanOrEqual(0)
   })
 
   it('flags missing dialogue and event keywords at ending', () => {
@@ -40,6 +41,7 @@ describe('chapter-audit (PR2 baseline)', () => {
     const hit = report.violations.find((v) => v.category === 'forbidden_word' && v.word === '似乎')
     expect(hit).toBeDefined()
     expect(hit?.severity).toBe('warn')
+    expect(hit?.offset).toBeGreaterThanOrEqual(0)
   })
 
   it('flags word_count below minWords', () => {

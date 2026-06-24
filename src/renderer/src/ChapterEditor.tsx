@@ -47,6 +47,13 @@ import ChapterFlowPanel from './ChapterFlowPanel'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { parseForeshadowReceipt } from '../../shared/parsers'
+import AlertDialog from './AlertDialog'
+import {
+  DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
+  composeWritingRequirements,
+  getWritingRequirementTemplate
+} from '../../shared/writing-requirement-templates'
+import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
 
 interface Props {
   projectId: string
@@ -190,11 +197,21 @@ export default function ChapterEditor({
   const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
   const [isEditingReqs, setIsEditingReqs] = useState(false)
-  const [editingReqsText, setEditingReqsText] = useState('')
+  const [editingReqsTemplateId, setEditingReqsTemplateId] = useState('')
+  const [editingReqsCustomText, setEditingReqsCustomText] = useState('')
   const [savingReqs, setSavingReqs] = useState(false)
+  const [writingRequirementTemplates, setWritingRequirementTemplates] = useState<
+    WritingRequirementTemplate[]
+  >(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
+  const writingTemplateApi = window.api as typeof window.api & {
+    getWritingRequirementTemplates?: () => Promise<WritingRequirementTemplate[]>
+  }
 
   useEffect(() => {
-    setEditingReqsText(chapterOutline?.writingRequirements ?? '')
+    setEditingReqsTemplateId(chapterOutline?.writingRequirementTemplateId ?? '')
+    setEditingReqsCustomText(
+      chapterOutline?.writingRequirementCustomText ?? chapterOutline?.writingRequirements ?? ''
+    )
     setIsEditingReqs(false)
   }, [chapterOutline])
 
@@ -202,7 +219,14 @@ export default function ChapterEditor({
     setSavingReqs(true)
     try {
       const updated = await window.api.updateDetailedOutline(projectId, chapterNumber, {
-        writingRequirements: editingReqsText
+        writingRequirements: composeWritingRequirements(
+          editingReqsTemplateId,
+          editingReqsCustomText,
+          '',
+          writingRequirementTemplates
+        ),
+        writingRequirementTemplateId: editingReqsTemplateId,
+        writingRequirementCustomText: editingReqsCustomText
       })
       setChapterOutline(updated)
       setIsEditingReqs(false)
@@ -213,6 +237,15 @@ export default function ChapterEditor({
       setSavingReqs(false)
     }
   }
+
+  const activeRequirementTemplate = useMemo(
+    () =>
+      getWritingRequirementTemplate(
+        chapterOutline?.writingRequirementTemplateId,
+        writingRequirementTemplates
+      ),
+    [chapterOutline?.writingRequirementTemplateId, writingRequirementTemplates]
+  )
 
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
@@ -250,6 +283,7 @@ export default function ChapterEditor({
   const [showContinueDialog, setShowContinueDialog] = useState(false)
   const [tempContextInput, setTempContextInput] = useState('')
   const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
+  const [alertInfo, setAlertInfo] = useState<{ message: string } | null>(null)
   const [previewCard, setPreviewCard] = useState<{
     kind: 'char' | 'foreshadow' | 'location'
     text: string
@@ -279,7 +313,7 @@ export default function ChapterEditor({
    * aiGenerate 完成时自动刷新（自动累加 LLM 调用）。
    */
   const [usage, setUsage] = useState<UsageSummary | null>(null)
-  const [usagePopoverOpen, setUsagePopoverOpen] = useState(false)
+  const [toolbarMoreOpen, setToolbarMoreOpen] = useState(false)
   // P16-C：点击趋势图某一天 → 显示当天 LLM 调用详情
   const [dayDetail, setDayDetail] = useState<{ date: string; records: UsageRecord[] } | null>(null)
   const [dayDetailLoading, setDayDetailLoading] = useState(false)
@@ -507,6 +541,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     void window.api.getProject(projectId).then(setProjectData)
     void window.api.listStyleProfiles(projectId).then(setStyleProfiles)
   }
+  const refreshWritingRequirementTemplates = () => {
+    if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
+      setWritingRequirementTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
+      return
+    }
+    void writingTemplateApi
+      .getWritingRequirementTemplates()
+      .then(setWritingRequirementTemplates)
+      .catch(() => setWritingRequirementTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES))
+  }
 
   const refreshChapterOutline = () => {
     void window.api.listDetailedOutline(projectId).then((items) => {
@@ -547,6 +591,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshMemory()
     refreshChapterOutline()
     refreshProjectStyleData()
+    refreshWritingRequirementTemplates()
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
   }, [projectId, chapterNumber])
 
@@ -653,9 +698,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null
-      if (usagePopoverOpen) {
-        if (!(target && target.closest('.usage-popover-root'))) {
-          setUsagePopoverOpen(false)
+      if (toolbarMoreOpen) {
+        if (!(target && target.closest('.toolbar-more'))) {
+          setToolbarMoreOpen(false)
         }
       }
       if (previewCard) {
@@ -666,7 +711,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
     document.addEventListener('mousedown', onClick)
     return () => document.removeEventListener('mousedown', onClick)
-  }, [usagePopoverOpen, previewCard])
+  }, [toolbarMoreOpen, previewCard])
 
   // P11-A：每 10 秒重渲染一次，让"X 秒前"指示器保持新鲜
   const [, setTick] = useState(0)
@@ -806,7 +851,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const aiGenerate = async (tempContextVal?: string) => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
     // P14-C：硬上限拦截——若 usage 已超阈值且用户开启 blockOnExceeded，弹确认
@@ -862,7 +907,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             : result.error === 'LLM_RATE_LIMIT'
               ? '请求过于频繁，请稍后再试'
               : '生成失败，请重试'
-        window.alert(msg)
+        setAlertInfo({ message: msg })
         return
       }
       setDirty(true)
@@ -883,6 +928,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           const r = await window.api.reviewChapterStream(
             projectId,
             chapterNumber,
+            finalDraft,
             (token, done) => {
               if (reviewRef.current !== myReview) return
               if (token) setReviewText((t) => t + token)
@@ -916,7 +962,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const startReview = async () => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
     setReviewOpen(true)
@@ -927,6 +973,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       const result = await window.api.reviewChapterStream(
         projectId,
         chapterNumber,
+        draft,
         (token, done) => {
           if (reviewRef.current !== myReview) return
           if (token) setReviewText((t) => t + token)
@@ -951,7 +998,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const startDetectCast = async () => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
     setShowCastPanel(true)
@@ -973,7 +1020,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (castRef.current !== myCast) return
       if (!result.ok) {
         setDetecting(false)
-        window.alert('识别失败：' + (result.error ?? '未知错误'))
+        setAlertInfo({ message: '识别失败：' + (result.error ?? '未知错误') })
         return
       }
       const parsed = parseCastJson(buffer)
@@ -1124,9 +1171,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const generateThisChapterOutline = async () => {
     if (!(await window.api.hasLlmKey())) {
-      window.alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
+
     setGeneratingOutline(true)
     try {
       await window.api.generateDetailedOutline(projectId, chapterNumber)
@@ -1307,6 +1355,24 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     const row = draft.slice(0, start).split('\n').length
     const lineHeight = 32
     el.scrollTop = Math.max(0, (row - 5) * lineHeight)
+  }
+
+  const jumpToOffset = (offset: number) => {
+    const safeOffset = Math.max(0, Math.min(offset, draft.length))
+    highlightMatch(safeOffset, 1)
+  }
+
+  const handleCopyDraft = async () => {
+    if (!draft.trim()) {
+      setUndoToast({ message: '正文为空，暂无可复制内容', type: 'warning' })
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(draft)
+      setUndoToast({ message: '已复制正文到剪贴板', type: 'info' })
+    } catch {
+      setUndoToast({ message: '复制失败，请稍后重试', type: 'error' })
+    }
   }
 
   const handleFind = (searchText: string) => {
@@ -1501,19 +1567,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         >
           {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
         </button>
-        <button className="btn btn-sm" onClick={saveAsVersion} disabled={savingVersion}>
-          存版本
-        </button>
-        <button className="btn btn-sm" onClick={() => setShowVersions((s) => !s)}>
-          {showVersions ? '收起版本' : `版本 ${versions.length}`}
-        </button>
-        <button
-          className="btn btn-sm"
-          onClick={() => setShowPreview((s) => !s)}
-          title="按人物/伏笔/地点高亮正文"
-        >
-          {showPreview ? '收起预览' : '👁 预览'}
-        </button>
         <button
           className={`btn btn-sm ${findBarOpen ? 'btn-primary' : ''}`}
           onClick={() => {
@@ -1532,136 +1585,15 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         >
           🔍 查找
         </button>
-        <span className="spacer" />
-        {/* P11-A：保存指示器 — 让用户知道"工作已自动保存" */}
-        {lastSavedAt !== null ? (
-          <span
-            className="save-indicator"
-            title={isSaving ? '正在保存…' : `上次保存：${new Date(lastSavedAt).toLocaleTimeString()}`}
-          >
-            {isSaving ? '⟳ 保存中…' : `✓ 已保存 ${formatRelativeTime(lastSavedAt, Date.now())}`}
-          </span>
-        ) : null}
-        {/* P10-A：用量徽章 — 显示今日费用，点击展开 popover */}
-        <div className="usage-popover-root" style={{ position: 'relative' }}>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => setUsagePopoverOpen((o) => !o)}
-            title="今日 AI 用量（点击查看详情）"
-          >
-            📊 今日{usage ? ` ${formatCost(usage.today.cost)}` : '…'}
-          </button>
-          {usagePopoverOpen && usage ? (
-            <div className="usage-popover">
-              <div className="usage-popover-title">用量统计</div>
-              <div className="usage-popover-grid">
-                <div className="usage-popover-cell">
-                  <div className="label">今日</div>
-                  <div className="tokens">{formatTokens(usage.today.total)}</div>
-                  <div className="cost">{formatCost(usage.today.cost)}</div>
-                </div>
-                <div className="usage-popover-cell">
-                  <div className="label">本月</div>
-                  <div className="tokens">{formatTokens(usage.month.total)}</div>
-                  <div className="cost">{formatCost(usage.month.cost)}</div>
-                </div>
-                <div className="usage-popover-cell">
-                  <div className="label">累计</div>
-                  <div className="tokens">{formatTokens(usage.allTime.total)}</div>
-                  <div className="cost">{formatCost(usage.allTime.cost)}</div>
-                </div>
-              </div>
-              {usage.byFeature.length > 0 ? (
-                <div className="usage-popover-features">
-                  <div className="usage-popover-section-title">按功能</div>
-                  {usage.byFeature.map((f) => (
-                    <div key={f.feature} className="usage-popover-row">
-                      <span style={{ minWidth: 70 }}>{f.feature}</span>
-                      <span className="meta" style={{ marginLeft: 'auto' }}>
-                        {formatTokens(f.total)} · {formatCost(f.cost)} · {f.calls}次
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              {/* P15-A：最近 7 天趋势图 */}
-              {usage.byDay && usage.byDay.length > 0 ? (
-                <div className="usage-popover-trend">
-                  <div className="usage-popover-section-title">最近 7 天（点击查看详情）</div>
-                  <div className="usage-trend-chart">
-                    {(() => {
-                      const max = Math.max(...usage.byDay.map((d) => d.cost), 0.01)
-                      return usage.byDay.map((d) => {
-                        const pct = (d.cost / max) * 100
-                        const dateLabel = d.date.slice(5) // MM-DD
-                        const isSelected = dayDetail?.date === d.date
-                        return (
-                          <div
-                            key={d.date}
-                            className={`usage-trend-col${isSelected ? ' selected' : ''}`}
-                            title={`${d.date}: ${formatCost(d.cost)} · ${d.calls}次（点击查看详情）`}
-                            onClick={() => loadDayDetail(d.date)}
-                          >
-                            <div className="usage-trend-bar-wrap">
-                              <div
-                                className="usage-trend-bar"
-                                style={{ height: `${Math.max(pct, 2)}%` }}
-                              />
-                            </div>
-                            <div className="usage-trend-label">{dateLabel}</div>
-                            <div className="usage-trend-value">{formatCost(d.cost)}</div>
-                          </div>
-                        )
-                      })
-                    })()}
-                  </div>
-                </div>
-              ) : null}
-
-              {/* P16-C：单日详情 */}
-              {dayDetail ? (
-                <div className="usage-day-detail">
-                  <div className="usage-popover-section-title" style={{ display: 'flex', alignItems: 'center' }}>
-                    <span>{dayDetail.date} 的 LLM 调用</span>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => setDayDetail(null)}
-                      style={{ marginLeft: 'auto', padding: '0 6px', fontSize: 11 }}
-                      title="关闭详情"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  {dayDetailLoading ? (
-                    <div className="muted" style={{ fontSize: 11, padding: '4px 0' }}>加载中…</div>
-                  ) : dayDetail.records.length === 0 ? (
-                    <div className="muted" style={{ fontSize: 11, padding: '4px 0' }}>这天没有 LLM 调用</div>
-                  ) : (
-                    <ul className="usage-day-list">
-                      {dayDetail.records.map((r, i) => (
-                        <li key={i} className="usage-day-list-item">
-                          <span className="usage-day-time">{r.at.slice(11, 16)}</span>
-                          <span className="usage-day-feature">{r.feature}</span>
-                          <span className="usage-day-meta">
-                            {formatTokens(r.totalTokens)} · {r.model}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
         <button
           className="btn btn-sm"
-          onClick={reAudit}
-          disabled={reAuditLoading}
-          title="对当前 draft 重新跑 AI 味检查（章末/禁用词/规则/字数）"
+          onClick={() => setShowPreview((s) => !s)}
+          title="按人物/伏笔/地点高亮正文"
         >
-          {reAuditLoading ? '检查中…' : '🔍 重新质检'}
+          {showPreview ? '收起预览' : '👁 预览'}
+        </button>
+        <button className="btn btn-sm" onClick={() => void handleCopyDraft()} title="复制当前正文到剪贴板">
+          复制正文
         </button>
         <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
           {reviewing ? '审稿中…' : '✎ AI 改稿'}
@@ -1681,6 +1613,55 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         >
           {generating ? '落墨中…' : '✦ 续写'}
         </button>
+        <span className="spacer" />
+        {/* P11-A：保存指示器 */}
+        {lastSavedAt !== null ? (
+          <span
+            className="save-indicator"
+            title={isSaving ? '正在保存…' : `上次保存：${new Date(lastSavedAt).toLocaleTimeString()}`}
+          >
+            {isSaving ? '⟳ 保存中…' : `✓ 已保存 ${formatRelativeTime(lastSavedAt, Date.now())}`}
+          </span>
+        ) : null}
+        {/* 更多操作下拉 */}
+        <div className="toolbar-more" style={{ position: 'relative' }}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setToolbarMoreOpen((v) => !v)}
+            onBlur={() => setTimeout(() => setToolbarMoreOpen(false), 150)}
+          >
+            ⋯
+          </button>
+          {toolbarMoreOpen ? (
+            <div className="toolbar-more-menu">
+              <button
+                className="toolbar-more-item"
+                onClick={() => { saveAsVersion(); setToolbarMoreOpen(false) }}
+                disabled={savingVersion}
+              >
+                存版本
+              </button>
+              <button
+                className="toolbar-more-item"
+                onClick={() => { setShowVersions((s) => !s); setToolbarMoreOpen(false) }}
+              >
+                {showVersions ? '收起版本' : `版本 (${versions.length})`}
+              </button>
+              <button
+                className="toolbar-more-item"
+                onClick={() => { reAudit(); setToolbarMoreOpen(false) }}
+                disabled={reAuditLoading}
+              >
+                {reAuditLoading ? '检查中…' : '重新质检'}
+              </button>
+              {/* P10-A：用量统计 */}
+              <div className="toolbar-more-sep" />
+              <div className="toolbar-more-item" style={{ cursor: 'default', opacity: 0.8 }}>
+                📊 今日{usage ? ` ${formatCost(usage.today.cost)}` : '…'}
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {/* 番茄钟 + 写作进度 */}
@@ -1934,12 +1915,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             setFlowSyncTrigger(0)
           }}
           onRunAudit={reAudit}
+          onJumpToOffset={jumpToOffset}
           onApplyRewrite={(snippet, rewritten, violationKey) => {
             // 用改写后的文本替换 draft 中的命中段（保留前后原文）
             if (!snippet) return
             const idx = draft.indexOf(snippet)
             if (idx < 0) {
-              window.alert('未在正文中找到原片段（可能已被改写），请手动应用')
+              setAlertInfo({ message: '未在正文中找到原片段（可能已被改写），请手动应用' })
               return
             }
             const next = draft.slice(0, idx) + rewritten + draft.slice(idx + snippet.length)
@@ -2080,7 +2062,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <div className="chapter-side-block">
       <div className="editor-panel">
         <div className="ep-head">
-          <div className="ep-title">🎯 本章写作要求</div>
+          <div className="ep-title">🎯 长期写作要求</div>
           <div className="btn-group">
             {isEditingReqs ? (
               <>
@@ -2094,7 +2076,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 <button
                   className="btn btn-sm"
                   onClick={() => {
-                    setEditingReqsText(chapterOutline?.writingRequirements ?? '')
+                    setEditingReqsTemplateId(chapterOutline?.writingRequirementTemplateId ?? '')
+                    setEditingReqsCustomText(
+                      chapterOutline?.writingRequirementCustomText ??
+                        chapterOutline?.writingRequirements ??
+                        ''
+                    )
                     setIsEditingReqs(false)
                   }}
                   disabled={savingReqs}
@@ -2116,39 +2103,121 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <div className="ep-body" style={{ marginTop: 6 }}>
           {!chapterOutline ? (
             <p className="muted" style={{ fontSize: '12px', margin: 0 }}>
-              暂无本章细纲。请先在左侧「📜 本章细纲」中生成或导入细纲，之后即可配置写作要求。
+              暂无本章细纲。请先在左侧「📜 本章细纲」中生成或导入细纲，之后即可配置长期写作要求。
             </p>
           ) : isEditingReqs ? (
-            <textarea
-              className="textarea"
-              style={{
-                width: '100%',
-                minHeight: '80px',
-                fontSize: '12px',
-                lineHeight: '1.5',
-                padding: '6px 8px',
-                borderRadius: '4px',
-                border: '1px solid var(--line-soft)',
-                backgroundColor: 'var(--bg-card)',
-                color: 'var(--fg-main)',
-                resize: 'vertical',
-                fontFamily: 'inherit'
-              }}
-              value={editingReqsText}
-              onChange={(e) => setEditingReqsText(e.target.value)}
-              placeholder="请输入本章写作要求（例如：展现主角果断性格、加入线索提示等）。AI 续写时将自动包含本字段内容。"
-            />
+            <div style={{ display: 'grid', gap: 10 }}>
+              <div>
+                <div className="muted" style={{ fontSize: '11.5px', marginBottom: 6 }}>
+                  先选一个长期写作模板，或者保留“仅自己填写”。
+                </div>
+                <select
+                  className="select"
+                  value={editingReqsTemplateId}
+                  onChange={(e) => setEditingReqsTemplateId(e.target.value)}
+                  style={{ width: '100%' }}
+                >
+                  <option value="">仅自己填写</option>
+                  {writingRequirementTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} - {template.description}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {editingReqsTemplateId ? (
+                <div
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    backgroundColor: 'var(--bg-card)',
+                    border: '1px solid var(--line-soft)',
+                    fontSize: '12px',
+                    lineHeight: '1.6',
+                    color: 'var(--fg-main)'
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                    {getWritingRequirementTemplate(
+                      editingReqsTemplateId,
+                      writingRequirementTemplates
+                    )?.name}
+                  </div>
+                  <div className="muted" style={{ fontSize: '11.5px', marginBottom: 6 }}>
+                    {getWritingRequirementTemplate(
+                      editingReqsTemplateId,
+                      writingRequirementTemplates
+                    )?.description}
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {(
+                      getWritingRequirementTemplate(
+                        editingReqsTemplateId,
+                        writingRequirementTemplates
+                      )?.requirements ?? []
+                    ).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div>
+                <div className="muted" style={{ fontSize: '11.5px', marginBottom: 6 }}>
+                  自定义补充要求
+                </div>
+                <textarea
+                  className="textarea"
+                  style={{
+                    width: '100%',
+                    minHeight: '96px',
+                    fontSize: '12px',
+                    lineHeight: '1.5',
+                    padding: '6px 8px',
+                    borderRadius: '4px',
+                    border: '1px solid var(--line-soft)',
+                    backgroundColor: 'var(--bg-card)',
+                    color: 'var(--fg-main)',
+                    resize: 'vertical',
+                    fontFamily: 'inherit'
+                  }}
+                  value={editingReqsCustomText}
+                  onChange={(e) => setEditingReqsCustomText(e.target.value)}
+                  placeholder="可继续自己写要求，例如：开头强情绪、人物对话贴合角色、结尾用对话或事件收束。这里会和所选模板一起长期生效。"
+                />
+              </div>
+            </div>
           ) : chapterOutline.writingRequirements ? (
-            <div
-              style={{
-                fontSize: '12px',
-                lineHeight: '1.5',
-                color: 'var(--fg-main)',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all'
-              }}
-            >
-              {chapterOutline.writingRequirements}
+            <div style={{ display: 'grid', gap: 8 }}>
+              {activeRequirementTemplate ? (
+                <div
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    backgroundColor: 'var(--bg-card)',
+                    border: '1px solid var(--line-soft)'
+                  }}
+                >
+                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--fg-main)' }}>
+                    已选模板：{activeRequirementTemplate.name}
+                  </div>
+                  <div className="muted" style={{ fontSize: '11.5px', marginTop: 4 }}>
+                    {activeRequirementTemplate.description}
+                  </div>
+                </div>
+              ) : null}
+              <div
+                style={{
+                  fontSize: '12px',
+                  lineHeight: '1.5',
+                  color: 'var(--fg-main)',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all'
+                }}
+              >
+                {chapterOutline.writingRequirements}
+              </div>
             </div>
           ) : (
             <p
@@ -2156,7 +2225,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               style={{ fontSize: '12px', margin: 0, cursor: 'pointer' }}
               onClick={() => setIsEditingReqs(true)}
             >
-              暂无本章写作要求，点击编辑添加。AI 续写时将自动遵循该要求。
+              暂无本章长期写作要求，点击编辑后可直接自己写，也可以先选模板再补充。之后继续写这一章时，AI 会持续遵循这些要求。
             </p>
           )}
         </div>
@@ -2380,11 +2449,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             </header>
             <div className="dialog-body" style={{ marginTop: 8 }}>
               <p style={{ fontSize: 12.5, color: 'var(--ink-2)', margin: 0 }}>
-                可在下方输入临时指导要求，引导接下来的生成走向（选填）：
+                可在下方输入本次临时写作要求，只影响这一次续写（选填）：
               </p>
               <textarea
                 className="textarea"
-                placeholder="例如：写林远和师尊在藏经阁的对话，暗示林远身世的线索..."
+                placeholder="例如：这次先多写对话推进，开头直接冲突，顺手埋下林远身世线索。仅本次续写生效，不会覆盖上面的长期要求。"
                 value={tempContextInput}
                 onChange={(e) => setTempContextInput(e.target.value)}
                 style={{ width: '100%', minHeight: 80, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
@@ -2415,7 +2484,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   void aiGenerate()
                 }}
               >
-                直接续写
+                按长期要求续写
               </button>
               <button
                 className="btn btn-primary btn-sm"
@@ -2424,11 +2493,18 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   void aiGenerate(tempContextInput)
                 }}
               >
-                指引续写
+                带临时要求续写
               </button>
             </footer>
           </div>
         </div>
+      ) : null}
+      {alertInfo ? (
+        <AlertDialog
+          open={true}
+          message={alertInfo.message}
+          onConfirm={() => setAlertInfo(null)}
+        />
       ) : null}
     </div>
   )
@@ -2722,7 +2798,7 @@ function AnalysisPanel({ text }: { text: string }) {
         <div className="stat-cell">
           <div className="label">对话占比</div>
           <div className="val">{Math.round(stats.dialogueRatio * 100)}%</div>
-          <div className="sub">「」/"" 字符</div>
+          <div className="sub">按引号内台词字数</div>
         </div>
         <div className="stat-cell">
           <div className="label">虚词占比</div>

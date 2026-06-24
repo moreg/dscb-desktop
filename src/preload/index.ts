@@ -179,6 +179,7 @@ const api = {
   reviewChapterStream: (
     projectId: string,
     chapterNumber: number,
+    content: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => {
     const requestId = crypto.randomUUID()
@@ -190,7 +191,7 @@ const api = {
     }
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
-      .invoke('write:reviewChapter', { projectId, chapterNumber, requestId })
+      .invoke('write:reviewChapter', { projectId, chapterNumber, content, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   detectCastStream: (
@@ -461,7 +462,14 @@ const api = {
   setAiHighFreqConfig: (cfg: {
     enabled?: boolean
     words?: { word: string; example?: string }[]
-  }) => ipcRenderer.invoke('settings:setAiHighFreq', cfg)
+  }) => ipcRenderer.invoke('settings:setAiHighFreq', cfg),
+  getWritingRequirementTemplates: () => ipcRenderer.invoke('settings:getWritingRequirementTemplates'),
+  setWritingRequirementTemplates: (templates: {
+    id: string
+    name: string
+    description: string
+    requirements: string[]
+  }[]) => ipcRenderer.invoke('settings:setWritingRequirementTemplates', templates)
 } as const
 
 contextBridge.exposeInMainWorld('api', api)

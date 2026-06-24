@@ -233,6 +233,7 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
 
   const ending = paragraphs.slice(-ENDING_PARA_COUNT).join('\n\n')
   const snippet = truncate(ending, ENDING_SNIPPET_MAX)
+  const endingStart = Math.max(0, content.lastIndexOf(ending))
 
   // 1. 先查"说教/AI 味抒怀"模板——命中直接 error
   for (const taboo of ENDING_TABOO_PATTERNS) {
@@ -242,7 +243,8 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
         category: 'ending',
         severity: 'error',
         message: `章末命中说教/AI 味结尾：${taboo.reason}`,
-        snippet: m[0]
+        snippet: m[0],
+        offset: endingStart + (m.index ?? 0)
       })
     }
   }
@@ -256,6 +258,7 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
       severity: 'error',
       message: '章末未发现对话引号或事件关键词，疑似纯心理/纯动作结尾，违反章末硬性原则',
       snippet,
+      offset: endingStart,
       suggestion: '请改为对话结尾（如"我不会让你——"）或事件结尾（如"门被踹开"）'
     })
   } else if (!hasDialogue) {
@@ -264,7 +267,8 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
       category: 'ending',
       severity: 'info',
       message: '章末为事件结尾（无对话）。如能加一句台词制造对话+事件混合，钩子更强',
-      snippet
+      snippet,
+      offset: endingStart
     })
   }
 }

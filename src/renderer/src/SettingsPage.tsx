@@ -7,6 +7,11 @@ import type {
   ProjectUsage,
   ChapterUsage
 } from '../../shared/types'
+import {
+  DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
+  normalizeWritingRequirementLines,
+  type WritingRequirementTemplate
+} from '../../shared/writing-requirement-templates'
 
 interface Props {
   onBack?: () => void
@@ -31,6 +36,23 @@ function newId(): string {
 }
 
 export default function SettingsPage(_: Props) {
+  const [activeTab, setActiveTab] = useState('appearance')
+  const writingTemplateApi = window.api as typeof window.api & {
+    getWritingRequirementTemplates?: () => Promise<WritingRequirementTemplate[]>
+    setWritingRequirementTemplates?: (
+      templates: WritingRequirementTemplate[]
+    ) => Promise<WritingRequirementTemplate[]>
+  }
+
+  const TABS = [
+    { id: 'appearance', label: '外观' },
+    { id: 'storage', label: '保存位置' },
+    { id: 'model', label: '模型服务' },
+    { id: 'usage', label: '用量与费用' },
+    { id: 'aiwords', label: 'AI 高频词' },
+    { id: 'writing', label: '写作节奏' }
+  ] as const
+
   // list 接口返回的是脱敏的 ProviderSummary（没有 apiKey）
   const [providers, setProviders] = useState<ListProvidersResult>({
     activeId: '',
@@ -70,7 +92,17 @@ export default function SettingsPage(_: Props) {
     enabled: boolean
     words: { word: string; example?: string }[]
   }>({ enabled: true, words: [] })
+  const [writingTemplates, setWritingTemplates] = useState<WritingRequirementTemplate[]>(
+    DEFAULT_WRITING_REQUIREMENT_TEMPLATES
+  )
   const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
+  const refreshWritingTemplates = () => {
+    if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
+      setWritingTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
+      return
+    }
+    void writingTemplateApi.getWritingRequirementTemplates().then(setWritingTemplates)
+  }
 
   const refreshProviders = () => void window.api.listProviders().then(setProviders)
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
@@ -88,6 +120,7 @@ export default function SettingsPage(_: Props) {
     refreshUsage()
     refreshCostAlert()
     refreshAiHighFreq()
+    refreshWritingTemplates()
     refreshByProject()
     refreshByChapter()
     void window.api.getTheme().then(setTheme)
@@ -171,477 +204,647 @@ export default function SettingsPage(_: Props) {
         </div>
       </div>
 
-      <div className="card" style={{ maxWidth: 600 }}>
-        <h3 className="sub">外观</h3>
-        <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
-          切换浅色/深色主题，或跟随系统设置。
-        </p>
-        <div className="theme-toggle" style={{ marginTop: 8 }}>
-          <button
-            className={theme === 'light' ? 'active' : ''}
-            onClick={() => onThemeChange('light')}
-          >
-            ☀ 浅色
-          </button>
-          <button
-            className={theme === 'dark' ? 'active' : ''}
-            onClick={() => onThemeChange('dark')}
-          >
-            ☾ 深色
-          </button>
-          <button
-            className={theme === 'system' ? 'active' : ''}
-            onClick={() => onThemeChange('system')}
-          >
-            ◐ 跟随系统
-          </button>
-        </div>
-      </div>
+      <div className="settings-layout">
+        <nav className="settings-tabs">
+          {TABS.map(tab => (
+            <button
+              key={tab.id}
+              className={`settings-tab ${activeTab === tab.id ? 'active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+        <div className="settings-content">
+          {/* 全局消息提示 */}
+          {msg ? (
+            <p
+              style={{
+                color: msg.kind === 'ok' ? 'var(--success)' : 'var(--danger)',
+                marginBottom: 14,
+                fontSize: 13
+              }}
+            >
+              {msg.text}
+            </p>
+          ) : null}
 
-      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
-        <div className="row" style={{ marginBottom: 4 }}>
-          <h3 className="sub" style={{ margin: 0 }}>书籍保存位置</h3>
-        </div>
-        <p
-          className="muted"
-          style={{ wordBreak: 'break-all', marginBottom: 10, fontSize: 13 }}
-        >
-          {projectsRoot || '加载中…'}
-        </p>
-        <button className="btn btn-ghost" onClick={selectSavePath} disabled={changingPath}>
-          {changingPath ? '选择中…' : '更改保存位置'}
-        </button>
-        <p className="meta" style={{ marginTop: 10 }}>
-          新建项目将保存到此位置。已有项目不受影响。
-        </p>
-      </div>
-
-      {/* 模型 provider 配置区 */}
-      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
-        <div className="row" style={{ marginBottom: 4 }}>
-          <h3 className="sub" style={{ margin: 0 }}>模型服务</h3>
-          {activeProvider ? (
-            <span className="chip chip-success" style={{ marginLeft: 8 }}>
-              ✓ {activeProvider.label}
-            </span>
-          ) : (
-            <span className="chip chip-warning" style={{ marginLeft: 8 }}>
-              未配置
-            </span>
+          {activeTab === 'appearance' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <h3 className="sub">外观</h3>
+              <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
+                切换浅色/深色主题，或跟随系统设置。
+              </p>
+              <div className="theme-toggle" style={{ marginTop: 8 }}>
+                <button
+                  className={theme === 'light' ? 'active' : ''}
+                  onClick={() => onThemeChange('light')}
+                >
+                  ☀ 浅色
+                </button>
+                <button
+                  className={theme === 'dark' ? 'active' : ''}
+                  onClick={() => onThemeChange('dark')}
+                >
+                  ☾ 深色
+                </button>
+                <button
+                  className={theme === 'system' ? 'active' : ''}
+                  onClick={() => onThemeChange('system')}
+                >
+                  ◐ 跟随系统
+                </button>
+              </div>
+            </div>
           )}
-        </div>
-        <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-          用于大纲生成、细纲生成、章节续写、改稿。支持 OpenAI Chat
-          Completions 兼容协议（POST <code>{'{baseUrl}'}/chat/completions</code>）和
-          Anthropic Messages API（POST <code>{'{baseUrl}'}/v1/messages</code>）。
-        </p>
 
-        {/* provider 列表 */}
-        {providers.providers.length > 0 ? (
-          <ul className="bare" style={{ marginTop: 12 }}>
-            {providers.providers.map((p) => (
-              <ProviderRow
-                key={p.id}
-                provider={p}
-                active={p.id === providers.activeId}
-                onActivate={async () => {
-                  await window.api.setActiveProvider(p.id)
-                  setMsg({ kind: 'ok', text: `已切换到「${p.label}」` })
+          {activeTab === 'storage' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <div className="row" style={{ marginBottom: 4 }}>
+                <h3 className="sub" style={{ margin: 0 }}>书籍保存位置</h3>
+              </div>
+              <p
+                className="muted"
+                style={{ wordBreak: 'break-all', marginBottom: 10, fontSize: 13 }}
+              >
+                {projectsRoot || '加载中…'}
+              </p>
+              <button className="btn btn-ghost" onClick={selectSavePath} disabled={changingPath}>
+                {changingPath ? '选择中…' : '更改保存位置'}
+              </button>
+              <p className="meta" style={{ marginTop: 10 }}>
+                新建项目将保存到此位置。已有项目不受影响。
+              </p>
+            </div>
+          )}
+
+          {activeTab === 'model' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <div className="row" style={{ marginBottom: 4 }}>
+                <h3 className="sub" style={{ margin: 0 }}>模型服务</h3>
+                {activeProvider ? (
+                  <span className="chip chip-success" style={{ marginLeft: 8 }}>
+                    ✓ {activeProvider.label}
+                  </span>
+                ) : (
+                  <span className="chip chip-warning" style={{ marginLeft: 8 }}>
+                    未配置
+                  </span>
+                )}
+              </div>
+              <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+                用于大纲生成、细纲生成、章节续写、改稿。支持 OpenAI Chat
+                Completions 兼容协议（POST <code>{'{baseUrl}'}/chat/completions</code>）和
+                Anthropic Messages API（POST <code>{'{baseUrl}'}/v1/messages</code>）。
+              </p>
+
+              {/* provider 列表 */}
+              {providers.providers.length > 0 ? (
+                <ul className="bare" style={{ marginTop: 12 }}>
+                  {providers.providers.map((p) => (
+                    <ProviderRow
+                      key={p.id}
+                      provider={p}
+                      active={p.id === providers.activeId}
+                      onActivate={async () => {
+                        await window.api.setActiveProvider(p.id)
+                        setMsg({ kind: 'ok', text: `已切换到「${p.label}」` })
+                        refreshProviders()
+                      }}
+                      onDelete={async () => {
+                        if (!window.confirm(`删除 provider「${p.label}」？`)) return
+                        await window.api.deleteProvider(p.id)
+                        refreshProviders()
+                      }}
+                    />
+                  ))}
+                </ul>
+              ) : (
+                <div className="placeholder" style={{ padding: 16 }}>
+                  尚未添加任何 provider，请在下方填写表单添加。
+                </div>
+              )}
+
+              {/* 联通测试 */}
+              <div className="row" style={{ gap: 8, marginTop: 14 }}>
+                <button className="btn" onClick={ping} disabled={pinging || !activeProvider?.hasKey}>
+                  {pinging ? '测试中…' : '测试当前连通'}
+                </button>
+              </div>
+              {pingResult ? (
+                <p
+                  style={{
+                    color: pingResult.ok ? 'var(--success)' : 'var(--danger)',
+                    marginTop: 10,
+                    fontSize: 13,
+                    fontFamily: 'ui-monospace, Consolas, monospace'
+                  }}
+                >
+                  {pingResult.text}
+                </p>
+              ) : null}
+
+              {/* 新增 / 编辑 provider 表单 */}
+              <hr className="soft" />
+              <h3 className="sub" style={{ fontSize: 14 }}>添加 provider</h3>
+              <NewProviderForm
+                onCreated={() => {
                   refreshProviders()
-                }}
-                onDelete={async () => {
-                  if (!window.confirm(`删除 provider「${p.label}」？`)) return
-                  await window.api.deleteProvider(p.id)
-                  refreshProviders()
+                  setMsg({ kind: 'ok', text: '已保存' })
                 }}
               />
-            ))}
-          </ul>
-        ) : (
-          <div className="placeholder" style={{ padding: 16 }}>
-            尚未添加任何 provider，请在下方填写表单添加。
-          </div>
-        )}
 
-        {/* 联通测试 */}
-        <div className="row" style={{ gap: 8, marginTop: 14 }}>
-          <button className="btn" onClick={ping} disabled={pinging || !activeProvider?.hasKey}>
-            {pinging ? '测试中…' : '测试当前连通'}
-          </button>
-        </div>
-        {pingResult ? (
-          <p
-            style={{
-              color: pingResult.ok ? 'var(--success)' : 'var(--danger)',
-              marginTop: 10,
-              fontSize: 13,
-              fontFamily: 'ui-monospace, Consolas, monospace'
-            }}
-          >
-            {pingResult.text}
-          </p>
-        ) : null}
-
-        {/* 新增 / 编辑 provider 表单 */}
-        <hr className="soft" />
-        <h3 className="sub" style={{ fontSize: 14 }}>添加 provider</h3>
-        <NewProviderForm
-          onCreated={() => {
-            refreshProviders()
-            setMsg({ kind: 'ok', text: '已保存' })
-          }}
-        />
-
-        <p className="meta" style={{ marginTop: 16 }}>
-          Key 经 Electron safeStorage（Windows DPAPI / macOS Keychain）加密后存于本地{' '}
-          <code>config/providers.enc</code>，源码不含任何密钥。
-        </p>
-      </div>
-
-      {/* 全局消息提示 */}
-      {msg ? (
-        <p
-          style={{
-            color: msg.kind === 'ok' ? 'var(--success)' : 'var(--danger)',
-            marginTop: 14,
-            fontSize: 13
-          }}
-        >
-          {msg.text}
-        </p>
-      ) : null}
-
-      {/* Token / 费用仪表盘 */}
-      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
-        <div className="row" style={{ marginBottom: 4 }}>
-          <h3 className="sub" style={{ margin: 0 }}>用量与费用</h3>
-          <button className="btn btn-ghost btn-sm" onClick={refreshUsage}>
-            刷新
-          </button>
-        </div>
-        <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-          统计本地记录的所有 AI 调用，费用按下方价格估算。
-        </p>
-        {usage ? (
-          <>
-            <div className="usage-grid">
-              <div className="usage-cell">
-                <div className="label">今日</div>
-                <div className="tokens">{fmtTokens(usage.today.total)}</div>
-                <div className="cost">{fmtCost(usage.today.cost)}</div>
-              </div>
-              <div className="usage-cell">
-                <div className="label">本月</div>
-                <div className="tokens">{fmtTokens(usage.month.total)}</div>
-                <div className="cost">{fmtCost(usage.month.cost)}</div>
-              </div>
-              <div className="usage-cell">
-                <div className="label">累计</div>
-                <div className="tokens">{fmtTokens(usage.allTime.total)}</div>
-                <div className="cost">{fmtCost(usage.allTime.cost)}</div>
-              </div>
+              <p className="meta" style={{ marginTop: 16 }}>
+                Key 经 Electron safeStorage（Windows DPAPI / macOS Keychain）加密后存于本地{' '}
+                <code>config/providers.enc</code>，源码不含任何密钥。
+              </p>
             </div>
-            {usage.byFeature.length > 0 ? (
-              <div style={{ marginTop: 12 }}>
-                <strong style={{ fontSize: 12.5 }}>按功能分布</strong>
-                {(() => {
-                  const max = Math.max(...usage.byFeature.map((f) => f.total), 1)
-                  return usage.byFeature.map((f) => (
-                    <div key={f.feature} className="usage-feature-row">
-                      <span style={{ minWidth: 72 }}>{f.feature}</span>
-                      <div className="bar-wrap">
-                        <div
-                          className="bar-fill"
-                          style={{ width: `${(f.total / max) * 100}%` }}
-                        />
-                      </div>
-                      <span className="meta" style={{ minWidth: 90, textAlign: 'right' }}>
-                        {fmtTokens(f.total)} · {fmtCost(f.cost)} · {f.calls}次
-                      </span>
+          )}
+
+          {activeTab === 'usage' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <div className="row" style={{ marginBottom: 4 }}>
+                <h3 className="sub" style={{ margin: 0 }}>用量与费用</h3>
+                <button className="btn btn-ghost btn-sm" onClick={refreshUsage}>
+                  刷新
+                </button>
+              </div>
+              <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                统计本地记录的所有 AI 调用，费用按下方价格估算。
+              </p>
+              {usage ? (
+                <>
+                  <div className="usage-grid">
+                    <div className="usage-cell">
+                      <div className="label">今日</div>
+                      <div className="tokens">{fmtTokens(usage.today.total)}</div>
+                      <div className="cost">{fmtCost(usage.today.cost)}</div>
                     </div>
-                  ))
-                })()}
+                    <div className="usage-cell">
+                      <div className="label">本月</div>
+                      <div className="tokens">{fmtTokens(usage.month.total)}</div>
+                      <div className="cost">{fmtCost(usage.month.cost)}</div>
+                    </div>
+                    <div className="usage-cell">
+                      <div className="label">累计</div>
+                      <div className="tokens">{fmtTokens(usage.allTime.total)}</div>
+                      <div className="cost">{fmtCost(usage.allTime.cost)}</div>
+                    </div>
+                  </div>
+                  {usage.byFeature.length > 0 ? (
+                    <div style={{ marginTop: 12 }}>
+                      <strong style={{ fontSize: 12.5 }}>按功能分布</strong>
+                      {(() => {
+                        const max = Math.max(...usage.byFeature.map((f) => f.total), 1)
+                        return usage.byFeature.map((f) => (
+                          <div key={f.feature} className="usage-feature-row">
+                            <span style={{ minWidth: 72 }}>{f.feature}</span>
+                            <div className="bar-wrap">
+                              <div
+                                className="bar-fill"
+                                style={{ width: `${(f.total / max) * 100}%` }}
+                              />
+                            </div>
+                            <span className="meta" style={{ minWidth: 90, textAlign: 'right' }}>
+                              {fmtTokens(f.total)} · {fmtCost(f.cost)} · {f.calls}次
+                            </span>
+                          </div>
+                        ))
+                      })()}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <span className="meta">价格（元 / 百万 token，仅用于估算）</span>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={async () => {
+                        if (!window.confirm('清空所有用量记录？此操作不可撤销。')) return
+                        await window.api.clearUsage()
+                        refreshUsage()
+                        refreshByProject()
+                        refreshByChapter()
+                      }}
+                    >
+                      清空记录
+                    </button>
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 6 }}>
+                    <label className="field" style={{ flex: 1, margin: 0 }}>
+                      <span className="meta">输入</span>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.1"
+                        value={pricing.inputRate}
+                        onChange={(e) => setPricing({ ...pricing, inputRate: Number(e.target.value) })}
+                      />
+                    </label>
+                    <label className="field" style={{ flex: 1, margin: 0 }}>
+                      <span className="meta">输出</span>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.1"
+                        value={pricing.outputRate}
+                        onChange={(e) => setPricing({ ...pricing, outputRate: Number(e.target.value) })}
+                      />
+                    </label>
+                    <button
+                      className="btn btn-sm"
+                      style={{ alignSelf: 'flex-end' }}
+                      onClick={async () => {
+                        const next = await window.api.setPricing(pricing)
+                        setPricing(next)
+                        refreshUsage()
+                        setMsg({ kind: 'ok', text: '价格已更新' })
+                      }}
+                    >
+                      保存价格
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="placeholder" style={{ padding: 12 }}>加载中…</div>
+              )}
+
+              {/* P13-C：用量预警阈值配置 */}
+              <div className="cost-alert-config" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
+                <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>用量预警阈值</h4>
+                <p className="muted" style={{ fontSize: 11.5, margin: '0 0 8px' }}>
+                  当月 AI 费用达到阈值时弹 toast 提醒。warning 是温和提醒，exceeded 是强警告。
+                </p>
+                <div className="row" style={{ alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
+                    <input
+                      type="checkbox"
+                      checked={costAlert.enabled}
+                      onChange={(e) => setCostAlert({ ...costAlert, enabled: e.target.checked })}
+                    />
+                    启用预警
+                  </label>
+                  <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
+                    warning ¥
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={costAlert.warning}
+                      onChange={(e) => setCostAlert({ ...costAlert, warning: Number(e.target.value) || 0 })}
+                      style={{ width: 60 }}
+                      disabled={!costAlert.enabled}
+                    />
+                  </label>
+                  <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
+                    exceeded ¥
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={costAlert.exceeded}
+                      onChange={(e) => setCostAlert({ ...costAlert, exceeded: Number(e.target.value) || 0 })}
+                      style={{ width: 60 }}
+                      disabled={!costAlert.enabled}
+                    />
+                  </label>
+                  <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
+                    <input
+                      type="checkbox"
+                      checked={costAlert.blockOnExceeded}
+                      onChange={(e) => setCostAlert({ ...costAlert, blockOnExceeded: e.target.checked })}
+                      disabled={!costAlert.enabled}
+                    />
+                    exceeded 时弹确认（用户可取消）
+                  </label>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={async () => {
+                      if (costAlert.warning >= costAlert.exceeded) {
+                        setMsg({ kind: 'err', text: 'warning 必须小于 exceeded' })
+                        return
+                      }
+                      setMsg(null)
+                      const next = await window.api.setCostAlertConfig(costAlert)
+                      setCostAlert(next)
+                      setMsg({ kind: 'ok', text: '预警配置已保存' })
+                      setTimeout(() => setMsg(null), 2000)
+                    }}
+                  >
+                    保存阈值
+                  </button>
+                  {msg && msg.kind === 'ok' ? <span className="muted" style={{ fontSize: 12 }}>{msg.text}</span> : null}
+                  {msg && msg.kind === 'err' && msg.text.includes('warning') ? (
+                    <span style={{ color: 'var(--danger)', fontSize: 12 }}>{msg.text}</span>
+                  ) : null}
+                </div>
               </div>
-            ) : null}
-            <div className="row" style={{ marginTop: 12 }}>
-              <span className="meta">价格（元 / 百万 token，仅用于估算）</span>
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={async () => {
-                  if (!window.confirm('清空所有用量记录？此操作不可撤销。')) return
-                  await window.api.clearUsage()
-                  refreshUsage()
-                  refreshByProject()
-                  refreshByChapter()
-                }}
+
+              {/* P17-A：按项目 / 按章节 用量统计 */}
+              <div
+                className="by-project-stats"
+                style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}
               >
-                清空记录
-              </button>
+                <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>按项目统计</h4>
+                {byProject.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 11.5 }}>
+                    还没有项目用量记录（开始续写后会自动汇总）
+                  </div>
+                ) : (
+                  <ul className="by-project-list">
+                    {byProject.map((p) => (
+                      <li key={p.projectId} className="by-project-row">
+                        <span className="project-id" title={p.projectId}>
+                          {p.projectId.length > 20 ? p.projectId.slice(0, 20) + '…' : p.projectId}
+                        </span>
+                        <span className="meta">
+                          {(p.total / 1000).toFixed(1)}k ·{' '}
+                          {p.cost < 1 ? `¥${p.cost.toFixed(3)}` : `¥${p.cost.toFixed(2)}`} · {p.calls}次
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <h4 style={{ margin: '12px 0 6px', fontSize: 12.5 }}>按章节统计</h4>
+                {byChapter.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 11.5 }}>
+                    还没有章节用量记录
+                  </div>
+                ) : (
+                  <ul className="by-project-list">
+                    {byChapter.slice(0, 10).map((c) => (
+                      <li key={`${c.projectId}-${c.chapterNumber}`} className="by-project-row">
+                        <span className="project-id" title={c.projectId}>
+                          {c.projectId.length > 14 ? c.projectId.slice(0, 14) + '…' : c.projectId}
+                        </span>
+                        <span className="chapter-tag">第 {c.chapterNumber} 章</span>
+                        <span className="meta">
+                          {(c.total / 1000).toFixed(1)}k ·{' '}
+                          {c.cost < 1 ? `¥${c.cost.toFixed(3)}` : `¥${c.cost.toFixed(2)}`} · {c.calls}次
+                        </span>
+                      </li>
+                    ))}
+                    {byChapter.length > 10 && (
+                      <li className="muted" style={{ fontSize: 11, padding: '4px 0' }}>
+                        …还有 {byChapter.length - 10} 章未展示
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
             </div>
-            <div className="row" style={{ gap: 8, marginTop: 6 }}>
-              <label className="field" style={{ flex: 1, margin: 0 }}>
-                <span className="meta">输入</span>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.1"
-                  value={pricing.inputRate}
-                  onChange={(e) => setPricing({ ...pricing, inputRate: Number(e.target.value) })}
-                />
-              </label>
-              <label className="field" style={{ flex: 1, margin: 0 }}>
-                <span className="meta">输出</span>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.1"
-                  value={pricing.outputRate}
-                  onChange={(e) => setPricing({ ...pricing, outputRate: Number(e.target.value) })}
-                />
-              </label>
+          )}
+
+          {activeTab === 'aiwords' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
+                <h3 className="sub" style={{ margin: 0 }}>AI 高频词</h3>
+                <label
+                  className="row"
+                  style={{ gap: 6, fontSize: 12.5, marginLeft: 'auto', alignItems: 'center' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={aiHighFreq.enabled}
+                    onChange={(e) => {
+                      const next = { ...aiHighFreq, enabled: e.target.checked }
+                      setAiHighFreq(next)
+                      void window.api.setAiHighFreqConfig({ enabled: e.target.checked })
+                    }}
+                  />
+                  启用高亮
+                </label>
+              </div>
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                配置 AI 常见高频词（如"微微一笑"、"眉头一皱"），正文会高亮匹配；并为每个词附一句改写范例便于润色。
+              </p>
+              <AiHighFreqEditor
+                words={aiHighFreq.words}
+                disabled={!aiHighFreq.enabled}
+                onChange={(words) => {
+                  const next = { ...aiHighFreq, words }
+                  setAiHighFreq(next)
+                }}
+                onSave={async (words) => {
+                  const saved = await window.api.setAiHighFreqConfig({ words })
+                  setAiHighFreq(saved)
+                  setMsg({ kind: 'ok', text: 'AI 高频词已保存' })
+                }}
+              />
+            </div>
+          )}
+
+          {activeTab === 'writing' && (
+            <div className="card" style={{ maxWidth: 600 }}>
+              <h3 className="sub">写作节奏</h3>
+              <div className="field" style={{ marginTop: 8 }}>
+                <label>每日字数目标</label>
+                <div className="row" style={{ gap: 8 }}>
+                  <input
+                    className="input"
+                    type="number"
+                    step="100"
+                    value={dailyGoal}
+                    onChange={(e) => setDailyGoal(Number(e.target.value))}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    className="btn btn-sm"
+                    onClick={async () => {
+                      await window.api.setDailyWordGoal(dailyGoal)
+                      setMsg({ kind: 'ok', text: '目标已保存' })
+                    }}
+                  >
+                    保存
+                  </button>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 12 }}>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>专注分钟</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={pomoFocus}
+                    onChange={(e) => setPomoFocus(Number(e.target.value))}
+                  />
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>休息分钟</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={pomoBreak}
+                    onChange={(e) => setPomoBreak(Number(e.target.value))}
+                  />
+                </div>
+              </div>
               <button
                 className="btn btn-sm"
-                style={{ alignSelf: 'flex-end' }}
                 onClick={async () => {
-                  const next = await window.api.setPricing(pricing)
-                  setPricing(next)
-                  refreshUsage()
-                  setMsg({ kind: 'ok', text: '价格已更新' })
+                  const next = await window.api.setPomodoroConfig({
+                    focus: pomoFocus,
+                    brk: pomoBreak
+                  })
+                  setPomoFocus(next.focus)
+                  setPomoBreak(next.brk)
+                  setMsg({ kind: 'ok', text: '番茄钟已保存' })
                 }}
               >
-                保存价格
+                保存番茄钟
               </button>
-            </div>
-          </>
-        ) : (
-          <div className="placeholder" style={{ padding: 12 }}>加载中…</div>
-        )}
 
-        {/* P13-C：用量预警阈值配置 */}
-        <div className="cost-alert-config" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
-          <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>用量预警阈值</h4>
-          <p className="muted" style={{ fontSize: 11.5, margin: '0 0 8px' }}>
-            当月 AI 费用达到阈值时弹 toast 提醒。warning 是温和提醒，exceeded 是强警告。
-          </p>
-          <div className="row" style={{ alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
-              <input
-                type="checkbox"
-                checked={costAlert.enabled}
-                onChange={(e) => setCostAlert({ ...costAlert, enabled: e.target.checked })}
-              />
-              启用预警
-            </label>
-            <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
-              warning ¥
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={costAlert.warning}
-                onChange={(e) => setCostAlert({ ...costAlert, warning: Number(e.target.value) || 0 })}
-                style={{ width: 60 }}
-                disabled={!costAlert.enabled}
-              />
-            </label>
-            <label className="row" style={{ gap: 4, fontSize: 12.5 }}>
-              exceeded ¥
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={costAlert.exceeded}
-                onChange={(e) => setCostAlert({ ...costAlert, exceeded: Number(e.target.value) || 0 })}
-                style={{ width: 60 }}
-                disabled={!costAlert.enabled}
-              />
-            </label>
-            <label className="row" style={{ gap: 6, fontSize: 12.5 }}>
-              <input
-                type="checkbox"
-                checked={costAlert.blockOnExceeded}
-                onChange={(e) => setCostAlert({ ...costAlert, blockOnExceeded: e.target.checked })}
-                disabled={!costAlert.enabled}
-              />
-              exceeded 时弹确认（用户可取消）
-            </label>
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={async () => {
-                if (costAlert.warning >= costAlert.exceeded) {
-                  setMsg({ kind: 'err', text: 'warning 必须小于 exceeded' })
-                  return
-                }
-                setMsg(null)
-                const next = await window.api.setCostAlertConfig(costAlert)
-                setCostAlert(next)
-                setMsg({ kind: 'ok', text: '预警配置已保存' })
-                setTimeout(() => setMsg(null), 2000)
-              }}
-            >
-              保存阈值
-            </button>
-            {msg && msg.kind === 'ok' ? <span className="muted" style={{ fontSize: 12 }}>{msg.text}</span> : null}
-            {msg && msg.kind === 'err' && msg.text.includes('warning') ? (
-              <span style={{ color: 'var(--danger)', fontSize: 12 }}>{msg.text}</span>
-            ) : null}
-          </div>
-        </div>
+              <hr className="soft" />
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h3 className="sub" style={{ margin: 0, fontSize: 15 }}>长期写作要求模板</h3>
+                  <p className="muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+                    这里维护的是全局模板。章节页里的“长期写作要求”会读取这里的模板列表。
+                  </p>
+                </div>
+                <div className="btn-group">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() =>
+                      setWritingTemplates((prev) => [
+                        ...prev,
+                        {
+                          id: newId(),
+                          name: '新模板',
+                          description: '',
+                          requirements: ['']
+                        }
+                      ])
+                    }
+                  >
+                    新增模板
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={async () => {
+                      const normalized = writingTemplates
+                        .map((item) => ({
+                          ...item,
+                          id: item.id.trim() || newId(),
+                          name: item.name.trim(),
+                          description: item.description.trim(),
+                          requirements: normalizeWritingRequirementLines(
+                            item.requirements.join('\n')
+                          )
+                        }))
+                      const invalidTemplate = normalized.find(
+                        (item) => !item.name || item.requirements.length === 0
+                      )
+                      if (invalidTemplate) {
+                        setMsg({
+                          kind: 'err',
+                          text: '请先补全每个模板的名称和要求列表，再保存模板。'
+                        })
+                        return
+                      }
+                      if (typeof writingTemplateApi.setWritingRequirementTemplates !== 'function') {
+                        setMsg({
+                          kind: 'err',
+                          text: '当前应用还没加载到新的模板设置接口，请重启桌面应用后再试。'
+                        })
+                        return
+                      }
+                      const saved = await writingTemplateApi.setWritingRequirementTemplates(
+                        normalized
+                      )
+                      setWritingTemplates(saved)
+                      setMsg({ kind: 'ok', text: '写作模板已保存' })
+                    }}
+                  >
+                    保存模板
+                  </button>
+                </div>
+              </div>
 
-        {/* P17-A：按项目 / 按章节 用量统计 */}
-        <div
-          className="by-project-stats"
-          style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}
-        >
-          <h4 style={{ margin: '0 0 6px', fontSize: 12.5 }}>按项目统计</h4>
-          {byProject.length === 0 ? (
-            <div className="muted" style={{ fontSize: 11.5 }}>
-              还没有项目用量记录（开始续写后会自动汇总）
+              <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                {writingTemplates.map((template, index) => (
+                  <div
+                    key={template.id}
+                    className="card"
+                    style={{ padding: 12, background: 'var(--surface)', border: '1px solid var(--line)' }}
+                  >
+                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                      <strong style={{ fontSize: 13.5 }}>模板 {index + 1}</strong>
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() =>
+                          setWritingTemplates((prev) => prev.filter((item) => item.id !== template.id))
+                        }
+                        disabled={writingTemplates.length <= 1}
+                      >
+                        删除
+                      </button>
+                    </div>
+
+                    <div className="field" style={{ marginTop: 10 }}>
+                      <label>模板名称</label>
+                      <input
+                        className="input"
+                        value={template.name}
+                        onChange={(e) =>
+                          setWritingTemplates((prev) =>
+                            prev.map((item) =>
+                              item.id === template.id ? { ...item, name: e.target.value } : item
+                            )
+                          )
+                        }
+                      />
+                    </div>
+
+                    <div className="field">
+                      <label>模板说明</label>
+                      <input
+                        className="input"
+                        value={template.description}
+                        onChange={(e) =>
+                          setWritingTemplates((prev) =>
+                            prev.map((item) =>
+                              item.id === template.id
+                                ? { ...item, description: e.target.value }
+                                : item
+                            )
+                          )
+                        }
+                      />
+                    </div>
+
+                    <div className="field">
+                      <label>要求列表</label>
+                      <textarea
+                        className="textarea"
+                        style={{ minHeight: 120 }}
+                        value={template.requirements.join('\n')}
+                        onChange={(e) =>
+                          setWritingTemplates((prev) =>
+                            prev.map((item) =>
+                              item.id === template.id
+                                ? {
+                                    ...item,
+                                    requirements: e.target.value.split(/\r?\n/)
+                                  }
+                                : item
+                            )
+                          )
+                        }
+                        placeholder="每行一条要求，例如：\n开头三段内抛出冲突\n结尾必须留钩子"
+                      />
+                      <p className="meta" style={{ marginTop: 6 }}>
+                        每行一条，保存时会自动去掉序号、空行和重复项。
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-          ) : (
-            <ul className="by-project-list">
-              {byProject.map((p) => (
-                <li key={p.projectId} className="by-project-row">
-                  <span className="project-id" title={p.projectId}>
-                    {p.projectId.length > 20 ? p.projectId.slice(0, 20) + '…' : p.projectId}
-                  </span>
-                  <span className="meta">
-                    {(p.total / 1000).toFixed(1)}k ·{' '}
-                    {p.cost < 1 ? `¥${p.cost.toFixed(3)}` : `¥${p.cost.toFixed(2)}`} · {p.calls}次
-                  </span>
-                </li>
-              ))}
-            </ul>
           )}
-
-          <h4 style={{ margin: '12px 0 6px', fontSize: 12.5 }}>按章节统计</h4>
-          {byChapter.length === 0 ? (
-            <div className="muted" style={{ fontSize: 11.5 }}>
-              还没有章节用量记录
-            </div>
-          ) : (
-            <ul className="by-project-list">
-              {byChapter.slice(0, 10).map((c) => (
-                <li key={`${c.projectId}-${c.chapterNumber}`} className="by-project-row">
-                  <span className="project-id" title={c.projectId}>
-                    {c.projectId.length > 14 ? c.projectId.slice(0, 14) + '…' : c.projectId}
-                  </span>
-                  <span className="chapter-tag">第 {c.chapterNumber} 章</span>
-                  <span className="meta">
-                    {(c.total / 1000).toFixed(1)}k ·{' '}
-                    {c.cost < 1 ? `¥${c.cost.toFixed(3)}` : `¥${c.cost.toFixed(2)}`} · {c.calls}次
-                  </span>
-                </li>
-              ))}
-              {byChapter.length > 10 && (
-                <li className="muted" style={{ fontSize: 11, padding: '4px 0' }}>
-                  …还有 {byChapter.length - 10} 章未展示
-                </li>
-              )}
-            </ul>
-          )}
         </div>
-      </div>
-
-      {/* AI 高频词配置 */}
-      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
-        <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
-          <h3 className="sub" style={{ margin: 0 }}>AI 高频词</h3>
-          <label
-            className="row"
-            style={{ gap: 6, fontSize: 12.5, marginLeft: 'auto', alignItems: 'center' }}
-          >
-            <input
-              type="checkbox"
-              checked={aiHighFreq.enabled}
-              onChange={(e) => {
-                const next = { ...aiHighFreq, enabled: e.target.checked }
-                setAiHighFreq(next)
-                void window.api.setAiHighFreqConfig({ enabled: e.target.checked })
-              }}
-            />
-            启用高亮
-          </label>
-        </div>
-        <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-          配置 AI 常见高频词（如"微微一笑"、"眉头一皱"），正文会高亮匹配；并为每个词附一句改写范例便于润色。
-        </p>
-        <AiHighFreqEditor
-          words={aiHighFreq.words}
-          disabled={!aiHighFreq.enabled}
-          onChange={(words) => {
-            const next = { ...aiHighFreq, words }
-            setAiHighFreq(next)
-          }}
-          onSave={async (words) => {
-            const saved = await window.api.setAiHighFreqConfig({ words })
-            setAiHighFreq(saved)
-            setMsg({ kind: 'ok', text: 'AI 高频词已保存' })
-          }}
-        />
-      </div>
-
-      {/* 写作目标 + 番茄钟 */}
-      <div className="card" style={{ maxWidth: 600, marginTop: 16 }}>
-        <h3 className="sub">写作节奏</h3>
-        <div className="field" style={{ marginTop: 8 }}>
-          <label>每日字数目标</label>
-          <div className="row" style={{ gap: 8 }}>
-            <input
-              className="input"
-              type="number"
-              step="100"
-              value={dailyGoal}
-              onChange={(e) => setDailyGoal(Number(e.target.value))}
-              style={{ flex: 1 }}
-            />
-            <button
-              className="btn btn-sm"
-              onClick={async () => {
-                await window.api.setDailyWordGoal(dailyGoal)
-                setMsg({ kind: 'ok', text: '目标已保存' })
-              }}
-            >
-              保存
-            </button>
-          </div>
-        </div>
-        <div className="row" style={{ gap: 12 }}>
-          <div className="field" style={{ flex: 1 }}>
-            <label>专注分钟</label>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              value={pomoFocus}
-              onChange={(e) => setPomoFocus(Number(e.target.value))}
-            />
-          </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label>休息分钟</label>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              value={pomoBreak}
-              onChange={(e) => setPomoBreak(Number(e.target.value))}
-            />
-          </div>
-        </div>
-        <button
-          className="btn btn-sm"
-          onClick={async () => {
-            const next = await window.api.setPomodoroConfig({
-              focus: pomoFocus,
-              brk: pomoBreak
-            })
-            setPomoFocus(next.focus)
-            setPomoBreak(next.brk)
-            setMsg({ kind: 'ok', text: '番茄钟已保存' })
-          }}
-        >
-          保存番茄钟
-        </button>
       </div>
     </div>
   )

@@ -8,6 +8,7 @@ import { writeTextAtomic } from './atomic'
 import { join } from 'path'
 import type { LlmService } from './llm-service'
 import type { MainOutline, DetailedOutlineItem, RhythmEntry, Volume } from '../../shared/types'
+import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 
 const NOT_IMPLEMENTED = '该操作需 Phase 3b（LLM 生成输出 v3.2）支持，当前未实现。'
 
@@ -56,7 +57,13 @@ export class OutlineService {
         volume: d.volume,
         emotion: d.emotion,
         climax: d.climax,
-        writingRequirements: d.writingRequirements
+        writingRequirements: composeWritingRequirements(
+          d.writingRequirementTemplateId,
+          d.writingRequirementCustomText,
+          d.writingRequirements
+        ),
+        writingRequirementTemplateId: d.writingRequirementTemplateId,
+        writingRequirementCustomText: d.writingRequirementCustomText
       }))
     }
     const rhythm = await this.getRhythm(projectId)
@@ -93,7 +100,9 @@ export class OutlineService {
       goldenLine: patch.goldenLine,
       emotion: patch.emotion,
       climax: patch.climax,
-      writingRequirements: patch.writingRequirements
+      writingRequirements: patch.writingRequirements,
+      writingRequirementTemplateId: patch.writingRequirementTemplateId,
+      writingRequirementCustomText: patch.writingRequirementCustomText
     }
 
     await writer.update(chapterNumber, patchForWriter)
@@ -118,7 +127,9 @@ export class OutlineService {
       volume: updated.volume,
       emotion: updated.emotion,
       climax: updated.climax,
-      writingRequirements: updated.writingRequirements
+      writingRequirements: updated.writingRequirements,
+      writingRequirementTemplateId: updated.writingRequirementTemplateId,
+      writingRequirementCustomText: updated.writingRequirementCustomText
     }
   }
 

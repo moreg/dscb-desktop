@@ -94,10 +94,13 @@ export function registerWriteIpc(service: WriteService): void {
 
   ipcMain.handle(
     'write:reviewChapter',
-    async (e, payload: { projectId: string; chapterNumber: number; requestId: string }) => {
+    async (
+      e,
+      payload: { projectId: string; chapterNumber: number; content?: string; requestId: string }
+    ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.reviewChapterStream(payload.projectId, payload.chapterNumber, {
+        await service.reviewChapterStream(payload.projectId, payload.chapterNumber, payload.content, {
           onToken: (token) =>
             win?.webContents.send('llm:token', {
               requestId: payload.requestId,

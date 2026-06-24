@@ -286,7 +286,7 @@ function NewChapterDialog({
             取消
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={saving || !title.trim()}>
-            {saving ? '创建中…' : '落笔'}
+            {saving ? '创建中…' : '创建'}
           </button>
         </div>
       </div>

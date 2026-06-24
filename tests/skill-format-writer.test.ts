@@ -135,6 +135,29 @@ describeIf('Phase 3 写入回环（真实样本复制到临时目录）', () => 
     expect(detailText).toContain('- **本章写作要求**：必须引入反派线索')
   })
 
+  it('DetailedOutlineWriter round-trip：写作模板与自定义补充会一起落盘', async () => {
+    const writer = new DetailedOutlineWriter(dir)
+    await writer.update(2, {
+      writingRequirementTemplateId: 'dialogue-character-voice',
+      writingRequirementCustomText: '结尾必须用一句带刺的对话收束',
+      writingRequirements:
+        '人物对话要符合各自身份、性格和当下情绪\n结尾必须用一句带刺的对话收束'
+    })
+    const details = await new DetailedOutlineMdRepo(dir).listAll()
+    const ch2 = details.find((d) => d.chapterNumber === 2)
+    expect(ch2?.writingRequirementTemplateId).toBe('dialogue-character-voice')
+    expect(ch2?.writingRequirementCustomText).toBe('结尾必须用一句带刺的对话收束')
+    expect(ch2?.writingRequirements).toContain('人物对话要符合各自身份、性格和当下情绪')
+    expect(ch2?.writingRequirements).toContain('结尾必须用一句带刺的对话收束')
+
+    const detailText = readFileSync(join(dir, '细纲', '第01卷.md'), 'utf-8')
+    expect(detailText).toContain('- **写作要求模板**：dialogue-character-voice')
+    expect(detailText).toContain('- **自定义补充要求**：结尾必须用一句带刺的对话收束')
+    expect(detailText).toContain('- **本章写作要求**：')
+    expect(detailText).toContain('  - 人物对话要符合各自身份、性格和当下情绪')
+    expect(detailText).toContain('  - 结尾必须用一句带刺的对话收束')
+  })
+
   it('大纲 round-trip：标题改后重新解析节奏回退表一致', async () => {
     const writer = new ChapterRhythmWriter(dir)
     await writer.update(10, { title: '第十章新名' })

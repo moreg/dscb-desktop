@@ -34,6 +34,22 @@ export interface ChapterStats {
   emotionCurve: number[]
 }
 
+function countDialogueChars(text: string): number {
+  const patterns = [
+    /“([^”]+)”/g,
+    /"([^"\n]+)"/g,
+    /「([^」]+)」/g,
+    /『([^』]+)』/g
+  ]
+  let total = 0
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      total += countWords(match[1] ?? '')
+    }
+  }
+  return total
+}
+
 function countOccurrences(text: string, words: string[]): number {
   let n = 0
   for (const w of words) {
@@ -68,9 +84,7 @@ export function analyze(text: string, segments = 12): ChapterStats {
     0
   )
   // 对话比例：成对「」/"" 的字符占总字数
-  let dialogueChars = 0
-  const dq = trimmed.match(/[「」""]/g)
-  if (dq) dialogueChars = dq.length
+  const dialogueChars = countDialogueChars(trimmed)
   const dialogueRatio = wordCount === 0 ? 0 : dialogueChars / wordCount
   // 虚词比例
   const fillerHits = countOccurrences(trimmed, FILLER)
