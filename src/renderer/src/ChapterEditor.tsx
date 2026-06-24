@@ -1412,32 +1412,35 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             <button className="btn btn-ghost btn-sm" onClick={onBack} title="返回章节列表" style={{ marginRight: 6 }}>
               ← 返回
             </button>
-            {allChapters.length > 0 && onNavigateChapter && (
-              <div className="btn-group" style={{ marginRight: 12 }}>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => {
-                    const idx = allChapters.findIndex((c) => c.chapterNumber === chapterNumber)
-                    if (idx > 0) onNavigateChapter(allChapters[idx - 1].chapterNumber)
-                  }}
-                  disabled={allChapters.findIndex((c) => c.chapterNumber === chapterNumber) <= 0}
-                >
-                  上一章
-                </button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => {
-                    const idx = allChapters.findIndex((c) => c.chapterNumber === chapterNumber)
-                    if (idx !== -1 && idx < allChapters.length - 1) {
-                      onNavigateChapter(allChapters[idx + 1].chapterNumber)
-                    }
-                  }}
-                  disabled={allChapters.findIndex((c) => c.chapterNumber === chapterNumber) >= allChapters.length - 1}
-                >
-                  下一章
-                </button>
-              </div>
-            )}
+            {(() => {
+              const idx = allChapters.findIndex((c) => c.chapterNumber === chapterNumber)
+              return (
+                allChapters.length > 0 && onNavigateChapter && (
+                  <div className="btn-group" style={{ marginRight: 12 }}>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => {
+                        if (idx > 0) onNavigateChapter(allChapters[idx - 1].chapterNumber)
+                      }}
+                      disabled={idx <= 0}
+                    >
+                      上一章
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => {
+                        if (idx !== -1 && idx < allChapters.length - 1) {
+                          onNavigateChapter(allChapters[idx + 1].chapterNumber)
+                        }
+                      }}
+                      disabled={idx === -1 || idx >= allChapters.length - 1}
+                    >
+                      下一章
+                    </button>
+                  </div>
+                )
+              )
+            })()}
             <div>
               <h1 style={{ display: 'inline', fontSize: 17, fontWeight: 700 }}>第 {data.meta.chapterNumber} 章 · {data.meta.title}</h1>
               <p className="desc" style={{ marginTop: 2 }}>
