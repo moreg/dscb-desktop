@@ -917,6 +917,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setAutoAudit(null)
     setReviewText('')
     setFlowSyncTrigger(0)
+    // 续写会用全新正文替换整章，旧的"已应用改写"记录（含 oldSnippet/newText、
+    // 用于 ✎ AI 改稿建议 的 applied 标记）都对不上新正文了。必须一并清掉，
+    // 否则新审稿结果的 index 会错误匹配到残留 rewriteHistory 里的 applied 标记，
+    // 导致"明明没点应用却显示已应用"。redoStack 是配套撤销/重做栈，一起清。
+    setRewriteHistory([])
+    setRedoStack([])
     const myGen = ++genRef.current
     let finalDraft = ''
     try {
@@ -961,52 +967,63 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         return
       }
       setDirty(true)
-      // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核
-      try {
-        const report = await window.api.auditChapter(projectId, finalDraft)
-        if (genRef.current !== myGen) return
-        setAutoAudit(report)
-      } catch {
-        // 质检失败不阻断
-      }
-      if (await window.api.hasLlmKey()) {
-        setReviewOpen(true)
-        setReviewing(true)
-        setReviewText('')
-        const myReview = ++reviewRef.current
-        try {
-          const r = await window.api.reviewChapterStream(
-            projectId,
-            chapterNumber,
-            finalDraft,
-            (token, done) => {
-              if (reviewRef.current !== myReview) return
-              if (token) setReviewText((t) => t + token)
-              if (done) {
-                setReviewing(false)
-                refreshUsage() // P10-A：审稿完成更新今日用量
-              }
-            }
-          )
-          if (reviewRef.current !== myReview) return
-          if (!r.ok) {
-            setReviewing(false)
-            setReviewText(
-              (t) =>
-                t +
-                (r.error === 'LLM_AUTH_FAILED'
-                  ? '\n\n⚠ 认证失败，请检查 API Key'
-                  : '\n\n⚠ 生成失败：' + (r.error ?? '未知错误'))
-            )
-          }
-        } catch {
-          if (reviewRef.current === myReview) setReviewing(false)
-        }
-      }
+      // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
       setFlowPanelOpen(true)
       setFlowSyncTrigger((t) => t + 1)
+      // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
+      // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
+      void runPostGenerateAudit(myGen, finalDraft)
+      void runPostGenerateReview(myGen, finalDraft)
     } catch {
       if (genRef.current === myGen) setGenerating(false)
+    }
+  }
+
+  /** 续写后的自动质检：失败静默，不阻断；中途切走则丢弃结果。 */
+  const runPostGenerateAudit = async (myGen: number, finalDraft: string) => {
+    try {
+      const report = await window.api.auditChapter(projectId, finalDraft)
+      if (genRef.current !== myGen) return
+      setAutoAudit(report)
+    } catch {
+      // 质检失败不阻断
+    }
+  }
+
+  /** 续写后的自动审稿：流式填充 reviewText；失败降级为错误提示；中途切走则丢弃结果。 */
+  const runPostGenerateReview = async (myGen: number, finalDraft: string) => {
+    if (!(await window.api.hasLlmKey())) return
+    setReviewOpen(true)
+    setReviewing(true)
+    setReviewText('')
+    const myReview = ++reviewRef.current
+    try {
+      const r = await window.api.reviewChapterStream(
+        projectId,
+        chapterNumber,
+        finalDraft,
+        (token, done) => {
+          if (reviewRef.current !== myReview) return
+          if (token) setReviewText((t) => t + token)
+          if (done) {
+            setReviewing(false)
+            refreshUsage() // P10-A：审稿完成更新今日用量
+          }
+        }
+      )
+      if (reviewRef.current !== myReview) return
+      if (!r.ok) {
+        setReviewing(false)
+        setReviewText(
+          (t) =>
+            t +
+            (r.error === 'LLM_AUTH_FAILED'
+              ? '\n\n⚠ 认证失败，请检查 API Key'
+              : '\n\n⚠ 生成失败：' + (r.error ?? '未知错误'))
+        )
+      }
+    } catch {
+      if (reviewRef.current === myReview) setReviewing(false)
     }
   }
 
