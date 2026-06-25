@@ -227,4 +227,103 @@ describe('registerLlmIpc handlers', () => {
     const cfg = await store.read()
     expect(cfg.activeId).toBe('p2')
   })
+
+  it('llm:upsertProvider stores temperature when provided', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_t',
+      label: 't',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: TEST_API_KEY,
+      temperature: 0.8
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].temperature).toBeCloseTo(0.8)
+  })
+
+  it('llm:upsertProvider clamps temperature to [0,2]', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_hi',
+      label: 'hi',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: TEST_API_KEY,
+      temperature: 99
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].temperature).toBe(2)
+
+    // 负数同样被 clamp 到 0
+    await handler!(null, {
+      id: 'p_lo',
+      label: 'lo',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: TEST_API_KEY,
+      temperature: -5
+    })
+    const cfg2 = await store.read()
+    expect(cfg2.providers.find((p) => p.id === 'p_lo')!.temperature).toBe(0)
+  })
+
+  it('llm:upsertProvider drops non-numeric temperature (keeps model default)', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_bad',
+      label: 'bad',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: TEST_API_KEY,
+      temperature: 'hot'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].temperature).toBeUndefined()
+  })
+
+  it('llm:listProviders returns temperature in summary', async () => {
+    await store.write({
+      activeId: 'p1',
+      providers: [
+        {
+          id: 'p1',
+          label: 'A',
+          baseUrl: 'https://a.example.com/v1',
+          model: 'm',
+          apiKey: TEST_API_KEY,
+          temperature: 0.7
+        }
+      ]
+    })
+    const handler = handlers.get('llm:listProviders')
+    const out = (await handler!(null)) as { providers: Array<{ temperature?: number }> }
+    expect(out.providers[0].temperature).toBeCloseTo(0.7)
+  })
+
+  it('llm:upsertProvider preserves temperature via apiKey-empty update path', async () => {
+    // 编辑（apiKey 传空保留旧 key）时，新 temperature 应覆盖旧值
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_e',
+      label: 'e',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: TEST_API_KEY,
+      temperature: 0.5
+    })
+    // 第二次只改温度，apiKey 留空
+    await handler!(null, {
+      id: 'p_e',
+      label: 'e',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'm',
+      apiKey: '',
+      temperature: 1.1
+    })
+    const cfg = await store.read()
+    const p = cfg.providers[0]
+    expect(p.apiKey).toBe(TEST_API_KEY) // 旧 key 保留
+    expect(p.temperature).toBeCloseTo(1.1) // 新温度生效
+  })
 })

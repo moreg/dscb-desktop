@@ -26,6 +26,7 @@ function summarize(p: ProviderConfig): ProviderSummary {
     baseUrl: p.baseUrl,
     model: p.model,
     protocol: p.protocol ?? 'openai',
+    temperature: p.temperature,
     hasKey: Boolean(p.apiKey),
     keyMasked: maskKey(p.apiKey)
   }
@@ -57,15 +58,26 @@ function sanitizeProvider(input: unknown): ProviderConfig {
     throw new Error('PROVIDER_INVALID: baseUrl must use http or https')
   }
   if (!model) throw new Error('PROVIDER_INVALID: missing model')
-  return {
+  // temperature：可选，仅接受有限数字，clamp 到 [0,2]；非数字/缺省则不设置（走模型默认）
+  let temperature: number | undefined
+  if (
+    typeof o.temperature === 'number' &&
+    Number.isFinite(o.temperature) &&
+    !Number.isNaN(o.temperature)
+  ) {
+    temperature = Math.min(2, Math.max(0, o.temperature))
+  }
+  const out: ProviderConfig = {
     id,
     label,
     baseUrl: baseUrl.replace(/\/+$/, ''),
     model,
     apiKey: apiKeyRaw,
     protocol,
-    ...(homepage ? { homepage } : {})
+    ...(homepage ? { homepage } : {}),
+    ...(temperature !== undefined ? { temperature } : {})
   }
+  return out
 }
 
 export function registerLlmIpc(secret: SecretStore, service: LlmService): void {

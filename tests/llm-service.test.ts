@@ -281,4 +281,74 @@ describe('LlmService', () => {
     expect(url).toBe('https://example.com/v1/messages')
     fetchSpy.mockRestore()
   })
+
+  it('OpenAI: temperature from provider is sent in request body', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-temp-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [
+        {
+          id: 'p',
+          label: 't',
+          baseUrl: 'https://api.example.com/v1',
+          model: 'm',
+          apiKey: 'k',
+          temperature: 0.6
+        }
+      ]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.temperature).toBeCloseTo(0.6)
+    fetchSpy.mockRestore()
+  })
+
+  it('OpenAI: omits temperature when provider does not set it', async () => {
+    // 默认 provider（无 temperature）→ 走模型默认，不应传该字段
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await service.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.temperature).toBeUndefined()
+    fetchSpy.mockRestore()
+  })
+
+  it('Anthropic: temperature from provider is sent in request body', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-anttemp-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [
+        {
+          id: 'p',
+          label: 't',
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+          model: 'MiniMax-M3',
+          apiKey: 'k',
+          protocol: 'anthropic',
+          temperature: 0.9
+        }
+      ]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['event: message_stop\ndata: {}\n\n'])
+    } as never)
+    await svc.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.temperature).toBeCloseTo(0.9)
+    fetchSpy.mockRestore()
+  })
 })

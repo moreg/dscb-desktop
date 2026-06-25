@@ -16,6 +16,12 @@ export interface GenerateOptions {
   systemPrompt?: string
   /** 临时续写上下文指导语 */
   tempContext?: string
+  /**
+   * 生成上限 token 数。
+   * - 不传时使用 DEFAULT_MAX_TOKENS
+   * - 中文约 1 字 ≈ 1.5~2 token，章节目标字数需换算后留足空间，否则会被物理截断
+   */
+  maxTokens?: number
 }
 
 interface UsageInfo {
@@ -27,6 +33,14 @@ interface UsageInfo {
 function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' {
   return p.protocol ?? 'openai'
 }
+
+/**
+ * 默认单次生成上限（token）。
+ * 中文约 1 字 ≈ 1.5~2 token；典型章节 2500~4000 字需约 8192 token 才不会被截断。
+ * 旧值 4096 只够 ~2000 字，导致"提示词要 2500 字但写不够/突然断尾"。
+ * 调用方可用 GenerateOptions.maxTokens 按目标字数动态覆盖（见 write-service）。
+ */
+const DEFAULT_MAX_TOKENS = 8192
 
 function endpointOf(p: ProviderConfig): string {
   const base = p.baseUrl.replace(/\/+$/, '')
@@ -80,7 +94,13 @@ export class LlmService {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const { url, init } = buildStreamRequest(p, prompt, opts.signal, opts.systemPrompt)
+        const { url, init } = buildStreamRequest(
+          p,
+          prompt,
+          opts.signal,
+          opts.systemPrompt,
+          opts.maxTokens
+        )
         const res = await fetch(url, init)
 
         if (!res.ok) {
@@ -176,20 +196,26 @@ function buildStreamRequest(
   p: ProviderConfig,
   prompt: string,
   signal?: AbortSignal,
-  systemPrompt?: string
+  systemPrompt?: string,
+  maxTokens?: number
 ): { url: string; init: RequestInit } {
   const url = endpointOf(p)
   const init: RequestInit = { method: 'POST', signal }
   const hasSystem = !!systemPrompt && systemPrompt.trim().length > 0
+  // 单次生成上限。中文 1 字 ≈ 1.5~2 token；章节正文约 2500~4000 字，需 8192 才不致截断。
+  const cap = maxTokens && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS
+  // 采样温度：仅在 provider 显式配置时透传，否则走模型默认
+  const hasTemp = typeof p.temperature === 'number' && Number.isFinite(p.temperature)
   if (protocolOf(p) === 'anthropic') {
     init.headers = anthropicHeaders(p.apiKey)
     const body: Record<string, unknown> = {
       model: p.model,
-      max_tokens: 4096,
+      max_tokens: cap,
       messages: [{ role: 'user', content: prompt }],
       stream: true
     }
     if (hasSystem) body.system = systemPrompt
+    if (hasTemp) body.temperature = p.temperature
     init.body = JSON.stringify(body)
   } else {
     init.headers = {
@@ -199,11 +225,14 @@ function buildStreamRequest(
     const messages: Array<{ role: string; content: string }> = []
     if (hasSystem) messages.push({ role: 'system', content: systemPrompt as string })
     messages.push({ role: 'user', content: prompt })
-    init.body = JSON.stringify({
+    const body: Record<string, unknown> = {
       model: p.model,
       messages,
+      max_tokens: cap,
       stream: true
-    })
+    }
+    if (hasTemp) body.temperature = p.temperature
+    init.body = JSON.stringify(body)
   }
   return { url, init }
 }

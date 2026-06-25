@@ -44,6 +44,13 @@ export interface ProviderConfig {
    * - 'anthropic'：POST {baseUrl}/v1/messages，x-api-key + anthropic-version
    */
   protocol?: ProviderProtocol
+  /**
+   * 采样温度（模型强度/创造性）。
+   * - 范围 0~2，缺省/未设置时不传该参数（走模型默认）
+   * - 续写正文建议 0.7~0.9，改写/审阅建议 0.3~0.5
+   * main 端写入前会 clamp 到 [0,2]
+   */
+  temperature?: number
 }
 
 /** 列表接口返回的脱敏 provider —— 永不返回明文 apiKey */

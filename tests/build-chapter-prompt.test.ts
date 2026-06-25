@@ -94,7 +94,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('以下要求必须全部落实到正文里')
     expect(user).toContain('下笔前先自检一次')
     expect(user).toContain('林远')
-    expect(user).toContain('约 2500 字')
+    // 未填细纲字数预估 → 兜底 2500，且为强约束"不少于"
+    expect(user).toContain('正文不少于 2500 字')
+    expect(user).not.toContain('约 2500 字')
   })
 
   it('renders chapter writing requirements as a checklist', async () => {
@@ -202,6 +204,38 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const otherSection = user.slice(otherIdx)
     expect(otherSection).toContain('赵乾')
   })
+
+  it('parses wordEstimate from chapter detail into a hard minimum and exposes targetWords', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远突破筑基',
+      wordEstimate: '约 3000 字'
+    })
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user, system, targetWords } = await service.buildChapterPrompt(projectId, 2)
+
+    // 细纲填了 3000 → 强约束用 3000，不再是兜底的 2500
+    expect(targetWords).toBe(3000)
+    expect(user).toContain('正文不少于 3000 字')
+    expect(user).not.toContain('不少于 2500 字')
+    // system prompt 不应再写死 2500（避免与 user prompt 的具体字数打架）
+    expect(system).not.toContain('2500')
+  })
+
+  it('wordEstimate range "2500-3000" takes the upper bound', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远突破筑基',
+      wordEstimate: '2500-3000'
+    })
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user, targetWords } = await service.buildChapterPrompt(projectId, 2)
+    expect(targetWords).toBe(3000)
+    expect(user).toContain('正文不少于 3000 字')
+  })
 })
 
 describe('generateChapterStream passes systemPrompt to llm', () => {
@@ -232,6 +266,27 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     expect(opts.systemPrompt).toBeDefined()
     expect(opts.systemPrompt).toContain('章末结尾硬性原则')
     expect(opts.meta?.feature).toBe('chapter')
+    // 默认目标 2500 → 反算 maxTokens 应高于旧的硬编码 4096
+    expect(opts.maxTokens).toBeDefined()
+    expect(opts.maxTokens!).toBeGreaterThan(4096)
+  })
+
+  it('derives maxTokens from wordEstimate so longer chapters are not truncated', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远突破筑基',
+      wordEstimate: '约 4000 字'
+    })
+    const generateStream = vi.fn().mockResolvedValue('正文')
+    const llm = { generateStream } as unknown as LlmService
+
+    const service = new WriteService(ps, llm)
+    await service.generateChapterStream(projectId, 2)
+
+    const opts = (generateStream as ReturnType<typeof vi.fn>).mock.calls[0][1] as GenerateOptions
+    // 4000 字 × 1.7 × 1.3 ≈ 8840
+    expect(opts.maxTokens).toBeGreaterThanOrEqual(8800)
   })
 })
 

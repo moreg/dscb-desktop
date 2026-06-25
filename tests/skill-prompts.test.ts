@@ -109,7 +109,9 @@ describe('buildSystemPrompt', () => {
 
   it('embeds output rules', () => {
     const prompt = buildSystemPrompt()
-    expect(prompt).toContain('2500')
+    // 字数不再在 system prompt 写死具体值，改为"以下文目标字数为硬性下限"
+    expect(prompt).not.toContain('2500')
+    expect(prompt).toContain('硬性下限')
     expect(prompt).toContain('Markdown')
   })
 

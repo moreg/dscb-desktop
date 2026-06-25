@@ -1050,6 +1050,35 @@ function ProviderRow({
   onActivate: () => void
   onDelete: () => void
 }) {
+  const [tempDraft, setTempDraft] = useState<number | null>(
+    typeof provider.temperature === 'number' ? provider.temperature : null
+  )
+  // provider 切换后同步草稿（例如重新拉取列表）
+  useEffect(() => {
+    setTempDraft(typeof provider.temperature === 'number' ? provider.temperature : null)
+  }, [provider.id, provider.temperature])
+
+  const persistTemp = async (v: number | null) => {
+    setTempDraft(v)
+    try {
+      // apiKey 传空 → main 端保留旧 key；只更新 temperature
+      await window.api.upsertProvider({
+        id: provider.id,
+        label: provider.label,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKey: '',
+        protocol: provider.protocol,
+        ...(v === null ? {} : { temperature: v })
+      })
+    } catch {
+      // 失败回滚到原值，避免滑块与存储不一致
+      setTempDraft(
+        typeof provider.temperature === 'number' ? provider.temperature : null
+      )
+    }
+  }
+
   return (
     <li
       className="card"
@@ -1087,6 +1116,41 @@ function ProviderRow({
           </div>
           <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
             {provider.baseUrl || '(未填 baseUrl)'} · {provider.model || '(未填 model)'}
+          </div>
+          {/* 模型强度（采样温度）：可拖动调节，即时保存 */}
+          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>模型强度</span>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={0.1}
+              value={tempDraft ?? 1}
+              onChange={(e) => setTempDraft(Number(e.target.value))}
+              onMouseUp={(e) => persistTemp(Number((e.target as HTMLInputElement).value))}
+              onTouchEnd={(e) => persistTemp(Number((e.target as HTMLInputElement).value))}
+              style={{ width: 160 }}
+            />
+            <span style={{ fontSize: 13, minWidth: 92, fontFamily: 'var(--font-mono)' }}>
+              {tempDraft === null ? '模型默认' : `温度 ${tempDraft.toFixed(1)}`}
+            </span>
+            <button
+              className="btn btn-sm"
+              style={{ padding: '2px 8px', fontSize: 12 }}
+              onClick={() => persistTemp(null)}
+              title="清除自定义温度，使用模型默认值"
+            >
+              默认
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>
+              {tempDraft === null
+                ? ''
+                : tempDraft <= 0.5
+                  ? '稳定（适合改写/审阅）'
+                  : tempDraft <= 1.0
+                    ? '均衡（适合续写）'
+                    : '发散（更有惊喜，易跑偏）'}
+            </span>
           </div>
         </div>
         <div className="btn-group">

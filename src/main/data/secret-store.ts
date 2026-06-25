@@ -19,7 +19,9 @@ const providerConfigSchema = z.object({
   ),
   model: z.string().min(1).max(255),
   apiKey: z.string().max(1000),
-  protocol: z.enum(['openai', 'anthropic']).optional()
+  protocol: z.enum(['openai', 'anthropic']).optional(),
+  homepage: z.string().max(2048).optional(),
+  temperature: z.number().min(0).max(2).optional()
 })
 
 const providersConfigSchema = z.object({

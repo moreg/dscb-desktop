@@ -45,6 +45,8 @@ import { composeWritingRequirements } from '../../shared/writing-requirement-tem
 export interface ChapterPrompt {
   system: string
   user: string
+  /** 本章目标字数（来自细纲「字数预估」，解析失败兜底 TARGET_WORDS）。供调用方反算 maxTokens。 */
+  targetWords?: number
 }
 
 /**
@@ -58,6 +60,47 @@ const PREV_TAIL_CHARS = 1500
  * 基于典型网文节奏设定，约 2500 字/章。
  */
 const TARGET_WORDS = 2500
+
+/**
+ * 字数预估的兜底下限/上限，防止用户在细纲里填出极端值（如 0 或 50000）。
+ */
+const MIN_TARGET_WORDS = 800
+const MAX_TARGET_WORDS = 8000
+
+/**
+ * 从细纲「字数预估」文本解析出整数目标字数。
+ * 容忍多种写法：「约 2500 字」「2500-3000」「2500~3000」「不少于3000」。
+ * 解析失败或无细纲时返回 undefined，由调用方决定兜底值。
+ */
+function parseWordEstimate(raw: string | undefined): number | undefined {
+  if (!raw) return undefined
+  // 取第一个出现的数字区间，取其上限（"2500-3000" → 3000，"约 2500" → 2500）
+  const range = raw.match(/(\d{3,5})\s*[-~到]\s*(\d{3,5})/)
+  if (range) {
+    const high = Number(range[2])
+    if (Number.isFinite(high)) return clampTargetWords(high)
+  }
+  const single = raw.match(/(\d{3,5})/)
+  if (single) {
+    const n = Number(single[1])
+    if (Number.isFinite(n)) return clampTargetWords(n)
+  }
+  return undefined
+}
+
+function clampTargetWords(n: number): number {
+  return Math.min(MAX_TARGET_WORDS, Math.max(MIN_TARGET_WORDS, n))
+}
+
+/**
+ * 按目标字数反算生成 token 上限，留出约 30% 余量。
+ * 中文 1 字 ≈ 1.7 token（取 1.5~2 的中位偏高，避免临界截断）。
+ * 最低不低于 DEFAULT_MAX_TOKENS，保证小目标章节也不被误伤。
+ */
+function tokensForWords(words: number): number {
+  const needed = Math.ceil(words * 1.7 * 1.3)
+  return Math.max(needed, 8192)
+}
 
 export class WriteService {
   constructor(
@@ -87,6 +130,8 @@ export class WriteService {
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
     const system = buildSystemPrompt(project.genre, style, overrides)
+    const targetWords =
+      parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
     const user = renderUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -99,10 +144,11 @@ export class WriteService {
       foreshadowings: ctx.foreshadowings,
       characters: ctx.characters,
       chapterNumber,
+      targetWords,
       tempContext
     })
 
-    return { system, user }
+    return { system, user, targetWords }
   }
 
   async generateChapterStream(
@@ -113,9 +159,11 @@ export class WriteService {
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     const prompt = await this.buildChapterPrompt(projectId, chapterNumber, styleProfileId, opts.tempContext)
+    const targetWords = prompt.targetWords ?? TARGET_WORDS
     return this.llm.generateStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
+      maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
     })
   }
@@ -1024,6 +1072,8 @@ interface RenderInput {
   foreshadowings: Foreshadowing[]
   characters: Character[]
   chapterNumber: number
+  /** 本章目标字数（用于强约束 LLM 写够）。 */
+  targetWords: number
   tempContext?: string
 }
 
@@ -1176,7 +1226,7 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
   parts.push(
-    `约 ${TARGET_WORDS} 字，按本章细纲剧情点顺序展开，章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
+    `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
   )
   if (chapterRequirements) {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】。如果没有，先补足再输出。`)
