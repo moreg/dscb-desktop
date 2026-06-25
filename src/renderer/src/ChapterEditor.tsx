@@ -26,6 +26,15 @@ import {
   type RewriteEntry
 } from '../../main/data/rewrite-history'
 import {
+  parseSuggestions,
+  isRewritable,
+  applyCandidate,
+  buildReviewKey,
+  parseReviewIndex,
+  computeSuggestionPositions,
+  type ReviewSuggestion
+} from '../../shared/review-suggestions'
+import {
   loadState,
   saveState,
   getLocalStorage
@@ -70,12 +79,6 @@ const SOURCE_LABEL: Record<ChapterSource, string> = {
   reviewed: '润色'
 }
 
-interface ReviewSuggestion {
-  quote: string
-  advice: string
-  why: string
-}
-
 interface CastSuggestion {
   name: string
   reason: string
@@ -84,31 +87,6 @@ interface CastSuggestion {
   applied: boolean
   /** 匹配到的人物 id；undefined 表示未在人物库中 */
   characterId?: string
-}
-
-/** 把 LLM 流式输出的"原文 → 建议 → 理由"格式解析成结构化建议 */
-function parseSuggestions(text: string): ReviewSuggestion[] {
-  // 按空行分段；每段查找 原文/建议/理由 标签
-  const blocks = text.split(/\n{2,}/)
-  const out: ReviewSuggestion[] = []
-  for (const b of blocks) {
-    if (!b.trim()) continue
-    const find = (label: string) => {
-      const re = new RegExp(`[【\\[\\]】]?\\s*${label}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n[【\\[\\]】]?\\s*(?:原文|建议|理由)|$)`)
-      const m = b.match(re)
-      return m ? m[1].trim() : ''
-    }
-    const quote = find('原文')
-    const advice = find('建议')
-    const why = find('理由')
-    if (advice || quote) {
-      out.push({ quote, advice, why })
-    } else {
-      // 没标签时整段作为建议
-      out.push({ quote: '', advice: b.trim(), why: '' })
-    }
-  }
-  return out
 }
 
 export default function ChapterEditor({
@@ -1296,48 +1274,104 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const suggestions = useMemo(() => (reviewText ? parseSuggestions(reviewText) : []), [reviewText])
 
-  const handleApplySuggestion = (quote: string, advice: string, index: number) => {
+  /**
+   * 从 rewriteHistory 反向推导哪些 AI 改稿建议已经应用：
+   * pushRewrite 时用 buildReviewKey(index, pos) 作为 violationKey，
+   * 撤销时会从 history 移除，所以这个集合天然与撤销/重做同步——
+   * 不需要单独维护 appliedSuggestionIndexes 状态。
+   */
+  const appliedReviewIndexes = useMemo(() => {
+    const set = new Set<number>()
+    for (const e of rewriteHistory) {
+      if (!e.violationKey) continue
+      const idx = parseReviewIndex(e.violationKey)
+      if (idx != null) set.add(idx)
+    }
+    return set
+  }, [rewriteHistory])
+
+  // 同 quote 多条建议依次匹配 draft 中的下一处，避免 indexOf 永远命中首处导致错位/重复替换。
+  const suggestionPositions = useMemo(
+    () => computeSuggestionPositions(suggestions, draft, appliedReviewIndexes),
+    [suggestions, draft, appliedReviewIndexes]
+  )
+
+  const handleApplySuggestion = (quote: string, candidate: string, index: number) => {
     if (!quote) {
       setUndoToast({ message: '此建议无匹配原文，无法自动应用。建议直接复制。', type: 'warning' })
       return
     }
-    const pos = draft.indexOf(quote)
+    const check = isRewritable(candidate, quote)
+    if (!check.ok) {
+      setUndoToast({ message: check.reason ?? '该建议无法自动应用，请手动修改或复制。', type: 'warning' })
+      return
+    }
+    const pos = suggestionPositions[index] ?? -1
     if (pos === -1) {
       setUndoToast({ message: '未在正文中找到对应的原文片段，可能已被修改。', type: 'warning' })
       return
     }
-    const nextDraft = draft.slice(0, pos) + advice + draft.slice(pos + quote.length)
+    const nextDraft = draft.slice(0, pos) + candidate + draft.slice(pos + quote.length)
     setDraft(nextDraft)
     setDirty(true)
-    pushRewrite(quote, advice, `ai-review-${index}-${pos}`)
+    pushRewrite(quote, candidate, buildReviewKey(index, pos))
     setUndoToast({ message: '已应用改稿建议到正文', type: 'info' })
   }
 
   const handleApplyAllSuggestions = () => {
     let nextDraft = draft
     let appliedCount = 0
-    const sorted = [...suggestions]
-      .map((s, i) => ({ ...s, originalIndex: i, pos: draft.indexOf(s.quote) }))
-      .filter(item => item.quote && item.pos !== -1)
-      .sort((a, b) => b.pos - a.pos)
+    let skippedConflict = 0
+    // 按位置升序、同位置则长 quote 优先（更具体的匹配优先），剔除区间重叠/重复条目。
+    const finalList = [...suggestions]
+      .map((s, i) => {
+        const candidate = applyCandidate(s)
+        return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
+      })
+      .filter(
+        (item) =>
+          !!item.s.quote &&
+          item.pos !== -1 &&
+          !!item.candidate &&
+          isRewritable(item.candidate, item.s.quote).ok
+      )
+      .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
+    // 升序后只有紧邻的上一段可能重叠，用标量 lastEnd 即可判定，无需维护区间数组
+    let lastEnd = -1
+    for (let i = 0; i < finalList.length; i++) {
+      const item = finalList[i]
+      if (item.pos < lastEnd) {
+        skippedConflict++
+        finalList.splice(i, 1)
+        i--
+        continue
+      }
+      lastEnd = item.pos + item.s.quote.length
+    }
+    // 倒序应用，保证靠前位置的下标不被先替换的内容影响
+    finalList.sort((a, b) => b.pos - a.pos)
 
-    for (const item of sorted) {
-      nextDraft = nextDraft.slice(0, item.pos) + item.advice + nextDraft.slice(item.pos + item.quote.length)
-      pushRewrite(item.quote, item.advice, `ai-review-${item.originalIndex}-${item.pos}`)
+    for (const item of finalList) {
+      const candidate = item.candidate as string
+      nextDraft = nextDraft.slice(0, item.pos) + candidate + nextDraft.slice(item.pos + item.s.quote.length)
+      pushRewrite(item.s.quote, candidate, buildReviewKey(item.originalIndex, item.pos))
       appliedCount++
     }
     if (appliedCount > 0) {
       setDraft(nextDraft)
       setDirty(true)
-      setUndoToast({ message: `已成功一键应用 ${appliedCount} 条建议`, type: 'info' })
+      const note = skippedConflict > 0 ? `，跳过 ${skippedConflict} 条重复/冲突` : ''
+      setUndoToast({ message: `已成功一键应用 ${appliedCount} 条建议${note}`, type: 'info' })
     } else {
       setUndoToast({ message: '未找到可直接应用的建议', type: 'warning' })
     }
   }
 
-  const handleFocusSuggestion = (quote: string) => {
+  const handleFocusSuggestion = (quote: string, index: number) => {
     if (!quote || !textareaRef.current) return
-    const pos = draft.indexOf(quote)
+    // 优先用预分配位置（处理同 quote 多处情形）；已应用建议或越界时降级 indexOf 首处。
+    let pos = suggestionPositions[index] ?? -1
+    if (pos === -1) pos = draft.indexOf(quote)
     if (pos === -1) return
     const el = textareaRef.current
     el.focus()
@@ -1461,7 +1495,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   if (!data) return <p className="empty">展卷中…</p>
 
   const STATUS_FULL: Record<ChapterStatus, string> = {
-    outline: '大纲',
+    outline: '待写',
     draft: '草稿',
     reviewed: '润色',
     published: '定稿'
@@ -2399,6 +2433,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           text={reviewText}
           streaming={reviewing}
           suggestions={suggestions}
+          appliedIndexes={appliedReviewIndexes}
           onClose={() => setReviewOpen(false)}
           onCopy={async () => {
             await navigator.clipboard.writeText(reviewText)
@@ -2581,6 +2616,7 @@ function ReviewPanel({
   text,
   streaming,
   suggestions,
+  appliedIndexes,
   onClose,
   onCopy,
   onApplySuggestion,
@@ -2590,11 +2626,12 @@ function ReviewPanel({
   text: string
   streaming: boolean
   suggestions: ReviewSuggestion[]
+  appliedIndexes: ReadonlySet<number>
   onClose: () => void
   onCopy: () => void | Promise<void>
   onApplySuggestion: (quote: string, advice: string, index: number) => void
   onApplyAll: () => void
-  onFocusSuggestion: (quote: string) => void
+  onFocusSuggestion: (quote: string, index: number) => void
 }) {
   return (
     <aside className="review-panel">
@@ -2623,33 +2660,65 @@ function ReviewPanel({
           <div className="review-empty review-streaming">审稿中…</div>
         ) : (
           <>
-            {suggestions.map((s, i) => (
-              <div
-                key={i}
-                className="review-suggestion"
-                onClick={() => onFocusSuggestion(s.quote)}
-                style={{ cursor: s.quote ? 'pointer' : 'default' }}
-              >
-                {s.quote ? <div className="quote">「{s.quote}」</div> : null}
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  建议 · {s.advice}
+            {suggestions.map((s, i) => {
+              const candidate = applyCandidate(s)
+              const rewritable = !!candidate && isRewritable(candidate, s.quote).ok
+              const copyText = [candidate, s.why].filter(Boolean).join('\n\n')
+              const applied = appliedIndexes.has(i)
+              return (
+                <div
+                  key={i}
+                  className={`review-suggestion ${applied ? 'review-suggestion-applied' : ''}`}
+                  onClick={() => onFocusSuggestion(s.quote, i)}
+                  style={{ cursor: s.quote ? 'pointer' : 'default' }}
+                >
+                  {s.quote ? <div className="quote">「{s.quote}」</div> : null}
+                  {s.rewrite ? (
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      改写 · {s.rewrite}
+                    </div>
+                  ) : s.advice ? (
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      说明 · {s.advice}
+                    </div>
+                  ) : null}
+                  {s.why ? <div className="why">理由 · {s.why}</div> : null}
+                  {(rewritable || copyText) && (
+                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      {applied ? (
+                        <span
+                          className="audit-applied-badge"
+                          title="此建议已应用到正文。如需撤销请点编辑器顶部的「↶ 撤销」按钮。"
+                        >
+                          ✓ 已应用
+                        </span>
+                      ) : rewritable && s.quote ? (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onApplySuggestion(s.quote, candidate!, i)
+                          }}
+                        >
+                          应用
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          title="该建议无法自动应用，复制说明后手动修改"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void navigator.clipboard.writeText(copyText).catch(() => {})
+                          }}
+                        >
+                          复制说明
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {s.why ? <div className="why">理由 · {s.why}</div> : null}
-                {s.quote && (
-                  <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onApplySuggestion(s.quote, s.advice, i)
-                      }}
-                    >
-                      应用
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+              )
+            })}
             {streaming ? (
               <div className="review-streaming muted" style={{ fontSize: 12 }}>
                 ▍ 还在收尾…

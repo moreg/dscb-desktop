@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AuditReport, AuditViolation, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
+import { dedupeForbiddenViolations } from './audit-dedupe'
+import { isReviewKey } from '../../shared/review-suggestions'
 
 interface RewriteEntry {
   oldSnippet: string
@@ -200,6 +202,15 @@ export default function ChapterAuditPanel({
   }
 
   const grouped = useMemo(() => groupViolations(report?.violations ?? []), [report])
+  // 展示计数基于去重后的 grouped，与列表实际条数一致；
+  // report.counts 仍含前缀重叠的重复命中（如「轰」+「轰然」），不宜直接用于展示。
+  const { errorCount, warnCount, infoCount } = useMemo(() => {
+    const c = { error: 0, warn: 0, info: 0 }
+    for (const k of Object.keys(grouped) as Array<keyof typeof grouped>) {
+      for (const v of grouped[k] ?? []) c[v.severity]++
+    }
+    return { errorCount: c.error, warnCount: c.warn, infoCount: c.info }
+  }, [grouped])
 
   if (!report && !loading) {
     return (
@@ -214,9 +225,6 @@ export default function ChapterAuditPanel({
     )
   }
 
-  const errorCount = report?.counts.error ?? 0
-  const warnCount = report?.counts.warn ?? 0
-  const infoCount = report?.counts.info ?? 0
   const blocked = mode === 'strict' && errorCount > 0
 
   return (
@@ -282,7 +290,7 @@ export default function ChapterAuditPanel({
                   {(() => {
                     const getRuleName = (key?: string) => {
                       if (!key) return '自定义改写'
-                      if (key.startsWith('ai-review-')) return 'AI 改稿建议'
+                      if (isReviewKey(key)) return 'AI 改稿建议'
                       const v = report?.violations.find(x => violationKey(x) === key)
                       if (v) {
                         if (v.category === 'forbidden_word') return '禁用高频词: ' + v.word
@@ -556,6 +564,10 @@ function groupViolations(violations: AuditViolation[]): GroupedViolations {
   for (const v of violations) {
     out[v.category].push(v)
   }
+  // 禁用词：同一 offset 上前缀重叠的词条会叠多条命中
+  // （如「轰」+「轰然」、「嘴角勾起」+「嘴角勾起一抹弧度」+ 嘴角_弧度 底层模式）。
+  // 展示前按 offset 去重，保留 word 最长（最具体）的那一条，避免重复提醒。
+  out.forbidden_word = dedupeForbiddenViolations(out.forbidden_word)
   // 同 category 内按 severity 排序：error → warn → info
   const order: Record<string, number> = { error: 0, warn: 1, info: 2 }
   for (const k of Object.keys(out) as Array<keyof GroupedViolations>) {
@@ -563,3 +575,4 @@ function groupViolations(violations: AuditViolation[]): GroupedViolations {
   }
   return out
 }
+

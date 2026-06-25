@@ -11,6 +11,7 @@ import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { StyleProfileRepository } from './style-profile-repository'
 import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
+import type { SettingsRepository } from './settings-repository'
 import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
 import { WriteFlowService } from './write-flow-service'
 import { MemoryWriter } from './memory-writer'
@@ -63,7 +64,8 @@ export class WriteService {
     private readonly projectService: ProjectService,
     private readonly llm: LlmService,
     private readonly flow: WriteFlowService = new WriteFlowService(llm),
-    private readonly chapterService: ChapterService = new ChapterService(projectService)
+    private readonly chapterService: ChapterService = new ChapterService(projectService),
+    private readonly settings?: SettingsRepository
   ) {}
 
   async buildChapterPrompt(
@@ -81,7 +83,10 @@ export class WriteService {
 
     const ctx = await this.loadChapterContext(dir, chapterNumber)
 
-    const system = buildSystemPrompt(project.genre, style)
+    const overrides = this.settings
+      ? (await this.settings.get()).chapterRuleOverrides ?? {}
+      : {}
+    const system = buildSystemPrompt(project.genre, style, overrides)
     const user = renderUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -719,10 +724,28 @@ export class WriteService {
         : (await this.chapterService.getChapter(projectId, chapterNumber)).content
     const trimmed = content.length > 8000 ? content.slice(0, 8000) + '\n\n…（后文已省略）' : content
     return [
-      `请审阅下面的小说章节正文，针对性地给出 3-5 条具体修改建议。`,
-      `要求：每条建议用「原文片段 → 建议 → 理由」三段格式；`,
-      `若问题不明显，可少给；不要客套话，不要重写整段。`,
-      `直接输出建议，不要标题或前言。`,
+      `你是资深网文/小说编辑，请以专业编辑视角审阅下面这一章正文，找出影响阅读体验最关键的问题，并给出可以直接落地的修改建议。`,
+      ``,
+      `**优先排查的维度**（不必全覆盖，按本章短板挑最值得改的；最多 8 条，问题不明显时少于 5 条也行，宁可不写也不要凑数）：`,
+      `1. **节奏与张力**：开篇是否有钩子；信息密度是否平均（动作/对白/描写/内心戏的占比是否失衡）；高潮前的铺垫是否到位；有没有该慢的地方一笔带过、该快的地方写拖了。`,
+      `2. **人物塑造**：人物的反应/动作/语言是否符合其性格与处境；有没有"工具人式"的应声虫对白；情绪转折是否有支点，还是凭空跳跃；内心活动是否过载，挤掉了外部行动。`,
+      `3. **场景与画面感**：感官细节（视/听/嗅/触/味）是否单一或缺失；环境描写是否服务于情绪，还是为写而写；动作描写是否清晰可视化，还是模糊的形容词堆砌。`,
+      `4. **用词精准度**：动词是否有力（避免大量"是/有/变得/十分"等弱动词）；形容词/副词是否冗余；有没有套路化的"网文腔"（嘴角勾起、眼神一凛、轰然作响 等）；同义重复或啰嗦表达。`,
+      `5. **对白质感**：对白是否推动情节或揭示性格，还是只在交换信息；语气是否符合人物身份；"说"字句和动作提示词是否单调。`,
+      `6. **逻辑与连贯**：时间线、空间感、因果链有无跳跃或自相矛盾；人物动机是否成立；伏笔和回收是否自然。`,
+      `7. **视角与文风一致性**：视角是否稳定（有无无意识的全知滑入）；叙述距离是否合适；风格是否前后统一。`,
+      ``,
+      `**输出格式**（每条严格按下面四行，标签不能省，条目之间空一行）：`,
+      `原文：从正文里逐字摘录的原句（含标点空格，便于定位）`,
+      `改写：可以直接替换"原文"的成品写法（必须是改后的成品文本本身）`,
+      `理由：用 1-2 句指出问题属于上述哪个维度，并解释这样改为什么更好（要具体，不要泛泛而谈）`,
+      ``,
+      `**硬性要求**：`,
+      `- "原文"必须与正文逐字一致（含标点空格），用于程序自动定位。`,
+      `- "改写"必须是改后的成品本身，能整句替换"原文"，禁止写成"把…改成…/应该…/可以…/拆到…/不要…"这种说明性句式。`,
+      `- 若问题属于结构调整、跨段落删改，无法用单句替换，则"改写"一行写"（无法直接替换）"，并在"理由"里讲清结构怎么调。`,
+      `- 单条建议聚焦一个问题，不要一条里塞两件事。"改写"应当明显优于"原文"（不是同义改写）。`,
+      `- 不要客套话、不要总评/前言/标题、不要打分、不要 Markdown 标记。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
       trimmed

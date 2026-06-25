@@ -8,6 +8,7 @@ import type {
   ProjectData,
   StyleProfile
 } from '../../shared/types'
+import { dedupeForbiddenViolations } from './audit-dedupe'
 
 interface Props {
   projectId: string
@@ -19,7 +20,7 @@ interface Props {
 }
 
 const STATUS_FULL: Record<ChapterStatus, string> = {
-  outline: '大纲',
+  outline: '待写',
   draft: '草稿',
   reviewed: '润色',
   published: '定稿'
@@ -32,6 +33,23 @@ const STATUS_CLASS: Record<ChapterStatus, string> = {
   published: 'status-published'
 }
 
+const CHAPTER_PAGE_SIZE = 20
+
+/** 生成分页页码窗口：首尾页恒显，中间取当前页邻域，超距用省略号收拢。 */
+function pageWindow(current: number, total: number): (number | 'ellipsis')[] {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1)
+  }
+  const tokens: (number | 'ellipsis')[] = [1]
+  const start = Math.max(2, current - 1)
+  const end = Math.min(total - 1, current + 1)
+  if (start > 2) tokens.push('ellipsis')
+  for (let i = start; i <= end; i++) tokens.push(i)
+  if (end < total - 1) tokens.push('ellipsis')
+  tokens.push(total)
+  return tokens
+}
+
 export default function ChapterListPage({
   projectId,
   onOpenChapter
@@ -42,6 +60,7 @@ export default function ChapterListPage({
   const [showNew, setShowNew] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
+  const [page, setPage] = useState(1)
 
   const refresh = () => {
     setLoading(true)
@@ -62,6 +81,7 @@ export default function ChapterListPage({
   }
 
   useEffect(() => {
+    setPage(1)
     refresh()
     refreshCharacters()
   }, [projectId])
@@ -84,16 +104,23 @@ export default function ChapterListPage({
     [chapters, filter]
   )
 
-  /** 按卷分组（volume 来自节奏图谱；无卷信息的归入「未分卷」） */
+  const totalPages = Math.max(1, Math.ceil(filtered.length / CHAPTER_PAGE_SIZE))
+  const currentPage = Math.min(Math.max(1, page), totalPages)
+  const paged = useMemo(
+    () => filtered.slice((currentPage - 1) * CHAPTER_PAGE_SIZE, currentPage * CHAPTER_PAGE_SIZE),
+    [filtered, currentPage]
+  )
+
+  /** 按卷分组（volume 来自节奏图谱；无卷信息的归入「未分卷」），仅当前分页内的章节 */
   const volumeGroups = useMemo(() => {
     const map = new Map<number, ChapterMeta[]>()
-    for (const c of filtered) {
+    for (const c of paged) {
       const v = c.volume ?? 0
       if (!map.has(v)) map.set(v, [])
       map.get(v)!.push(c)
     }
     return [...map.entries()].sort((a, b) => a[0] - b[0])
-  }, [filtered])
+  }, [paged])
 
   return (
     <div>
@@ -125,7 +152,10 @@ export default function ChapterListPage({
         <div className="filters">
           <span
             className={`filter-chip ${filter === 'all' ? 'active' : ''}`}
-            onClick={() => setFilter('all')}
+            onClick={() => {
+              setFilter('all')
+              setPage(1)
+            }}
           >
             全部 · {counts.all ?? 0}
           </span>
@@ -134,7 +164,10 @@ export default function ChapterListPage({
               <span
                 key={s}
                 className={`filter-chip ${filter === s ? 'active' : ''}`}
-                onClick={() => setFilter(s)}
+                onClick={() => {
+                  setFilter(s)
+                  setPage(1)
+                }}
                 title={STATUS_FULL[s]}
               >
                 {STATUS_FULL[s]} · {counts[s]}
@@ -156,6 +189,7 @@ export default function ChapterListPage({
       ) : filtered.length === 0 ? (
         <p className="empty">该状态下暂无章节。</p>
       ) : (
+        <>
         <div className="chapter-list">
           {volumeGroups.map(([vol, chs]) => (
             <div key={vol} className="volume-group">
@@ -210,6 +244,41 @@ export default function ChapterListPage({
             </div>
           ))}
         </div>
+        {totalPages > 1 ? (
+          <div className="paginator">
+            <span className="page-info">
+              第 {currentPage}/{totalPages} 页 · 共 {filtered.length} 章
+            </span>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setPage(currentPage - 1)}
+              disabled={currentPage <= 1}
+            >
+              上一页
+            </button>
+            {pageWindow(currentPage, totalPages).map((t, i) =>
+              t === 'ellipsis' ? (
+                <span key={`e${i}`} className="page-num ellipsis">…</span>
+              ) : (
+                <button
+                  key={t}
+                  className={`page-num ${t === currentPage ? 'active' : ''}`}
+                  onClick={() => setPage(t)}
+                >
+                  {t}
+                </button>
+              )
+            )}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setPage(currentPage + 1)}
+              disabled={currentPage >= totalPages}
+            >
+              下一页
+            </button>
+          </div>
+        ) : null}
+        </>
       )}
 
       {showNew ? (
@@ -319,6 +388,17 @@ function BatchWriteDialog({
 
   const status = progress?.status ?? 'pending'
   const isFinished = status === 'completed' || status === 'failed'
+
+  // 批量续写结果角标计数：对 forbidden_word 做前缀重叠去重后再数，
+  // 与质检面板展示一致（report.counts 含未去重命中，会偏大）。
+  const auditDisplayCounts = useMemo(() => {
+    if (!lastResult) return { error: 0, warn: 0 }
+    const deduped = dedupeForbiddenViolations(lastResult.audit.violations)
+    return {
+      error: deduped.filter((v) => v.severity === 'error').length,
+      warn: deduped.filter((v) => v.severity === 'warn').length
+    }
+  }, [lastResult])
   const isPaused = status === 'paused'
 
   useEffect(() => {
@@ -527,10 +607,10 @@ function BatchWriteDialog({
               </li>
               <li>
                 质检：
-                {lastResult.audit.counts.error > 0
-                  ? `${lastResult.audit.counts.error} 错误`
-                  : lastResult.audit.counts.warn > 0
-                    ? `${lastResult.audit.counts.warn} 警告`
+                {auditDisplayCounts.error > 0
+                  ? `${auditDisplayCounts.error} 错误`
+                  : auditDisplayCounts.warn > 0
+                    ? `${auditDisplayCounts.warn} 警告`
                     : '通过'}
               </li>
               <li>

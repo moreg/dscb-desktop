@@ -12,6 +12,7 @@ import {
   cloneWritingRequirementTemplates,
   normalizeWritingRequirementLines
 } from '../../shared/writing-requirement-templates'
+import { CHAPTER_RULE_SECTIONS } from './skill-prompts'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -40,6 +41,8 @@ export interface AppSettings {
   aiHighFreq?: Partial<AiHighFreqConfig>
   /** 长期写作要求模板 */
   writingRequirementTemplates?: WritingRequirementTemplate[]
+  /** 续写规则分节覆盖：key→正文。缺 key = 用内置默认；空串 = 停用该节 */
+  chapterRuleOverrides?: Record<string, string>
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -74,6 +77,17 @@ const DEFAULTS: AppSettings = {
   writeAudit: DEFAULT_WRITE_AUDIT,
   costAlert: DEFAULT_COST_ALERT,
   aiHighFreq: DEFAULT_AI_HIGH_FREQ
+}
+
+/** 续写规则覆盖白名单：只保留注册表内的 key、字符串值（空串=停用该节，保留） */
+const CHAPTER_RULE_KEYS: Set<string> = new Set(CHAPTER_RULE_SECTIONS.map((s) => s.key))
+function sanitizeChapterRuleOverrides(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (CHAPTER_RULE_KEYS.has(k) && typeof v === 'string') out[k] = v
+  }
+  return out
 }
 
 function sanitizeWritingRequirementTemplates(
@@ -126,7 +140,8 @@ export class SettingsRepository {
       },
       writingRequirementTemplates: sanitizeWritingRequirementTemplates(
         stored.writingRequirementTemplates
-      )
+      ),
+      chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides)
     }
   }
 
@@ -157,7 +172,11 @@ export class SettingsRepository {
       writingRequirementTemplates:
         patch.writingRequirementTemplates !== undefined
           ? sanitizeWritingRequirementTemplates(patch.writingRequirementTemplates)
-          : current.writingRequirementTemplates
+          : current.writingRequirementTemplates,
+      chapterRuleOverrides:
+        patch.chapterRuleOverrides !== undefined
+          ? sanitizeChapterRuleOverrides(patch.chapterRuleOverrides)
+          : current.chapterRuleOverrides
     }
     await writeJsonAtomic(this.settingsFile, next)
     return next
@@ -176,6 +195,21 @@ export class SettingsRepository {
     const sanitized = sanitizeWritingRequirementTemplates(templates)
     await this.update({ writingRequirementTemplates: sanitized })
     return this.getWritingRequirementTemplates()
+  }
+
+  /** 取续写规则覆盖（清洗后；缺省为空对象，表示全用内置默认） */
+  async getChapterRuleOverrides(): Promise<Record<string, string>> {
+    const s = await this.get()
+    return { ...sanitizeChapterRuleOverrides(s.chapterRuleOverrides) }
+  }
+
+  /** 整体替换续写规则覆盖（清洗：仅保留白名单 key） */
+  async setChapterRuleOverrides(
+    overrides: Record<string, string>
+  ): Promise<Record<string, string>> {
+    const sanitized = sanitizeChapterRuleOverrides(overrides)
+    await this.update({ chapterRuleOverrides: sanitized })
+    return this.getChapterRuleOverrides()
   }
 
   /** 获取 AI 高频词配置 */

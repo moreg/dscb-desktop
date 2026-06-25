@@ -469,7 +469,10 @@ const api = {
     name: string
     description: string
     requirements: string[]
-  }[]) => ipcRenderer.invoke('settings:setWritingRequirementTemplates', templates)
+  }[]) => ipcRenderer.invoke('settings:setWritingRequirementTemplates', templates),
+  getChapterRules: () => ipcRenderer.invoke('settings:getChapterRules'),
+  setChapterRules: (overrides: Record<string, string>) =>
+    ipcRenderer.invoke('settings:setChapterRules', overrides)
 } as const
 
 contextBridge.exposeInMainWorld('api', api)

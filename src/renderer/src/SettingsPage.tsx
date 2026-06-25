@@ -5,7 +5,8 @@ import type {
   ProviderSummary,
   ProviderProtocol,
   ProjectUsage,
-  ChapterUsage
+  ChapterUsage,
+  ChapterRuleSectionView
 } from '../../shared/types'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
@@ -35,6 +36,16 @@ function newId(): string {
   return 'p_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 }
 
+/** 由小节清单 + 覆盖表合成草稿：覆盖优先，否则内置默认（空串=停用会保留） */
+function mergeRuleDrafts(
+  sections: ChapterRuleSectionView[],
+  overrides: Record<string, string>
+): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const s of sections) drafts[s.key] = overrides[s.key] ?? s.defaultText
+  return drafts
+}
+
 export default function SettingsPage(_: Props) {
   const [activeTab, setActiveTab] = useState('appearance')
   const writingTemplateApi = window.api as typeof window.api & {
@@ -50,7 +61,9 @@ export default function SettingsPage(_: Props) {
     { id: 'model', label: '模型服务' },
     { id: 'usage', label: '用量与费用' },
     { id: 'aiwords', label: 'AI 高频词' },
-    { id: 'writing', label: '写作节奏' }
+    { id: 'writing', label: '写作节奏' },
+    { id: 'writingReq', label: '写作要求' },
+    { id: 'writingRules', label: '续写规则' }
   ] as const
 
   // list 接口返回的是脱敏的 ProviderSummary（没有 apiKey）
@@ -95,6 +108,12 @@ export default function SettingsPage(_: Props) {
   const [writingTemplates, setWritingTemplates] = useState<WritingRequirementTemplate[]>(
     DEFAULT_WRITING_REQUIREMENT_TEMPLATES
   )
+  const [expandedTemplateId, setExpandedTemplateId] = useState<string | null>(
+    DEFAULT_WRITING_REQUIREMENT_TEMPLATES[0]?.id ?? null
+  )
+  // 续写规则分节编辑：内置小节清单 + 本地草稿（预填生效正文）
+  const [ruleSections, setRuleSections] = useState<ChapterRuleSectionView[]>([])
+  const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({})
   const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
   const refreshWritingTemplates = () => {
     if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
@@ -103,6 +122,18 @@ export default function SettingsPage(_: Props) {
     }
     void writingTemplateApi.getWritingRequirementTemplates().then(setWritingTemplates)
   }
+  const refreshChapterRules = () => {
+    void window.api.getChapterRules().then((bundle) => {
+      setRuleSections(bundle.sections)
+      setRuleDrafts(mergeRuleDrafts(bundle.sections, bundle.overrides))
+    })
+  }
+
+  useEffect(() => {
+    setExpandedTemplateId((cur) =>
+      writingTemplates.some((t) => t.id === cur) ? cur : (writingTemplates[0]?.id ?? null)
+    )
+  }, [writingTemplates])
 
   const refreshProviders = () => void window.api.listProviders().then(setProviders)
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
@@ -121,6 +152,7 @@ export default function SettingsPage(_: Props) {
     refreshCostAlert()
     refreshAiHighFreq()
     refreshWritingTemplates()
+    refreshChapterRules()
     refreshByProject()
     refreshByChapter()
     void window.api.getTheme().then(setTheme)
@@ -695,8 +727,11 @@ export default function SettingsPage(_: Props) {
               >
                 保存番茄钟
               </button>
+            </div>
+          )}
 
-              <hr className="soft" />
+          {activeTab === 'writingReq' && (
+            <div className="card" style={{ maxWidth: 600 }}>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <h3 className="sub" style={{ margin: 0, fontSize: 15 }}>长期写作要求模板</h3>
@@ -707,17 +742,19 @@ export default function SettingsPage(_: Props) {
                 <div className="btn-group">
                   <button
                     className="btn btn-ghost btn-sm"
-                    onClick={() =>
+                    onClick={() => {
+                      const id = newId()
                       setWritingTemplates((prev) => [
                         ...prev,
                         {
-                          id: newId(),
+                          id,
                           name: '新模板',
                           description: '',
                           requirements: ['']
                         }
                       ])
-                    }
+                      setExpandedTemplateId(id)
+                    }}
                   >
                     新增模板
                   </button>
@@ -763,84 +800,235 @@ export default function SettingsPage(_: Props) {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
-                {writingTemplates.map((template, index) => (
-                  <div
-                    key={template.id}
-                    className="card"
-                    style={{ padding: 12, background: 'var(--surface)', border: '1px solid var(--line)' }}
-                  >
-                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong style={{ fontSize: 13.5 }}>模板 {index + 1}</strong>
-                      <button
-                        className="btn btn-danger btn-sm"
-                        onClick={() =>
-                          setWritingTemplates((prev) => prev.filter((item) => item.id !== template.id))
-                        }
-                        disabled={writingTemplates.length <= 1}
+              <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+                {writingTemplates.map((template, index) => {
+                  const isOpen = expandedTemplateId === template.id
+                  const summary =
+                    template.description.trim() ||
+                    template.requirements.find((r) => r.trim()) ||
+                    '暂无要求'
+                  return (
+                    <div
+                      key={template.id}
+                      className="card"
+                      style={{
+                        padding: 0,
+                        overflow: 'hidden',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--line)'
+                      }}
+                    >
+                      <div
+                        className="row"
+                        style={{
+                          padding: '10px 12px',
+                          alignItems: 'center',
+                          gap: 8,
+                          cursor: 'pointer',
+                          userSelect: 'none'
+                        }}
+                        onClick={() => setExpandedTemplateId(isOpen ? null : template.id)}
                       >
-                        删除
-                      </button>
-                    </div>
-
-                    <div className="field" style={{ marginTop: 10 }}>
-                      <label>模板名称</label>
-                      <input
-                        className="input"
-                        value={template.name}
-                        onChange={(e) =>
-                          setWritingTemplates((prev) =>
-                            prev.map((item) =>
-                              item.id === template.id ? { ...item, name: e.target.value } : item
+                        <span
+                          style={{
+                            width: 14,
+                            textAlign: 'center',
+                            color: 'var(--ink-3)',
+                            fontSize: 12
+                          }}
+                        >
+                          {isOpen ? '▼' : '▸'}
+                        </span>
+                        <strong
+                          style={{
+                            fontSize: 13.5,
+                            flex: '0 1 auto',
+                            minWidth: 0,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          {template.name.trim() || `未命名模板 ${index + 1}`}
+                        </strong>
+                        <span
+                          className="meta"
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          {summary}
+                        </span>
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setWritingTemplates((prev) =>
+                              prev.filter((item) => item.id !== template.id)
                             )
-                          )
-                        }
-                      />
-                    </div>
+                          }}
+                          disabled={writingTemplates.length <= 1}
+                        >
+                          删除
+                        </button>
+                      </div>
 
-                    <div className="field">
-                      <label>模板说明</label>
-                      <input
-                        className="input"
-                        value={template.description}
-                        onChange={(e) =>
-                          setWritingTemplates((prev) =>
-                            prev.map((item) =>
-                              item.id === template.id
-                                ? { ...item, description: e.target.value }
-                                : item
-                            )
-                          )
-                        }
-                      />
-                    </div>
+                      {isOpen ? (
+                        <div
+                          style={{
+                            padding: '0 12px 12px',
+                            borderTop: '1px solid var(--line-soft)'
+                          }}
+                        >
+                          <div className="field" style={{ marginTop: 10 }}>
+                            <label>模板名称</label>
+                            <input
+                              className="input"
+                              value={template.name}
+                              onChange={(e) =>
+                                setWritingTemplates((prev) =>
+                                  prev.map((item) =>
+                                    item.id === template.id
+                                      ? { ...item, name: e.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                            />
+                          </div>
 
-                    <div className="field">
-                      <label>要求列表</label>
+                          <div className="field">
+                            <label>模板说明</label>
+                            <input
+                              className="input"
+                              value={template.description}
+                              onChange={(e) =>
+                                setWritingTemplates((prev) =>
+                                  prev.map((item) =>
+                                    item.id === template.id
+                                      ? { ...item, description: e.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                            />
+                          </div>
+
+                          <div className="field">
+                            <label>要求列表</label>
+                            <textarea
+                              className="textarea"
+                              style={{ minHeight: 120 }}
+                              value={template.requirements.join('\n')}
+                              onChange={(e) =>
+                                setWritingTemplates((prev) =>
+                                  prev.map((item) =>
+                                    item.id === template.id
+                                      ? {
+                                          ...item,
+                                          requirements: e.target.value.split(/\r?\n/)
+                                        }
+                                      : item
+                                  )
+                                )
+                              }
+                              placeholder="每行一条要求，例如：\n开头三段内抛出冲突\n结尾必须留钩子"
+                            />
+                            <p className="meta" style={{ marginTop: 6 }}>
+                              每行一条，保存时会自动去掉序号、空行和重复项。
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'writingRules' && (
+            <div className="card" style={{ maxWidth: 760 }}>
+              <div
+                className="row"
+                style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}
+              >
+                <div>
+                  <h3 className="sub" style={{ margin: 0, fontSize: 15 }}>
+                    续写规则（分节可编辑）
+                  </h3>
+                  <p className="muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+                    这些规则会拼进每次续写的系统提示词。改完点「保存规则」生效。与内置默认完全相同的小节不会存储、仍随内置升级；把某节清空等于停用该规则。「题材定位」与「禁用高频词」是系统目录，不在此编辑。
+                  </p>
+                </div>
+                <button
+                  className="btn btn-primary btn-sm"
+                  style={{ flexShrink: 0 }}
+                  disabled={ruleSections.length === 0}
+                  onClick={async () => {
+                    // 只保存与默认不同的 key（含清空=停用）；与默认相同的剔除，回到内置
+                    const pruned: Record<string, string> = {}
+                    for (const s of ruleSections) {
+                      const cur = ruleDrafts[s.key] ?? ''
+                      if (cur !== s.defaultText) pruned[s.key] = cur
+                    }
+                    try {
+                      const saved = await window.api.setChapterRules(pruned)
+                      setRuleDrafts(mergeRuleDrafts(ruleSections, saved))
+                      setMsg({ kind: 'ok', text: '续写规则已保存' })
+                    } catch {
+                      setMsg({ kind: 'err', text: '保存失败，请重试' })
+                    }
+                  }}
+                >
+                  保存规则
+                </button>
+              </div>
+
+              <div style={{ display: 'grid', gap: 16, marginTop: 14 }}>
+                {ruleSections.map((s) => {
+                  const cur = ruleDrafts[s.key] ?? ''
+                  const customized = cur !== s.defaultText
+                  return (
+                    <div key={s.key} className="field" style={{ marginBottom: 0 }}>
+                      <div className="row" style={{ marginBottom: 6 }}>
+                        <label style={{ margin: 0 }}>
+                          {s.title}{' '}
+                          <span
+                            className="meta"
+                            style={{
+                              marginLeft: 6,
+                              color: customized ? 'var(--vermilion)' : 'var(--ink-3)'
+                            }}
+                          >
+                            {customized ? '已自定义' : '默认'}
+                          </span>
+                        </label>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() =>
+                            setRuleDrafts((prev) => ({ ...prev, [s.key]: s.defaultText }))
+                          }
+                          disabled={!customized}
+                        >
+                          恢复默认
+                        </button>
+                      </div>
                       <textarea
                         className="textarea"
-                        style={{ minHeight: 120 }}
-                        value={template.requirements.join('\n')}
+                        style={{ minHeight: 200 }}
+                        value={cur}
                         onChange={(e) =>
-                          setWritingTemplates((prev) =>
-                            prev.map((item) =>
-                              item.id === template.id
-                                ? {
-                                    ...item,
-                                    requirements: e.target.value.split(/\r?\n/)
-                                  }
-                                : item
-                            )
-                          )
+                          setRuleDrafts((prev) => ({ ...prev, [s.key]: e.target.value }))
                         }
-                        placeholder="每行一条要求，例如：\n开头三段内抛出冲突\n结尾必须留钩子"
                       />
-                      <p className="meta" style={{ marginTop: 6 }}>
-                        每行一条，保存时会自动去掉序号、空行和重复项。
-                      </p>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}

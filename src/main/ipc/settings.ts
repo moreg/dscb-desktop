@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { validateInput, dailyWordGoalSchema } from './validation'
 import type { AiHighFreqConfig } from '../../shared/types'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
+import { CHAPTER_RULE_SECTIONS } from '../data/skill-prompts'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -166,6 +167,29 @@ export function registerSettingsIpc(
         templates
       )
       return repo.setWritingRequirementTemplates(validated)
+    }
+  )
+
+  /** 续写规则分节：读取可编辑小节（标题 + 默认正文）与当前覆盖 */
+  safeHandle('settings:getChapterRules', async () => {
+    const overrides = await repo.getChapterRuleOverrides()
+    return {
+      sections: CHAPTER_RULE_SECTIONS.map((s) => ({
+        key: s.key,
+        title: s.title,
+        defaultText: s.text
+      })),
+      overrides
+    }
+  })
+  safeHandle(
+    'settings:setChapterRules',
+    async (
+      _e: IpcMainInvokeEvent,
+      overrides: Record<string, string>
+    ): Promise<Record<string, string>> => {
+      const validated = validateInput(z.record(z.string(), z.string()), overrides)
+      return repo.setChapterRuleOverrides(validated)
     }
   )
 }

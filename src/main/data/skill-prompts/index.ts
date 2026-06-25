@@ -1,11 +1,4 @@
-import {
-  CHAPTER_ENDING_RULES,
-  CONTINUITY_RULES,
-  DEAI_TECHNIQUES,
-  DIALOGUE_RULES,
-  OUTLINE_THREE_RULES,
-  OUTPUT_RULES
-} from './chapter-rules'
+import { CHAPTER_RULE_SECTIONS } from './chapter-rules'
 import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
@@ -13,8 +6,14 @@ import type { StyleProfile } from '../../../shared/types'
 export { FORBIDDEN_WORD_CATEGORIES, flattenForbiddenWords } from './forbidden-words'
 export { GENRE_VOICES, resolveGenreVoice } from './genre-voice'
 export type { GenreKey, GenreVoice } from './genre-voice'
+export { CHAPTER_RULE_SECTIONS } from './chapter-rules'
+export type { ChapterRuleKey, ChapterRuleSection } from './chapter-rules'
 
-export function buildSystemPrompt(genre?: string, style?: StyleProfile | null): string {
+export function buildSystemPrompt(
+  genre?: string,
+  style?: StyleProfile | null,
+  overrides?: Record<string, string>
+): string {
   const voice = resolveGenreVoice(genre)
   const sections: string[] = []
 
@@ -32,32 +31,20 @@ export function buildSystemPrompt(genre?: string, style?: StyleProfile | null): 
     sections.push(renderStyleProfileMarkdown(style))
   }
 
-  sections.push('---')
-  sections.push('## 2. 输出要求')
-  sections.push(OUTPUT_RULES)
+  // 可编辑小节：动态编号。用户覆盖（含空串=停用）优先，否则内置默认；空串则跳过。
+  let n = 2
+  for (const sec of CHAPTER_RULE_SECTIONS) {
+    const ov = overrides?.[sec.key]
+    const text = typeof ov === 'string' ? ov : sec.text
+    if (!text.trim()) continue
+    sections.push('---')
+    sections.push(`## ${n}. ${sec.title}`)
+    sections.push(text)
+    n++
+  }
 
   sections.push('---')
-  sections.push('## 3. 细纲遵守')
-  sections.push(OUTLINE_THREE_RULES)
-
-  sections.push('---')
-  sections.push('## 4. 衔接检查')
-  sections.push(CONTINUITY_RULES)
-
-  sections.push('---')
-  sections.push('## 5. 章末硬性原则')
-  sections.push(CHAPTER_ENDING_RULES)
-
-  sections.push('---')
-  sections.push('## 6. 去 AI 味技巧')
-  sections.push(DEAI_TECHNIQUES)
-
-  sections.push('---')
-  sections.push('## 7. 对话规则')
-  sections.push(DIALOGUE_RULES)
-
-  sections.push('---')
-  sections.push('## 8. 禁用高频词')
+  sections.push(`## ${n}. 禁用高频词`)
   sections.push(renderForbiddenWordsMarkdown())
 
   return sections.join('\n\n')

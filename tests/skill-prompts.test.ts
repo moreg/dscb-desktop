@@ -75,6 +75,32 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('同一人台词中间禁止插入动作打断')
   })
 
+  it('embeds negative constraints', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('严格禁止与写作负向限制')
+    expect(prompt).toContain('工具人/背景板路人')
+    expect(prompt).toContain('对话中夹杂长神态描写')
+    expect(prompt).toContain('事件-反应-结果')
+  })
+
+  it('applies chapter rule overrides; unlisted sections keep defaults', () => {
+    const prompt = buildSystemPrompt('玄幻', null, {
+      dialogue: '【自定义对话规则】只许说真话。'
+    })
+    expect(prompt).toContain('【自定义对话规则】只许说真话。')
+    // 未覆盖的小节仍用内置默认
+    expect(prompt).toContain('章末结尾硬性原则')
+    // 对话小节被整体覆盖，其默认标记不再出现
+    expect(prompt).not.toContain('真人对话特征')
+  })
+
+  it('skips a section whose override is an empty string (= 停用)', () => {
+    const prompt = buildSystemPrompt('玄幻', null, { ending: '' })
+    expect(prompt).not.toContain('章末结尾硬性原则')
+    // 其他小节不受影响
+    expect(prompt).toContain('真人对话特征')
+  })
+
   it('embeds continuity rules', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('衔接检查')

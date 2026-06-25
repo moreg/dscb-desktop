@@ -2213,6 +2213,57 @@ pre.body {
 .filter-chip.active { background: var(--vermilion); color: #fff5e8; border-color: var(--vermilion); font-weight: 600; }
 
 /* =========================================================
+   分页器
+   ========================================================= */
+.paginator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.paginator .page-info {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin-right: 6px;
+  font-family: var(--font-sans);
+}
+.page-num {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+  font-family: var(--font-sans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.page-num:hover:not(.ellipsis):not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+.page-num.active {
+  background: var(--vermilion);
+  color: #fff5e8;
+  border-color: var(--vermilion);
+  font-weight: 600;
+}
+.page-num.ellipsis {
+  border: none;
+  background: transparent;
+  cursor: default;
+  color: var(--ink-2);
+}
+.page-num:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* =========================================================
    状态标签
    ========================================================= */
 .status-outline   { background: var(--surface-2); color: var(--ink-2); }

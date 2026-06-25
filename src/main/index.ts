@@ -85,7 +85,7 @@ app.whenReady().then(async () => {
   registerLlmIpc(secret, llmService)
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
-  const writeService = new WriteService(projectService, llmService, undefined, chapterService)
+  const writeService = new WriteService(projectService, llmService, undefined, chapterService, settings)
   registerWriteIpc(writeService)
   const diagnosticsService = new DiagnosticsService(projectService)
   registerDiagnosticsIpc(diagnosticsService)

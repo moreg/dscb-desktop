@@ -213,6 +213,19 @@ export interface UpdateChapterMetaInput {
   appearingCharacters?: string[]
 }
 
+/** 一条可编辑的续写规则小节（renderer 视图：标题 + 内置默认正文） */
+export interface ChapterRuleSectionView {
+  key: string
+  title: string
+  defaultText: string
+}
+
+/** getChapterRules 返回：可编辑小节清单 + 当前用户覆盖 */
+export interface ChapterRulesBundle {
+  sections: ChapterRuleSectionView[]
+  overrides: Record<string, string>
+}
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
@@ -484,6 +497,10 @@ export interface RendererApi {
   setWritingRequirementTemplates: (
     templates: WritingRequirementTemplate[]
   ) => Promise<WritingRequirementTemplate[]>
+  /** 续写规则分节：读取内置小节（标题 + 默认正文）与当前用户覆盖 */
+  getChapterRules: () => Promise<ChapterRulesBundle>
+  /** 整体保存续写规则覆盖（仅白名单 key 生效；与默认相等的 key 由前端剔除） */
+  setChapterRules: (overrides: Record<string, string>) => Promise<Record<string, string>>
 }
 
 export interface Character {

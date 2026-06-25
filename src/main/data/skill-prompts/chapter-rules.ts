@@ -143,6 +143,15 @@ export const DIALOGUE_RULES = `
 - 纯凑字、重复已知信息、无意义寒暄：禁止
 `.trim()
 
+/** 写作负向限制：三条件严格禁止（路人描写 / 对话神态 / 氛围渲染） */
+export const NEGATIVE_CONSTRAINTS = `
+【严格禁止与写作负向限制（违反必须重写）】
+
+1. 禁止对"工具人/背景板路人"进行任何外貌、衣着、细微小动作的描写（如：帽子歪了、抽了口烟、摸了摸胡子）。除非该配角在三章内会死，或对主角有重大剧情推动。
+2. 禁止使用"对话中夹杂长神态描写"的句式。路人说话要直奔主题，不要铺垫。
+3. 严格执行"事件-反应-结果"闭环，拒绝任何纯粹为了渲染氛围而存在的描写。
+`.trim()
+
 /** 衔接检查原则（让 LLM 自检本章开头与上一章末尾的对接） */
 export const CONTINUITY_RULES = `
 【衔接检查原则（写本章开头前必须自检）】
@@ -168,3 +177,35 @@ export const OUTPUT_RULES = `
 - 章末必须以"对话"或"事件"结尾，违反此条立即视为失败
 - 按细纲剧情点编号顺序写，不得跳过、不得越界写下一章内容
 `.trim()
+
+/** 可被用户在设置里覆盖的写作规则小节 key（题材定位与禁用高频词为目录驱动，不在此列） */
+export type ChapterRuleKey =
+  | 'output'
+  | 'outline'
+  | 'continuity'
+  | 'ending'
+  | 'deai'
+  | 'dialogue'
+  | 'negative'
+
+/** 一条可编辑规则小节：UI 用 title+defaultText 展示与恢复默认，prompt 拼装用 key 取生效文本 */
+export interface ChapterRuleSection {
+  key: ChapterRuleKey
+  title: string
+  /** 内置默认正文（用户未覆盖时使用） */
+  text: string
+}
+
+/**
+ * 写作规则小节注册表——UI（标题 + 默认正文）与 buildSystemPrompt（取生效正文）的单一事实源。
+ * 顺序即 prompt 中的呈现顺序。
+ */
+export const CHAPTER_RULE_SECTIONS: ChapterRuleSection[] = [
+  { key: 'output', title: '输出要求', text: OUTPUT_RULES },
+  { key: 'outline', title: '细纲遵守', text: OUTLINE_THREE_RULES },
+  { key: 'continuity', title: '衔接检查', text: CONTINUITY_RULES },
+  { key: 'ending', title: '章末硬性原则', text: CHAPTER_ENDING_RULES },
+  { key: 'deai', title: '去 AI 味技巧', text: DEAI_TECHNIQUES },
+  { key: 'dialogue', title: '对话规则', text: DIALOGUE_RULES },
+  { key: 'negative', title: '写作负向限制', text: NEGATIVE_CONSTRAINTS }
+]
