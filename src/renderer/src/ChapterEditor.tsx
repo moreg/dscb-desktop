@@ -2069,11 +2069,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onJumpToOffset={jumpToOffset}
           onApplyRewrite={(snippet, rewritten, violationKey) => {
             // 用改写后的文本替换 draft 中的命中段（保留前后原文）
-            if (!snippet) return
+            if (!snippet) return false
             const idx = draft.indexOf(snippet)
             if (idx < 0) {
               setAlertInfo({ message: '未在正文中找到原片段（可能已被改写），请手动应用' })
-              return
+              return false
             }
             const next = draft.slice(0, idx) + rewritten + draft.slice(idx + snippet.length)
             setDraft(next)
@@ -2082,6 +2082,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             pushRewrite(snippet, rewritten, violationKey)
             // 应用后自动重跑一次，让违例清单反映新正文
             void reAudit()
+            return true
           }}
           rewriteHistory={rewriteHistory}
           redoStackCount={redoStack.length}

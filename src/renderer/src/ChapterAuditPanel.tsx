@@ -24,8 +24,10 @@ interface Props {
   /** 跳到指定 offset 的回调（PR 后续接入正文滚动定位时再启用） */
   onJumpToOffset?: (offset: number) => void
   /** 把改写结果回填到正文的回调（用于「应用到正文」按钮）。
-   * P6-B：第三参 violationKey 让父组件按稳定键精确记录这次应用，便于 per-violation 撤销。 */
-  onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => void
+   * P6-B：第三参 violationKey 让父组件按稳定键精确记录这次应用，便于 per-violation 撤销。
+   * 返回值：是否真正应用成功。false 表示 snippet 为空或在正文中找不到（如已被其他改写覆盖），
+   * 此时调用方不应标记 appliedAt——否则会出现"提示已应用但正文未变"。 */
+  onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => boolean
   /** 撤销最近一次改写（顶层按钮快捷路径） */
   onUndoRewrite?: () => void | Promise<void>
   /** 撤销指定位置的改写（0=最近一次，1=次新...）— 用于下拉菜单 */
@@ -455,9 +457,14 @@ export default function ChapterAuditPanel({
                                   <button
                                     className="btn btn-ghost btn-sm"
                                     onClick={() => {
-                                      // 1. 通知父组件 apply（修改 draft + 压栈）
-                                      onApplyRewrite(v.snippet!, hState.result!.rewritten, hKey)
-                                      // 2. 标记本条为"已应用"，显示角标
+                                      // 1. 通知父组件 apply（修改 draft + 压栈）。
+                                      // 必须按返回值决定是否标记 appliedAt——
+                                      // 若 snippet 在正文中找不到（如已被其他改写覆盖），
+                                      // 父组件不会改 draft，此时标"已应用"会导致
+                                      // "提示已应用但正文未变"。
+                                      const ok = onApplyRewrite(v.snippet!, hState.result!.rewritten, hKey)
+                                      if (!ok) return
+                                      // 2. 真正应用成功才标记本条为"已应用"，显示角标
                                       setHumanizeMap((m) => ({
                                         ...m,
                                         [hKey]: { ...m[hKey], appliedAt: Date.now() }

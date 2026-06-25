@@ -24,8 +24,9 @@ interface Props {
   reviewText: string
   reviewing: boolean
   onClose: () => void
-  /** AI 改写命中段后，把 snippet 替换为 rewritten（P6-B：第三参 violationKey 用于 per-violation 撤销） */
-  onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => void
+  /** AI 改写命中段后，把 snippet 替换为 rewritten（P6-B：第三参 violationKey 用于 per-violation 撤销）。
+   *  返回是否真正应用成功（见 ChapterAuditPanel.onApplyRewrite 契约）。 */
+  onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => boolean
   onJumpToOffset?: (offset: number) => void
   /** 重新跑质检（用于"立即质检"按钮） */
   onRunAudit?: () => void | Promise<void>
