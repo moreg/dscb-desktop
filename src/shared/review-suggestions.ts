@@ -8,33 +8,87 @@ export interface ReviewSuggestion {
 }
 
 const LABELS = ['原文', '改写', '建议', '理由'] as const
-const LABEL_ALT = '[【\\[\\]】]?'
-const LABEL_LOOKAHEAD = LABELS.join('|')
+
+/** 行首标签：可选中英文括号包裹的「原文/改写/建议/理由」+ 全/半角冒号。
+ *  用 (?:^|\n) 锚定，只认每段行首的标签，避免把建议正文里出现的"建议""原文"等词误判为新字段。 */
+const LABEL_RE = /(?:^|\n)[ \t]*[【\[]?\s*(原文|改写|建议|理由)\s*[】\]]?[ \t]*[：:][ \t]*/g
+
+/** 去掉值首尾成对的引号/括号（LLM 常把"改写：「xxx」"里的值也包一层），避免面板出现重复书名号。
+ *  仅当这对引号确实是整体包裹（内部不再出现同类闭括号）时才剥离，否则保留原样——
+ *  否则会把「（补一句）（结尾）」误剥成「补一句）（结尾」，破坏正文。 */
+function unwrapQuotes(s: string): string {
+  const t = s.trim()
+  const pairs: [string, string][] = [
+    ['「', '」'],
+    ['『', '』'],
+    ['“', '”'],
+    ['‘', '’'],
+    ['（', '）'],
+    ['(', ')']
+  ]
+  for (const [a, b] of pairs) {
+    if (t.length < a.length + b.length || !t.startsWith(a) || !t.endsWith(b)) continue
+    // 内部不应再出现同一个闭括号，否则首尾的开/闭并不属于同一对。
+    if (t.slice(a.length, t.length - b.length).includes(b)) continue
+    return t.slice(a.length, t.length - b.length).trim()
+  }
+  return t
+}
 
 /** 把 LLM 输出的"原文：… 改写：… 理由：…"标签格式解析成结构化建议。
- *  兼容旧格式（只有「建议」没有「改写」）。流式友好：按空行分块，已闭合字段即可解析。 */
+ *  兼容旧格式（只有「建议」没有「改写」）。流式友好：先按标签分词再按「原文」边界归组——
+ *  这样即使 LLM 在两条建议之间没留空行、或字段顺序打乱，也不会把多条合并成一条导致字段错位。 */
 export function parseSuggestions(text: string): ReviewSuggestion[] {
-  const blocks = text.split(/\n{2,}/)
+  if (!text) return []
+  // 1) 扫描所有行首标签及其取值区间（取值 = 标签冒号后到下一个标签之前）。
+  const tokens: { label: string; index: number; valueStart: number; valueEnd: number }[] = []
+  let m: RegExpExecArray | null
+  LABEL_RE.lastIndex = 0
+  while ((m = LABEL_RE.exec(text)) !== null) {
+    tokens.push({
+      label: m[1],
+      index: m.index,
+      valueStart: m.index + m[0].length,
+      valueEnd: text.length
+    })
+  }
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    // 取值截至下一个标签（含其前导换行/空白），保证不串进下一条建议。
+    tokens[i].valueEnd = tokens[i + 1].index
+  }
+
+  // 2) 第一个标签之前的文本（前言/总结）作为一条不可应用的建议保留，避免丢失内容。
   const out: ReviewSuggestion[] = []
-  for (const b of blocks) {
-    if (!b.trim()) continue
-    const find = (label: string) => {
-      const re = new RegExp(
-        `${LABEL_ALT}\\s*${label}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n${LABEL_ALT}\\s*(?:${LABEL_LOOKAHEAD})|$)`
-      )
-      const m = b.match(re)
-      return m ? m[1].trim() : ''
-    }
-    const quote = find('原文')
-    const rewrite = find('改写')
-    const advice = find('建议')
-    const why = find('理由')
-    if (quote || rewrite || advice || why) {
-      out.push({ quote, rewrite: rewrite || undefined, advice, why })
+  if (tokens.length > 0 && tokens[0].index > 0) {
+    const intro = text.slice(0, tokens[0].index).trim()
+    if (intro) out.push({ quote: '', rewrite: undefined, advice: '', why: intro })
+  }
+
+  // 3) 按「原文」边界归组：遇到一个新的「原文」就开一条新建议，
+  //    同一组内的 改写/建议/理由 填到当前建议上；字段重复或缺失时也不会错位。
+  let cur: ReviewSuggestion | null = null
+  const flush = () => {
+    if (cur && (cur.quote || cur.rewrite || cur.advice || cur.why)) out.push(cur)
+    cur = null
+  }
+  for (const tk of tokens) {
+    const raw = unwrapQuotes(text.slice(tk.valueStart, tk.valueEnd))
+    if (tk.label === '原文') {
+      flush()
+      cur = { quote: raw, advice: '', why: '' }
     } else {
-      // 完全无标签的段落（前言/总结）：归到 why 当说明，不进入 advice，避免被当成可应用建议。
-      out.push({ quote: '', rewrite: undefined, advice: '', why: b.trim() })
+      if (!cur) cur = { quote: '', advice: '', why: '' }
+      if (tk.label === '改写') cur.rewrite = raw || undefined
+      else if (tk.label === '建议') cur.advice = raw
+      else if (tk.label === '理由') cur.why = raw
     }
+  }
+  flush()
+
+  // 4) 完全无标签的整段（只有前言/总结）：归到 why 当说明，不进入 advice，避免被当成可应用建议。
+  if (out.length === 0) {
+    const intro = text.trim()
+    if (intro) out.push({ quote: '', rewrite: undefined, advice: '', why: intro })
   }
   return out
 }

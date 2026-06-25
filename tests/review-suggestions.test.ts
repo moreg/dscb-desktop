@@ -63,6 +63,45 @@ describe('parseSuggestions', () => {
     expect(out[0].quote).toBe('甲。')
     expect(out[0].rewrite).toBe('乙')
   })
+
+  it('两条建议之间没有空行也不会合并成一条（修复字段串行 bug）', () => {
+    // LLM 经常省略建议之间的空行：原文1/改写1/理由1 紧接 原文2/改写2/理由2
+    const text = [
+      '原文：天色灰绿。',
+      '改写：天色是一种说不清的灰绿。',
+      '理由：原句多了一个不字。',
+      '原文：风停了。',
+      '改写：风忽然就停了。',
+      '理由：原句太干。'
+    ].join('\n')
+    const out = parseSuggestions(text)
+    expect(out).toHaveLength(2)
+    expect(out[0].quote).toBe('天色灰绿。')
+    expect(out[0].rewrite).toBe('天色是一种说不清的灰绿。')
+    expect(out[0].why).toBe('原句多了一个不字。')
+    expect(out[1].quote).toBe('风停了。')
+    expect(out[1].rewrite).toBe('风忽然就停了。')
+    expect(out[1].why).toBe('原句太干。')
+  })
+
+  it('去掉 LLM 多包的一层引号，避免面板出现重复书名号', () => {
+    const text = '原文：「天色灰绿。」\n改写：天色是一种说不清的灰绿。'
+    const out = parseSuggestions(text)
+    expect(out[0].quote).toBe('天色灰绿。')
+  })
+
+  it('括号不是整体包裹时保持原样，不破坏正文（修复过度剥离）', () => {
+    // 「（补一句）（结尾）」首尾是（）但内部还有一个），属于两个独立括号，不能剥
+    const text = '原文：甲。\n改写：（补一句）（结尾）。'
+    const out = parseSuggestions(text)
+    expect(out[0].rewrite).toBe('（补一句）（结尾）。')
+  })
+
+  it('尾部不是闭括号时不误剥', () => {
+    const text = '原文：（天气很好）。\n改写：天气很好。'
+    const out = parseSuggestions(text)
+    expect(out[0].quote).toBe('（天气很好）。')
+  })
 })
 
 describe('isRewritable', () => {
