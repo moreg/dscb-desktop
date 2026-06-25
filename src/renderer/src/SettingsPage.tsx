@@ -1092,20 +1092,27 @@ function ProviderRow({
   }
 
   /** 「默认」按钮：清除自定义温度。瞬时操作，立即写盘并取消挂起的防抖 */
-  const resetTemp = () => {
+  const resetTemp = async () => {
     if (tempTimer.current) {
       clearTimeout(tempTimer.current)
       tempTimer.current = null
     }
     setTempDraft(null)
-    void window.api.upsertProvider({
-      id: provider.id,
-      label: provider.label,
-      baseUrl: provider.baseUrl,
-      model: provider.model,
-      apiKey: '',
-      protocol: provider.protocol
-    })
+    try {
+      await window.api.upsertProvider({
+        id: provider.id,
+        label: provider.label,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKey: '',
+        protocol: provider.protocol
+      })
+    } catch {
+      // 与 persistTemp 一致：写盘失败回滚到 props 当前值，避免 UI 显示"默认"但存储仍是旧温度
+      setTempDraft(
+        typeof provider.temperature === 'number' ? provider.temperature : null
+      )
+    }
   }
 
   return (
