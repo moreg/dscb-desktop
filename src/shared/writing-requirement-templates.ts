@@ -90,14 +90,14 @@ export function composeWritingRequirements(
   legacyText?: string | null,
   templates: WritingRequirementTemplate[] = DEFAULT_WRITING_REQUIREMENT_TEMPLATES
 ): string {
-  const legacy = legacyText?.trim() ?? ''
-  if (legacy && (templateId || customText)) {
-    return legacy
-  }
-
+  // 三者合并去重：模板条目 → 自定义补充 → 老字段（legacy）兜底并入。
+  // 注意：legacy 不再"优先且独占"。旧逻辑里只要存在 legacy 文本就会忽略
+  // 模板和自定义补充，导致用户在 UI 选的模板/写的补充被静默丢弃。
+  // 现在三者平等参与去重合并，顺序上 legacy 排最后，仅作补充。
   const merged: string[] = []
   const seen = new Set<string>()
 
+  // 1. 模板条目（保持模板定义顺序）
   const template = getWritingRequirementTemplate(templateId, templates)
   for (const line of template?.requirements ?? []) {
     const text = line.trim()
@@ -106,14 +106,18 @@ export function composeWritingRequirements(
     merged.push(text)
   }
 
+  // 2. 用户自定义补充
   for (const line of normalizeWritingRequirementLines(customText)) {
     if (seen.has(line)) continue
     seen.add(line)
     merged.push(line)
   }
 
-  if (merged.length === 0) {
-    return legacyText?.trim() ?? ''
+  // 3. 老字段 legacy（本章写作要求/写作要求）兜底并入，去重
+  for (const line of normalizeWritingRequirementLines(legacyText)) {
+    if (seen.has(line)) continue
+    seen.add(line)
+    merged.push(line)
   }
 
   return merged.join('\n')
