@@ -157,6 +157,7 @@ export default function ChapterEditor({
   const [draft, setDraft] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lineGutterRef = useRef<HTMLDivElement>(null)
+  const lineGutterInnerRef = useRef<HTMLDivElement>(null)
   const mirrorRef = useRef<HTMLDivElement>(null)
   const [showLineNumbers, setShowLineNumbers] = useState(() => {
     return localStorage.getItem('ai-writer:show-line-numbers') !== 'false'
@@ -777,8 +778,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }, [draft, showLineNumbers])
 
   const handleEditorScroll = useCallback(() => {
-    if (lineGutterRef.current && textareaRef.current) {
-      lineGutterRef.current.scrollTop = textareaRef.current.scrollTop
+    // 用 transform 平移行号内容层来跟随 textarea 滚动。
+    // gutter 是 overflow:hidden + 固定高度，scrollTop 对它无效，必须用 translateY。
+    if (lineGutterInnerRef.current && textareaRef.current) {
+      lineGutterInnerRef.current.style.transform = `translateY(${-textareaRef.current.scrollTop}px)`
     }
   }, [])
 
@@ -2133,11 +2136,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           const lines = draft.split('\n')
           return (
             <div className="editor-line-gutter" ref={lineGutterRef} aria-hidden="true">
-              {lines.map((_, i) => (
-                <div key={i} className="line-num" style={{ height: lineHeights[i] ?? baseLineHeight }}>
-                  {i + 1}
-                </div>
-              ))}
+              <div className="editor-line-gutter-inner" ref={lineGutterInnerRef}>
+                {lines.map((_, i) => (
+                  <div key={i} className="line-num" style={{ height: lineHeights[i] ?? baseLineHeight }}>
+                    {i + 1}
+                  </div>
+                ))}
+              </div>
             </div>
           )
         })()}

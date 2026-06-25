@@ -1505,6 +1505,10 @@ hr.soft {
 .editor-line-gutter {
   width: 48px;
   min-width: 48px;
+  /* 与 textarea 锁定同高：stretch 让 flex 把它拉到与 textarea 等高，
+     max-height 防止行号过多时撑得比 textarea 高而溢出正文窗口。 */
+  align-self: stretch;
+  max-height: calc(100vh - 280px);
   background: var(--surface-2, var(--surface));
   border: 1px solid var(--line);
   border-right: 1px solid var(--line-soft);
@@ -1515,6 +1519,12 @@ hr.soft {
   user-select: none;
   box-sizing: border-box;
   transition: border-color 0.15s;
+}
+/* 行号内容层：用 transform 跟随 textarea 滚动，而非给 gutter 设 scrollTop
+   （overflow:hidden 的元素 scrollTop 无效）。translateY 在可视区内平移行号，
+   超出部分被 gutter 的 overflow:hidden 裁剪，与 textarea 滚动严格同步。 */
+.editor-line-gutter-inner {
+  will-change: transform;
 }
 .editor-text-wrapper.with-line-numbers .editor-text:focus ~ .editor-text-mirror,
 .editor-text-wrapper.with-line-numbers:focus-within .editor-line-gutter {
