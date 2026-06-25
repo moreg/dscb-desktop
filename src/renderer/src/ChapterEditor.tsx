@@ -156,6 +156,12 @@ export default function ChapterEditor({
 
   const [draft, setDraft] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const lineGutterRef = useRef<HTMLDivElement>(null)
+  const mirrorRef = useRef<HTMLDivElement>(null)
+  const [showLineNumbers, setShowLineNumbers] = useState(() => {
+    return localStorage.getItem('ai-writer:show-line-numbers') !== 'false'
+  })
+  const [lineHeights, setLineHeights] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [versions, setVersions] = useState<ChapterVersion[]>([])
@@ -696,6 +702,72 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 10_000)
     return () => clearInterval(id)
+  }, [])
+
+  // 行号：切换时持久化
+  useEffect(() => {
+    localStorage.setItem('ai-writer:show-line-numbers', String(showLineNumbers))
+  }, [showLineNumbers])
+
+  // 行号：计算每行渲染高度（用隐藏的 mirror div 精确测量自动换行后的实际行高）
+  useEffect(() => {
+    if (!showLineNumbers || !mirrorRef.current || !textareaRef.current) {
+      setLineHeights([])
+      return
+    }
+    const measure = () => {
+      const mirror = mirrorRef.current
+      const textarea = textareaRef.current
+      if (!mirror || !textarea) return
+      const cs = getComputedStyle(textarea)
+      // 复制所有影响断行的计算样式到 mirror，让每行换行点和行数与 textarea 完全一致，
+      // 否则一行长正文自动折行后行号会累积偏移。wordBreak/overflowWrap/textWrap 尤为关键。
+      Object.assign(mirror.style, {
+        font: cs.font,
+        fontFamily: cs.fontFamily,
+        fontSize: cs.fontSize,
+        fontWeight: cs.fontWeight,
+        lineHeight: cs.lineHeight,
+        letterSpacing: cs.letterSpacing,
+        wordSpacing: cs.wordSpacing,
+        textIndent: cs.textIndent,
+        tabSize: cs.tabSize,
+        textTransform: cs.textTransform,
+        whiteSpace: 'pre-wrap',
+        wordBreak: cs.wordBreak,
+        overflowWrap: cs.overflowWrap,
+        // CSS Text 4：textarea 默认会自动换行，镜像也要换行，否则中英混排断行点不一致。
+        textWrap: 'wrap',
+        paddingLeft: cs.paddingLeft,
+        paddingRight: cs.paddingRight,
+        paddingTop: '0px',
+        paddingBottom: '0px',
+        width: `${textarea.clientWidth}px`,
+        boxSizing: 'border-box'
+      })
+      const lines = draft.split('\n')
+      mirror.innerHTML = ''
+      for (const line of lines) {
+        const div = document.createElement('div')
+        div.textContent = line || '​'
+        mirror.appendChild(div)
+      }
+      const heights: number[] = []
+      for (let i = 0; i < mirror.children.length; i++) {
+        heights.push((mirror.children[i] as HTMLElement).offsetHeight)
+      }
+      setLineHeights(heights)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(textareaRef.current)
+    return () => observer.disconnect()
+  }, [draft, showLineNumbers])
+
+  const handleEditorScroll = useCallback(() => {
+    if (lineGutterRef.current && textareaRef.current) {
+      lineGutterRef.current.scrollTop = textareaRef.current.scrollTop
+    }
   }, [])
 
   // 全局快捷键：Ctrl+Shift+A 重新质检 + Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo
@@ -1626,6 +1698,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         >
           {showPreview ? '收起预览' : '👁 预览'}
         </button>
+        <button
+          className={`btn btn-sm${showLineNumbers ? ' btn-primary' : ''}`}
+          onClick={() => setShowLineNumbers((s) => !s)}
+          title="显示/隐藏行号"
+        >
+          {showLineNumbers ? '隐藏行号' : '# 行号'}
+        </button>
         <button className="btn btn-sm" onClick={() => void handleCopyDraft()} title="复制当前正文到剪贴板">
           复制正文
         </button>
@@ -2018,21 +2097,38 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
       ) : null}
 
-      <textarea
-        ref={textareaRef}
-        className="editor-text"
-        value={draft}
-        onChange={(e) => {
-          setDraft(e.target.value)
-          setDirty(true)
-          if (findResults.length > 0) {
-            setFindResults([])
-            setCurrentResultIndex(-1)
-          }
-        }}
-        placeholder="此处落笔，或点「续写」让 AI 接续成文……"
-        style={{ marginTop: 16 }}
-      />
+      <div className={`editor-text-wrapper${showLineNumbers ? ' with-line-numbers' : ''}`}>
+        {showLineNumbers && (() => {
+          // 行号数量始终以当前 draft 的逻辑行数为准（lineHeights 仅用于精确对齐高度），
+          // 避免 AI 续写流式更新时 lineHeights 滞后一帧导致"行号数量对不上正文"。
+          const lines = draft.split('\n')
+          return (
+            <div className="editor-line-gutter" ref={lineGutterRef} aria-hidden="true">
+              {lines.map((_, i) => (
+                <div key={i} className="line-num" style={{ height: lineHeights[i] ?? 32 }}>
+                  {i + 1}
+                </div>
+              ))}
+            </div>
+          )
+        })()}
+        <textarea
+          ref={textareaRef}
+          className="editor-text"
+          value={draft}
+          onScroll={handleEditorScroll}
+          onChange={(e) => {
+            setDraft(e.target.value)
+            setDirty(true)
+            if (findResults.length > 0) {
+              setFindResults([])
+              setCurrentResultIndex(-1)
+            }
+          }}
+          placeholder="此处落笔，或点「续写」让 AI 接续成文……"
+        />
+        <div ref={mirrorRef} className="editor-text-mirror" aria-hidden="true" />
+      </div>
 
       {showPreview ? (
         <div className="chapter-main-preview">

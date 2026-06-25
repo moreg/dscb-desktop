@@ -1487,6 +1487,58 @@ hr.soft {
   font-style: italic;
 }
 
+/* 行号 gutter */
+.editor-text-wrapper {
+  position: relative;
+  display: flex;
+}
+.editor-text-wrapper .editor-text {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0 !important;
+}
+.editor-text-wrapper.with-line-numbers .editor-text {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: none;
+}
+.editor-line-gutter {
+  width: 48px;
+  min-width: 48px;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--line);
+  border-right: 1px solid var(--line-soft);
+  border-radius: var(--r-md) 0 0 var(--r-md);
+  overflow: hidden;
+  padding-top: 28px;
+  padding-bottom: 28px;
+  user-select: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.editor-text-wrapper.with-line-numbers .editor-text:focus ~ .editor-text-mirror,
+.editor-text-wrapper.with-line-numbers:focus-within .editor-line-gutter {
+  border-color: var(--vermilion);
+}
+.line-num {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding-right: 8px;
+  font-size: 12px;
+  line-height: 32px;
+  color: var(--ink-4, #999);
+  font-family: var(--font-mono, monospace);
+  box-sizing: border-box;
+}
+.editor-text-mirror {
+  visibility: hidden;
+  position: absolute;
+  top: 0;
+  left: -9999px;
+  pointer-events: none;
+}
+
 .chapter-editor-shell {
   transition: padding 0.2s ease;
 }
