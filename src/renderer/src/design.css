@@ -1505,10 +1505,8 @@ hr.soft {
 .editor-line-gutter {
   width: 48px;
   min-width: 48px;
-  /* 与 textarea 锁定同高：stretch 让 flex 把它拉到与 textarea 等高，
-     max-height 防止行号过多时撑得比 textarea 高而溢出正文窗口。 */
-  align-self: stretch;
-  max-height: calc(100vh - 280px);
+  /* 高度由 JS 在 measure 时同步为 textarea 的 clientHeight（单一事实源），
+     不在 CSS 写死 calc，避免与 textarea 各持一份表达式、改一处忘另一处。 */
   background: var(--surface-2, var(--surface));
   border: 1px solid var(--line);
   border-right: 1px solid var(--line-soft);

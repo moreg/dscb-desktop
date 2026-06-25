@@ -770,6 +770,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         const lh = parseFloat(cs.lineHeight)
         setBaseLineHeight(Number.isFinite(lh) && lh > 0 ? lh : 32)
       }
+      // 把 gutter 高度锁定为 textarea 的可视高度（单一事实源）。
+      // textarea 是高度权威（max-height / resize 手柄 / 响应式都在它身上），
+      // gutter 直接抄它的 clientHeight，无需在 CSS 里复制同一份高度表达式，
+      // 彻底消除「两处各写一份 calc、改一处忘另一处」的耦合错位。
+      const gutter = lineGutterRef.current
+      if (gutter) gutter.style.height = `${textarea.clientHeight}px`
     }
     measure()
     const observer = new ResizeObserver(measure)
