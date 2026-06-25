@@ -162,6 +162,9 @@ export default function ChapterEditor({
     return localStorage.getItem('ai-writer:show-line-numbers') !== 'false'
   })
   const [lineHeights, setLineHeights] = useState<number[]>([])
+  /** textarea 单行基准高度（未折行时一行的高度），用于 lineHeights 滞后时的兜底，
+   *  替代写死的魔法数 32——避免字体回退/缩放导致行号与正文行高不符而错位。 */
+  const [baseLineHeight, setBaseLineHeight] = useState(32)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [versions, setVersions] = useState<ChapterVersion[]>([])
@@ -757,6 +760,15 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         heights.push((mirror.children[i] as HTMLElement).offsetHeight)
       }
       setLineHeights(heights)
+      // 基准行高 = 未折行行的最小高度（折行行只会更高）。
+      // 草稿为空 / 全部折行时回退到 getComputedStyle 的 line-height（已是像素值），保证兜底始终反映真实排版。
+      const minH = heights.length > 0 ? Math.min(...heights) : 0
+      if (minH > 0) {
+        setBaseLineHeight(minH)
+      } else {
+        const lh = parseFloat(cs.lineHeight)
+        setBaseLineHeight(Number.isFinite(lh) && lh > 0 ? lh : 32)
+      }
     }
     measure()
     const observer = new ResizeObserver(measure)
@@ -2122,7 +2134,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           return (
             <div className="editor-line-gutter" ref={lineGutterRef} aria-hidden="true">
               {lines.map((_, i) => (
-                <div key={i} className="line-num" style={{ height: lineHeights[i] ?? 32 }}>
+                <div key={i} className="line-num" style={{ height: lineHeights[i] ?? baseLineHeight }}>
                   {i + 1}
                 </div>
               ))}

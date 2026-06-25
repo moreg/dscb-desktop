@@ -1522,11 +1522,14 @@ hr.soft {
 }
 .line-num {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: flex-end;
   padding-right: 8px;
+  /* 行高必须与 .editor-text(textarea) 严格一致，否则行号会逐行累积错位。
+     textarea 用 line-height:2（相对 font-size），这里也用 2 自动跟随，
+     避免写死 px 在字体回退或缩放时不匹配。 */
   font-size: 12px;
-  line-height: 32px;
+  line-height: 2;
   color: var(--ink-4, #999);
   font-family: var(--font-mono, monospace);
   box-sizing: border-box;
