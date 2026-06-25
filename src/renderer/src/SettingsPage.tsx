@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
   UsageSummary,
   ListProvidersResult,
@@ -1053,30 +1053,59 @@ function ProviderRow({
   const [tempDraft, setTempDraft] = useState<number | null>(
     typeof provider.temperature === 'number' ? provider.temperature : null
   )
+  // 防抖定时器：拖动/键盘连续调节时，停止输入 400ms 后才写盘，避免狂发请求
+  const tempTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // provider 切换后同步草稿（例如重新拉取列表）
   useEffect(() => {
     setTempDraft(typeof provider.temperature === 'number' ? provider.temperature : null)
   }, [provider.id, provider.temperature])
-
-  const persistTemp = async (v: number | null) => {
-    setTempDraft(v)
-    try {
-      // apiKey 传空 → main 端保留旧 key；只更新 temperature
-      await window.api.upsertProvider({
-        id: provider.id,
-        label: provider.label,
-        baseUrl: provider.baseUrl,
-        model: provider.model,
-        apiKey: '',
-        protocol: provider.protocol,
-        ...(v === null ? {} : { temperature: v })
-      })
-    } catch {
-      // 失败回滚到原值，避免滑块与存储不一致
-      setTempDraft(
-        typeof provider.temperature === 'number' ? provider.temperature : null
-      )
+  // 卸载时清掉待写的定时器，避免内存泄漏与卸载后写盘
+  useEffect(() => {
+    return () => {
+      if (tempTimer.current) clearTimeout(tempTimer.current)
     }
+  }, [])
+
+  const persistTemp = (v: number | null) => {
+    setTempDraft(v)
+    if (tempTimer.current) clearTimeout(tempTimer.current)
+    tempTimer.current = setTimeout(async () => {
+      tempTimer.current = null
+      try {
+        // apiKey 传空 → main 端保留旧 key；只更新 temperature
+        await window.api.upsertProvider({
+          id: provider.id,
+          label: provider.label,
+          baseUrl: provider.baseUrl,
+          model: provider.model,
+          apiKey: '',
+          protocol: provider.protocol,
+          ...(v === null ? {} : { temperature: v })
+        })
+      } catch {
+        // 失败回滚到 props 当前值，避免滑块与存储不一致
+        setTempDraft(
+          typeof provider.temperature === 'number' ? provider.temperature : null
+        )
+      }
+    }, 400)
+  }
+
+  /** 「默认」按钮：清除自定义温度。瞬时操作，立即写盘并取消挂起的防抖 */
+  const resetTemp = () => {
+    if (tempTimer.current) {
+      clearTimeout(tempTimer.current)
+      tempTimer.current = null
+    }
+    setTempDraft(null)
+    void window.api.upsertProvider({
+      id: provider.id,
+      label: provider.label,
+      baseUrl: provider.baseUrl,
+      model: provider.model,
+      apiKey: '',
+      protocol: provider.protocol
+    })
   }
 
   return (
@@ -1117,7 +1146,7 @@ function ProviderRow({
           <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
             {provider.baseUrl || '(未填 baseUrl)'} · {provider.model || '(未填 model)'}
           </div>
-          {/* 模型强度（采样温度）：可拖动调节，即时保存 */}
+          {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
           <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>模型强度</span>
             <input
@@ -1126,9 +1155,8 @@ function ProviderRow({
               max={2}
               step={0.1}
               value={tempDraft ?? 1}
-              onChange={(e) => setTempDraft(Number(e.target.value))}
-              onMouseUp={(e) => persistTemp(Number((e.target as HTMLInputElement).value))}
-              onTouchEnd={(e) => persistTemp(Number((e.target as HTMLInputElement).value))}
+              onChange={(e) => persistTemp(Number(e.target.value))}
+              aria-label="模型强度（采样温度）"
               style={{ width: 160 }}
             />
             <span style={{ fontSize: 13, minWidth: 92, fontFamily: 'var(--font-mono)' }}>
@@ -1137,7 +1165,8 @@ function ProviderRow({
             <button
               className="btn btn-sm"
               style={{ padding: '2px 8px', fontSize: 12 }}
-              onClick={() => persistTemp(null)}
+              onClick={resetTemp}
+              disabled={tempDraft === null}
               title="清除自定义温度，使用模型默认值"
             >
               默认
