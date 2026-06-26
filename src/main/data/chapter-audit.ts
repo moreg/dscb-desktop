@@ -21,6 +21,7 @@ import {
 import { resolveGenreVoice, type GenreVoice, type GenreKey } from './skill-prompts/genre-voice'
 import { DEFAULT_REVIEW_THRESHOLDS } from './skill-prompts'
 import { countWords } from './words'
+import { runCustomAlgorithmChecks } from './custom-check-engine'
 import type {
   AuditReport,
   AuditSeverity,
@@ -234,6 +235,8 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
     pushLongParagraphViolations(content, thresholds, rules, violations)
     pushDialogueTagViolations(content, rules, violations)
     pushSensitiveViolations(content, rules, violations)
+    // 用户自定义算法检查项（keyword/regex）
+    runCustomAlgorithmChecks(content, rules.customChecks, violations)
   }
 
   const counts = countSeverities(violations)
