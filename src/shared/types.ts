@@ -233,9 +233,39 @@ export interface ChapterRulesBundle {
   overrides: Record<string, string>
 }
 
+/** 自定义检查项的检测类型（用户在 UI 选）。 */
+export type CustomCheckType = 'keyword' | 'regex' | 'llm'
+
+/**
+ * 用户自定义检查项（CRUD 的"新增"产物）。
+ * id 用 custom_ 前缀，与内置 ReviewCheckId 永不冲突。
+ */
+export interface CustomReviewCheck {
+  /** 'custom_xxx'，UI 生成，全局唯一 */
+  id: string
+  label: string
+  hint: string
+  severity: AuditSeverity
+  type: CustomCheckType
+  /** UI 分组 + 违例 category，限定为 AuditCategory 之一（复用现有分类） */
+  group: AuditCategory
+  keywords?: string[]
+  pattern?: string
+  prompt?: string
+  enabled: boolean
+}
+
+/** 内置检查项的元数据覆盖（用户编辑内置项名称/说明/严重度时写入）。 */
+export interface BuiltinCheckMeta {
+  label?: string
+  hint?: string
+  severity?: AuditSeverity
+}
+
 /** 一条审稿检查项（renderer 视图：分类 + 标签 + 默认严重度 + 说明） */
 export interface ReviewCheckSectionView {
-  checkId: ReviewCheckId
+  /** 内置项用 ReviewCheckId；自定义项用 custom_ 前缀 id */
+  checkId: string
   /** 检查类别（用于分组：算法 / LLM） */
   kind: 'algorithm' | 'llm'
   /** 所属技能检查分组（toxic/quote/quality/paragraph/dialogue/sensitive/llm_review） */
@@ -243,6 +273,14 @@ export interface ReviewCheckSectionView {
   label: string
   defaultSeverity: AuditSeverity
   hint: string
+  /** true = 用户自定义项（UI 据此显示删除/全字段编辑） */
+  isCustom?: boolean
+  /** 自定义项的检测类型；内置项无此字段 */
+  customType?: CustomCheckType
+  /** 自定义项配置（按 type 取用），供 UI 编辑表单初始化 */
+  keywords?: string[]
+  pattern?: string
+  prompt?: string
 }
 
 /** getReviewRules 返回：检查项清单（含默认信息）+ 当前配置 */
@@ -950,10 +988,16 @@ export interface ReviewRulesConfig {
   enabled: boolean
   /** 完整流程里是否自动跑 LLM 深度审稿（默认 false，按需点按钮触发，省 token） */
   autoDeepReview: boolean
-  /** 各检查项开关；缺省=开 */
-  checks: Partial<Record<ReviewCheckId, boolean>>
+  /** 各检查项开关；缺省=开（key 含 custom_ 前缀的自定义项） */
+  checks: Partial<Record<string, boolean>>
   thresholds: ReviewThresholds
   wordLists: ReviewWordLists
+  /** 内置项元数据覆盖（编辑内置项 label/hint/severity） */
+  builtinMeta?: Partial<Record<ReviewCheckId, BuiltinCheckMeta>>
+  /** 软删除（隐藏）的内置项 id；可恢复 */
+  hiddenBuiltin?: ReviewCheckId[]
+  /** 用户自定义检查项 */
+  customChecks?: CustomReviewCheck[]
 }
 
 /**

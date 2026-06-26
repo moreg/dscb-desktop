@@ -1,5 +1,5 @@
 import type { LlmService, GenerateOptions } from './llm-service'
-import type { AuditSeverity, AuditViolation, ReviewCheckId } from '../../shared/types'
+import type { AuditSeverity, AuditViolation, CustomReviewCheck, ReviewCheckId } from '../../shared/types'
 
 /**
  * LLM 深度审稿流程编排服务（M3 新增）。
@@ -110,6 +110,8 @@ export interface DeepReviewContext {
   characterCards?: string
   /** 章节细纲文本（logic_hole 对照用），可为空 */
   outline?: string
+  /** 用户自定义的 LLM 检查项（type=llm），由调用方从 settings 透传 */
+  customLlmChecks?: CustomReviewCheck[]
 }
 
 export class ReviewFlowService {
