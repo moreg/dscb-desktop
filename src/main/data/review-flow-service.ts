@@ -154,6 +154,28 @@ export class ReviewFlowService {
         console.warn(`[runDeepReview] check ${checkId} failed:`, err)
       }
     }
+    // 用户自定义 LLM 检查项（type=llm，由调用方透传）
+    const customLlm = ctx.customLlmChecks ?? []
+    for (const check of customLlm) {
+      if (!check.enabled || !check.prompt) continue
+      const spec: CheckSpec = { checkId: check.id as ReviewCheckId, instruction: check.prompt }
+      try {
+        const findings = await this.runOneCheck(spec, content, ctx, opts)
+        for (const f of findings) {
+          all.push({
+            category: 'llm_review',
+            severity: f.severity,
+            message: f.message,
+            snippet: f.snippet,
+            offset: f.offset,
+            ruleId: check.id,
+            suggestion: f.suggestion
+          })
+        }
+      } catch (err) {
+        console.warn(`[runDeepReview] custom check ${check.id} failed:`, err)
+      }
+    }
     return all
   }
 
