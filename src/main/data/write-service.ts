@@ -32,6 +32,7 @@ import type {
   OutlineDiffReport,
   PrevEndingState,
   ReviewCheckId,
+  CustomReviewCheck,
   RhythmApplyResult,
   RhythmEntry,
   RhythmEvaluation,
@@ -222,6 +223,7 @@ export class WriteService {
     let enabledChecks: ReviewCheckId[] | undefined
     let characterCards = ''
     let outline = ''
+    let customLlmChecks: CustomReviewCheck[] | undefined
     const dir = await this.projectService.resolveDir(projectId).catch(() => null)
 
     try {
@@ -246,6 +248,10 @@ export class WriteService {
               'quote_contradiction'
             ] as ReviewCheckId[]
           ).filter((c) => rules.checks[c] !== false)
+          // 自定义 LLM 项：只取 enabled 且开关未关的
+          customLlmChecks = (rules.customChecks ?? []).filter(
+            (c) => c.type === 'llm' && c.enabled && rules.checks[c.id] !== false
+          )
         } else {
           // 审稿总开关关 → 不跑
           return []
@@ -285,7 +291,7 @@ export class WriteService {
 
     return this.reviewFlow.runDeepReview(
       content,
-      { chapterNumber, genre, enabledChecks, characterCards, outline },
+      { chapterNumber, genre, enabledChecks, characterCards, outline, customLlmChecks },
       { ...opts, meta: { feature: 'deepReview', projectId, ...opts.meta } }
     )
   }
