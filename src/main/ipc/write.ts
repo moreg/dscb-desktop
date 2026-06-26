@@ -46,6 +46,22 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /** LLM 深度审稿（M3）：跑角色崩坏/逻辑漏洞等语义检查，返回 findings 列表 */
+  safeHandle(
+    'write:runDeepReview',
+    async (_e, payload: { projectId: string; content: string; chapterNumber: number }) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          content: chapterContentSchema,
+          chapterNumber: chapterNumberSchema
+        }),
+        payload
+      )
+      return service.runDeepReview(validated.projectId, validated.content, validated.chapterNumber)
+    }
+  )
+
   ipcMain.handle(
     'write:generateChapter',
     async (
