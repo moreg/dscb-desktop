@@ -7,7 +7,12 @@ import { z } from 'zod'
 import { validateInput, dailyWordGoalSchema } from './validation'
 import type { AiHighFreqConfig } from '../../shared/types'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
-import { CHAPTER_RULE_SECTIONS } from '../data/skill-prompts'
+import {
+  CHAPTER_RULE_SECTIONS,
+  REVIEW_CHECK_SECTIONS,
+  REVIEW_CHECK_KEYS
+} from '../data/skill-prompts'
+import type { ReviewCheckId } from '../../shared/types'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -192,4 +197,53 @@ export function registerSettingsIpc(
       return repo.setChapterRuleOverrides(validated)
     }
   )
+
+  /** 审稿规则：读取检查项清单（含默认信息）+ 当前配置 */
+  safeHandle('settings:getReviewRules', async () => {
+    const config = await repo.getReviewRules()
+    return {
+      sections: REVIEW_CHECK_SECTIONS.map((s) => ({
+        checkId: s.checkId,
+        kind: s.kind,
+        group: s.group,
+        label: s.label,
+        defaultSeverity: s.defaultSeverity,
+        hint: s.hint
+      })),
+      config
+    }
+  })
+
+  /** 保存审稿规则配置（开关/阈值/词表）；非白名单 checkId 由 repo 层清洗丢弃 */
+  safeHandle('settings:setReviewRules', async (_e, patch) => {
+    const checkIdEnum = z.custom<ReviewCheckId>(
+      (v): v is ReviewCheckId => typeof v === 'string' && REVIEW_CHECK_KEYS.has(v as ReviewCheckId),
+      '非法 checkId'
+    )
+    const validated = validateInput(
+      z.object({
+        enabled: z.boolean().optional(),
+        autoDeepReview: z.boolean().optional(),
+        checks: z.record(checkIdEnum, z.boolean()).optional(),
+        thresholds: z
+          .object({
+            minWords: z.number().int().min(1).max(100000).optional(),
+            maxWords: z.number().int().min(1).max(100000).optional(),
+            maxParagraphLen: z.number().int().min(1).max(10000).optional(),
+            dashDensityPer100: z.number().min(0).max(100).optional(),
+            repetitionLen: z.number().int().min(1).max(1000).optional(),
+            maxSentenceLen: z.number().int().min(1).max(10000).optional()
+          })
+          .optional(),
+        wordLists: z
+          .object({
+            metaBreak: z.array(z.string().max(100)).max(1000).optional(),
+            sensitive: z.array(z.string().max(100)).max(1000).optional()
+          })
+          .optional()
+      }),
+      patch
+    )
+    return repo.setReviewRules(validated)
+  })
 }

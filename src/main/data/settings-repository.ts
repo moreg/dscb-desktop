@@ -4,7 +4,11 @@ import type {
   WriteAuditMode,
   CostAlertConfig,
   AiHighFreqConfig,
-  AiHighFreqWord
+  AiHighFreqWord,
+  ReviewCheckId,
+  ReviewRulesConfig,
+  ReviewThresholds,
+  ReviewWordLists
 } from '../../shared/types'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
 import {
@@ -12,7 +16,13 @@ import {
   cloneWritingRequirementTemplates,
   normalizeWritingRequirementLines
 } from '../../shared/writing-requirement-templates'
-import { CHAPTER_RULE_SECTIONS } from './skill-prompts'
+import {
+  CHAPTER_RULE_SECTIONS,
+  REVIEW_CHECK_KEYS,
+  DEFAULT_REVIEW_RULES,
+  DEFAULT_REVIEW_THRESHOLDS,
+  DEFAULT_REVIEW_WORD_LISTS
+} from './skill-prompts'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -43,6 +53,8 @@ export interface AppSettings {
   writingRequirementTemplates?: WritingRequirementTemplate[]
   /** 续写规则分节覆盖：key→正文。缺 key = 用内置默认；空串 = 停用该节 */
   chapterRuleOverrides?: Record<string, string>
+  /** 审稿规则配置（按「正文审核」技能） */
+  reviewRules?: Partial<ReviewRulesConfig>
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -76,7 +88,8 @@ const DEFAULTS: AppSettings = {
   pomodoroBreak: 5,
   writeAudit: DEFAULT_WRITE_AUDIT,
   costAlert: DEFAULT_COST_ALERT,
-  aiHighFreq: DEFAULT_AI_HIGH_FREQ
+  aiHighFreq: DEFAULT_AI_HIGH_FREQ,
+  reviewRules: DEFAULT_REVIEW_RULES
 }
 
 /** 续写规则覆盖白名单：只保留注册表内的 key、字符串值（空串=停用该节，保留） */
@@ -88,6 +101,86 @@ function sanitizeChapterRuleOverrides(raw: unknown): Record<string, string> {
     if (CHAPTER_RULE_KEYS.has(k) && typeof v === 'string') out[k] = v
   }
   return out
+}
+
+/**
+ * 阈值裁剪范围（防止用户填入导致引擎异常的值）。
+ * minWords/maxWords/maxParagraphLen/maxSentenceLen/repetitionLen ≥ 1；
+ * dashDensityPer100 允许小数，但 ≥ 0。
+ */
+function clampThresholds(raw: Partial<ReviewThresholds> | undefined): ReviewThresholds {
+  const d = DEFAULT_REVIEW_THRESHOLDS
+  const pick = (key: keyof ReviewThresholds, min: number): number => {
+    const v = raw?.[key]
+    return typeof v === 'number' && Number.isFinite(v) && v >= min ? Math.floor(v) : d[key]
+  }
+  return {
+    minWords: pick('minWords', 1),
+    maxWords: pick('maxWords', 1),
+    maxParagraphLen: pick('maxParagraphLen', 1),
+    repetitionLen: pick('repetitionLen', 1),
+    maxSentenceLen: pick('maxSentenceLen', 1),
+    dashDensityPer100:
+      typeof raw?.dashDensityPer100 === 'number' &&
+      Number.isFinite(raw.dashDensityPer100) &&
+      raw.dashDensityPer100 >= 0
+        ? raw.dashDensityPer100
+        : d.dashDensityPer100
+  }
+}
+
+/** 过滤词表：去空白、去重，保留非空字符串。 */
+function sanitizeWordList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const w of raw) {
+    if (typeof w !== 'string') continue
+    const t = w.trim()
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+  }
+  return out
+}
+
+/**
+ * 审稿规则清洗：
+ * - checks：只保留白名单 checkId 的布尔值；
+ * - thresholds：范围裁剪 + 缺省补默认；
+ * - wordLists：过滤空串 + 去重；缺省补默认；
+ * - enabled/autoDeepReview：缺省补默认。
+ * 永远返回完整对象（不返回 Partial），保证下游引擎可直接用。
+ */
+function sanitizeReviewRules(raw: unknown): ReviewRulesConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<ReviewRulesConfig>
+  const checks: Partial<Record<ReviewCheckId, boolean>> = {}
+  if (r.checks && typeof r.checks === 'object') {
+    for (const [k, v] of Object.entries(r.checks)) {
+      if (REVIEW_CHECK_KEYS.has(k as ReviewCheckId) && typeof v === 'boolean') {
+        checks[k as ReviewCheckId] = v
+      }
+    }
+  }
+  const thresholds = clampThresholds(r.thresholds)
+  const wordLists: ReviewWordLists = {
+    metaBreak: sanitizeWordList(r.wordLists?.metaBreak).length
+      ? sanitizeWordList(r.wordLists?.metaBreak)
+      : [...DEFAULT_REVIEW_WORD_LISTS.metaBreak],
+    sensitive: sanitizeWordList(r.wordLists?.sensitive).length
+      ? sanitizeWordList(r.wordLists?.sensitive)
+      : [...DEFAULT_REVIEW_WORD_LISTS.sensitive]
+  }
+  return {
+    enabled: typeof r.enabled === 'boolean' ? r.enabled : DEFAULT_REVIEW_RULES.enabled,
+    autoDeepReview:
+      typeof r.autoDeepReview === 'boolean'
+        ? r.autoDeepReview
+        : DEFAULT_REVIEW_RULES.autoDeepReview,
+    checks,
+    thresholds,
+    wordLists
+  }
 }
 
 function sanitizeWritingRequirementTemplates(
@@ -141,7 +234,8 @@ export class SettingsRepository {
       writingRequirementTemplates: sanitizeWritingRequirementTemplates(
         stored.writingRequirementTemplates
       ),
-      chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides)
+      chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides),
+      reviewRules: sanitizeReviewRules(stored.reviewRules)
     }
   }
 
@@ -151,6 +245,7 @@ export class SettingsRepository {
       writeAudit?: Partial<WriteAuditConfig>
       costAlert?: Partial<CostAlertConfig>
       aiHighFreq?: Partial<AiHighFreqConfig>
+      reviewRules?: Partial<ReviewRulesConfig>
     }
   ): Promise<AppSettings> {
     const current = await this.get()
@@ -176,7 +271,9 @@ export class SettingsRepository {
       chapterRuleOverrides:
         patch.chapterRuleOverrides !== undefined
           ? sanitizeChapterRuleOverrides(patch.chapterRuleOverrides)
-          : current.chapterRuleOverrides
+          : current.chapterRuleOverrides,
+      reviewRules:
+        patch.reviewRules !== undefined ? sanitizeReviewRules(patch.reviewRules) : current.reviewRules
     }
     await writeJsonAtomic(this.settingsFile, next)
     return next
@@ -210,6 +307,36 @@ export class SettingsRepository {
     const sanitized = sanitizeChapterRuleOverrides(overrides)
     await this.update({ chapterRuleOverrides: sanitized })
     return this.getChapterRuleOverrides()
+  }
+
+  /** 取审稿规则配置（清洗后；永远返回完整对象） */
+  async getReviewRules(): Promise<ReviewRulesConfig> {
+    const s = await this.get()
+    return sanitizeReviewRules(s.reviewRules)
+  }
+
+  /** 增量更新审稿规则（patch 合并到当前值，整体清洗后落盘） */
+  async setReviewRules(patch: Partial<ReviewRulesConfig>): Promise<ReviewRulesConfig> {
+    const current = await this.getReviewRules()
+    // checks：合并而非覆盖（用户改一项不应清空其他项）
+    const mergedChecks: Partial<Record<ReviewCheckId, boolean>> = { ...current.checks }
+    if (patch.checks) {
+      for (const [k, v] of Object.entries(patch.checks)) {
+        if (REVIEW_CHECK_KEYS.has(k as ReviewCheckId) && typeof v === 'boolean') {
+          mergedChecks[k as ReviewCheckId] = v
+        }
+      }
+    }
+    const merged: Partial<ReviewRulesConfig> = {
+      enabled: typeof patch.enabled === 'boolean' ? patch.enabled : current.enabled,
+      autoDeepReview:
+        typeof patch.autoDeepReview === 'boolean' ? patch.autoDeepReview : current.autoDeepReview,
+      checks: mergedChecks,
+      thresholds: patch.thresholds ? { ...current.thresholds, ...patch.thresholds } : current.thresholds,
+      wordLists: patch.wordLists ? { ...current.wordLists, ...patch.wordLists } : current.wordLists
+    }
+    await this.update({ reviewRules: merged })
+    return this.getReviewRules()
   }
 
   /** 获取 AI 高频词配置 */

@@ -6,7 +6,9 @@ import type {
   ProviderProtocol,
   ProjectUsage,
   ChapterUsage,
-  ChapterRuleSectionView
+  ChapterRuleSectionView,
+  ReviewCheckSectionView,
+  ReviewRulesConfig
 } from '../../shared/types'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
@@ -63,7 +65,8 @@ export default function SettingsPage(_: Props) {
     { id: 'aiwords', label: 'AI 高频词' },
     { id: 'writing', label: '写作节奏' },
     { id: 'writingReq', label: '写作要求' },
-    { id: 'writingRules', label: '续写规则' }
+    { id: 'writingRules', label: '续写规则' },
+    { id: 'reviewRules', label: '审稿规则' }
   ] as const
 
   // list 接口返回的是脱敏的 ProviderSummary（没有 apiKey）
@@ -115,6 +118,20 @@ export default function SettingsPage(_: Props) {
   const [ruleSections, setRuleSections] = useState<ChapterRuleSectionView[]>([])
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({})
   const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
+  // 审稿规则：检查项清单（含默认信息）+ 当前配置（开关/阈值/词表本地草稿）
+  const [reviewSections, setReviewSections] = useState<ReviewCheckSectionView[]>([])
+  const [reviewCfg, setReviewCfg] = useState<ReviewRulesConfig | null>(null)
+  // 阈值/词表本地草稿：用户编辑时不立即落盘，点「保存」才写
+  const [reviewThresholdDraft, setReviewThresholdDraft] = useState({
+    minWords: 2300,
+    maxWords: 3500,
+    maxParagraphLen: 300,
+    dashDensityPer100: 2,
+    repetitionLen: 8,
+    maxSentenceLen: 80
+  })
+  const [reviewMetaDraft, setReviewMetaDraft] = useState('')
+  const [reviewSensitiveDraft, setReviewSensitiveDraft] = useState('')
   const refreshWritingTemplates = () => {
     if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
       setWritingTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
@@ -126,6 +143,15 @@ export default function SettingsPage(_: Props) {
     void window.api.getChapterRules().then((bundle) => {
       setRuleSections(bundle.sections)
       setRuleDrafts(mergeRuleDrafts(bundle.sections, bundle.overrides))
+    })
+  }
+  const refreshReviewRules = () => {
+    void window.api.getReviewRules().then((bundle) => {
+      setReviewSections(bundle.sections)
+      setReviewCfg(bundle.config)
+      setReviewThresholdDraft({ ...bundle.config.thresholds })
+      setReviewMetaDraft(bundle.config.wordLists.metaBreak.join('\n'))
+      setReviewSensitiveDraft(bundle.config.wordLists.sensitive.join('\n'))
     })
   }
 
@@ -153,6 +179,7 @@ export default function SettingsPage(_: Props) {
     refreshAiHighFreq()
     refreshWritingTemplates()
     refreshChapterRules()
+    refreshReviewRules()
     refreshByProject()
     refreshByChapter()
     void window.api.getTheme().then(setTheme)
@@ -1029,6 +1056,249 @@ export default function SettingsPage(_: Props) {
                     </div>
                   )
                 })}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'reviewRules' && reviewCfg && (
+            <div className="card" style={{ maxWidth: 760 }}>
+              <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
+                <h3 className="sub" style={{ margin: 0 }}>审稿规则</h3>
+                <label
+                  className="row"
+                  style={{ gap: 6, fontSize: 12.5, marginLeft: 'auto', alignItems: 'center' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reviewCfg.enabled}
+                    onChange={async (e) => {
+                      const next = await window.api.setReviewRules({ enabled: e.target.checked })
+                      setReviewCfg(next)
+                    }}
+                  />
+                  启用审稿
+                </label>
+              </div>
+              <p className="muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+                按「正文审核」技能集成。算法类检查（毒点/引文/成文质量等）实时跑、不调 LLM；LLM
+                类（角色崩坏/逻辑漏洞等）需点「AI 深度审稿」按需触发，避免每次续写烧 token。关闭某项 =
+                该项不再报告。
+              </p>
+
+              {/* 总开关：自动深度审稿 */}
+              <div
+                className="field"
+                style={{
+                  marginTop: 12,
+                  padding: 10,
+                  border: '1px solid var(--border)',
+                  borderRadius: 6
+                }}
+              >
+                <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={reviewCfg.autoDeepReview}
+                    disabled={!reviewCfg.enabled}
+                    onChange={async (e) => {
+                      const next = await window.api.setReviewRules({
+                        autoDeepReview: e.target.checked
+                      })
+                      setReviewCfg(next)
+                    }}
+                  />
+                  <span>续写完自动跑 LLM 深度审稿</span>
+                  <span className="meta" style={{ color: 'var(--ink-3)' }}>
+                    （默认关：手动点按钮触发，省 token）
+                  </span>
+                </label>
+              </div>
+
+              {/* 检查项清单：算法 / LLM 分组 */}
+              <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
+                检查项
+              </h4>
+              <div style={{ display: 'grid', gap: 12, marginTop: 10 }}>
+                {(['algorithm', 'llm'] as const).map((kind) => {
+                  const list = reviewSections.filter((s) => s.kind === kind)
+                  if (list.length === 0) return null
+                  return (
+                    <div
+                      key={kind}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 6,
+                        padding: 10
+                      }}
+                    >
+                      <div className="meta" style={{ marginBottom: 8, fontSize: 12 }}>
+                        {kind === 'algorithm' ? '算法检查（实时，不调 LLM）' : 'LLM 深度审稿（按需）'}
+                      </div>
+                      <div style={{ display: 'grid', gap: 8 }}>
+                        {list.map((s) => {
+                          const on = reviewCfg.checks[s.checkId] !== false
+                          const pill =
+                            s.defaultSeverity === 'error'
+                              ? '🚨'
+                              : s.defaultSeverity === 'warn'
+                                ? '⚠'
+                                : '💡'
+                          return (
+                            <label
+                              key={s.checkId}
+                              className="row"
+                              style={{ gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={on && reviewCfg.enabled}
+                                disabled={!reviewCfg.enabled}
+                                style={{ marginTop: 2 }}
+                                onChange={async (e) => {
+                                  const next = await window.api.setReviewRules({
+                                    checks: { [s.checkId]: e.target.checked }
+                                  })
+                                  setReviewCfg(next)
+                                }}
+                              />
+                              <span>
+                                {pill} <strong>{s.label}</strong>
+                                <span className="meta" style={{ marginLeft: 6 }}>
+                                  {s.hint}
+                                </span>
+                              </span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* 阈值区 */}
+              <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
+                阈值
+              </h4>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
+                {(
+                  [
+                    ['minWords', '字数下限', 1, 100000],
+                    ['maxWords', '字数上限', 1, 100000],
+                    ['maxParagraphLen', '段落长度上限', 1, 10000],
+                    ['maxSentenceLen', '句子长度上限', 1, 10000],
+                    ['repetitionLen', '重复判定长度', 1, 1000],
+                    ['dashDensityPer100', '破折号密度(/100字)', 0, 100]
+                  ] as const
+                ).map(([key, label, min, max]) => (
+                  <div key={key} className="field" style={{ marginBottom: 0 }}>
+                    <label style={{ fontSize: 12.5 }}>{label}</label>
+                    <input
+                      className="input"
+                      type="number"
+                      step={key === 'dashDensityPer100' ? 0.5 : 1}
+                      min={min}
+                      max={max}
+                      value={reviewThresholdDraft[key]}
+                      onChange={(e) =>
+                        setReviewThresholdDraft((prev) => ({
+                          ...prev,
+                          [key]: Number(e.target.value)
+                        }))
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                <button
+                  className="btn btn-sm"
+                  disabled={!reviewCfg.enabled}
+                  onClick={async () => {
+                    try {
+                      const next = await window.api.setReviewRules({
+                        thresholds: reviewThresholdDraft
+                      })
+                      setReviewCfg(next)
+                      setReviewThresholdDraft({ ...next.thresholds })
+                      setMsg({ kind: 'ok', text: '阈值已保存' })
+                    } catch {
+                      setMsg({ kind: 'err', text: '保存失败，请重试' })
+                    }
+                  }}
+                >
+                  保存阈值
+                </button>
+              </div>
+
+              {/* 自定义词表区 */}
+              <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
+                自定义词表
+              </h4>
+              <div style={{ display: 'grid', gap: 12, marginTop: 10 }}>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: 12.5 }}>打破第四面墙触发词（每行一个）</label>
+                  <textarea
+                    className="textarea"
+                    style={{ minHeight: 100 }}
+                    value={reviewMetaDraft}
+                    onChange={(e) => setReviewMetaDraft(e.target.value)}
+                    placeholder="第X卷、弹幕、读者、主角、剧情……"
+                  />
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: 12.5 }}>敏感词（每行一个；仅提醒，不强制修改）</label>
+                  <textarea
+                    className="textarea"
+                    style={{ minHeight: 100 }}
+                    value={reviewSensitiveDraft}
+                    onChange={(e) => setReviewSensitiveDraft(e.target.value)}
+                    placeholder="敏感词每行一个……"
+                  />
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                <button
+                  className="btn btn-sm"
+                  disabled={!reviewCfg.enabled}
+                  onClick={async () => {
+                    try {
+                      const next = await window.api.setReviewRules({
+                        wordLists: {
+                          metaBreak: reviewMetaDraft.split('\n'),
+                          sensitive: reviewSensitiveDraft.split('\n')
+                        }
+                      })
+                      setReviewCfg(next)
+                      setReviewMetaDraft(next.wordLists.metaBreak.join('\n'))
+                      setReviewSensitiveDraft(next.wordLists.sensitive.join('\n'))
+                      setMsg({ kind: 'ok', text: '词表已保存' })
+                    } catch {
+                      setMsg({ kind: 'err', text: '保存失败，请重试' })
+                    }
+                  }}
+                >
+                  保存词表
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={async () => {
+                    // 恢复默认 = 传空词表，repo 层会兜底为内置默认
+                    try {
+                      const next = await window.api.setReviewRules({
+                        wordLists: { metaBreak: [], sensitive: [] }
+                      })
+                      setReviewCfg(next)
+                      setReviewMetaDraft(next.wordLists.metaBreak.join('\n'))
+                      setReviewSensitiveDraft(next.wordLists.sensitive.join('\n'))
+                      setMsg({ kind: 'ok', text: '词表已恢复默认' })
+                    } catch {
+                      setMsg({ kind: 'err', text: '恢复失败，请重试' })
+                    }
+                  }}
+                >
+                  恢复默认词表
+                </button>
               </div>
             </div>
           )}

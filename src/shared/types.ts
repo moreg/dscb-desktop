@@ -233,6 +233,24 @@ export interface ChapterRulesBundle {
   overrides: Record<string, string>
 }
 
+/** 一条审稿检查项（renderer 视图：分类 + 标签 + 默认严重度 + 说明） */
+export interface ReviewCheckSectionView {
+  checkId: ReviewCheckId
+  /** 检查类别（用于分组：算法 / LLM） */
+  kind: 'algorithm' | 'llm'
+  /** 所属技能检查分组（toxic/quote/quality/paragraph/dialogue/sensitive/llm_review） */
+  group: string
+  label: string
+  defaultSeverity: AuditSeverity
+  hint: string
+}
+
+/** getReviewRules 返回：检查项清单（含默认信息）+ 当前配置 */
+export interface ReviewRulesBundle {
+  sections: ReviewCheckSectionView[]
+  config: ReviewRulesConfig
+}
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
@@ -492,6 +510,12 @@ export interface RendererApi {
     violationType: string,
     chapterNumber?: number
   ) => Promise<{ rewritten: string; reason: string }>
+  /** LLM 深度审稿：跑角色崩坏/逻辑漏洞等语义检查，返回 findings 列表 */
+  runDeepReview: (
+    projectId: string,
+    content: string,
+    chapterNumber: number
+  ) => Promise<AuditViolation[]>
   getWriteAuditConfig: () => Promise<WriteAuditConfig>
   setWriteAuditConfig: (cfg: Partial<WriteAuditConfig>) => Promise<WriteAuditConfig>
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
@@ -508,6 +532,10 @@ export interface RendererApi {
   getChapterRules: () => Promise<ChapterRulesBundle>
   /** 整体保存续写规则覆盖（仅白名单 key 生效；与默认相等的 key 由前端剔除） */
   setChapterRules: (overrides: Record<string, string>) => Promise<Record<string, string>>
+  /** 审稿规则：读取检查项清单 + 当前配置 */
+  getReviewRules: () => Promise<ReviewRulesBundle>
+  /** 保存审稿规则配置（开关/阈值/词表） */
+  setReviewRules: (cfg: Partial<ReviewRulesConfig>) => Promise<ReviewRulesConfig>
 }
 
 export interface Character {
@@ -795,13 +823,32 @@ export interface ChapterFigure {
 export type AuditSeverity = 'error' | 'warn' | 'info'
 
 /**
- * 质检类别。与「正文写作」技能的章末/禁用词/字数 + zh-humanizer 1-16 规则 + 题材例外检查项对应。
+ * 质检类别。与「正文写作」技能的章末/禁用词/字数 + zh-humanizer 1-16 规则 + 题材例外检查项对应，
+ * 加上「正文审核」技能集成的审稿检查项。
  * - ending: 章末形式（对话/事件 vs 说教/AI 抒怀）
  * - forbidden_word: 12 类禁用高频词命中（含正则模式）
- * - word_count: 字数偏离 1500-3500 区间
+ * - word_count: 字数偏离区间
  * - rule: zh-humanizer 识别规则 1-16（破折号/三段式/Emoji/聊天语残留/空洞结尾等算法可检测项）
+ * - toxic: 毒点（打破第四面墙🚨/视角混乱/水字数重复）—— 正文审核技能 3.1
+ * - quote: 引文一致性（字数描述🚨）—— 正文审核技能 3.2
+ * - quality: 成文质量（破折号碎片化🚨/超长句/逗号堆叠/省略号滥用）—— 正文审核技能 3.3
+ * - paragraph: 段落长度（过长）—— 正文审核技能 3.8
+ * - dialogue: 对话标签单一 —— 正文审核技能 3.7
+ * - sensitive: 敏感词提醒（仅提醒）—— 正文审核技能 3.9
+ * - llm_review: LLM 深度审稿（角色崩坏/逻辑漏洞等语义项，由 review-flow-service 产出）
  */
-export type AuditCategory = 'ending' | 'forbidden_word' | 'word_count' | 'rule'
+export type AuditCategory =
+  | 'ending'
+  | 'forbidden_word'
+  | 'word_count'
+  | 'rule'
+  | 'toxic'
+  | 'quote'
+  | 'quality'
+  | 'paragraph'
+  | 'dialogue'
+  | 'sensitive'
+  | 'llm_review'
 
 export interface AuditViolation {
   category: AuditCategory
@@ -840,6 +887,73 @@ export interface WriteAuditConfig {
   enabled: boolean
   /** soft：违规标红仍可保存；strict：error 必须修复才能保存 */
   mode: WriteAuditMode
+}
+
+/* ==========================================================
+   审稿规则配置（按「正文审核」技能集成）
+   ========================================================== */
+
+/**
+ * 审稿检查项 id。对应「正文审核」技能第 3 步检查项。
+ * 分两类：算法可检测（同步纯函数）+ LLM 语义判定（流式）。
+ */
+export type ReviewCheckId =
+  // 算法类（chapter-audit.ts 纯函数检测）
+  | 'meta_break' // 🚨 打破第四面墙（第X卷/弹幕/读者/主角/剧情）
+  | 'pov_mix' // 视角混乱（第一/第三人称同段混用）
+  | 'repetition' // 水字数/剧情重复（N-gram 重复片段）
+  | 'quote_count' // 🚨 引文字数描述与实际不符
+  | 'dash_fragment' // 🚨 破折号碎片化（单字碎片/密度超阈值）
+  | 'long_sentence' // 超长句（无句号）
+  | 'comma_stack' // 逗号堆叠
+  | 'ellipsis_abuse' // 省略号滥用
+  | 'long_paragraph' // 段落过长（手机阅读不友好）
+  | 'dialogue_tag' // 对话标签单一（"道/说"占比过高）
+  | 'sensitive' // 敏感词提醒（仅提醒，不强制）
+  // LLM 类（review-flow-service.ts 流式判定）
+  | 'character_breakdown' // 角色崩坏人设
+  | 'logic_hole' // 逻辑漏洞/逻辑断层
+  | 'low_iq_plot' // 剧情降智
+  | 'emotion_cliff' // 情绪断崖
+  | 'hook_grade' // 钩子强度分级
+  | 'style_match' // 文风匹配度
+  | 'cool_point' // 爽点分析（爽文题材）
+  | 'quote_contradiction' // 引文语气/动作/情绪矛盾
+
+/** 审稿阈值（数值类检查项的临界值）。 */
+export interface ReviewThresholds {
+  /** 单章字数下限（对齐技能合格线 2300） */
+  minWords: number
+  /** 单章字数上限 */
+  maxWords: number
+  /** 段落字数上限（超此值提醒拆分） */
+  maxParagraphLen: number
+  /** 破折号密度上限（每 100 字允许的——数量） */
+  dashDensityPer100: number
+  /** 重复片段判定长度（连续重复字数阈值） */
+  repetitionLen: number
+  /** 句子字数上限（超此值提醒断句） */
+  maxSentenceLen: number
+}
+
+/** 用户可编辑的审稿词表。 */
+export interface ReviewWordLists {
+  /** 打破第四面墙触发词（命中即 error，穿书/系统文题材降级） */
+  metaBreak: string[]
+  /** 敏感词（仅提醒，不强制修改） */
+  sensitive: string[]
+}
+
+/** 审稿规则配置（设置里可编辑）。 */
+export interface ReviewRulesConfig {
+  /** 总开关：false = 跳过所有新增审稿，回到旧质检行为 */
+  enabled: boolean
+  /** 完整流程里是否自动跑 LLM 深度审稿（默认 false，按需点按钮触发，省 token） */
+  autoDeepReview: boolean
+  /** 各检查项开关；缺省=开 */
+  checks: Partial<Record<ReviewCheckId, boolean>>
+  thresholds: ReviewThresholds
+  wordLists: ReviewWordLists
 }
 
 /**
@@ -1104,4 +1218,6 @@ export interface ChapterFlowResult {
   rhythm: RhythmEvaluation | null
   /** 图解草稿 */
   figure: FigureDraft
+  /** LLM 深度审稿 findings（仅当 settings.autoDeepReview=true 时填充；否则空数组） */
+  deepReview?: AuditViolation[]
 }

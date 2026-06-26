@@ -444,6 +444,9 @@ const api = {
       violationType,
       chapterNumber
     }),
+  /** LLM 深度审稿：跑角色崩坏/逻辑漏洞等语义检查，返回 findings */
+  runDeepReview: (projectId: string, content: string, chapterNumber: number) =>
+    ipcRenderer.invoke('write:runDeepReview', { projectId, content, chapterNumber }),
   getWriteAuditConfig: async () => {
     const all = await ipcRenderer.invoke('settings:getAll')
     return {
@@ -472,7 +475,11 @@ const api = {
   }[]) => ipcRenderer.invoke('settings:setWritingRequirementTemplates', templates),
   getChapterRules: () => ipcRenderer.invoke('settings:getChapterRules'),
   setChapterRules: (overrides: Record<string, string>) =>
-    ipcRenderer.invoke('settings:setChapterRules', overrides)
+    ipcRenderer.invoke('settings:setChapterRules', overrides),
+  /** 审稿规则：检查项清单 + 当前配置 */
+  getReviewRules: () => ipcRenderer.invoke('settings:getReviewRules'),
+  /** 保存审稿规则配置（开关/阈值/词表） */
+  setReviewRules: (cfg) => ipcRenderer.invoke('settings:setReviewRules', cfg)
 } as const
 
 contextBridge.exposeInMainWorld('api', api)

@@ -8,6 +8,16 @@ export { GENRE_VOICES, resolveGenreVoice } from './genre-voice'
 export type { GenreKey, GenreVoice } from './genre-voice'
 export { CHAPTER_RULE_SECTIONS } from './chapter-rules'
 export type { ChapterRuleKey, ChapterRuleSection } from './chapter-rules'
+export {
+  REVIEW_CHECK_SECTIONS,
+  REVIEW_CHECK_KEYS,
+  ALGORITHM_CHECK_IDS,
+  LLM_CHECK_IDS,
+  DEFAULT_REVIEW_THRESHOLDS,
+  DEFAULT_REVIEW_WORD_LISTS,
+  DEFAULT_REVIEW_RULES
+} from './review-checks'
+export type { ReviewCheckSection, ReviewCheckKind, ReviewCheckGroup } from './review-checks'
 
 export function buildSystemPrompt(
   genre?: string,
