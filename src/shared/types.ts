@@ -286,6 +286,8 @@ export interface ReviewCheckSectionView {
 /** getReviewRules 返回：检查项清单（含默认信息）+ 当前配置 */
 export interface ReviewRulesBundle {
   sections: ReviewCheckSectionView[]
+  /** 被软删除（隐藏）的内置项，供前端「已隐藏」恢复区渲染 */
+  hiddenSections: { checkId: string; label: string }[]
   config: ReviewRulesConfig
 }
 

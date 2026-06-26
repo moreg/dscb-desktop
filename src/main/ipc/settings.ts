@@ -198,23 +198,50 @@ export function registerSettingsIpc(
     }
   )
 
-  /** 审稿规则：读取检查项清单（含默认信息）+ 当前配置 */
+  /** 审稿规则：读取检查项清单（内置应用元数据覆盖 + 自定义）+ 当前配置 */
   safeHandle('settings:getReviewRules', async () => {
     const config = await repo.getReviewRules()
+    const hidden = new Set(config.hiddenBuiltin ?? [])
+    const meta = config.builtinMeta ?? {}
+    const builtinSections = REVIEW_CHECK_SECTIONS.filter((s) => !hidden.has(s.checkId)).map(
+      (s) => {
+        const m = meta[s.checkId]
+        return {
+          checkId: s.checkId,
+          kind: s.kind,
+          group: s.group,
+          label: m?.label ?? s.label,
+          defaultSeverity: m?.severity ?? s.defaultSeverity,
+          hint: m?.hint ?? s.hint,
+          isCustom: false as const
+        }
+      }
+    )
+    const customSections = (config.customChecks ?? []).map((c) => ({
+      checkId: c.id,
+      kind: c.type === 'llm' ? ('llm' as const) : ('algorithm' as const),
+      group: c.group,
+      label: c.label,
+      defaultSeverity: c.severity,
+      hint: c.hint,
+      isCustom: true as const,
+      customType: c.type,
+      keywords: c.keywords,
+      pattern: c.pattern,
+      prompt: c.prompt
+    }))
+    const hiddenSections = REVIEW_CHECK_SECTIONS.filter((s) => hidden.has(s.checkId)).map((s) => ({
+      checkId: s.checkId,
+      label: meta[s.checkId]?.label ?? s.label
+    }))
     return {
-      sections: REVIEW_CHECK_SECTIONS.map((s) => ({
-        checkId: s.checkId,
-        kind: s.kind,
-        group: s.group,
-        label: s.label,
-        defaultSeverity: s.defaultSeverity,
-        hint: s.hint
-      })),
+      sections: [...builtinSections, ...customSections],
+      hiddenSections,
       config
     }
   })
 
-  /** 保存审稿规则配置（开关/阈值/词表）；非白名单 checkId 由 repo 层清洗丢弃 */
+  /** 保存审稿规则配置（开关/阈值/词表/自定义项/元数据/软删除） */
   safeHandle('settings:setReviewRules', async (_e, patch) => {
     const checkIdEnum = z.custom<ReviewCheckId>(
       (v): v is ReviewCheckId => typeof v === 'string' && REVIEW_CHECK_KEYS.has(v as ReviewCheckId),
@@ -224,7 +251,8 @@ export function registerSettingsIpc(
       z.object({
         enabled: z.boolean().optional(),
         autoDeepReview: z.boolean().optional(),
-        checks: z.record(checkIdEnum, z.boolean()).optional(),
+        // checks key 放宽为 string（含 custom_ 前缀），repo 层用运行时白名单清洗
+        checks: z.record(z.string(), z.boolean()).optional(),
         thresholds: z
           .object({
             minWords: z.number().int().min(1).max(100000).optional(),
@@ -240,6 +268,34 @@ export function registerSettingsIpc(
             metaBreak: z.array(z.string().max(100)).max(1000).optional(),
             sensitive: z.array(z.string().max(100)).max(1000).optional()
           })
+          .optional(),
+        builtinMeta: z
+          .record(
+            checkIdEnum,
+            z.object({
+              label: z.string().max(100).optional(),
+              hint: z.string().max(300).optional(),
+              severity: z.enum(['error', 'warn', 'info']).optional()
+            })
+          )
+          .optional(),
+        hiddenBuiltin: z.array(checkIdEnum).max(50).optional(),
+        customChecks: z
+          .array(
+            z.object({
+              id: z.string().min(1).max(60),
+              label: z.string().min(1).max(100),
+              hint: z.string().max(300),
+              severity: z.enum(['error', 'warn', 'info']),
+              type: z.enum(['keyword', 'regex', 'llm']),
+              group: z.string().min(1).max(40),
+              keywords: z.array(z.string().max(100)).max(500).optional(),
+              pattern: z.string().max(500).optional(),
+              prompt: z.string().max(2000).optional(),
+              enabled: z.boolean()
+            })
+          )
+          .max(50)
           .optional()
       }),
       patch
