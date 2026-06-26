@@ -14,11 +14,13 @@ import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
 import type { SettingsRepository } from './settings-repository'
 import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
 import { WriteFlowService } from './write-flow-service'
+import { ReviewFlowService } from './review-flow-service'
 import { MemoryWriter } from './memory-writer'
 import { FigureHtmlRepo } from './skill-format/figure-html-repo'
 import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
 import type {
   AuditReport,
+  AuditViolation,
   BatchProgress,
   ChapterFlowResult,
   Character,
@@ -29,6 +31,7 @@ import type {
   MemoryApplyResult,
   OutlineDiffReport,
   PrevEndingState,
+  ReviewCheckId,
   RhythmApplyResult,
   RhythmEntry,
   RhythmEvaluation,
@@ -107,6 +110,7 @@ export class WriteService {
     private readonly projectService: ProjectService,
     private readonly llm: LlmService,
     private readonly flow: WriteFlowService = new WriteFlowService(llm),
+    private readonly reviewFlow: ReviewFlowService = new ReviewFlowService(llm),
     private readonly chapterService: ChapterService = new ChapterService(projectService),
     private readonly settings?: SettingsRepository
   ) {}
@@ -190,7 +194,100 @@ export class WriteService {
         // skip：fallback to urban
       }
     }
-    return runAudit(content, { ...opts, genre })
+    // M2：从设置读审稿规则（开关/阈值/词表），透传给检测引擎。
+    // 读失败（旧 settings.json 无此字段）兜底为 undefined → 引擎用默认值且不跑新增检查。
+    let reviewRules = opts?.reviewRules
+    if (!reviewRules && this.settings) {
+      try {
+        reviewRules = await this.settings.getReviewRules()
+      } catch (err) {
+        console.warn('[auditChapter] Failed to read reviewRules, skipping review checks:', err)
+      }
+    }
+    return runAudit(content, { ...opts, genre, reviewRules })
+  }
+
+  /**
+   * LLM 深度审稿（M3）：跑角色崩坏/逻辑漏洞等语义检查项。
+   * 启用项由 settings.reviewRules.checks 决定（llm 类 checkId）；为空 = 全部 llm 项都跑。
+   * 失败兜底为空数组，永不 reject。角色卡/细纲从磁盘读取（用于语义对照）。
+   */
+  async runDeepReview(
+    projectId: string,
+    content: string,
+    chapterNumber: number,
+    opts: GenerateOptions = {}
+  ): Promise<AuditViolation[]> {
+    let genre: string | undefined
+    let enabledChecks: ReviewCheckId[] | undefined
+    let characterCards = ''
+    let outline = ''
+    const dir = await this.projectService.resolveDir(projectId).catch(() => null)
+
+    try {
+      genre = (await this.projectService.getProjectData(projectId)).genre
+    } catch (err) {
+      console.warn('[runDeepReview] Failed to get project genre:', err)
+    }
+    // 启用项：只跑 settings 里未关闭的 LLM 类检查
+    if (this.settings) {
+      try {
+        const rules = await this.settings.getReviewRules()
+        if (rules.enabled) {
+          enabledChecks = (
+            [
+              'character_breakdown',
+              'logic_hole',
+              'low_iq_plot',
+              'emotion_cliff',
+              'hook_grade',
+              'style_match',
+              'cool_point',
+              'quote_contradiction'
+            ] as ReviewCheckId[]
+          ).filter((c) => rules.checks[c] !== false)
+        } else {
+          // 审稿总开关关 → 不跑
+          return []
+        }
+      } catch (err) {
+        console.warn('[runDeepReview] Failed to read reviewRules:', err)
+      }
+    }
+    // 预加载角色卡 / 细纲（用于语义对照）
+    if (dir) {
+      try {
+        const cards = await new CharacterCardMdRepo(dir).list()
+        if (cards.length > 0) {
+          characterCards = cards
+            .map((c) => `- ${c.name}${c.role ? `（${c.role}）` : ''}：${c.personality ?? ''}`.trim())
+            .join('\n')
+            .slice(0, 2000)
+        }
+      } catch {
+        // skip
+      }
+      try {
+        const all = await new DetailedOutlineMdRepo(dir).listAll()
+        const d = all.find((x) => x.chapterNumber === chapterNumber)
+        if (d) {
+          const lines: string[] = []
+          if (d.title) lines.push(`标题：${d.title}`)
+          if (d.plotSummary) lines.push(`核心事件：${d.plotSummary}`)
+          if (d.coolPoint) lines.push(`爽点：${d.coolPoint}`)
+          if (d.hook) lines.push(`钩子：${d.hook}`)
+          outline = lines.join('\n')
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    return this.reviewFlow.runDeepReview(
+      content,
+      { chapterNumber, genre, enabledChecks, characterCards, outline },
+      { ...opts, meta: { feature: 'deepReview', projectId, ...opts.meta } }
+    )
   }
 
   /**
@@ -661,8 +758,26 @@ export class WriteService {
       // skip
     }
 
+    // 7. LLM 深度审稿（仅当 settings.autoDeepReview=true 时自动跑，省 token）
+    // 默认关：用户在面板手动点「AI 深度审稿」按钮触发（见 runDeepReview IPC）。
+    let deepReview: AuditViolation[] = []
+    if (this.settings) {
+      try {
+        const rules = await this.settings.getReviewRules()
+        if (rules.enabled && rules.autoDeepReview) {
+          onProgress('deepReview')
+          deepReview = await this.runDeepReview(projectId, content, chapterNumber, {
+            meta: { feature: 'batchDeepReview', projectId }
+          })
+        }
+      } catch (err) {
+        console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
+        // skip
+      }
+    }
+
     onProgress('done')
-    return { chapterNumber, content, audit, outlineDiff, memory, rhythm, figure }
+    return { chapterNumber, content, audit, outlineDiff, memory, rhythm, figure, deepReview }
   }
 
   /**

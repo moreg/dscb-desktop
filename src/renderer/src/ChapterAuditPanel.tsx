@@ -46,7 +46,15 @@ const CATEGORY_LABEL: Record<string, string> = {
   ending: '章末形式',
   forbidden_word: '禁用高频词',
   word_count: '字数',
-  rule: '写作规则'
+  rule: '写作规则',
+  // 正文审核技能新增（M2）
+  toxic: '毒点',
+  quote: '引文一致性',
+  quality: '成文质量',
+  paragraph: '段落长度',
+  dialogue: '对话标签',
+  sensitive: '敏感词',
+  llm_review: '深度审稿'
 }
 
 const SEVERITY_LABEL: Record<string, string> = {
@@ -82,6 +90,9 @@ export default function ChapterAuditPanel({
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 })
   const [undoMenuOpen, setUndoMenuOpen] = useState(false)
+  // LLM 深度审稿（M3）：手动触发，结果合并进同一面板的「深度审稿」分组
+  const [deepReviewRunning, setDeepReviewRunning] = useState(false)
+  const [deepReviewFindings, setDeepReviewFindings] = useState<AuditViolation[]>([])
   // 每条 violation 的 humanize 状态：key = violationKey(v)，value = {loading, result, error, appliedAt}
   // appliedAt 标记"用户已把此条改写应用到正文"，用于显示"已应用"角标和"↶ 撤销这次"按钮。
   const [humanizeMap, setHumanizeMap] = useState<
@@ -203,7 +214,25 @@ export default function ChapterAuditPanel({
     setBatchRunning(false)
   }
 
-  const grouped = useMemo(() => groupViolations(report?.violations ?? []), [report])
+  /** 手动触发 LLM 深度审稿（角色崩坏/逻辑漏洞等语义检查） */
+  const handleDeepReview = async () => {
+    if (!draft || deepReviewRunning) return
+    setDeepReviewRunning(true)
+    try {
+      const findings = await window.api.runDeepReview(projectId, draft, chapterNumber ?? 1)
+      setDeepReviewFindings(findings)
+    } catch (err) {
+      console.warn('[deepReview] failed:', err)
+    } finally {
+      setDeepReviewRunning(false)
+    }
+  }
+
+  // 合并算法审稿（report.violations）+ LLM 深度审稿（deepReviewFindings）
+  const grouped = useMemo(
+    () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings]),
+    [report, deepReviewFindings]
+  )
   // 展示计数基于去重后的 grouped，与列表实际条数一致；
   // report.counts 仍含前缀重叠的重复命中（如「轰」+「轰然」），不宜直接用于展示。
   const { errorCount, warnCount, infoCount } = useMemo(() => {
@@ -370,6 +399,23 @@ export default function ChapterAuditPanel({
         >
           {batchRunning ? `改写中…` : '✎ 批量改写'}
         </button>
+        <button
+          className="btn btn-sm"
+          onClick={handleDeepReview}
+          disabled={deepReviewRunning || !draft}
+          title="调 LLM 做角色崩坏/逻辑漏洞/钩子分级等语义检查（按需触发，省 token）"
+        >
+          {deepReviewRunning ? '审稿中…' : '🔍 AI 深度审稿'}
+        </button>
+        {deepReviewFindings.length > 0 && (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setDeepReviewFindings([])}
+            title="清空深度审稿结果"
+          >
+            清空深度结果（{deepReviewFindings.length}）
+          </button>
+        )}
         {onRunAgain && (
           <button className="btn btn-sm" onClick={onRunAgain} disabled={loading}>
             重新质检
@@ -382,11 +428,19 @@ export default function ChapterAuditPanel({
           {(Object.keys(grouped) as Array<keyof typeof grouped>).map((cat) => {
             const items = grouped[cat]
             if (!items || items.length === 0) return null
+            const errInCat = items.filter((v) => v.severity === 'error').length
+            const warnInCat = items.filter((v) => v.severity === 'warn').length
+            // 优先级标识：本组含 error → 🚨必须修复；仅 warn/info → 💡建议优化
+            const priority = errInCat > 0 ? '🚨' : warnInCat > 0 ? '⚠' : '💡'
             return (
               <section className="audit-section" key={cat}>
                 <h4 className="audit-section-title">
+                  <span title={errInCat > 0 ? '必须修复' : '建议优化'}>{priority}</span>{' '}
                   {CATEGORY_LABEL[cat] ?? cat}
-                  <span className="muted">（{items.length}）</span>
+                  <span className="muted">
+                    （{items.length}
+                    {errInCat > 0 ? `，含 ${errInCat} 处必须修复` : ''}）
+                  </span>
                 </h4>
                 <ul className="audit-list">
                   {items.slice(0, 50).map((v, i) => {
@@ -554,32 +608,47 @@ export default function ChapterAuditPanel({
   )
 }
 
-interface GroupedViolations {
-  ending: AuditViolation[]
-  forbidden_word: AuditViolation[]
-  word_count: AuditViolation[]
-  rule: AuditViolation[]
-}
+/** 按 category 动态分组（不再用闭合联合，便于审稿新增 category 自动展示） */
+type GroupedViolations = Record<string, AuditViolation[]>
+
+/** 分组呈现顺序：固定项在前，审稿新增项在后，未知 category 兜底到最后 */
+const CATEGORY_ORDER: string[] = [
+  'ending',
+  'word_count',
+  'forbidden_word',
+  'rule',
+  'toxic',
+  'quote',
+  'quality',
+  'paragraph',
+  'dialogue',
+  'sensitive',
+  'llm_review'
+]
 
 function groupViolations(violations: AuditViolation[]): GroupedViolations {
-  const out: GroupedViolations = {
-    ending: [],
-    forbidden_word: [],
-    word_count: [],
-    rule: []
-  }
+  const out: GroupedViolations = {}
   for (const v of violations) {
+    if (!out[v.category]) out[v.category] = []
     out[v.category].push(v)
   }
   // 禁用词：同一 offset 上前缀重叠的词条会叠多条命中
   // （如「轰」+「轰然」、「嘴角勾起」+「嘴角勾起一抹弧度」+ 嘴角_弧度 底层模式）。
   // 展示前按 offset 去重，保留 word 最长（最具体）的那一条，避免重复提醒。
-  out.forbidden_word = dedupeForbiddenViolations(out.forbidden_word)
+  if (out.forbidden_word) out.forbidden_word = dedupeForbiddenViolations(out.forbidden_word)
   // 同 category 内按 severity 排序：error → warn → info
   const order: Record<string, number> = { error: 0, warn: 1, info: 2 }
-  for (const k of Object.keys(out) as Array<keyof GroupedViolations>) {
+  for (const k of Object.keys(out)) {
     out[k].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
   }
-  return out
+  // 按 CATEGORY_ORDER 排序键（未知 category 排末尾）
+  const sorted: GroupedViolations = {}
+  for (const cat of CATEGORY_ORDER) {
+    if (out[cat]) sorted[cat] = out[cat]
+  }
+  for (const cat of Object.keys(out)) {
+    if (!CATEGORY_ORDER.includes(cat)) sorted[cat] = out[cat]
+  }
+  return sorted
 }
 
