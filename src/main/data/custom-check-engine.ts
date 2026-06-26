@@ -7,15 +7,23 @@ const MAX_HITS_PER_CHECK = 5
  * 跑自定义算法类检查项（keyword / regex）。llm 类被跳过（由 review-flow-service 跑）。
  * 单项失败（如非法正则）只跳过不抛错，不阻断整体。
  * 结果 push 进 out，ruleId = check.id，category = check.group。
+ *
+ * 开关语义：与内置 isCheckOn 一致——checkToggles[id] !== false 才跑。
+ * UI 的复选框写 checks[custom_id]，故必须读此表，不能只看 check.enabled。
+ *
+ * @param checkToggles 即 rules.checks；为 undefined 时按全开处理（向后兼容）
  */
 export function runCustomAlgorithmChecks(
   content: string,
   checks: CustomReviewCheck[] | undefined,
-  out: AuditViolation[]
+  out: AuditViolation[],
+  checkToggles?: Partial<Record<string, boolean>>
 ): void {
   if (!checks || !content) return
   for (const check of checks) {
     if (!check.enabled) continue
+    // 用户开关：checks[id] === false 表示关闭（与 isCheckOn 同构）
+    if (checkToggles && checkToggles[check.id] === false) continue
     if (check.type === 'keyword') {
       runKeywordCheck(content, check, out)
     } else if (check.type === 'regex') {

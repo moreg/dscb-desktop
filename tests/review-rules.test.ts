@@ -169,6 +169,27 @@ describe('SettingsRepository custom checks / builtinMeta / hiddenBuiltin', () =>
     expect(saved.customChecks?.[0].id).toBe('custom_ok')
   })
 
+  it('丢弃大写/非法字符的 custom id', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        { id: 'custom_Bad', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['a'], enabled: true },
+        { id: 'custom_ok1', label: 'y', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['b'], enabled: true }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+    expect(saved.customChecks?.[0].id).toBe('custom_ok1')
+  })
+
+  it('非法 group 降级为 toxic（保证 AuditViolation.category 合法）', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        { id: 'custom_g', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: '非法定义', keywords: ['a'], enabled: true }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+    expect(saved.customChecks?.[0].group).toBe('toxic')
+  })
+
   it('丢弃非法正则的 regex 项', async () => {
     const saved = await repo.setReviewRules({
       customChecks: [

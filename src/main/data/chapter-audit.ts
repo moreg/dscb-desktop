@@ -235,8 +235,8 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
     pushLongParagraphViolations(content, thresholds, rules, violations)
     pushDialogueTagViolations(content, rules, violations)
     pushSensitiveViolations(content, rules, violations)
-    // 用户自定义算法检查项（keyword/regex）
-    runCustomAlgorithmChecks(content, rules.customChecks, violations)
+    // 用户自定义算法检查项（keyword/regex）；传入 checks 开关表，关掉的项跳过
+    runCustomAlgorithmChecks(content, rules.customChecks, violations, rules.checks)
   }
 
   const counts = countSeverities(violations)

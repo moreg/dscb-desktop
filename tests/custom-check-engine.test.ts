@@ -142,4 +142,50 @@ describe('runCustomAlgorithmChecks', () => {
     runCustomAlgorithmChecks('', [], out)
     expect(out).toEqual([])
   })
+
+  it('checkToggles[id]===false 时跳过（UI 复选框关掉该项）', () => {
+    const checks: CustomReviewCheck[] = [
+      {
+        id: 'custom_words',
+        label: '禁用词',
+        hint: '',
+        severity: 'warn',
+        type: 'keyword',
+        group: 'toxic',
+        keywords: ['居然'],
+        enabled: true
+      }
+    ]
+    const out: AuditViolation[] = []
+    // 用户在 UI 取消勾选 → checks[custom_words] = false
+    runCustomAlgorithmChecks('他居然笑了', checks, out, { custom_words: false })
+    expect(out).toEqual([])
+  })
+
+  it('checkToggles[id]===true 或缺省时正常跑', () => {
+    const checks: CustomReviewCheck[] = [
+      {
+        id: 'custom_words',
+        label: '禁用词',
+        hint: '',
+        severity: 'warn',
+        type: 'keyword',
+        group: 'toxic',
+        keywords: ['居然'],
+        enabled: true
+      }
+    ]
+    // true → 跑
+    const out1: AuditViolation[] = []
+    runCustomAlgorithmChecks('他居然笑了', checks, out1, { custom_words: true })
+    expect(out1.length).toBe(1)
+    // 缺省 → 跑
+    const out2: AuditViolation[] = []
+    runCustomAlgorithmChecks('他居然笑了', checks, out2, { other_id: false })
+    expect(out2.length).toBe(1)
+    // 整个表为空 → 跑
+    const out3: AuditViolation[] = []
+    runCustomAlgorithmChecks('他居然笑了', checks, out3)
+    expect(out3.length).toBe(1)
+  })
 })

@@ -155,6 +155,13 @@ function sanitizeWordList(raw: unknown): string[] {
  * - enabled/autoDeepReview：缺省补默认。
  * 永远返回完整对象（不返回 Partial），保证下游引擎可直接用。
  */
+/** 合法的检查项分组（= AuditCategory 闭合联合的镜像）。
+ * 自定义项 group 必须落在此集合内，否则降级为 toxic，保证 AuditViolation.category 合法。 */
+const VALID_GROUPS: ReadonlySet<string> = new Set([
+  'ending', 'forbidden_word', 'word_count', 'rule', 'toxic',
+  'quote', 'quality', 'paragraph', 'dialogue', 'sensitive', 'llm_review'
+])
+
 function sanitizeCustomChecks(raw: unknown): CustomReviewCheck[] {
   if (!Array.isArray(raw)) return []
   const out: CustomReviewCheck[] = []
@@ -162,7 +169,7 @@ function sanitizeCustomChecks(raw: unknown): CustomReviewCheck[] {
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue
     const r = item as Partial<CustomReviewCheck>
-    // id：必须 custom_ 前缀 + 合法字符，且唯一
+    // id：必须 custom_ 前缀 + 合法字符，且唯一；不得与内置 checkId 冲突
     const id = typeof r.id === 'string' ? r.id.trim() : ''
     if (!/^custom_[a-z0-9_]+$/.test(id) || seen.has(id)) continue
     const label = typeof r.label === 'string' ? r.label.trim() : ''
@@ -170,7 +177,11 @@ function sanitizeCustomChecks(raw: unknown): CustomReviewCheck[] {
     if (!label) continue
     const severity = r.severity === 'error' || r.severity === 'warn' || r.severity === 'info' ? r.severity : 'warn'
     const type = r.type === 'keyword' || r.type === 'regex' || r.type === 'llm' ? r.type : 'keyword'
-    const group = typeof r.group === 'string' ? (r.group as AuditCategory) : 'toxic'
+    // group 必须是合法 AuditCategory；否则降级 toxic，保证 AuditViolation.category 合法
+    const group: AuditCategory =
+      typeof r.group === 'string' && VALID_GROUPS.has(r.group)
+        ? (r.group as AuditCategory)
+        : 'toxic'
     const check: CustomReviewCheck = {
       id, label, hint, severity, type, group, enabled: typeof r.enabled === 'boolean' ? r.enabled : true
     }
