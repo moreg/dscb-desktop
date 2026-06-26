@@ -8,7 +8,9 @@ import type {
   ChapterUsage,
   ChapterRuleSectionView,
   ReviewCheckSectionView,
-  ReviewRulesConfig
+  ReviewRulesConfig,
+  ReviewCheckId,
+  AuditCategory
 } from '../../shared/types'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
@@ -132,6 +134,29 @@ export default function SettingsPage(_: Props) {
   })
   const [reviewMetaDraft, setReviewMetaDraft] = useState('')
   const [reviewSensitiveDraft, setReviewSensitiveDraft] = useState('')
+  // 检查项 CRUD：编辑中的 checkId / 编辑草稿 / 待二次确认删除 / 已隐藏项
+  const [hiddenSections, setHiddenSections] = useState<{ checkId: string; label: string }[]>([])
+  const [editingCheckId, setEditingCheckId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<{ label: string; hint: string; severity: 'error' | 'warn' | 'info' }>({
+    label: '', hint: '', severity: 'warn'
+  })
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
+  // 新增自定义检查项表单
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [addDraft, setAddDraft] = useState<{
+    label: string
+    hint: string
+    severity: 'error' | 'warn' | 'info'
+    type: 'keyword' | 'regex' | 'llm'
+    group: string
+    keywords: string
+    pattern: string
+    prompt: string
+  }>({
+    label: '', hint: '', severity: 'warn', type: 'keyword',
+    group: 'toxic', keywords: '', pattern: '', prompt: ''
+  })
+  const [regexValid, setRegexValid] = useState<{ ok: boolean; err?: string }>({ ok: true })
   const refreshWritingTemplates = () => {
     if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
       setWritingTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
@@ -148,6 +173,7 @@ export default function SettingsPage(_: Props) {
   const refreshReviewRules = () => {
     void window.api.getReviewRules().then((bundle) => {
       setReviewSections(bundle.sections)
+      setHiddenSections(bundle.hiddenSections ?? [])
       setReviewCfg(bundle.config)
       setReviewThresholdDraft({ ...bundle.config.thresholds })
       setReviewMetaDraft(bundle.config.wordLists.metaBreak.join('\n'))
@@ -1143,31 +1169,151 @@ export default function SettingsPage(_: Props) {
                               : s.defaultSeverity === 'warn'
                                 ? '⚠'
                                 : '💡'
+                          const isEditing = editingCheckId === s.checkId
                           return (
-                            <label
-                              key={s.checkId}
-                              className="row"
-                              style={{ gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={on && reviewCfg.enabled}
-                                disabled={!reviewCfg.enabled}
-                                style={{ marginTop: 2 }}
-                                onChange={async (e) => {
-                                  const next = await window.api.setReviewRules({
-                                    checks: { [s.checkId]: e.target.checked }
-                                  })
-                                  setReviewCfg(next)
-                                }}
-                              />
-                              <span>
-                                {pill} <strong>{s.label}</strong>
-                                <span className="meta" style={{ marginLeft: 6 }}>
-                                  {s.hint}
+                            <div key={s.checkId} style={{ borderBottom: '1px dashed var(--line-soft)', paddingBottom: 6 }}>
+                              <label
+                                className="row"
+                                style={{ gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={on && reviewCfg.enabled}
+                                  disabled={!reviewCfg.enabled}
+                                  style={{ marginTop: 2 }}
+                                  onChange={async (e) => {
+                                    const next = await window.api.setReviewRules({
+                                      checks: { [s.checkId]: e.target.checked }
+                                    })
+                                    setReviewCfg(next)
+                                  }}
+                                />
+                                <span style={{ flex: 1 }}>
+                                  {pill} <strong>{s.label}</strong>
+                                  {s.isCustom && (
+                                    <span className="meta" style={{ marginLeft: 6, fontSize: 11 }}>
+                                      [{s.customType}]
+                                    </span>
+                                  )}
+                                  <span className="meta" style={{ marginLeft: 6 }}>
+                                    {s.hint}
+                                  </span>
                                 </span>
-                              </span>
-                            </label>
+                              </label>
+                              {/* 编辑/删除按钮 */}
+                              {!isEditing && (
+                                <div className="row" style={{ gap: 6, marginTop: 4, marginLeft: 24 }}>
+                                  <button
+                                    className="btn btn-ghost btn-sm"
+                                    style={{ padding: '1px 6px', fontSize: 11 }}
+                                    onClick={() => {
+                                      setEditingCheckId(s.checkId)
+                                      setEditDraft({
+                                        label: s.label,
+                                        hint: s.hint,
+                                        severity: s.defaultSeverity
+                                      })
+                                    }}
+                                  >
+                                    ✎ 编辑
+                                  </button>
+                                  {s.isCustom ? (
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      style={{ padding: '1px 6px', fontSize: 11, color: 'var(--vermilion)' }}
+                                      onClick={async () => {
+                                        if (pendingDeleteId === s.checkId) {
+                                          // 二次确认 → 硬删
+                                          const next = (reviewCfg.customChecks ?? []).filter(
+                                            (c) => c.id !== s.checkId
+                                          )
+                                          await window.api.setReviewRules({ customChecks: next })
+                                          refreshReviewRules()
+                                          setPendingDeleteId(null)
+                                        } else {
+                                          setPendingDeleteId(s.checkId)
+                                        }
+                                      }}
+                                    >
+                                      {pendingDeleteId === s.checkId ? '⚠ 确认删除？' : '🗑 删除'}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      style={{ padding: '1px 6px', fontSize: 11 }}
+                                      title="隐藏此项（可在下方「已隐藏」区恢复）"
+                                      onClick={async () => {
+                                        const next = [...(reviewCfg.hiddenBuiltin ?? []), s.checkId as ReviewCheckId]
+                                        await window.api.setReviewRules({ hiddenBuiltin: next })
+                                        refreshReviewRules()
+                                      }}
+                                    >
+                                      🗑 隐藏
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                              {/* 编辑表单 */}
+                              {isEditing && (
+                                <div style={{ marginTop: 6, marginLeft: 24, padding: 8, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--surface-2)' }}>
+                                  <div className="field" style={{ marginBottom: 6 }}>
+                                    <label style={{ fontSize: 11.5 }}>名称</label>
+                                    <input
+                                      className="input"
+                                      value={editDraft.label}
+                                      onChange={(e) => setEditDraft((d) => ({ ...d, label: e.target.value }))}
+                                    />
+                                  </div>
+                                  <div className="field" style={{ marginBottom: 6 }}>
+                                    <label style={{ fontSize: 11.5 }}>说明</label>
+                                    <input
+                                      className="input"
+                                      value={editDraft.hint}
+                                      onChange={(e) => setEditDraft((d) => ({ ...d, hint: e.target.value }))}
+                                    />
+                                  </div>
+                                  <div className="field" style={{ marginBottom: 8 }}>
+                                    <label style={{ fontSize: 11.5 }}>严重度</label>
+                                    <select
+                                      className="input"
+                                      value={editDraft.severity}
+                                      onChange={(e) => setEditDraft((d) => ({ ...d, severity: e.target.value as 'error' | 'warn' | 'info' }))}
+                                    >
+                                      <option value="error">🚨 错误（error）</option>
+                                      <option value="warn">⚠ 提醒（warn）</option>
+                                      <option value="info">💡 建议（info）</option>
+                                    </select>
+                                  </div>
+                                  <div className="row" style={{ gap: 6 }}>
+                                    <button
+                                      className="btn btn-sm"
+                                      onClick={async () => {
+                                        // 内置项 → builtinMeta 覆盖；自定义项 → 改 customChecks
+                                        if (s.isCustom) {
+                                          const next = (reviewCfg.customChecks ?? []).map((c) =>
+                                            c.id === s.checkId
+                                              ? { ...c, label: editDraft.label, hint: editDraft.hint, severity: editDraft.severity }
+                                              : c
+                                          )
+                                          await window.api.setReviewRules({ customChecks: next })
+                                        } else {
+                                          await window.api.setReviewRules({
+                                            builtinMeta: { [s.checkId]: { label: editDraft.label, hint: editDraft.hint, severity: editDraft.severity } }
+                                          })
+                                        }
+                                        refreshReviewRules()
+                                        setEditingCheckId(null)
+                                      }}
+                                    >
+                                      保存
+                                    </button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => setEditingCheckId(null)}>
+                                      取消
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           )
                         })}
                       </div>
@@ -1175,6 +1321,200 @@ export default function SettingsPage(_: Props) {
                   )
                 })}
               </div>
+
+              {/* 已隐藏的内置项（可恢复） */}
+              {hiddenSections.length > 0 && (
+                <div style={{ marginTop: 10, padding: 10, border: '1px dashed var(--border)', borderRadius: 6 }}>
+                  <div className="meta" style={{ fontSize: 12, marginBottom: 6 }}>已隐藏（点恢复）</div>
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    {hiddenSections.map((h) => (
+                      <button
+                        key={h.checkId}
+                        className="btn btn-ghost btn-sm"
+                        style={{ fontSize: 11 }}
+                        onClick={async () => {
+                          const next = (reviewCfg.hiddenBuiltin ?? []).filter((x) => x !== h.checkId)
+                          await window.api.setReviewRules({ hiddenBuiltin: next })
+                          refreshReviewRules()
+                        }}
+                      >
+                        ↩ 恢复「{h.label}」
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 新增自定义检查项 */}
+              <div className="row" style={{ marginTop: 12, gap: 8 }}>
+                <button
+                  className="btn btn-sm"
+                  disabled={!reviewCfg.enabled}
+                  onClick={() => {
+                    setShowAddForm((v) => !v)
+                    setAddDraft({
+                      label: '', hint: '', severity: 'warn', type: 'keyword',
+                      group: 'toxic', keywords: '', pattern: '', prompt: ''
+                    })
+                    setRegexValid({ ok: true })
+                  }}
+                >
+                  {showAddForm ? '取消新增' : '＋ 新增检查项'}
+                </button>
+              </div>
+
+              {showAddForm && (
+                <div style={{ marginTop: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface-2)' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>名称</label>
+                      <input
+                        className="input"
+                        value={addDraft.label}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, label: e.target.value }))}
+                        placeholder="如：我的专属禁用词"
+                      />
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>严重度</label>
+                      <select
+                        className="input"
+                        value={addDraft.severity}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, severity: e.target.value as 'error' | 'warn' | 'info' }))}
+                      >
+                        <option value="error">🚨 错误</option>
+                        <option value="warn">⚠ 提醒</option>
+                        <option value="info">💡 建议</option>
+                      </select>
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>检测类型</label>
+                      <select
+                        className="input"
+                        value={addDraft.type}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, type: e.target.value as 'keyword' | 'regex' | 'llm' }))}
+                      >
+                        <option value="keyword">关键词命中（词表，实时）</option>
+                        <option value="regex">正则匹配（实时）</option>
+                        <option value="llm">LLM 语义（按需调 AI）</option>
+                      </select>
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>分类（结果分组）</label>
+                      <select
+                        className="input"
+                        value={addDraft.group}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, group: e.target.value }))}
+                      >
+                        <option value="toxic">毒点</option>
+                        <option value="quality">成文质量</option>
+                        <option value="quote">引文一致性</option>
+                        <option value="paragraph">段落长度</option>
+                        <option value="dialogue">对话标签</option>
+                        <option value="sensitive">敏感词</option>
+                        <option value="llm_review">深度审稿</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                    <label style={{ fontSize: 12.5 }}>说明（命中时显示）</label>
+                    <input
+                      className="input"
+                      value={addDraft.hint}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, hint: e.target.value }))}
+                      placeholder="一句话说明这条查什么"
+                    />
+                  </div>
+                  {addDraft.type === 'keyword' && (
+                    <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>触发词（每行一个）</label>
+                      <textarea
+                        className="textarea"
+                        style={{ minHeight: 80 }}
+                        value={addDraft.keywords}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, keywords: e.target.value }))}
+                        placeholder={'居然\n竟然\n忍不住'}
+                      />
+                    </div>
+                  )}
+                  {addDraft.type === 'regex' && (
+                    <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>正则表达式（如 ——[一-龥]——）</label>
+                      <input
+                        className="input"
+                        value={addDraft.pattern}
+                        style={{ borderColor: regexValid.ok ? undefined : 'var(--vermilion)' }}
+                        onChange={(e) => {
+                          const pat = e.target.value
+                          setAddDraft((d) => ({ ...d, pattern: pat }))
+                          if (!pat) { setRegexValid({ ok: true }); return }
+                          try {
+                            new RegExp(pat)
+                            setRegexValid({ ok: true })
+                          } catch (err) {
+                            setRegexValid({ ok: false, err: (err as Error).message })
+                          }
+                        }}
+                        placeholder="——[一-龥]——"
+                      />
+                      {!regexValid.ok && (
+                        <span style={{ color: 'var(--vermilion)', fontSize: 11 }}>⚠ 非法正则：{regexValid.err}</span>
+                      )}
+                    </div>
+                  )}
+                  {addDraft.type === 'llm' && (
+                    <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                      <label style={{ fontSize: 12.5 }}>检查指令（告诉 AI 这项查什么）</label>
+                      <textarea
+                        className="textarea"
+                        style={{ minHeight: 80 }}
+                        value={addDraft.prompt}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, prompt: e.target.value }))}
+                        placeholder={'检查是否有过度堆砌形容词，列出明显段落'}
+                      />
+                    </div>
+                  )}
+                  <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                    <button
+                      className="btn btn-sm"
+                      disabled={
+                        !addDraft.label.trim() ||
+                        (addDraft.type === 'keyword' && !addDraft.keywords.trim()) ||
+                        (addDraft.type === 'regex' && (!addDraft.pattern.trim() || !regexValid.ok)) ||
+                        (addDraft.type === 'llm' && !addDraft.prompt.trim())
+                      }
+                      onClick={async () => {
+                        // 生成唯一 id：custom_ + slug + 短随机
+                        const slug =
+                          addDraft.label
+                            .replace(/[^\u4e00-\u9fa5a-z0-9]/gi, '')
+                            .slice(0, 12)
+                            .toLowerCase() || 'rule'
+                        const id = `custom_${slug}_${Math.random().toString(36).slice(2, 6)}`
+                        const newCheck = {
+                          id,
+                          label: addDraft.label.trim(),
+                          hint: addDraft.hint.trim(),
+                          severity: addDraft.severity,
+                          type: addDraft.type,
+                          group: addDraft.group as AuditCategory,
+                          enabled: true,
+                          keywords: addDraft.type === 'keyword' ? addDraft.keywords.split('\n') : undefined,
+                          pattern: addDraft.type === 'regex' ? addDraft.pattern : undefined,
+                          prompt: addDraft.type === 'llm' ? addDraft.prompt : undefined
+                        }
+                        const next = [...(reviewCfg.customChecks ?? []), newCheck]
+                        await window.api.setReviewRules({ customChecks: next })
+                        refreshReviewRules()
+                        setShowAddForm(false)
+                        setMsg({ kind: 'ok', text: `已新增「${newCheck.label}」` })
+                      }}
+                    >
+                      创建
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* 阈值区 */}
               <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
