@@ -5,6 +5,9 @@ import type {
   CostAlertConfig,
   AiHighFreqConfig,
   AiHighFreqWord,
+  AuditCategory,
+  BuiltinCheckMeta,
+  CustomReviewCheck,
   ReviewCheckId,
   ReviewRulesConfig,
   ReviewThresholds,
@@ -152,13 +155,93 @@ function sanitizeWordList(raw: unknown): string[] {
  * - enabled/autoDeepReview：缺省补默认。
  * 永远返回完整对象（不返回 Partial），保证下游引擎可直接用。
  */
+function sanitizeCustomChecks(raw: unknown): CustomReviewCheck[] {
+  if (!Array.isArray(raw)) return []
+  const out: CustomReviewCheck[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const r = item as Partial<CustomReviewCheck>
+    // id：必须 custom_ 前缀 + 合法字符，且唯一
+    const id = typeof r.id === 'string' ? r.id.trim() : ''
+    if (!/^custom_[a-z0-9_]+$/.test(id) || seen.has(id)) continue
+    const label = typeof r.label === 'string' ? r.label.trim() : ''
+    const hint = typeof r.hint === 'string' ? r.hint.trim() : ''
+    if (!label) continue
+    const severity = r.severity === 'error' || r.severity === 'warn' || r.severity === 'info' ? r.severity : 'warn'
+    const type = r.type === 'keyword' || r.type === 'regex' || r.type === 'llm' ? r.type : 'keyword'
+    const group = typeof r.group === 'string' ? (r.group as AuditCategory) : 'toxic'
+    const check: CustomReviewCheck = {
+      id, label, hint, severity, type, group, enabled: typeof r.enabled === 'boolean' ? r.enabled : true
+    }
+    // 类型相关配置校验
+    if (type === 'keyword') {
+      const kw = sanitizeWordList(r.keywords)
+      if (kw.length === 0) continue // 关键词项无词表 = 无意义，丢弃
+      check.keywords = kw.slice(0, 500)
+    } else if (type === 'regex') {
+      const pat = typeof r.pattern === 'string' ? r.pattern.trim() : ''
+      if (!pat) continue
+      try {
+        new RegExp(pat) // 非法正则抛错 → 丢弃
+      } catch {
+        continue
+      }
+      check.pattern = pat.slice(0, 500)
+    } else {
+      // llm
+      const prompt = typeof r.prompt === 'string' ? r.prompt.trim() : ''
+      if (!prompt) continue
+      check.prompt = prompt.slice(0, 2000)
+    }
+    seen.add(id)
+    out.push(check)
+    if (out.length >= 50) break // 上限 50 条
+  }
+  return out
+}
+
+function sanitizeBuiltinMeta(raw: unknown): Partial<Record<ReviewCheckId, BuiltinCheckMeta>> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Partial<Record<ReviewCheckId, BuiltinCheckMeta>> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!REVIEW_CHECK_KEYS.has(k as ReviewCheckId)) continue
+    if (!v || typeof v !== 'object') continue
+    const r = v as Partial<BuiltinCheckMeta>
+    const meta: BuiltinCheckMeta = {}
+    if (typeof r.label === 'string' && r.label.trim()) meta.label = r.label.trim().slice(0, 100)
+    if (typeof r.hint === 'string') meta.hint = r.hint.trim().slice(0, 300)
+    if (r.severity === 'error' || r.severity === 'warn' || r.severity === 'info') meta.severity = r.severity
+    out[k as ReviewCheckId] = meta
+  }
+  return out
+}
+
+function sanitizeHiddenBuiltin(raw: unknown): ReviewCheckId[] {
+  if (!Array.isArray(raw)) return []
+  const out: ReviewCheckId[] = []
+  const seen = new Set<string>()
+  for (const id of raw) {
+    if (typeof id !== 'string') continue
+    if (!REVIEW_CHECK_KEYS.has(id as ReviewCheckId)) continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id as ReviewCheckId)
+  }
+  return out
+}
+
 function sanitizeReviewRules(raw: unknown): ReviewRulesConfig {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<ReviewRulesConfig>
-  const checks: Partial<Record<ReviewCheckId, boolean>> = {}
+  // 先清洗自定义项（checks 白名单要含 custom id）
+  const customChecks = sanitizeCustomChecks(r.customChecks)
+  const customIds = new Set(customChecks.map((c) => c.id))
+  const allCheckKeys = new Set<string>([...REVIEW_CHECK_KEYS, ...customIds])
+  const checks: Partial<Record<string, boolean>> = {}
   if (r.checks && typeof r.checks === 'object') {
     for (const [k, v] of Object.entries(r.checks)) {
-      if (REVIEW_CHECK_KEYS.has(k as ReviewCheckId) && typeof v === 'boolean') {
-        checks[k as ReviewCheckId] = v
+      if (allCheckKeys.has(k) && typeof v === 'boolean') {
+        checks[k] = v
       }
     }
   }
@@ -179,7 +262,10 @@ function sanitizeReviewRules(raw: unknown): ReviewRulesConfig {
         : DEFAULT_REVIEW_RULES.autoDeepReview,
     checks,
     thresholds,
-    wordLists
+    wordLists,
+    builtinMeta: sanitizeBuiltinMeta(r.builtinMeta),
+    hiddenBuiltin: sanitizeHiddenBuiltin(r.hiddenBuiltin),
+    customChecks
   }
 }
 
@@ -319,11 +405,15 @@ export class SettingsRepository {
   async setReviewRules(patch: Partial<ReviewRulesConfig>): Promise<ReviewRulesConfig> {
     const current = await this.getReviewRules()
     // checks：合并而非覆盖（用户改一项不应清空其他项）
-    const mergedChecks: Partial<Record<ReviewCheckId, boolean>> = { ...current.checks }
+    const mergedChecks: Partial<Record<string, boolean>> = { ...current.checks }
     if (patch.checks) {
       for (const [k, v] of Object.entries(patch.checks)) {
-        if (REVIEW_CHECK_KEYS.has(k as ReviewCheckId) && typeof v === 'boolean') {
-          mergedChecks[k as ReviewCheckId] = v
+        const allKeys = new Set<string>([
+          ...REVIEW_CHECK_KEYS,
+          ...(current.customChecks ?? []).map((c) => c.id)
+        ])
+        if (allKeys.has(k) && typeof v === 'boolean') {
+          mergedChecks[k] = v
         }
       }
     }
@@ -333,7 +423,14 @@ export class SettingsRepository {
         typeof patch.autoDeepReview === 'boolean' ? patch.autoDeepReview : current.autoDeepReview,
       checks: mergedChecks,
       thresholds: patch.thresholds ? { ...current.thresholds, ...patch.thresholds } : current.thresholds,
-      wordLists: patch.wordLists ? { ...current.wordLists, ...patch.wordLists } : current.wordLists
+      wordLists: patch.wordLists ? { ...current.wordLists, ...patch.wordLists } : current.wordLists,
+      // builtinMeta 浅合并（同 key 覆盖）
+      builtinMeta: patch.builtinMeta
+        ? { ...current.builtinMeta, ...patch.builtinMeta }
+        : current.builtinMeta,
+      // hiddenBuiltin / customChecks 整体替换（CRUD 语义清晰）
+      hiddenBuiltin: patch.hiddenBuiltin !== undefined ? patch.hiddenBuiltin : current.hiddenBuiltin,
+      customChecks: patch.customChecks !== undefined ? patch.customChecks : current.customChecks
     }
     await this.update({ reviewRules: merged })
     return this.getReviewRules()

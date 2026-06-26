@@ -9,7 +9,7 @@
  * 与 chapter-rules.ts 同构：注册表驱动，单一事实源。
  */
 
-import type { AuditSeverity, ReviewCheckId, ReviewThresholds, ReviewWordLists } from '../../../shared/types'
+import type { AuditSeverity, ReviewCheckId, ReviewThresholds, ReviewWordLists, BuiltinCheckMeta, CustomReviewCheck } from '../../../shared/types'
 
 /** 检查项分类：算法（纯函数）vs LLM（流式语义） */
 export type ReviewCheckKind = 'algorithm' | 'llm'
@@ -285,10 +285,13 @@ export const DEFAULT_REVIEW_WORD_LISTS: ReviewWordLists = {
 export const DEFAULT_REVIEW_RULES = {
   enabled: true,
   autoDeepReview: false,
-  checks: {} as Partial<Record<ReviewCheckId, boolean>>,
+  checks: {} as Partial<Record<string, boolean>>,
   thresholds: { ...DEFAULT_REVIEW_THRESHOLDS },
   wordLists: {
     metaBreak: [...DEFAULT_REVIEW_WORD_LISTS.metaBreak],
     sensitive: [...DEFAULT_REVIEW_WORD_LISTS.sensitive]
-  }
+  },
+  builtinMeta: {} as Partial<Record<ReviewCheckId, BuiltinCheckMeta>>,
+  hiddenBuiltin: [] as ReviewCheckId[],
+  customChecks: [] as CustomReviewCheck[]
 }

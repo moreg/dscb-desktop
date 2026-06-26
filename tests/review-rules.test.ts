@@ -128,3 +128,114 @@ describe('review-checks registry integrity', () => {
     expect(LLM_CHECK_IDS.size).toBe(8)
   })
 })
+
+describe('SettingsRepository custom checks / builtinMeta / hiddenBuiltin', () => {
+  let repo: SettingsRepository
+
+  beforeEach(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-cc-'))
+    repo = new SettingsRepository(path.join(dir, 'settings.json'))
+  })
+
+  it('持久化 customChecks（合法项）', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        {
+          id: 'custom_words',
+          label: '我的禁用词',
+          hint: '命中提醒',
+          severity: 'warn',
+          type: 'keyword',
+          group: 'toxic',
+          keywords: ['居然', '竟然'],
+          enabled: true
+        }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+    expect(saved.customChecks?.[0].id).toBe('custom_words')
+    expect(saved.customChecks?.[0].keywords).toEqual(['居然', '竟然'])
+    expect(await repo.getReviewRules()).toEqual(saved)
+  })
+
+  it('丢弃非法 custom id（非 custom_ 前缀）', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        { id: 'badid', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['a'], enabled: true },
+        { id: 'custom_ok', label: 'y', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['b'], enabled: true }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+    expect(saved.customChecks?.[0].id).toBe('custom_ok')
+  })
+
+  it('丢弃非法正则的 regex 项', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        { id: 'custom_bad', label: 'x', hint: '', severity: 'warn', type: 'regex', group: 'quality', pattern: '[unclosed', enabled: true },
+        { id: 'custom_ok', label: 'y', hint: '', severity: 'warn', type: 'regex', group: 'quality', pattern: 'abc', enabled: true }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+    expect(saved.customChecks?.[0].id).toBe('custom_ok')
+  })
+
+  it('custom id 去重', async () => {
+    const saved = await repo.setReviewRules({
+      customChecks: [
+        { id: 'custom_dup', label: 'a', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['x'], enabled: true },
+        { id: 'custom_dup', label: 'b', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['y'], enabled: true }
+      ]
+    })
+    expect(saved.customChecks?.length).toBe(1)
+  })
+
+  it('持久化 builtinMeta（编辑内置项元数据）', async () => {
+    const saved = await repo.setReviewRules({
+      builtinMeta: { meta_break: { label: '改名', severity: 'warn' } }
+    })
+    expect(saved.builtinMeta?.meta_break?.label).toBe('改名')
+    expect(saved.builtinMeta?.meta_break?.severity).toBe('warn')
+  })
+
+  it('builtinMeta 仅保留白名单 checkId', async () => {
+    const saved = await repo.setReviewRules({
+      builtinMeta: { bogus_id: { label: 'x' } as never, meta_break: { label: 'y' } }
+    })
+    expect((saved.builtinMeta as Record<string, unknown>).bogus_id).toBeUndefined()
+    expect(saved.builtinMeta?.meta_break?.label).toBe('y')
+  })
+
+  it('持久化 hiddenBuiltin（软删除内置项）', async () => {
+    const saved = await repo.setReviewRules({
+      hiddenBuiltin: ['meta_break', 'pov_mix']
+    })
+    expect(saved.hiddenBuiltin).toEqual(['meta_break', 'pov_mix'])
+  })
+
+  it('hiddenBuiltin 仅保留白名单 id 并去重', async () => {
+    const saved = await repo.setReviewRules({
+      hiddenBuiltin: ['meta_break', 'meta_break', 'bogus' as never]
+    })
+    expect(saved.hiddenBuiltin).toEqual(['meta_break'])
+  })
+
+  it('checks 白名单含 custom id', async () => {
+    // 先建一个自定义项
+    await repo.setReviewRules({
+      customChecks: [
+        { id: 'custom_c', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: 'toxic', keywords: ['a'], enabled: true }
+      ]
+    })
+    // 再关掉它
+    const saved = await repo.setReviewRules({ checks: { custom_c: false } })
+    expect(saved.checks.custom_c).toBe(false)
+  })
+
+  it('空/缺省时 customChecks/builtinMeta/hiddenBuiltin 返回默认（[]/{}/[]）', async () => {
+    const cfg = await repo.getReviewRules()
+    expect(cfg.customChecks).toEqual([])
+    expect(cfg.builtinMeta).toEqual({})
+    expect(cfg.hiddenBuiltin).toEqual([])
+  })
+})
