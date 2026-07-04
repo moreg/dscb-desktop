@@ -30,7 +30,7 @@ export class ProjectService {
   private async writeV3Skeleton(dir: string, input: CreateProjectDataInput): Promise<void> {
     const now = new Date().toISOString()
     const today = now.slice(0, 10)
-    const header = `**版本**：v1.0（${today} 创建）\n**修改记录**：\n- v1.0（${today}）：初版\n\n`
+    const header = `**版本**：v1.0（${today} 创建）\n**修改记录**\n- v1.0（${today}）：初版\n\n`
     const genre = input.genre ?? '未指定'
     const tc = input.targetChapters ?? ''
     const cwc = input.chapterWordCount ?? ''
@@ -44,26 +44,29 @@ export class ProjectService {
       (desc ? `- **简介**：${desc}\n` : '') +
       `\n## 主线剧情走向\n\n（待生成）\n`
 
-    await writeTextAtomic(join(dir, '大纲', '大纲.md'), header + outlineBody)
-    await writeTextAtomic(join(dir, '大纲', '提示词.md'), header + `# 《${input.name}》创作提示词\n`)
-
-    const memoryFiles = [
-      '角色卡',
-      '世界观设定',
-      '地点档案',
-      '核心情节',
-      '章节进度',
-      '伏笔追踪',
-      '问题记录'
-    ]
-    for (const name of memoryFiles) {
-      await writeTextAtomic(join(dir, '记忆系统', `${name}.md`), header + `# ${name}\n`)
-    }
-
+    await fs.mkdir(join(dir, '设定', '世界观'), { recursive: true })
+    await fs.mkdir(join(dir, '设定', '角色'), { recursive: true })
+    await fs.mkdir(join(dir, '设定', '势力'), { recursive: true })
+    await fs.mkdir(join(dir, '大纲'), { recursive: true })
     await fs.mkdir(join(dir, '细纲'), { recursive: true })
     await fs.mkdir(join(dir, '图解'), { recursive: true })
     await fs.mkdir(join(dir, '正文'), { recursive: true })
+    await fs.mkdir(join(dir, '追踪'), { recursive: true })
+    await fs.mkdir(join(dir, '对标'), { recursive: true })
+    await fs.mkdir(join(dir, '参考资料'), { recursive: true })
     await fs.mkdir(join(dir, 'chapters'), { recursive: true })
+
+    await writeTextAtomic(join(dir, '大纲', '大纲.md'), header + outlineBody)
+    await writeTextAtomic(join(dir, '设定', '题材定位.md'), header + `# 题材定位\n`)
+    await writeTextAtomic(join(dir, '设定', '世界观', '背景设定.md'), header + `# 背景设定\n`)
+    await writeTextAtomic(join(dir, '设定', '世界观', '力量体系.md'), header + `# 力量体系\n`)
+    await writeTextAtomic(join(dir, '设定', '世界观', '金手指.md'), header + `# 金手指\n`)
+    await writeTextAtomic(join(dir, '设定', '关系.md'), header + `# 角色关系\n`)
+    await writeTextAtomic(join(dir, '追踪', '伏笔.md'), header + `# 伏笔追踪\n`)
+    await writeTextAtomic(join(dir, '追踪', '时间线.md'), header + `# 时间线\n`)
+    await writeTextAtomic(join(dir, '追踪', '角色状态.md'), header + `# 角色状态快照\n`)
+    await writeTextAtomic(join(dir, '追踪', '上下文.md'), header + `# 上下文\n`)
+    await writeTextAtomic(join(dir, '追踪', '问题记录.md'), header + `# 问题记录\n`)
 
     await new ProjectRepository(dir).write({
       schemaVersion: 1,

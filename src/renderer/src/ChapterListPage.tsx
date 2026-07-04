@@ -6,9 +6,11 @@ import type {
   BatchProgress,
   ChapterFlowResult,
   ProjectData,
-  StyleProfile
+  StyleProfile,
+  TeardownEntry
 } from '../../shared/types'
 import { dedupeForbiddenViolations } from './audit-dedupe'
+import OpeningDialog from './OpeningDialog'
 
 interface Props {
   projectId: string
@@ -59,6 +61,9 @@ export default function ChapterListPage({
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
+  const [showBenchmark, setShowBenchmark] = useState(false)
+  const [showOpening, setShowOpening] = useState(false)
+  const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
   const [page, setPage] = useState(1)
 
@@ -84,6 +89,22 @@ export default function ChapterListPage({
     setPage(1)
     refresh()
     refreshCharacters()
+    void window.api.getProject(projectId).then(setProjectData).catch((err) => {
+      console.error('[ChapterListPage] Failed to load project:', err)
+    })
+    // refresh/refreshCharacters 依赖 projectId 内部状态，仅 projectId 变化时重新加载
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId])
+
+  // 订阅外部文件变更（用户用外部编辑器改源文件时自动刷新）
+  useEffect(() => {
+    const off = window.api.onProjectFilesChanged((e) => {
+      if (e.projectId !== projectId) return
+      // 细纲/节奏图谱/章节进度变 → 刷新章节列表；角色卡变 → 同时刷角色
+      refresh()
+      if (e.kind === 'characters') refreshCharacters()
+    })
+    return off
   }, [projectId])
 
   const charName = (id: string) => characters.find((c) => c.id === id)?.name ?? '?'
@@ -133,6 +154,23 @@ export default function ChapterListPage({
             </p>
           </div>
           <div className="page-head-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => setShowOpening(true)}
+              title="输入脑洞，AI 生成核心设定/卷级大纲/前 10 章细纲"
+            >
+              🚀 开书
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setShowBenchmark(true)}
+              title="挂载拆文库对标书，写作时召回情绪模块/节奏/文风"
+            >
+              📚 对标
+              {projectData?.benchmarkBooks?.length
+                ? ` ${projectData.benchmarkBooks.length}`
+                : ''}
+            </button>
             <button
               className="btn btn-ghost"
               onClick={() => setShowBatch(true)}
@@ -303,6 +341,29 @@ export default function ChapterListPage({
           }
           onClose={() => setShowBatch(false)}
           onChapterCompleted={() => refresh()}
+        />
+      ) : null}
+
+      {showBenchmark ? (
+        <BenchmarkDialog
+          projectId={projectId}
+          current={projectData?.benchmarkBooks ?? []}
+          onClose={() => setShowBenchmark(false)}
+          onSaved={async () => {
+            setProjectData(await window.api.getProject(projectId))
+            setShowBenchmark(false)
+          }}
+        />
+      ) : null}
+
+      {showOpening ? (
+        <OpeningDialog
+          projectId={projectId}
+          onClose={() => setShowOpening(false)}
+          onCompleted={() => {
+            setShowOpening(false)
+            refresh()
+          }}
         />
       ) : null}
     </div>
@@ -654,6 +715,114 @@ function BatchWriteDialog({
               {running ? '生成中…' : '继续下一章'}
             </button>
           ) : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BenchmarkDialog({
+  projectId,
+  current,
+  onClose,
+  onSaved
+}: {
+  projectId: string
+  current: string[]
+  onClose: () => void
+  onSaved: () => void
+}): React.ReactElement {
+  const [teardowns, setTeardowns] = useState<TeardownEntry[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set(current))
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    void window.api.listTeardowns().then((list) => {
+      setTeardowns(list)
+      setLoading(false)
+    }).catch((err) => {
+      console.error('[BenchmarkDialog] Failed to load teardowns:', err)
+      setTeardowns([])
+      setLoading(false)
+    })
+  }, [])
+
+  const toggle = (name: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+
+  const save = async (): Promise<void> => {
+    setSaving(true)
+    try {
+      await window.api.setBenchmarkBooks(projectId, Array.from(selected))
+      onSaved()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <h3>📚 对标书（写作召回）</h3>
+        <p className="meta" style={{ marginTop: 4 }}>
+          挂载拆文库中的对标书。续写时自动召回其情绪模块（爽点套路）、节奏（爆发节律）、文风（句法），让正文向对标靠拢。
+          <strong>只召回方法论，不照搬具体桥段。</strong>
+        </p>
+
+        {loading ? (
+          <p className="empty">加载拆文库…</p>
+        ) : teardowns.length === 0 ? (
+          <div className="placeholder" style={{ marginTop: 12 }}>
+            <p style={{ margin: '0 0 8px', fontSize: 13 }}>拆文库还没有书。先到「🔍 拆文库」拆解一本爆款，再回来挂载。</p>
+          </div>
+        ) : (
+          <div style={{ maxHeight: 360, overflow: 'auto', marginTop: 12 }}>
+            {teardowns.map((t) => {
+              const done = t.stagesCompleted.length > 0
+              return (
+                <label
+                  key={t.bookName}
+                  className="toolbar-more-item"
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', cursor: 'pointer' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(t.bookName)}
+                    onChange={() => toggle(t.bookName)}
+                  />
+                  <span style={{ flex: 1 }}>
+                    <strong>{t.bookName}</strong>
+                    <span className="meta" style={{ marginLeft: 8, fontSize: 11 }}>
+                      {t.lengthKind === 'long' ? '长篇' : '短篇'} · {(t.wordCount / 10000).toFixed(1)} 万字
+                      {done ? ` · ${t.stagesCompleted.length} 阶段` : ' · 未拆解'}
+                    </span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        )}
+
+        {selected.size > 0 ? (
+          <p className="meta" style={{ marginTop: 8 }}>
+            已选 {selected.size} 本：{Array.from(selected).map((n) => `《${n}》`).join('、')}
+          </p>
+        ) : null}
+
+        <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+          <button className="btn btn-ghost" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn btn-primary" onClick={() => void save()} disabled={saving}>
+            {saving ? '保存中…' : '保存'}
+          </button>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { AuditReport, AuditViolation, WriteAuditMode } from '../../shared/types'
+import type { AuditReport, AuditViolation, ChapterReviewReport, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { isReviewKey } from '../../shared/review-suggestions'
@@ -40,6 +40,14 @@ interface Props {
   redoStackCount?: number
   /** 改写历史栈完整数据（最新在末尾）— 用于下拉菜单显示每条 */
   rewriteHistory?: readonly RewriteEntry[]
+  /** 结构化审核报告（对齐「正文审核」技能第 6 步）。提供后在违例列表上方渲染评分摘要区 */
+  reviewReport?: ChapterReviewReport | null
+  /** 是否正在生成结构化审核报告（控制按钮 loading 态） */
+  reportLoading?: boolean
+  /** 生成结构化审核报告失败的错误信息（展示给用户） */
+  reportError?: string
+  /** 触发生成/重新生成结构化审核报告 */
+  onGenerateReport?: () => void
 }
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -84,12 +92,18 @@ export default function ChapterAuditPanel({
   onUndoRewriteByKey,
   onRedoRewrite,
   redoStackCount,
-  rewriteHistory
+  rewriteHistory,
+  reviewReport,
+  reportLoading,
+  reportError,
+  onGenerateReport
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 })
   const [undoMenuOpen, setUndoMenuOpen] = useState(false)
+  // 结构化报告摘要折叠态：默认收起，生成报告后自动展开
+  const [reportCollapsed, setReportCollapsed] = useState(true)
   // LLM 深度审稿（M3）：手动触发，结果合并进同一面板的「深度审稿」分组
   const [deepReviewRunning, setDeepReviewRunning] = useState(false)
   const [deepReviewFindings, setDeepReviewFindings] = useState<AuditViolation[]>([])
@@ -117,6 +131,17 @@ export default function ChapterAuditPanel({
       setHumanizeMap({})
     }
     setUndoMenuOpen(false)
+  }, [report])
+
+  // 报告生成完成时自动展开摘要区
+  useEffect(() => {
+    if (reviewReport) setReportCollapsed(false)
+  }, [reviewReport])
+
+  // re-audit（report 变化）时收起摘要：旧报告对应的是旧正文，评分可能已过期。
+  // 不清除 reviewReport 本身——用户可手动展开对比旧报告。
+  useEffect(() => {
+    setReportCollapsed(true)
   }, [report])
 
   // 点下拉菜单外区域时关闭
@@ -244,6 +269,8 @@ export default function ChapterAuditPanel({
   }, [grouped])
 
   if (!report && !loading) {
+    // 无算法质检结果时，仍允许直接生成结构化审核报告（内部会跑算法+LLM）。
+    // 生成后 reviewReport 有值但 report 仍为 null，需把违例从 reviewReport 摘出来展示。
     return (
       <div className="audit-panel audit-panel-idle">
         <span className="muted">尚未质检</span>
@@ -251,6 +278,35 @@ export default function ChapterAuditPanel({
           <button className="btn btn-sm" onClick={onRunAgain}>
             ▶ 立即质检
           </button>
+        )}
+        {onGenerateReport && (
+          <button
+            className="btn btn-sm"
+            onClick={onGenerateReport}
+            disabled={reportLoading || !draft}
+            title="按「正文审核」技能六步流程生成结构化审核报告（含 LLM 深度审稿）"
+            style={{ marginLeft: 4 }}
+          >
+            {reportLoading ? '审核中…' : reviewReport ? '✦ 重新审核' : '✦ 审核报告'}
+          </button>
+        )}
+        {reviewReport && reportCollapsed && (
+          <button
+            className="btn btn-ghost btn-sm audit-score-badge"
+            onClick={() => setReportCollapsed(false)}
+            title="点击展开报告摘要"
+            style={{ marginLeft: 6, fontWeight: 700, fontSize: 13, color: scoreColor(reviewReport.overall.score) }}
+          >
+            {reviewReport.overall.score}/10
+          </button>
+        )}
+        {reviewReport && !reportCollapsed && (
+          <ReviewReportSummary report={reviewReport} onToggle={() => setReportCollapsed(true)} />
+        )}
+        {reportError && (
+          <p className="err" style={{ fontSize: 12.5, margin: '6px 0 0' }}>
+            {reportError}
+          </p>
         )}
       </div>
     )
@@ -283,6 +339,27 @@ export default function ChapterAuditPanel({
               {report.passed.wordCount ? '' : ' ⚠'}
             </span>
           </>
+        )}
+        {onGenerateReport && (
+          <button
+            className="btn btn-sm"
+            onClick={onGenerateReport}
+            disabled={reportLoading || !draft}
+            title="按「正文审核」技能六步流程生成结构化审核报告（含 LLM 深度审稿）"
+            style={{ marginLeft: 4 }}
+          >
+            {reportLoading ? '审核中…' : reviewReport ? '✦ 重新审核' : '✦ 审核报告'}
+          </button>
+        )}
+        {reviewReport && (
+          <button
+            className="btn btn-ghost btn-sm audit-score-badge"
+            onClick={() => setReportCollapsed((c) => !c)}
+            title="点击展开/收起报告摘要"
+            style={{ marginLeft: 6, fontWeight: 700, fontSize: 13, color: scoreColor(reviewReport.overall.score) }}
+          >
+            {reviewReport.overall.score}/10
+          </button>
         )}
         <span className="spacer" />
         {blocked && (
@@ -423,8 +500,22 @@ export default function ChapterAuditPanel({
         )}
       </div>
 
+      {reportError && (
+        <p className="err" style={{ fontSize: 12.5, margin: '6px 0 0' }}>
+          {reportError}
+        </p>
+      )}
+
       {!collapsed && report && (
         <div className="audit-panel-body">
+          {/* 结构化审核报告摘要（对齐「正文审核」技能第 6 步）。
+              只展示评分/元信息，不重复列违例——违例在下方分组列表里逐条可改稿。 */}
+          {reviewReport && !reportCollapsed && (
+            <ReviewReportSummary
+              report={reviewReport}
+              onToggle={() => setReportCollapsed(true)}
+            />
+          )}
           {(Object.keys(grouped) as Array<keyof typeof grouped>).map((cat) => {
             const items = grouped[cat]
             if (!items || items.length === 0) return null
@@ -650,5 +741,114 @@ function groupViolations(violations: AuditViolation[]): GroupedViolations {
     if (!CATEGORY_ORDER.includes(cat)) sorted[cat] = out[cat]
   }
   return sorted
+}
+
+// ============================================================
+// 结构化审核报告摘要（合并自 ReviewReportPanel，对齐「正文审核」技能第 6 步）
+// 只展示评分 + 元信息，违例不在此重复列——它们在下方分组列表里逐条可改稿。
+// ============================================================
+
+function scoreColor(score: number): string {
+  if (score >= 8) return 'var(--ok)'
+  if (score >= 5) return 'var(--warn)'
+  return 'var(--danger)'
+}
+
+function ReviewReportSummary({
+  report,
+  onToggle
+}: {
+  report: ChapterReviewReport
+  onToggle: () => void
+}) {
+  const o = report.overall
+  return (
+    <div
+      style={{
+        marginBottom: 10,
+        padding: '8px 12px',
+        background: 'var(--bg-soft)',
+        borderRadius: 6,
+        border: '1px solid var(--line-soft)'
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontSize: 24, fontWeight: 700, color: scoreColor(o.score) }}>
+          {o.score}
+          <span style={{ fontSize: 13, color: 'var(--text-3)' }}>/10</span>
+        </span>
+        <div style={{ flex: 1 }}>
+          {o.mainIssues.length > 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+              {o.mainIssues.map((issue, i) => (
+                <span key={i} style={{ marginRight: 8 }}>
+                  {issue}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>无明显问题</span>
+          )}
+          {o.fixPriority.length > 0 ? (
+            <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4 }}>
+              {o.fixPriority.map((p, i) => (
+                <div key={i}>{p}</div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={onToggle}
+          title="收起报告摘要"
+          style={{ padding: '2px 8px', fontSize: 11 }}
+        >
+          ▴
+        </button>
+      </div>
+
+      {/* 元信息行：字数判定 / 记忆一致性 / 大纲一致性 / 连贯性 */}
+      <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.7 }}>
+        <span>
+          字数 {report.wordCount.current}/{report.wordCount.minRequired} →{' '}
+          <strong style={{ color: report.wordCount.passing ? 'var(--ok)' : 'var(--warn)' }}>
+            {report.wordCount.passing ? '达标' : '不足'}
+          </strong>
+        </span>
+        {report.wordCount.suggestion ? <span> · {report.wordCount.suggestion}</span> : null}
+        <br />
+        <span>
+          记忆文件{report.memoryConsistency.read ? '✓' : '⚠'}
+          {report.memoryConsistency.missingFiles.length > 0
+            ? `（缺：${report.memoryConsistency.missingFiles.join('、')}）`
+            : ''}
+        </span>
+        {' · '}
+        <span>
+          大纲细纲{report.outlineConsistency.hasOutline ? '✓' : '⚠'}
+          {report.outlineConsistency.rhythmMatchPercent != null
+            ? `（节奏匹配 ${report.outlineConsistency.rhythmMatchPercent}%）`
+            : ''}
+        </span>
+        {report.styleMatch.genre ? (
+          <>
+            {' · '}
+            <span>题材：{report.styleMatch.genre}</span>
+          </>
+        ) : null}
+        {report.continuity.notes.length > 0 || report.continuity.plotTransition ? (
+          <div style={{ marginTop: 2 }}>
+            连贯性：
+            {report.continuity.plotTransition ? `情节${report.continuity.plotTransition}；` : ''}
+            {report.continuity.timeline ? `时间线${report.continuity.timeline}；` : ''}
+            {report.continuity.spatialTransition ? `空间${report.continuity.spatialTransition}` : ''}
+            {report.continuity.notes.map((n, i) => (
+              <span key={i}> {n}</span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
 }
 

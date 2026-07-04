@@ -33,6 +33,8 @@ export interface GenreVoice {
   taboo: string
   /** 允许保留的虚词（在该题材内不算 AI 味） */
   allowedHedges?: string[]
+  /** 建议主动使用的题材语气词（改写时优先用这些替代现代通腔） */
+  suggestedParticles?: string[]
   /** 题材专属的替换示例：左 AI 味 → 右本题材自然 */
   replacements: readonly [string, string][]
 }
@@ -46,6 +48,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     syntax: '长短句交替，文言虚词点缀（方/尚/约莫/竟）',
     taboo: '禁用现代口语（卧槽/牛逼/绝了/打工人）',
     allowedHedges: ['渐渐', '此刻', '一时之间', '似乎', '仿佛', '一丝', '一抹'],
+    suggestedParticles: ['方', '尚', '竟', '约莫', '倒', '索性', '好歹', '权当', '罢了', '且', '殊不知', '焉知', '莫非', '岂'],
     replacements: [
       ['嘴角带了点弧度', '勾了勾唇 / 笑了笑'],
       ['眼底闪过一丝复杂', '看了她一眼，没说话'],
@@ -108,6 +111,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     pace: '中等',
     syntax: '长短句兼有，洋行/军阀/旗袍的时代细节',
     taboo: '禁用网络流行语、纯古风称谓',
+    suggestedParticles: ['倒', '索性', '好歹', '权当', '且', '罢了', '莫非'],
     replacements: [
       ['嘴角带了点弧度', '笑了笑'],
       ['气氛微妙', '一时间没人说话'],
@@ -161,6 +165,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     pace: '稳、不急',
     syntax: '长句、排比、对仗',
     taboo: '禁用轻浮、网络用语',
+    suggestedParticles: ['乃', '遂', '尚', '且', '罢了', '焉', '岂'],
     replacements: [
       ['嘴角带了点弧度', '神色未动'],
       ['气氛微妙', '众人沉默']
@@ -222,6 +227,9 @@ export function renderGenreVoiceMarkdown(voice: GenreVoice): string {
   lines.push(`- 禁忌：${voice.taboo}`)
   if (voice.allowedHedges?.length) {
     lines.push(`- 该题材允许保留的虚词：${voice.allowedHedges.join('、')}`)
+  }
+  if (voice.suggestedParticles?.length) {
+    lines.push(`- 建议主动使用的题材语气词（替换现代通腔）：${voice.suggestedParticles.join('、')}`)
   }
   lines.push('')
   lines.push('**语感替换示例**（左 AI 味 → 右本题材自然写法）：')

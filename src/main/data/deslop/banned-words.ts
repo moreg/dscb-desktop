@@ -1,0 +1,140 @@
+/**
+ * 去 AI 味禁用词与句式表（源自 oh-story-claudecode banned-words.md）。
+ *
+ * 分三类：最毒句式（正则，命中即重度证据）/ 一级禁用词（出现即替换）/
+ * 二级禁用词（高频时替换）。
+ *
+ * 供 check-ai-patterns 的 Gate A 扫描使用。词表与 banned-words.md 同步。
+ */
+
+/** 最毒禁用句式（正则 + 毒级 + 修法说明）。Gate A 第一遍扫描必命中。 */
+export interface ToxicPattern {
+  /** 唯一 id */
+  id: string
+  /** 毒级 ★ 越多越毒 */
+  stars: 2 | 3 | 4 | 5
+  /** 命中正则（全局匹配，注意中文） */
+  re: RegExp
+  /** 句式名 */
+  name: string
+  /** 修法说明 */
+  fix: string
+}
+
+/**
+ * 最毒句式。注意：破折号/省略号属于标点兜底（normalize-punctuation），
+ * 这里只列句式模板。"不是A而是B" 由 check-ai-patterns 的精确算法检测（更准），此处不重复。
+ */
+export const TOXIC_PATTERNS: ToxicPattern[] = [
+  {
+    id: 'dai_zhe',
+    stars: 4,
+    re: /，带着[一二]?丝?[^，。！？\n]{1,15}/,
+    name: '万能状语"，带着……"',
+    fix: '拆短句或换动作'
+  },
+  {
+    id: 'voice_power',
+    stars: 4,
+    re: /声音不大[，,]却带着[^，。！？\n]{2,20}/,
+    name: '"声音不大，却带着一种……的力量"',
+    fix: '直接写声音特征或动作'
+  },
+  {
+    id: 'he_knows',
+    stars: 4,
+    re: /[他她它](知道|明白|清楚|意识到)[^，。！？\n]{3,40}/,
+    name: '"他/她知道……"（告诉而非展示）',
+    fix: '用行为展示认知'
+  },
+  {
+    id: 'fangfo',
+    stars: 3,
+    re: /(仿佛|犹如|宛若|好像|好似)[^，。！？\n]{2,30}(一般|一样|似的|般)/,
+    name: '"仿佛/犹如/宛若……一般"（文言比喻腔）',
+    fix: '删掉或白描'
+  },
+  {
+    id: 'eye_flash',
+    stars: 3,
+    re: /眼中闪过[一一]?丝?[^，。！？\n]{1,12}/,
+    name: '"眼中闪过一丝……"',
+    fix: '他垂下眼 / 他笑了一下，没到眼底'
+  },
+  {
+    id: 'mouth_curl',
+    stars: 3,
+    re: /嘴角(勾起|扬起|挂着)[一]?抹?[^，。！？\n]{1,12}/,
+    name: '"嘴角勾起一抹……"',
+    fix: '用具体动作或表情'
+  },
+  {
+    id: 'heart_surge',
+    stars: 3,
+    re: /心中(涌起|升起|泛起|一动)[一]?股?[^，。！？\n]{1,12}/,
+    name: '"心中涌起一股……"',
+    fix: '用身体反应替代心理描写'
+  },
+  {
+    id: 'dont_know_next',
+    stars: 2,
+    re: /[他她](不知道的是|不知道)[，,][^，。！？\n]{3,40}/,
+    name: '章末预告"他不知道的是……"',
+    fix: '用具体钩子物件/事件收束，避免空泛预告'
+  }
+]
+
+/** 一级禁用词（出现即替换）。按分类组织。 */
+export const BANNED_WORDS_LEVEL1: Record<string, string[]> = {
+  情态类: ['仿佛', '犹如', '宛若', '如同', '一丝', '一抹', '些许', '几分', '隐约'],
+  动作类: ['深吸一口气', '缓缓', '不禁', '微微', '轻轻', '淡淡'],
+  表情类: ['眼中闪过', '嘴角勾起', '眉头微皱', '眉眼低垂', '瞳孔微缩'],
+  心理类: ['心中一动', '心头一震', '心下了然', '心中暗道', '心底泛起', '不由得'],
+  判断类: ['不容置疑', '不容置喙', '不易察觉', '显而易见', '毫无疑问', '不可否认'],
+  形容类: ['闪烁着光芒', '狡黠', '深邃', '凛冽', '冰冷'],
+  过渡类: ['不由自主', '情不自禁', '自然而然']
+}
+
+/** 心理词（用于 psychWordDensity 指标，比 BANNED_WORDS 心理类更广） */
+export const PSYCH_WORDS: string[] = [
+  '心中', '心头', '心底', '心下', '心想', '内心',
+  '感到', '感觉', '觉得', '意识到', '明白', '知道',
+  '涌起', '泛起', '升起'
+]
+
+/** 二级禁用词（高频时处理，语境敏感） */
+export const BANNED_WORDS_LEVEL2: string[] = ['突然', '瞬间']
+
+/** 书面腔 → 口语化替换表 */
+export const FORMAL_TO_COLLOQUIAL: Record<string, string> = {
+  瓦解: '消失',
+  无名火: '烦躁',
+  往我心上捅刀子: '心烦意乱'
+}
+
+/** 总结/升华句式（Gate F 结尾去升华） */
+export const SUBLIMATION_PATTERNS: RegExp[] = [
+  /[他她]终于明白/,
+  /[他她]这才意识到/,
+  /此刻[，,][他她]/,
+  /这一刻[，,]/,
+  /这就是[^，。！？\n]{1,15}/,
+  /原来[^，。！？\n]{1,15}/
+]
+
+/** 排比句式（Gate B 句式去套路，连续 3 句以上同结构） */
+export const PARALLELISM_PATTERNS: RegExp[] = [
+  /有的[^。！？\n]{1,15}[，,]有的[^。！？\n]{1,15}[，,]有的/,
+  /一边[^。！？\n]{1,15}[，,]一边[^。！？\n]{1,15}[，,]一边/,
+  /既[^。！？\n]{1,15}[，,]又[^。！？\n]{1,15}[，,]还/
+]
+
+/** 扁平化的一级禁用词列表（去重，供扫描） */
+export const FLATTENED_LEVEL1: string[] = Array.from(
+  new Set(Object.values(BANNED_WORDS_LEVEL1).flat())
+)
+
+/** 全部禁用词（一级 + 二级，供密度计算） */
+export const ALL_BANNED_WORDS: string[] = Array.from(
+  new Set([...FLATTENED_LEVEL1, ...BANNED_WORDS_LEVEL2])
+)

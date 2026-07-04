@@ -52,7 +52,8 @@ export interface UseStyleProfileController {
   closeConfirmDialog: () => void
 }
 
-export function useStyleProfileController(projectId: string): UseStyleProfileController {
+export function useStyleProfileController(projectId?: string): UseStyleProfileController {
+  const styleScopeId = projectId ?? ''
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [profiles, setProfiles] = useState<StyleProfile[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -69,8 +70,12 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
 
   const refresh = () => {
-    void window.api.getProject(projectId).then(setProjectData)
-    void window.api.listStyleProfiles(projectId).then((items) => {
+    if (projectId) {
+      void window.api.getProject(projectId).then(setProjectData)
+    } else {
+      setProjectData(null)
+    }
+    void window.api.listStyleProfiles(styleScopeId).then((items) => {
       setProfiles(items)
       setSelectedId((current) => current ?? items[0]?.id ?? null)
     })
@@ -96,7 +101,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
     setMessage(null)
     try {
       const result = await window.api.extractStyleProfile(
-        projectId,
+        styleScopeId,
         sampleText,
         draftName.trim() || undefined
       )
@@ -140,7 +145,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
         sampleText,
         ...analysis
       }
-      const profile = await window.api.createStyleProfile(projectId, input)
+      const profile = await window.api.createStyleProfile(styleScopeId, input)
       refresh()
       setSelectedId(profile.id)
       setDraftName('')
@@ -160,7 +165,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
     setRenaming(true)
     setMessage(null)
     try {
-      const updated = await window.api.updateStyleProfile(projectId, selected.id, {
+      const updated = await window.api.updateStyleProfile(styleScopeId, selected.id, {
         name: draftName.trim()
       })
       refresh()
@@ -178,7 +183,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
       title: '删除文风卡',
       message: `确定删除「${profile.name}」？删除后无法恢复。`,
       onConfirm: async () => {
-        await window.api.deleteStyleProfile(projectId, profile.id)
+        await window.api.deleteStyleProfile(styleScopeId, profile.id)
         refresh()
         setSelectedId((current) => (current === profile.id ? null : current))
         setConfirmDialog(null)
@@ -189,6 +194,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
   const closeConfirmDialog = () => setConfirmDialog(null)
 
   const onSetDefault = async (styleProfileId: string | null) => {
+    if (!projectId) return
     await window.api.setProjectDefaultStyleProfile(projectId, styleProfileId)
     refresh()
   }
@@ -229,7 +235,7 @@ export function useStyleProfileController(projectId: string): UseStyleProfileCon
         setEditingDraft(null)
         return
       }
-      const updated = await window.api.updateStyleProfile(projectId, editingDraft.id, patch)
+      const updated = await window.api.updateStyleProfile(styleScopeId, editingDraft.id, patch)
       refresh()
       setSelectedId(updated.id)
       setEditingDraft(null)

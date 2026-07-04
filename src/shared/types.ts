@@ -83,6 +83,12 @@ export interface ProjectData {
   chapterWordCount?: number
   status?: string
   createdAt: string
+  /**
+   * 对标书名列表（拆文库中的书名）。写作时按回退链
+   * （项目 对标/{书名}/ → 全局 teardown-library/{书名}/）召回方法论产物。
+   * 对齐 oh-story-claudecode 的对标/拆文库分离设计。
+   */
+  benchmarkBooks?: string[]
 }
 
 export interface ChapterMeta {
@@ -291,12 +297,22 @@ export interface ReviewRulesBundle {
   config: ReviewRulesConfig
 }
 
+export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose'
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
   scanProjects: () => Promise<ProjectMeta[]>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
+  /** 设置项目的对标书列表（拆文库中的书名，写作时召回方法论） */
+  setBenchmarkBooks: (projectId: string, books: string[]) => Promise<string[]>
+  /** 进入项目视图时启动文件监听（主进程 fs.watch 项目目录） */
+  watchProject: (projectId: string) => Promise<boolean>
+  /** 离开项目视图时停止文件监听 */
+  stopWatchProject: () => Promise<boolean>
+  /** 订阅项目文件变更事件（外部编辑器改源文件时推送）。返回取消订阅函数。 */
+  onProjectFilesChanged: (cb: (e: { projectId: string; kind: FileChangeKind }) => void) => () => void
   listStyleProfiles: (projectId: string) => Promise<StyleProfile[]>
   createStyleProfile: (projectId: string, input: CreateStyleProfileInput) => Promise<StyleProfile>
   updateStyleProfile: (
@@ -414,9 +430,15 @@ export interface RendererApi {
     patch: Partial<DetailedOutlineItem>
   ) => Promise<DetailedOutlineItem>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
+  generateDetailedOutlineRange: (
+    projectId: string,
+    fromChapter: number,
+    count: number
+  ) => Promise<DetailedOutlineItem[]>
   getRhythm: (projectId: string) => Promise<RhythmEntry[]>
   getVolumes: (projectId: string) => Promise<Volume[]>
   getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
+  getVolumeOutlines: (projectId: string) => Promise<VolumeOutline[]>
   getDiagnostics: (projectId: string) => Promise<Diagnostic[]>
   listFigures: (projectId: string) => Promise<FigureSummary[]>
   readFigure: (projectId: string, fileName: string) => Promise<ChapterFigure | null>
@@ -426,6 +448,7 @@ export interface RendererApi {
     chapterNumber: number,
     styleProfileId: string | null | undefined,
     tempContext: string | undefined,
+    existingText: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   getProjectsRoot: () => Promise<string>
@@ -556,6 +579,12 @@ export interface RendererApi {
     content: string,
     chapterNumber: number
   ) => Promise<AuditViolation[]>
+  /** 结构化审核报告（对齐正文审核技能第 6 步）：聚合算法 + LLM 检查为 10 节报告 */
+  generateReviewReport: (
+    projectId: string,
+    content: string,
+    chapterNumber: number
+  ) => Promise<ChapterReviewReport>
   getWriteAuditConfig: () => Promise<WriteAuditConfig>
   setWriteAuditConfig: (cfg: Partial<WriteAuditConfig>) => Promise<WriteAuditConfig>
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
@@ -576,6 +605,124 @@ export interface RendererApi {
   getReviewRules: () => Promise<ReviewRulesBundle>
   /** 保存审稿规则配置（开关/阈值/词表） */
   setReviewRules: (cfg: Partial<ReviewRulesConfig>) => Promise<ReviewRulesConfig>
+  /* ---- 拆文库（长/短篇拆文）---- */
+  /** 列出全部拆文库条目 */
+  listTeardowns: () => Promise<TeardownEntry[]>
+  /** 启动拆文：落盘原文 + 字数路由，返回篇幅判定（灰区需前端确认） */
+  startTeardown: (input: StartTeardownInput) => Promise<TeardownRouteResult>
+  /** 运行拆文管道（流式返回进度文本）。lengthKind 由 startTeardown 路由后传入 */
+  runTeardown: (
+    bookName: string,
+    lengthKind: TeardownLengthKind,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: true }>
+  /** 长篇 Stage 1 停靠后继续（从 Stage 2 续跑） */
+  continueTeardown: (
+    bookName: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: true }>
+  /** 轮询拆文进度 */
+  getTeardownProgress: (bookName: string) => Promise<TeardownProgressInfo>
+  /** 列出某书拆文库产物文件树 */
+  getTeardownFiles: (bookName: string) => Promise<TeardownFileNode[]>
+  /** 读取单个拆文产物文件内容 */
+  readTeardownFile: (bookName: string, path: string) => Promise<TeardownFileContent | null>
+  /** 删除整本书的拆文库 */
+  deleteTeardown: (bookName: string) => Promise<void>
+  /* ---- 去 AI 味润色（story-deslop）---- */
+  /** 扫描正文（确定性，不调 LLM），返回检测报告 */
+  deslopScan: (projectId: string, text: string) => Promise<DeslopScanReport>
+  /** 润色正文（流式），返回润色结果。applyToChapter 传章节号时写回正文，否则仅返回文本 */
+  deslopStream: (
+    projectId: string,
+    text: string,
+    levelOverride: DeslopLevel | undefined,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<DeslopResult>
+  /** 读取项目级去 AI 味白名单 */
+  getDeslopWhitelist: (projectId: string) => Promise<string[]>
+  /** 写入项目级去 AI 味白名单 */
+  setDeslopWhitelist: (projectId: string, words: string[]) => Promise<string[]>
+  /* ---- 封面生成（story-cover）---- */
+  /** 生成封面（调图像 API），返回封面文件信息 */
+  generateCover: (input: GenerateCoverInput) => Promise<CoverFile>
+  /** 列出项目内已有封面 */
+  listCovers: (projectId: string) => Promise<CoverFile[]>
+  /** 读取封面为 base64 data URL（前端预览用） */
+  readCover: (projectId: string, fileName: string) => Promise<string | null>
+  /** 读取图像生成 API 配置（脱敏，不含 apiKey 明文） */
+  getCoverImageConfig: () => Promise<CoverImageConfigSummary>
+  /** 保存图像生成 API 配置 */
+  setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) => Promise<CoverImageConfigSummary>
+  /* ---- 扫榜（story-long-scan / story-short-scan）---- */
+  /** 采集某平台榜单（确定性，不调 LLM），返回榜单 markdown + 结构化条目 */
+  scanRank: (input: ScanRankInput) => Promise<ScanResult>
+  /** 列出历史扫榜报告 */
+  listScanReports: () => Promise<ScanReportSummary[]>
+  /** 读取单份扫榜报告内容 */
+  readScanReport: (fileName: string) => Promise<string | null>
+  /** LLM 分析榜单 + 产出选题决策（流式） */
+  analyzeRankStream: (
+    report: string,
+    platform: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: true }>
+  /** 删除扫榜报告 */
+  deleteScanReport: (fileName: string) => Promise<void>
+  /* ---- 开书（story-long-write Phase 1-3）---- */
+  /** Step 1：脑洞 → 核心设定表（流式） */
+  openingCoreSettingsStream: (
+    projectId: string,
+    brainDump: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
+  /** Step 2：核心设定 → 卷级大纲（流式） */
+  openingVolumeOutlineStream: (
+    projectId: string,
+    coreSettings: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
+  /** Step 3：核心设定 + 卷级大纲 → 前 N 章细纲（流式） */
+  openingFirstChaptersStream: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    fromChapter: number,
+    count: number,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
+  /** Step 4：落盘核心设定 + 卷级大纲 + 细纲 */
+  persistOpening: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    chaptersMarkdown?: string,
+    fromChapter?: number
+  ) => Promise<{ settingsFile: string; outlineFile: string; chapterFiles: string[] }>
+  /** 手动续写：从已有内容断点继续生成核心设定 */
+  continueCoreSettingsStream: (
+    projectId: string,
+    brainDump: string,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
+  /** 手动续写：从已有内容断点继续生成卷级大纲 */
+  continueVolumeOutlineStream: (
+    projectId: string,
+    coreSettings: string,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
+  /** 手动续写：从已有内容断点继续生成前 N 章细纲 */
+  continueFirstChaptersStream: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    fromChapter: number,
+    count: number,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
 }
 
 export interface Character {
@@ -790,6 +937,20 @@ export interface Volume {
   chapterEnd: number
 }
 
+/** 卷纲文件内容（大纲/第N卷_卷名.md 的结构化读取） */
+export interface VolumeOutline {
+  /** 卷号 */
+  number: number
+  /** 卷名 */
+  name: string
+  /** H1 标题原文 */
+  h1Title: string
+  /** 文件名 */
+  fileName: string
+  /** H2 节列表（卷核心/情绪弧线/爽点节奏/伏笔/反转/各章核心事件/卷末钩子 等） */
+  sections: { title: string; body: string }[]
+}
+
 /** 细纲每章的完整细节（来自 细纲/第NN卷.md 每章块） */
 export interface ChapterDetail {
   chapterNumber: number
@@ -920,6 +1081,79 @@ export interface AuditReport {
   violations: AuditViolation[]
 }
 
+/**
+ * 结构化审核报告（对齐「正文审核」技能第 6 步报告模板）。
+ * 10 个 section 聚合所有算法 + LLM 检查结果。
+ */
+export interface ChapterReviewReport {
+  /** 章号 */
+  chapterNumber: number
+  /** 生成时间 ISO */
+  generatedAt: string
+  /** 1. 记忆文件一致性（追踪/设定文件是否读取到） */
+  memoryConsistency: {
+    read: boolean
+    missingFiles: string[]
+  }
+  /** 2. 大纲/细纲一致性 */
+  outlineConsistency: {
+    hasOutline: boolean
+    rhythmMatchPercent: number | null
+    notes: string[]
+  }
+  /** 3. 毒点检测（toxic 类违规） */
+  toxicPoints: AuditViolation[]
+  /** 4. 引文一致性（quote 类违规） */
+  quoteConsistency: AuditViolation[]
+  /** 5. 成文质量（quality 类违规） */
+  manuscriptQuality: {
+    violations: AuditViolation[]
+    verdict: '✅' | '⚠️' | '🚨'
+  }
+  /** 6. 内容连贯性 */
+  continuity: {
+    plotTransition: string | null
+    timeline: string | null
+    spatialTransition: string | null
+    notes: string[]
+  }
+  /** 7. 章节结构（钩子/对话标签/段落长度） */
+  structure: {
+    hookStrength: AuditViolation[]
+    dialogueTags: AuditViolation[]
+    paragraphLength: AuditViolation[]
+  }
+  /** 8. 敏感词检测 */
+  sensitiveWords: AuditViolation[]
+  /** 9. 爽点分析（爽文题材） */
+  coolPointAnalysis: {
+    applicable: boolean
+    violations: AuditViolation[]
+    notes: string[]
+  }
+  /** 10. 字数统计 */
+  wordCount: {
+    current: number
+    passing: boolean
+    minRequired: number
+    suggestion: string | null
+  }
+  /** 11. 文风匹配 */
+  styleMatch: {
+    genre: string | null
+    matchPercent: number | null
+    violations: AuditViolation[]
+  }
+  /** 12. 去 AI 味建议（forbidden_word + rule 类违规） */
+  deAiSuggestions: AuditViolation[]
+  /** 总体评价 */
+  overall: {
+    score: number // 0-10
+    mainIssues: string[]
+    fixPriority: string[]
+  }
+}
+
 export type WriteAuditMode = 'soft' | 'strict'
 
 export interface WriteAuditConfig {
@@ -950,6 +1184,7 @@ export type ReviewCheckId =
   | 'long_paragraph' // 段落过长（手机阅读不友好）
   | 'dialogue_tag' // 对话标签单一（"道/说"占比过高）
   | 'sensitive' // 敏感词提醒（仅提醒，不强制）
+  | 'hook_strength' // 章末钩子强度检测（算法：末段悬念/冲突/反转关键词）
   // LLM 类（review-flow-service.ts 流式判定）
   | 'character_breakdown' // 角色崩坏人设
   | 'logic_hole' // 逻辑漏洞/逻辑断层
@@ -1266,4 +1501,393 @@ export interface ChapterFlowResult {
   figure: FigureDraft
   /** LLM 深度审稿 findings（仅当 settings.autoDeepReview=true 时填充；否则空数组） */
   deepReview?: AuditViolation[]
+}
+
+/* ==========================================================
+   拆文库（长/短篇拆文）—— 对齐 oh-story-claudecode skill 包
+   产物落在全局 <userData>/teardown-library/<书名>/，与项目解耦，
+   供「对标召回」「选题决策」跨项目复用。
+   ========================================================== */
+
+/** 拆文篇幅路由：<15k 短篇 / 15-20k 灰区询问 / >20k 长篇 */
+export type TeardownLengthKind = 'short' | 'long'
+
+/** 拆文管道阶段。长篇走 0-6，短篇走 2-6（数值对齐 skill 包 Stage 编号）。 */
+export type TeardownStage = 0 | 0.5 | 1 | 2 | 3 | 4 | 5 | 6
+
+/** 长篇 _progress.md 的章节边界表一行（全管道唯一切片来源，避免多阶段各自切片不一致）。 */
+export interface TeardownChapterBoundary {
+  /** 章号（从原文「第N章」解析，1-based） */
+  chapter: number
+  /** 章节标题（去除「第N章：」前缀） */
+  title: string
+  /** 在原文中的字符起始偏移 */
+  start: number
+  /** 在原文中的字符结束偏移（不含） */
+  end: number
+}
+
+/** 长篇 _progress.md（schema v2）：章节边界表 + 断点 + 失败记录。 */
+export interface TeardownLongProgress {
+  schemaVersion: 2
+  bookName: string
+  /** 章节边界表，全管道唯一切片来源 */
+  chapterBoundaries: TeardownChapterBoundary[]
+  /** 已完成阶段；停靠点 = [0, 0.5, 1] 后等待用户确认继续 */
+  stagesCompleted: TeardownStage[]
+  /** 正在进行的阶段（落盘前置，crash safety：半成品不被信任，resume 整段重跑） */
+  lastStageInProgress?: TeardownStage
+  /** Stage 1 后是否停靠（true = 已产快速预览，等待 continueTeardown） */
+  pausedAfterStage1: boolean
+  /** 失败记录（章节号 + 原因），不中断管道 */
+  failures: { chapter?: number; stage: TeardownStage; reason: string; at: string }[]
+  updatedAt: string
+}
+
+/** 短篇 _meta.json：管道元数据 + 结构计数（Phase 7 验收依据）。 */
+export interface TeardownShortMeta {
+  version: 1
+  bookName: string
+  wordCount: number
+  genreDetected?: string
+  /** 已完成阶段 */
+  stagesCompleted: TeardownStage[]
+  lastStageInProgress?: TeardownStage
+  /** Phase 7.2 强制阈值校验的结构计数 */
+  structureCounts: StructureCounts
+  updatedAt: string
+}
+
+/** 短篇结构计数（_meta.json.structure_counts，Phase 7 依据）。 */
+export interface StructureCounts {
+  /** 功能分段数（≥4，必含开端/发展/高潮/结局） */
+  beats: number
+  /** 钩子数（≥3） */
+  hooks: number
+  /** 铺垫线索数（≥3） */
+  setupClues: number
+  /** 角色原型数（≥2） */
+  characterArchetypes: number
+  /** 可复用结构数（≥3） */
+  reusableStructures: number
+  /** 反转类型（枚举内） */
+  reversalType?: string
+}
+
+/** 拆文库条目摘要（listTeardowns 返回）。 */
+export interface TeardownEntry {
+  bookName: string
+  lengthKind: TeardownLengthKind
+  /** 已完成阶段 */
+  stagesCompleted: TeardownStage[]
+  /** 当前阶段（进行中） */
+  currentStage?: TeardownStage
+  /** 是否停在 Stage 1 停靠点（仅长篇） */
+  pausedAfterStage1?: boolean
+  /** 字数 */
+  wordCount: number
+  genreDetected?: string
+  /** 创建时间（原文落盘时间） */
+  createdAt: string
+  updatedAt: string
+}
+
+/** 拆文进度（轮询用）。 */
+export interface TeardownProgressInfo {
+  bookName: string
+  lengthKind: TeardownLengthKind
+  currentStage: TeardownStage | null
+  stagesCompleted: TeardownStage[]
+  /** 当前进度描述（人类可读） */
+  statusText: string
+  /** Stage 2 逐章摘要的进度（已完成/总数），仅长篇 Stage 2 */
+  chapterProgress?: { done: number; total: number }
+}
+
+/** 拆文产物文件项（getTeardownFiles 返回，用于前端预览产物树）。 */
+export interface TeardownFileNode {
+  /** 相对拆文库根的路径，如 章节/第1-3章_深度拆解.md */
+  path: string
+  /** 是否目录 */
+  isDir: boolean
+  /** 文件大小（字节），目录为 0 */
+  size: number
+}
+
+/** 读取单个拆文产物文件内容（前端预览用）。 */
+export interface TeardownFileContent {
+  path: string
+  content: string
+}
+
+/** 启动拆文的输入。 */
+export interface StartTeardownInput {
+  bookName: string
+  /** 原文全文（.txt/.md 内容或对话贴文本） */
+  rawText: string
+  /** 平台/来源（可选，仅展示用） */
+  platform?: string
+  /** 强制篇幅；不传则按字数自动路由 */
+  lengthKindOverride?: TeardownLengthKind
+}
+
+/** 字数路由结果（startTeardown 返回，灰区需前端询问）。 */
+export interface TeardownRouteResult {
+  lengthKind: TeardownLengthKind
+  wordCount: number
+  /** 灰区（15-20k）时为 true，需前端确认是否仍走短篇 */
+  isGrayZone: boolean
+}
+
+/* ==========================================================
+   去 AI 味润色（story-deslop）—— 对齐 oh-story-claudecode
+   ========================================================== */
+
+/** 去 AI 味检测严重度：blocking 必须改写（复扫到 0）；advisory 仅提示 */
+export type DeslopSeverity = 'blocking' | 'advisory'
+
+/** 去 AI 味检测项的 gate 归属（A-G 七道关卡） */
+export type DeslopGate = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G'
+
+/** 单条去 AI 味检测结果（确定性脚本产出，不调 LLM） */
+export interface DeslopFinding {
+  /** 1-based 行号 */
+  line: number
+  /** 1-based 列号 */
+  column: number
+  /** 检测类型：not-is-comparison / em-dash / period-stutter / long-paragraph / repetition / truncation / placeholder / meta-leak / banned-word */
+  type: string
+  /** severity：blocking 必须改写复扫到 0；advisory 仅提示 */
+  severity: DeslopSeverity
+  /** 所属 Gate（A 禁用词 / B 句式 / C 心理外化 / D 节奏 / E 对话 / F 结尾 / G 解释腔） */
+  gate: DeslopGate
+  /** 用户可读的修复说明 */
+  message: string
+  /** 命中的原文片段（≤80 字） */
+  excerpt: string
+  /** 命中的禁用词本身（仅 banned-word 用） */
+  word?: string
+}
+
+/** 去 AI 味扫描报告（Phase 1 产出） */
+export interface DeslopScanReport {
+  findings: DeslopFinding[]
+  /** 各 severity 计数 */
+  counts: { blocking: number; advisory: number }
+  /** 6 项量化指标（用于 Phase 2 分级） */
+  metrics: DeslopMetrics
+  /** 字数 */
+  wordCount: number
+}
+
+/** 去 AI 味 6 项量化指标（Phase 2 分级依据） */
+export interface DeslopMetrics {
+  /** 禁用词密度（命中数 / 千字） */
+  bannedWordDensity: number
+  /** 连续排比命中数 */
+  parallelismCount: number
+  /** 心理词占比（心中/心头/感到 等命中数 / 千字） */
+  psychWordDensity: number
+  /** 对话标签密度（"道/说" 占对话比例） */
+  dialogueTagDensity: number
+  /** 平均段落句数 */
+  avgSentencesPerParagraph: number
+  /** 重复描写密度（复读命中数 / 千字） */
+  repetitionDensity: number
+}
+
+/** 去 AI 味严重度分级（Phase 2 产出） */
+export type DeslopLevel = 'mild' | 'moderate' | 'severe'
+
+/**
+ * 去 AI 味改写的风格语境（IPC 层从项目元数据/文风档案解析后注入）。
+ * 让 LLM 改写时对齐项目题材与文风，避免套通用模板。
+ */
+export interface DeslopStyleContext {
+  /** 项目题材（ProjectData.genre，默认"通用"），决定替换语感基调 */
+  genre?: string
+  /** 文风档案摘要（来自 StyleProfile，可选） */
+  style?: {
+    /** 文风标识（StyleProfile.identifiedStyle） */
+    identifiedStyle?: string
+    /** 语感/语气（StyleProfile.tone） */
+    tone?: string[]
+    /** 句式偏好（StyleProfile.sentencePatterns） */
+    sentencePatterns?: string[]
+    /** 词汇偏好（StyleProfile.vocabularyPreferences） */
+    vocabularyPreferences?: string[]
+    /** 跨题材写作手法约束（StyleProfile.styleConstraints） */
+    styleConstraints?: string[]
+    /** 与题材/设定绑定的剧情手法约束（StyleProfile.plotConstraints） */
+    plotConstraints?: string[]
+  }
+}
+
+/** 去 AI 味润色结果（Phase 4 产出） */
+export interface DeslopResult {
+  /** 润色后全文（文件模式落盘，文本模式返回） */
+  rewritten: string
+  /** 命中并处理的 Gate 列表 */
+  processedGates: DeslopGate[]
+  /** 改写前字数 */
+  beforeWords: number
+  /** 改写后字数 */
+  afterWords: number
+  /** 删除比例（afterWords / beforeWords） */
+  deleteRatio: number
+  /** Phase 3.5 复扫报告（兜底后剩余 finding） */
+  remainingFindings: DeslopFinding[]
+  /** 改动摘要（逐 Gate 的修改统计） */
+  changeSummary: string[]
+}
+
+/* ==========================================================
+   封面生成（story-cover）—— 对齐 oh-story-claudecode
+   ========================================================== */
+
+/** 目标平台（决定封面比例与风格） */
+export type CoverPlatform = 'fanqie' | 'qidian' | 'jjwxc' | 'zhihu' | 'qimao' | 'ciweimao' | 'other'
+
+/** 题材（书名关键词推断，决定视觉风格） */
+export type CoverGenre =
+  | 'xianxia'
+  | 'urban'
+  | 'ancient_romance'
+  | 'modern_romance'
+  | 'mystery'
+  | 'scifi'
+  | 'western_fantasy'
+  | 'historical'
+  | 'supernatural'
+  | 'light_novel'
+
+/** 构图变体 */
+export type CoverComposition = 'closeup' | 'fullbody' | 'scene' | 'duo'
+
+/** 封面输入 */
+export interface GenerateCoverInput {
+  /** 项目 id（封面存到项目目录下） */
+  projectId: string
+  /** 书名 */
+  bookName: string
+  /** 作者名（笔名） */
+  authorName: string
+  /** 目标平台 */
+  platform: CoverPlatform
+  /** 题材（不传则按书名自动推断） */
+  genreOverride?: CoverGenre
+  /** 构图变体（默认 closeup） */
+  composition?: CoverComposition
+  /** 风格偏好补充（可选，追加到 prompt） */
+  styleHint?: string
+  /** 参考图本地路径（设置后走图生图） */
+  refImagePath?: string
+}
+
+/** 封面文件信息（落盘后） */
+export interface CoverFile {
+  /** 文件名，如 封面_v1.png */
+  fileName: string
+  /** 相对项目目录的路径，如 封面/封面_v1.png */
+  relPath: string
+  /** 版本号 */
+  version: number
+  /** 是否平台上传尺寸版（_上传 后缀） */
+  isUploadSize: boolean
+  /** 文件大小（字节） */
+  size: number
+  /** 推断/指定的题材 */
+  genre: CoverGenre
+  /** 生成时间 */
+  createdAt: string
+}
+
+/** 图像生成 API 配置（存 settings） */
+export interface CoverImageConfigInput {
+  /** OpenAI 或兼容代理的 API Key */
+  apiKey: string
+  /** 基础 URL，默认 https://api.openai.com/v1 */
+  baseUrl: string
+  /** 模型名，默认 gpt-image-2 */
+  model: string
+}
+
+/** 图像生成 API 配置摘要（脱敏，list 返回） */
+export interface CoverImageConfigSummary {
+  hasKey: boolean
+  keyMasked: string
+  baseUrl: string
+  model: string
+}
+
+/* ==========================================================
+   扫榜（story-long-scan / story-short-scan）—— 对齐 oh-story-claudecode
+   ========================================================== */
+
+/** 扫榜平台（长篇 + 短篇统一） */
+export type ScanPlatform =
+  | 'qidian' // 起点长篇
+  | 'fanqie' // 番茄长篇
+  | 'jjwxc' // 晋江长篇
+  | 'qimao' // 七猫长篇
+  | 'ciweimao' // 刺猬猫长篇
+  | 'dz' // 点众短篇
+  | 'heiyan' // 黑岩短篇
+  | 'zhihu' // 知乎盐言短篇
+
+/**
+ * 扫榜榜单类型（不同平台支持的榜单不同）。
+ * 注意：这是开放字符串——各平台 rankType id 不同（起点 'hotsales'、晋江 '12' 等），
+ * 运行时由 IPC 层 `z.string().max(50)` 约束，运行时由 getRankTypesForPlatform 提供合法值。
+ */
+export type ScanRankType = string
+
+/** 单本榜单条目（各采集器统一产出） */
+export interface ScanBookRecord {
+  rank: number
+  title: string
+  author: string
+  genre: string
+  status: string
+  descText: string
+  url?: string
+  tags?: string[]
+}
+
+/** 扫榜采集方式 */
+export type ScanSourceMode = 'fetch' | 'browser' | 'user' | 'builtin'
+
+/** 采集输入 */
+export interface ScanRankInput {
+  platform: ScanPlatform
+  rankType?: ScanRankType
+  /** 用户直接提供的榜单数据（markdown/文本，跳过采集走 user 模式） */
+  userData?: string
+}
+
+/** 采集结果 */
+export interface ScanResult {
+  platform: ScanPlatform
+  rankType: ScanRankType
+  /** 采集方式 */
+  sourceMode: ScanSourceMode
+  /** 落盘的 markdown 报告文件名 */
+  fileName: string
+  /** 结构化条目 */
+  books: ScanBookRecord[]
+  /** 完整 markdown 报告内容 */
+  markdown: string
+  /** 数据质量提示（采集失败/部分成功时） */
+  dataQualityNote?: string
+  /** 抓取时间 */
+  scannedAt: string
+}
+
+/** 扫榜报告摘要（listScanReports 返回） */
+export interface ScanReportSummary {
+  fileName: string
+  platform: ScanPlatform
+  rankType: ScanRankType
+  bookCount: number
+  scannedAt: string
 }

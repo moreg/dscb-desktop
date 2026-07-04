@@ -1,3 +1,4 @@
+import { join, dirname } from 'path'
 import type { ProjectService } from './project-service'
 import type { LlmService, GenerateOptions } from './llm-service'
 import { OutlineRepository } from './outline-repository'
@@ -11,8 +12,10 @@ import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { StyleProfileRepository } from './style-profile-repository'
 import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
+import { recallBenchmark, mergeRecalls } from './teardown/benchmark-recall'
 import type { SettingsRepository } from './settings-repository'
 import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
+import { buildReviewReport } from './review-report-builder'
 import { WriteFlowService } from './write-flow-service'
 import { ReviewFlowService } from './review-flow-service'
 import { MemoryWriter } from './memory-writer'
@@ -23,6 +26,7 @@ import type {
   AuditViolation,
   BatchProgress,
   ChapterFlowResult,
+  ChapterReviewReport,
   Character,
   ChapterDetail,
   FigureDraft,
@@ -32,6 +36,7 @@ import type {
   OutlineDiffReport,
   PrevEndingState,
   ReviewCheckId,
+  ReviewRulesConfig,
   CustomReviewCheck,
   RhythmApplyResult,
   RhythmEntry,
@@ -113,15 +118,17 @@ export class WriteService {
     private readonly flow: WriteFlowService = new WriteFlowService(llm),
     private readonly reviewFlow: ReviewFlowService = new ReviewFlowService(llm),
     private readonly chapterService: ChapterService = new ChapterService(projectService),
-    private readonly settings?: SettingsRepository
+    private readonly settings?: SettingsRepository,
+    private readonly benchmarkResolver?: import('./teardown/benchmark-resolver').BenchmarkResolver
   ) {}
 
   async buildChapterPrompt(
     projectId: string,
     chapterNumber: number,
     styleProfileId?: string | null,
-    tempContext?: string
-  ): Promise<ChapterPrompt> {
+    tempContext?: string,
+    existingText?: string
+  ): Promise<{ system: string; user: string; targetWords: number }> {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
     const style = await this.loadStyleProfile(
@@ -134,9 +141,19 @@ export class WriteService {
     const overrides = this.settings
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
-    const system = buildSystemPrompt(project.genre, style, overrides)
-    const targetWords =
-      parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
+
+    // 对标书方法论召回（oh-story-claudecode 闭环：拆文产物 → 写作召回）
+    const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
+
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    
+    let targetWords = parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
+    if (existingText && existingText.trim()) {
+      const existingWordCount = existingText.trim().length
+      // Calculate remaining words to write, ensuring a minimum of 500 words for continuation
+      targetWords = Math.max(500, targetWords - existingWordCount)
+    }
+
     const user = renderUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -150,7 +167,8 @@ export class WriteService {
       characters: ctx.characters,
       chapterNumber,
       targetWords,
-      tempContext
+      tempContext,
+      existingText
     })
 
     return { system, user, targetWords }
@@ -163,7 +181,13 @@ export class WriteService {
     maybeOpts: GenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const prompt = await this.buildChapterPrompt(projectId, chapterNumber, styleProfileId, opts.tempContext)
+    const prompt = await this.buildChapterPrompt(
+      projectId,
+      chapterNumber,
+      styleProfileId,
+      opts.tempContext,
+      opts.existingText
+    )
     const targetWords = prompt.targetWords ?? TARGET_WORDS
     return this.llm.generateStream(prompt.user, {
       ...opts,
@@ -206,6 +230,53 @@ export class WriteService {
       }
     }
     return runAudit(content, { ...opts, genre, reviewRules })
+  }
+
+  /**
+   * 生成结构化审核报告（对齐「正文审核」技能第 6 步）。
+   * 聚合 auditChapter 的算法检查 + runDeepReview 的 LLM 检查为 10 节报告。
+   */
+  async generateReviewReport(
+    projectId: string,
+    content: string,
+    chapterNumber: number
+  ): Promise<ChapterReviewReport> {
+    // 1. 算法检查
+    const audit = await this.auditChapter(projectId, content)
+
+    // 2. 获取审稿规则（步骤 4 提前，复用避免重复读取）
+    let reviewRules: ReviewRulesConfig | null = null
+    try {
+      reviewRules = this.settings ? await this.settings.getReviewRules() : null
+    } catch (err) {
+      console.warn('[generateReviewReport] Failed to load review rules:', err)
+    }
+
+    // 3. LLM 深度检查（如果启用）
+    let llmViolations: AuditViolation[] = []
+    try {
+      if (reviewRules?.enabled && reviewRules.autoDeepReview) {
+        llmViolations = await this.runDeepReview(projectId, content, chapterNumber)
+      }
+    } catch (err) {
+      console.warn('[generateReviewReport] LLM deep review failed, skipping:', err)
+    }
+
+    // 4. 获取题材
+    let genre: string | undefined
+    try {
+      const project = await this.projectService.getProjectData(projectId)
+      genre = project.genre
+    } catch (err) {
+      console.warn('[generateReviewReport] Failed to load project genre:', err)
+    }
+
+    // 5. 构建报告
+    return buildReviewReport(chapterNumber, audit, llmViolations, {
+      genre,
+      reviewRules: reviewRules ?? undefined,
+      minWords: reviewRules?.thresholds.minWords
+    })
   }
 
   /**
@@ -914,6 +985,14 @@ export class WriteService {
       `- "改写"必须是改后的成品本身，能整句替换"原文"，禁止写成"把…改成…/应该…/可以…/拆到…/不要…"这种说明性句式。`,
       `- 若问题属于结构调整、跨段落删改，无法用单句替换，则"改写"一行写"（此为结构调整，请参考理由手动改）"，并在"理由"里讲清结构怎么调。`,
       `- 单条建议聚焦一个问题，不要一条里塞两件事。"改写"应当明显优于"原文"（不是同义改写）。`,
+      `- **"改写"成品必须自身去 AI 味**，禁止出现以下高频 AI 套路表达（你正在批评的词，自己改写时也不许用）：`,
+      `  · 情态比喻：仿佛 / 犹如 / 宛若 / 如同 / 一丝 / 一抹 / 些许 / 几分`,
+      `  · 程度副词堆叠：缓缓 / 微微 / 轻轻 / 淡淡 / 不禁 / 不由得`,
+      `  · 表情套路：眼中闪过一丝X / 嘴角勾起一抹X / 眉头微皱 / 瞳孔微缩`,
+      `  · 心理外露：心中涌起/一动 / 心头一震 / 心下暗道 / 深吸一口气`,
+      `  · 句式套路："不是A，而是B" / "，带着一丝X" / "声音不大，却带着X的力量" / "他/她知道……"`,
+      `  · 判断/升华：不容置疑 / 显而易见 / 这一刻，他终于明白 / 他不知道的是，更大的风暴即将来临`,
+      `  替换思路：用具体动作、身体反应、可见细节、短句断句代替；与其写"她微微一笑，眼中闪过一丝失落"，不如写"她扯了下嘴角，没说话"。改写后若仍含上述表达，视为不合格。`,
       `- 不要客套话、不要总评/前言/标题、不要打分、不要 Markdown 标记。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
@@ -1015,8 +1094,45 @@ export class WriteService {
     styleProfileId: string | null
   ): Promise<StyleProfile | null> {
     if (!styleProfileId) return null
-    const data = await new StyleProfileRepository(projectDir).read()
+    const globalStylesFile = this.settings
+      ? join(dirname(this.settings.getSettingsFile()), 'styles.json')
+      : join(projectDir, 'styles.json')
+    const data = await new StyleProfileRepository(globalStylesFile).read()
     return data.items.find((item) => item.id === styleProfileId) ?? null
+  }
+
+  /**
+   * 加载对标书方法论召回（oh-story-claudecode 闭环核心）。
+   * 按回退链（项目 对标/ → 全局 拆文库/）解析对标书拆文产物，
+   * 召回情绪模块/节奏/文风/写法技巧，注入 system prompt。
+   * 无对标书或解析失败时返回 null（降级为无对标写作，不报错）。
+   */
+  private async loadBenchmarkRecall(
+    projectDir: string,
+    benchmarkBooks: string[] | undefined
+  ): Promise<import('./skill-prompts').BenchmarkRecallPrompt | null> {
+    if (!this.benchmarkResolver || !benchmarkBooks || benchmarkBooks.length === 0) {
+      return null
+    }
+    try {
+      const artifacts = await this.benchmarkResolver.resolveAll(projectDir, benchmarkBooks)
+      if (artifacts.length === 0) return null
+      const recalls = artifacts.map((a) => recallBenchmark(a))
+      const merged = mergeRecalls(recalls)
+      if (!merged.emotion && !merged.rhythm && !merged.style && !merged.technique) {
+        return null
+      }
+      return {
+        bookNames: merged.bookNames,
+        emotion: merged.emotion,
+        rhythm: merged.rhythm,
+        style: merged.style,
+        technique: merged.technique
+      }
+    } catch (err) {
+      console.warn('[loadBenchmarkRecall] 召回失败，降级无对标写作:', err)
+      return null
+    }
   }
 
   /**
@@ -1196,6 +1312,7 @@ interface RenderInput {
   /** 本章目标字数（用于强约束 LLM 写够）。 */
   targetWords: number
   tempContext?: string
+  existingText?: string
 }
 
 function normalizeStyleGenerateArgs(
@@ -1343,12 +1460,27 @@ function renderUserPrompt(input: RenderInput): string {
     }
   }
 
+  // 6.1 本章已写正文前部（用于续写衔接）
+  if (input.existingText && input.existingText.trim()) {
+    parts.push('---')
+    parts.push('**【本章已写正文前部】**（这部分是你已经写出来的正文内容）：')
+    parts.push('```')
+    parts.push(input.existingText.trim())
+    parts.push('```')
+  }
+
   // 7. 输出最终指令 + 伏笔回执格式
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
-  parts.push(
-    `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
-  )
+  if (input.existingText && input.existingText.trim()) {
+    parts.push(
+      `**请接续上面的【本章已写正文前部】继续续写本章后续正文，预计继续写不少于 ${input.targetWords} 字**（这是硬性下限）。请保持文风、人称视角（如第一人称或第三人称）、语气风格及叙事逻辑与前部完全一致，承接前文的情节向下发展，不要重复前部已有的内容或情节，直接输出后续正文内容，开头不需要任何问候或承接词。`
+    )
+  } else {
+    parts.push(
+      `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
+    )
+  }
   if (chapterRequirements) {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】。如果没有，先补足再输出。`)
   }
@@ -1394,6 +1526,24 @@ function renderChapterDetail(d: ChapterDetail, label: string): string {
   if (d.wordEstimate) lines.push(`- 字数预估：${d.wordEstimate}`)
   if (d.climaxTag) lines.push(`- 关键标记：${d.climaxTag}`)
   if (d.writingRequirements) lines.push(`- 本章写作要求：${d.writingRequirements}`)
+
+  if (d.rawFields) {
+    const skipKeys = new Set([
+      '章节标题', '核心事件', '爽点/打脸', '爽点', '章末钩子', 
+      '金句', '伏笔铺设', '角色出场', '字数预估', '关键标记', 
+      '本章写作要求', '写作要求', '写作要求模板', '自定义补充要求',
+      'title', 'plotSummary', 'coolPoint', 'hook', 'goldenLine', 
+      'foreshadowings', 'charactersAppearing', 'wordEstimate', 
+      'climaxTag', 'writingRequirements', 'writingRequirementTemplateId', 
+      'writingRequirementCustomText', 'volume', 'chapterNumber', 'emotion', 'climax'
+    ])
+    for (const [k, v] of Object.entries(d.rawFields)) {
+      if (skipKeys.has(k)) continue
+      const text = Array.isArray(v) ? v.join('；') : v
+      if (text) lines.push(`- ${k}：${text}`)
+    }
+  }
+
   return lines.join('\n')
 }
 

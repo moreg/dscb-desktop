@@ -21,7 +21,25 @@ import type {
   ChapterFlowResult,
   ListProvidersResult,
   CreateStyleProfileInput,
-  UpdateStyleProfileInput
+  UpdateStyleProfileInput,
+  TeardownEntry,
+  StartTeardownInput,
+  TeardownRouteResult,
+  TeardownLengthKind,
+  TeardownProgressInfo,
+  TeardownFileNode,
+  TeardownFileContent,
+  ScanRankInput,
+  ScanResult,
+  ScanReportSummary,
+  DeslopScanReport,
+  DeslopLevel,
+  DeslopResult,
+  GenerateCoverInput,
+  CoverFile,
+  CoverImageConfigSummary,
+  CoverImageConfigInput,
+  ReviewRulesConfig
 } from '../shared/types'
 
 const api = {
@@ -29,6 +47,10 @@ const api = {
   scanProjects: () => ipcRenderer.invoke('library:scan'),
   createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
   getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
+  setBenchmarkBooks: (projectId: string, books: string[]) =>
+    ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
+  watchProject: (projectId: string) => ipcRenderer.invoke('projects:watch', projectId) as Promise<boolean>,
+  stopWatchProject: () => ipcRenderer.invoke('projects:stopWatch') as Promise<boolean>,
   listStyleProfiles: (projectId: string) => ipcRenderer.invoke('styles:list', projectId),
   createStyleProfile: (projectId: string, input: CreateStyleProfileInput) =>
     ipcRenderer.invoke('styles:create', { projectId, input }),
@@ -144,9 +166,12 @@ const api = {
     ipcRenderer.invoke('outline:updateDetailed', id, chapterNumber, patch),
   generateDetailedOutline: (id: string, n: number) =>
     ipcRenderer.invoke('outline:generateDetailed', id, n),
+  generateDetailedOutlineRange: (id: string, fromChapter: number, count: number) =>
+    ipcRenderer.invoke('outline:generateDetailedRange', id, fromChapter, count) as Promise<DetailedOutlineItem[]>,
   getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
   getVolumes: (id: string) => ipcRenderer.invoke('outline:getVolumes', id),
   getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
+  getVolumeOutlines: (id: string) => ipcRenderer.invoke('outline:getVolumeOutlines', id),
   getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),
   listFigures: (id: string) => ipcRenderer.invoke('figure:list', id),
   readFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:read', id, fileName),
@@ -156,6 +181,7 @@ const api = {
     chapterNumber: number,
     styleProfileId: string | null | undefined,
     tempContext: string | undefined,
+    existingText: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => {
     const requestId = crypto.randomUUID()
@@ -167,7 +193,7 @@ const api = {
     }
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
-      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, requestId })
+      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, existingText, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
@@ -447,6 +473,9 @@ const api = {
   /** LLM 深度审稿：跑角色崩坏/逻辑漏洞等语义检查，返回 findings */
   runDeepReview: (projectId: string, content: string, chapterNumber: number) =>
     ipcRenderer.invoke('write:runDeepReview', { projectId, content, chapterNumber }),
+  /** 结构化审核报告（对齐正文审核技能第 6 步）：10 节报告 */
+  generateReviewReport: (projectId: string, content: string, chapterNumber: number) =>
+    ipcRenderer.invoke('write:reviewReport', { projectId, content, chapterNumber }),
   getWriteAuditConfig: async () => {
     const all = await ipcRenderer.invoke('settings:getAll')
     return {
@@ -479,7 +508,264 @@ const api = {
   /** 审稿规则：检查项清单 + 当前配置 */
   getReviewRules: () => ipcRenderer.invoke('settings:getReviewRules'),
   /** 保存审稿规则配置（开关/阈值/词表） */
-  setReviewRules: (cfg) => ipcRenderer.invoke('settings:setReviewRules', cfg)
+  setReviewRules: (cfg: Partial<ReviewRulesConfig>) =>
+    ipcRenderer.invoke('settings:setReviewRules', cfg),
+
+  /* ---- 拆文库（长/短篇拆文）---- */
+  listTeardowns: () => ipcRenderer.invoke('teardown:list'),
+  startTeardown: (input: StartTeardownInput) =>
+    ipcRenderer.invoke('teardown:start', input),
+  runTeardown: (
+    bookName: string,
+    lengthKind: TeardownLengthKind,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('teardown:token', handler as never)
+    return ipcRenderer
+      .invoke('teardown:run', { bookName, lengthKind, requestId })
+      .finally(() => ipcRenderer.removeListener('teardown:token', handler as never))
+  },
+  continueTeardown: (
+    bookName: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('teardown:token', handler as never)
+    return ipcRenderer
+      .invoke('teardown:continue', { bookName, requestId })
+      .finally(() => ipcRenderer.removeListener('teardown:token', handler as never))
+  },
+  getTeardownProgress: (bookName: string) =>
+    ipcRenderer.invoke('teardown:progress', bookName) as Promise<TeardownProgressInfo>,
+  getTeardownFiles: (bookName: string) =>
+    ipcRenderer.invoke('teardown:files', bookName) as Promise<TeardownFileNode[]>,
+  readTeardownFile: (bookName: string, path: string) =>
+    ipcRenderer.invoke('teardown:readFile', { bookName, path }) as Promise<TeardownFileContent | null>,
+  deleteTeardown: (bookName: string) =>
+    ipcRenderer.invoke('teardown:delete', bookName),
+
+  /* ---- 扫榜（story-long-scan / story-short-scan）---- */
+  scanRank: (input: ScanRankInput) =>
+    ipcRenderer.invoke('scan:rank', input) as Promise<ScanResult>,
+  listScanReports: () =>
+    ipcRenderer.invoke('scan:list') as Promise<ScanReportSummary[]>,
+  readScanReport: (fileName: string) =>
+    ipcRenderer.invoke('scan:read', fileName) as Promise<string | null>,
+  deleteScanReport: (fileName: string) =>
+    ipcRenderer.invoke('scan:delete', fileName),
+  analyzeRankStream: (
+    report: string,
+    platform: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('scan:token', handler as never)
+    return ipcRenderer
+      .invoke('scan:analyze', { report, platform, requestId })
+      .finally(() => ipcRenderer.removeListener('scan:token', handler as never))
+  },
+
+  /* ---- 去 AI 味润色（story-deslop）---- */
+  deslopScan: (projectId: string, text: string) =>
+    ipcRenderer.invoke('deslop:scan', { projectId, text }) as Promise<DeslopScanReport>,
+  deslopStream: (
+    projectId: string,
+    text: string,
+    levelOverride: DeslopLevel | undefined,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('deslop:token', handler as never)
+    return ipcRenderer
+      .invoke('deslop:run', { projectId, text, levelOverride, requestId })
+      .finally(() => ipcRenderer.removeListener('deslop:token', handler as never)) as Promise<DeslopResult>
+  },
+  getDeslopWhitelist: (projectId: string) =>
+    ipcRenderer.invoke('deslop:getWhitelist', projectId) as Promise<string[]>,
+  setDeslopWhitelist: (projectId: string, words: string[]) =>
+    ipcRenderer.invoke('deslop:setWhitelist', { projectId, words }) as Promise<string[]>,
+
+  /* ---- 封面生成（story-cover）---- */
+  generateCover: (input: GenerateCoverInput) =>
+    ipcRenderer.invoke('cover:generate', input) as Promise<CoverFile>,
+  listCovers: (projectId: string) =>
+    ipcRenderer.invoke('cover:list', projectId) as Promise<CoverFile[]>,
+  readCover: (projectId: string, fileName: string) =>
+    ipcRenderer.invoke('cover:read', { projectId, fileName }) as Promise<string | null>,
+  getCoverImageConfig: () =>
+    ipcRenderer.invoke('cover:getConfig') as Promise<CoverImageConfigSummary>,
+  setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) =>
+    ipcRenderer.invoke('cover:setConfig', cfg) as Promise<CoverImageConfigSummary>,
+
+  /* ---- 开书（story-long-write Phase 1-3）---- */
+  openingCoreSettingsStream: (
+    projectId: string,
+    brainDump: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:coreSettings', { projectId, brainDump, requestId })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  openingVolumeOutlineStream: (
+    projectId: string,
+    coreSettings: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:volumeOutline', { projectId, coreSettings, requestId })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  openingFirstChaptersStream: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    fromChapter: number,
+    count: number,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:firstChapters', {
+        projectId,
+        coreSettings,
+        volumeOutline,
+        fromChapter,
+        count,
+        requestId
+      })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  persistOpening: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    _chaptersMarkdown?: string,
+    _fromChapter?: number
+  ) =>
+    ipcRenderer.invoke('opening:persist', { projectId, coreSettings, volumeOutline }),
+  continueCoreSettingsStream: (
+    projectId: string,
+    brainDump: string,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:continueCoreSettings', { projectId, brainDump, partial, requestId })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  continueVolumeOutlineStream: (
+    projectId: string,
+    coreSettings: string,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:continueVolumeOutline', { projectId, coreSettings, partial, requestId })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  continueFirstChaptersStream: (
+    projectId: string,
+    coreSettings: string,
+    volumeOutline: string,
+    fromChapter: number,
+    count: number,
+    partial: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('opening:token', handler as never)
+    return ipcRenderer
+      .invoke('opening:continueFirstChapters', {
+        projectId,
+        coreSettings,
+        volumeOutline,
+        fromChapter,
+        count,
+        partial,
+        requestId
+      })
+      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
+  },
+  onProjectFilesChanged: (
+    cb: (e: { projectId: string; kind: 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' }) => void
+  ) => {
+    const handler = (_e: unknown, payload: { projectId: string; kind: string }) => {
+      cb(payload as { projectId: string; kind: 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' })
+    }
+    ipcRenderer.on('project:files-changed', handler as never)
+    return () => ipcRenderer.removeListener('project:files-changed', handler as never)
+  }
 } as const
 
 contextBridge.exposeInMainWorld('api', api)

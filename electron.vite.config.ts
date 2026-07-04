@@ -15,6 +15,11 @@ export default defineConfig({
     root: 'src/renderer',
     publicDir: resolve(__dirname, 'build'),
     plugins: [react()],
+    server: {
+      host: true,
+      port: 5176,
+      strictPort: true
+    },
     build: { rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } } }
   }
 })

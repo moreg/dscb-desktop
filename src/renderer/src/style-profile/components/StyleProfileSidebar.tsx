@@ -60,13 +60,15 @@ export default function StyleProfileSidebar({
                   <div className="meta" style={{ marginTop: 6 }}>{profile.identifiedStyle}</div>
                 </button>
                 <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => void onSetDefault(profile.id)}
-                    disabled={isDefault}
-                  >
-                    设为默认
-                  </button>
+                  {projectData ? (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void onSetDefault(profile.id)}
+                      disabled={isDefault}
+                    >
+                      设为默认
+                    </button>
+                  ) : null}
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => onStartEdit(profile.id)}

@@ -10,7 +10,6 @@ import {
   ALGORITHM_CHECK_IDS,
   LLM_CHECK_IDS
 } from '../src/main/data/skill-prompts'
-import type { ReviewCheckId } from '../src/shared/types'
 
 describe('SettingsRepository review rules', () => {
   let repo: SettingsRepository
@@ -43,7 +42,7 @@ describe('SettingsRepository review rules', () => {
 
   it('drops unknown checkId silently', async () => {
     const saved = await repo.setReviewRules({
-      checks: { dash_fragment: false, bogus_id: true as unknown as ReviewCheckId }
+      checks: { dash_fragment: false, bogus_id: true as never }
     })
     expect((saved.checks as Record<string, unknown>).bogus_id).toBeUndefined()
     expect(saved.checks.dash_fragment).toBe(false)
@@ -58,7 +57,7 @@ describe('SettingsRepository review rules', () => {
 
   it('clamps invalid thresholds to defaults', async () => {
     const saved = await repo.setReviewRules({
-      thresholds: { minWords: -5, maxWords: NaN, maxParagraphLen: 'x' as unknown as number }
+      thresholds: { minWords: -5, maxWords: NaN, maxParagraphLen: 'x' as unknown as number } as never
     })
     expect(saved.thresholds.minWords).toBe(DEFAULT_REVIEW_THRESHOLDS.minWords)
     expect(saved.thresholds.maxWords).toBe(DEFAULT_REVIEW_THRESHOLDS.maxWords)
@@ -67,7 +66,7 @@ describe('SettingsRepository review rules', () => {
 
   it('preserves valid thresholds and allows fractional dashDensity', async () => {
     const saved = await repo.setReviewRules({
-      thresholds: { minWords: 2000, dashDensityPer100: 1.5 }
+      thresholds: { minWords: 2000, dashDensityPer100: 1.5 } as never
     })
     expect(saved.thresholds.minWords).toBe(2000)
     expect(saved.thresholds.dashDensityPer100).toBe(1.5)
@@ -75,7 +74,7 @@ describe('SettingsRepository review rules', () => {
 
   it('dedups and trims word lists, falls back to defaults when empty', async () => {
     const saved = await repo.setReviewRules({
-      wordLists: { metaBreak: ['  弹幕  ', '弹幕', '', '  '] }
+      wordLists: { metaBreak: ['  弹幕  ', '弹幕', '', '  '] } as never
     })
     expect(saved.wordLists.metaBreak).toEqual(['弹幕'])
     // sensitive 未传 → 保留默认（非空）
@@ -124,7 +123,7 @@ describe('review-checks registry integrity', () => {
   })
 
   it('algorithm checkIds count matches llm checkIds count expectation', () => {
-    expect(ALGORITHM_CHECK_IDS.size).toBe(11)
+    expect(ALGORITHM_CHECK_IDS.size).toBe(12)
     expect(LLM_CHECK_IDS.size).toBe(8)
   })
 })
@@ -183,7 +182,7 @@ describe('SettingsRepository custom checks / builtinMeta / hiddenBuiltin', () =>
   it('非法 group 降级为 toxic（保证 AuditViolation.category 合法）', async () => {
     const saved = await repo.setReviewRules({
       customChecks: [
-        { id: 'custom_g', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: '非法定义', keywords: ['a'], enabled: true }
+        { id: 'custom_g', label: 'x', hint: '', severity: 'warn', type: 'keyword', group: '非法定义' as never, keywords: ['a'], enabled: true }
       ]
     })
     expect(saved.customChecks?.length).toBe(1)
@@ -221,7 +220,7 @@ describe('SettingsRepository custom checks / builtinMeta / hiddenBuiltin', () =>
 
   it('builtinMeta 仅保留白名单 checkId', async () => {
     const saved = await repo.setReviewRules({
-      builtinMeta: { bogus_id: { label: 'x' } as never, meta_break: { label: 'y' } }
+      builtinMeta: { bogus_id: { label: 'x' }, meta_break: { label: 'y' } } as never
     })
     expect((saved.builtinMeta as Record<string, unknown>).bogus_id).toBeUndefined()
     expect(saved.builtinMeta?.meta_break?.label).toBe('y')

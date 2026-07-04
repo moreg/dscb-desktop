@@ -69,6 +69,20 @@ describe('LlmService', () => {
     fetchSpy.mockRestore()
   })
 
+  it('throws when OpenAI stream stops because max_tokens was reached', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody([
+        'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n'
+      ])
+    } as never)
+
+    await expect(service.generateStream('hi')).rejects.toThrow(/LLM_OUTPUT_TRUNCATED/)
+    fetchSpy.mockRestore()
+  })
+
   it('throws LLM_NOT_CONFIGURED when no provider', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-empty-'))
     const empty = new SecretStore(path.join(dir, 'providers.enc'))
@@ -140,6 +154,36 @@ describe('LlmService', () => {
     expect(body.max_tokens).toBeGreaterThan(0)
     expect(body.stream).toBe(true)
     expect(body.messages[0]).toEqual({ role: 'user', content: 'hi' })
+    fetchSpy.mockRestore()
+  })
+
+  it('throws when Anthropic stream stops because max_tokens was reached', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-ant-truncated-'))
+    const antStore = new SecretStore(path.join(dir, 'providers.enc'))
+    await antStore.write({
+      activeId: 'p_ant',
+      providers: [
+        {
+          id: 'p_ant',
+          label: 'ant',
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+          model: 'MiniMax-M3',
+          apiKey: 'sk-ant-key',
+          protocol: 'anthropic'
+        }
+      ]
+    })
+    const svc = new LlmService(antStore)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody([
+        'event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"partial"}}\n\n',
+        'event: message_delta\ndata: {"usage":{"output_tokens":20},"stop_reason":"max_tokens"}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+      ])
+    } as never)
+
+    await expect(svc.generateStream('hi')).rejects.toThrow(/LLM_OUTPUT_TRUNCATED/)
     fetchSpy.mockRestore()
   })
 

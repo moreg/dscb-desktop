@@ -50,7 +50,7 @@ import {
 } from '../../main/data/usage-summary'
 import type { UsageSummary, CostAlertConfig, UsageRecord } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
-import type { DetailedOutlineItem } from '../../shared/types'
+import type { DetailedOutlineItem, DeslopScanReport, DeslopResult } from '../../shared/types'
 import { buildForeshadowingReminders } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
@@ -269,6 +269,11 @@ export default function ChapterEditor({
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
   const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [deslopScanReport, setDeslopScanReport] = useState<DeslopScanReport | null>(null)
+  const [deslopScanning, setDeslopScanning] = useState(false)
+  const [deslopRunning, setDeslopRunning] = useState(false)
+  const [deslopLog, setDeslopLog] = useState('')
+  const [deslopResult, setDeslopResult] = useState<DeslopResult | null>(null)
   const [tempContextInput, setTempContextInput] = useState('')
   const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
   const [alertInfo, setAlertInfo] = useState<{ message: string } | null>(null)
@@ -582,6 +587,23 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshWritingRequirementTemplates()
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
   }, [projectId, chapterNumber])
+
+  // 订阅外部文件变更：细纲/节奏图谱变 → 刷新本章 meta（标题/情绪/爽点等）。
+  // 仅当用户无未保存正文输入（!dirty）时刷新，避免覆盖正在编辑的内容。
+  useEffect(() => {
+    const off = window.api.onProjectFilesChanged((e) => {
+      if (e.projectId !== projectId) return
+      if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'progress') return
+      if (dirty) return // 用户有未保存输入，跳过，保存后会重新读盘
+      void window.api.getChapter(projectId, chapterNumber).then((c) => {
+        setData(c)
+        setDraft(c.content)
+        setSessionStartWords(c.meta.wordCount)
+      })
+    })
+    return off
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, chapterNumber, dirty])
 
   // P9-A：debounced 持久化。rewriteHistory 或 redoStack 变化时延迟 200ms 写入 localStorage。
   // 延迟合并：连续 apply/undo/redo 操作只在用户停手后写一次。
@@ -933,7 +955,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (!proceed) return
     }
     setGenerating(true)
-    setDraft('')
+    const initialDraft = draft
     setFlowPanelOpen(false)
     setAutoAudit(null)
     setReviewText('')
@@ -952,18 +974,19 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         chapterNumber,
         requestedStyleProfileId,
         tempContextVal,
+        initialDraft,
         (token, done) => {
           if (genRef.current !== myGen) return
           if (token) {
             finalDraft += token
-            setDraft((d) => d + token)
+            setDraft(initialDraft + finalDraft)
           }
           if (done) {
             setGenerating(false)
             refreshUsage() // P10-A：续写完成更新今日用量
             const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
             if (receipt) {
-              setDraft(stripped)
+              setDraft(initialDraft + stripped)
               window.api.applyForeshadowReceipt(projectId, chapterNumber, receipt)
                 .then(res => {
                   if (res.planted > 0 || res.collected > 0) {
@@ -1046,6 +1069,54 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     } catch {
       if (reviewRef.current === myReview) setReviewing(false)
     }
+  }
+
+  /** 去 AI 味：扫描（确定性，不调 LLM）→ 弹报告 */
+  const startDeslopScan = async (): Promise<void> => {
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法扫描' })
+      return
+    }
+    setDeslopScanning(true)
+    setDeslopResult(null)
+    setDeslopLog('')
+    try {
+      const report = await window.api.deslopScan(projectId, draft)
+      setDeslopScanReport(report)
+    } finally {
+      setDeslopScanning(false)
+    }
+  }
+
+  /** 去 AI 味：润色（流式），完成后存结果供 diff 预览 */
+  const runDeslop = async (levelOverride?: 'mild' | 'moderate' | 'severe'): Promise<void> => {
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
+      return
+    }
+    setDeslopRunning(true)
+    setDeslopLog('')
+    setDeslopResult(null)
+    try {
+      const result = await window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
+        if (token) setDeslopLog((l) => l + token)
+        if (done) setDeslopRunning(false)
+      })
+      setDeslopResult(result)
+    } catch (err) {
+      setAlertInfo({ message: `去 AI 味失败：${(err as Error).message}` })
+    } finally {
+      setDeslopRunning(false)
+    }
+  }
+
+  /** 应用去 AI 味结果到正文 */
+  const applyDeslopResult = (): void => {
+    if (!deslopResult) return
+    setDraft(deslopResult.rewritten)
+    setDeslopResult(null)
+    setDeslopScanReport(null)
+    setDeslopLog('')
   }
 
   const startReview = async () => {
@@ -1748,6 +1819,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </button>
         <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
           {reviewing ? '审稿中…' : '✎ AI 改稿'}
+        </button>
+        <button
+          className="btn btn-sm"
+          onClick={() => void startDeslopScan()}
+          disabled={deslopScanning || deslopRunning || !draft.trim()}
+          title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
+        >
+          {deslopScanning ? '扫描中…' : '🧹 去 AI 味'}
         </button>
         <button
           className="btn btn-primary btn-sm"
@@ -2563,6 +2642,130 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onClose={() => setShowVersionDialog(false)}
           onSubmit={submitVersion}
         />
+      ) : null}
+
+      {deslopScanReport || deslopRunning || deslopResult ? (
+        <div
+          className="dialog-overlay"
+          onClick={() => {
+            if (!deslopRunning) {
+              setDeslopScanReport(null)
+              setDeslopResult(null)
+              setDeslopLog('')
+            }
+          }}
+        >
+          <div className="dialog" style={{ maxWidth: 720, maxHeight: '85vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+            <h3>🧹 去 AI 味</h3>
+
+            {/* 扫描报告 */}
+            {deslopScanReport && !deslopResult ? (
+              <div>
+                <div className="row" style={{ gap: 12, marginBottom: 12 }}>
+                  <span className="filter-chip">blocking {deslopScanReport.counts.blocking}</span>
+                  <span className="filter-chip">advisory {deslopScanReport.counts.advisory}</span>
+                  <span className="filter-chip">{deslopScanReport.wordCount} 字</span>
+                  <span className="filter-chip">禁用词密度 {deslopScanReport.metrics.bannedWordDensity.toFixed(1)}/千字</span>
+                </div>
+                {deslopScanReport.findings.length === 0 ? (
+                  <p className="empty">未检测到 AI 写作痕迹，正文很自然。</p>
+                ) : (
+                  <div style={{ maxHeight: 280, overflow: 'auto', fontSize: 12, marginBottom: 12 }}>
+                    {deslopScanReport.findings.slice(0, 40).map((f, i) => (
+                      <div key={i} className="diag-item" style={{ padding: '4px 0' }}>
+                        <span style={{ color: f.severity === 'blocking' ? '#dc2626' : '#d97706', fontWeight: 600 }}>
+                          [{f.gate}] {f.severity}
+                        </span>
+                        <span className="diag-msg" style={{ marginLeft: 8 }}>第{f.line}行 {f.excerpt}</span>
+                        <div className="diag-hint">{f.message}</div>
+                      </div>
+                    ))}
+                    {deslopScanReport.findings.length > 40 ? (
+                      <p className="meta">…还有 {deslopScanReport.findings.length - 40} 处</p>
+                    ) : null}
+                  </div>
+                )}
+                <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => { setDeslopScanReport(null); setDeslopLog('') }}
+                    disabled={deslopRunning}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void runDeslop(undefined)}
+                    disabled={deslopRunning || deslopScanReport.findings.length === 0}
+                  >
+                    {deslopRunning ? '润色中…' : '开始润色'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {/* 润色进度 */}
+            {deslopRunning && deslopLog ? (
+              <pre style={{ background: 'var(--bg-code, #1e1e2e)', color: 'var(--fg-code, #cdd6f4)', padding: 12, borderRadius: 8, maxHeight: 320, overflow: 'auto', fontSize: 12, whiteSpace: 'pre-wrap', margin: '8px 0' }}>
+                {deslopLog}
+              </pre>
+            ) : null}
+
+            {/* 润色结果 diff 预览 */}
+            {deslopResult ? (
+              <div>
+                <div className="row" style={{ gap: 12, marginBottom: 8 }}>
+                  <span className="filter-chip">{deslopResult.beforeWords} → {deslopResult.afterWords} 字</span>
+                  <span className="filter-chip">删除 {(deslopResult.deleteRatio * 100).toFixed(1)}%</span>
+                  <span className="filter-chip">剩余问题 {deslopResult.remainingFindings.length}</span>
+                  <span className="filter-chip">Gate {deslopResult.processedGates.join('')}</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <strong style={{ fontSize: 12 }}>改写前（前 600 字）</strong>
+                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                      {draft.slice(0, 600)}
+                    </pre>
+                  </div>
+                  <div>
+                    <strong style={{ fontSize: 12 }}>改写后（前 600 字）</strong>
+                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                      {deslopResult.rewritten.slice(0, 600)}
+                    </pre>
+                  </div>
+                </div>
+                {deslopResult.changeSummary.length > 0 ? (
+                  <div style={{ marginTop: 10 }}>
+                    <strong style={{ fontSize: 12 }}>改动明细（{deslopResult.changeSummary.length} 处）</strong>
+                    <div style={{ maxHeight: 200, overflow: 'auto', fontSize: 12, marginTop: 4 }}>
+                      {deslopResult.changeSummary.map((c, i) => (
+                        <div key={i} className="diag-item" style={{ padding: '4px 8px' }}>
+                          <span className="diag-msg">{c.replace(/^- /, '')}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length > 0 ? (
+                  <p className="diag-msg" style={{ color: '#dc2626', marginTop: 8 }}>
+                    ⚠ 复扫仍剩 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length} 处 blocking，建议人工复核
+                  </p>
+                ) : null}
+                <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => { setDeslopResult(null); setDeslopLog('') }}
+                  >
+                    放弃
+                  </button>
+                  <button className="btn btn-primary" onClick={applyDeslopResult}>
+                    应用到正文
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : null}
 
       {reviewOpen ? (

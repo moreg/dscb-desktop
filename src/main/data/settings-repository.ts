@@ -11,7 +11,9 @@ import type {
   ReviewCheckId,
   ReviewRulesConfig,
   ReviewThresholds,
-  ReviewWordLists
+  ReviewWordLists,
+  CoverImageConfigInput,
+  CoverImageConfigSummary
 } from '../../shared/types'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
 import {
@@ -58,6 +60,8 @@ export interface AppSettings {
   chapterRuleOverrides?: Record<string, string>
   /** 审稿规则配置（按「正文审核」技能） */
   reviewRules?: Partial<ReviewRulesConfig>
+  /** 图像生成 API 配置（封面生成用，独立于文本 LLM provider） */
+  coverImage?: Partial<CoverImageConfigInput>
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -315,6 +319,10 @@ function sanitizeWritingRequirementTemplates(
 export class SettingsRepository {
   constructor(private readonly settingsFile: string) {}
 
+  getSettingsFile(): string {
+    return this.settingsFile
+  }
+
   async get(): Promise<AppSettings> {
     const stored = await readJson<AppSettings>(this.settingsFile, {})
     // 合并默认值（嵌套字段也要兜底）
@@ -492,6 +500,61 @@ export class SettingsRepository {
     return theme
   }
 
+  /** 图像生成 API 配置（封面用）。apiKey 空串=未配置（保留旧值由 update 处理） */
+  async getCoverImageConfig(): Promise<{
+    apiKey: string
+    baseUrl: string
+    model: string
+  }> {
+    const s = await this.get()
+    const cfg = s.coverImage ?? {}
+    return {
+      apiKey: typeof cfg.apiKey === 'string' ? cfg.apiKey : '',
+      baseUrl: cfg.baseUrl || 'https://api.openai.com/v1',
+      model: cfg.model || 'gpt-image-2'
+    }
+  }
+
+  /** 脱敏摘要（list 返回，不含明文 apiKey） */
+  async getCoverImageConfigSummary(): Promise<CoverImageConfigSummary> {
+    const cfg = await this.getCoverImageConfig()
+    return {
+      hasKey: cfg.apiKey.length > 0,
+      keyMasked: cfg.apiKey ? maskKey(cfg.apiKey) : '',
+      baseUrl: cfg.baseUrl,
+      model: cfg.model
+    }
+  }
+
+  /** 更新图像配置；apiKey 为空串时保留旧值（不覆盖） */
+  async setCoverImageConfig(patch: Partial<CoverImageConfigInput>): Promise<CoverImageConfigSummary> {
+    const current = await this.getCoverImageConfig()
+    // baseUrl 校验：必须是 http/https 协议的合法 URL（防 SSRF）
+    let baseUrl = current.baseUrl
+    if (patch.baseUrl !== undefined) {
+      const trimmed = patch.baseUrl.trim()
+      if (trimmed) {
+        try {
+          const u = new URL(trimmed)
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            throw new Error('仅支持 http/https 协议')
+          }
+          baseUrl = trimmed
+        } catch (err) {
+          throw new Error(`图像 API baseUrl 非法：${(err as Error).message}`)
+        }
+      }
+    }
+    const next: Partial<CoverImageConfigInput> = {
+      baseUrl,
+      model: patch.model?.trim() || current.model,
+      // apiKey 空串=保留旧值；非空才覆盖
+      apiKey: patch.apiKey && patch.apiKey.trim() ? patch.apiKey.trim() : current.apiKey
+    }
+    await this.update({ coverImage: next })
+    return this.getCoverImageConfigSummary()
+  }
+
   async getPricing(): Promise<PricingConfig> {
     const s = await this.get()
     return { ...DEFAULT_PRICING, ...(s.pricing ?? {}) }
@@ -545,4 +608,10 @@ export class SettingsRepository {
     await this.update({ costAlert: sanitized })
     return this.getCostAlert()
   }
+}
+
+/** apiKey 脱敏：只保留首尾 4 字符，中间用 · 替换 */
+function maskKey(key: string): string {
+  if (key.length <= 8) return '····'
+  return `${key.slice(0, 4)}··${key.slice(-4)}`
 }

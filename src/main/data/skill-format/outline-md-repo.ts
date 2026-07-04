@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { promises as fs } from 'fs'
 import { readText, parseDoc, findSection, parseSubsections, parseTable, parseVolumeNumber } from './md-parser'
 import type { MainOutline, Volume, RhythmEntry } from '../../../shared/types'
 
@@ -16,6 +17,10 @@ export interface OutlineMdRead {
 /**
  * 读取大纲。真相源：`大纲/大纲.md`。
  * 解析：主线概要、卷结构（来自「## 主线剧情走向」的 H3）、逐章节奏（来自「## 逐章节奏标注」表）。
+ *
+ * 卷结构支持双来源：
+ * 1. `大纲/大纲.md` 的 H3 子节 `### 第N卷：卷名（第X-Y章）`
+ * 2. 独立卷文件 `大纲/第N卷_卷名.md`（技能标准格式，H1 = `# 卷纲：第N卷 卷名（第X-Y章）`）
  */
 export class OutlineMdRepo {
   constructor(private readonly projectDir: string) {}
@@ -27,7 +32,16 @@ export class OutlineMdRepo {
     const doc = parseDoc(text)
 
     const mainLineSection = findSection(doc, '主线剧情走向')
-    const volumes = mainLineSection ? extractVolumes(mainLineSection.body) : []
+    const volumesFromMain = mainLineSection ? extractVolumes(mainLineSection.body) : []
+
+    // 补充：扫描独立卷文件 大纲/第N卷_卷名.md
+    const volumesFromFiles = await this.readVolumeFiles()
+
+    // 合并去重（以卷号为准，大纲.md 内的优先）
+    const volumeMap = new Map<number, Volume>()
+    for (const v of volumesFromFiles) volumeMap.set(v.number, v)
+    for (const v of volumesFromMain) volumeMap.set(v.number, v) // 大纲.md 优先覆盖
+    const volumes = Array.from(volumeMap.values()).sort((a, b) => a.number - b.number)
 
     const main: MainOutline = {
       schemaVersion: 1,
@@ -41,6 +55,60 @@ export class OutlineMdRepo {
     const rhythmFallback = extractRhythmFallback(doc)
     return { main, volumes, rhythmFallback }
   }
+
+  /** 扫描 大纲/ 目录下的独立卷文件（第N卷_卷名.md），提取卷结构 */
+  private async readVolumeFiles(): Promise<Volume[]> {
+    const dir = join(this.projectDir, '大纲')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      if (e.code === 'ENOENT') return []
+      throw err
+    }
+    const volumes: Volume[] = []
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue
+      // 匹配 第N卷_卷名.md（N 为 1-2 位数字）
+      const nameMatch = f.match(/^第(\d+)卷[_\s]*(.+?)\.md$/)
+      if (!nameMatch) continue
+      const number = parseInt(nameMatch[1], 10)
+      const name = nameMatch[2].trim()
+      // 从文件内容提取章节范围
+      const text = await readText(join(dir, f))
+      const range = text ? extractChapterRangeFromVolumeFile(text, number) : null
+      volumes.push({
+        number,
+        name,
+        chapterStart: range?.start ?? 0,
+        chapterEnd: range?.end ?? 0
+      })
+    }
+    return volumes
+  }
+}
+
+/** 从卷文件内容提取章节范围（H1 或 卷核心 section 中的「章节范围」字段） */
+function extractChapterRangeFromVolumeFile(
+  text: string,
+  volumeNumber: number
+): { start: number; end: number } | null {
+  // 从 H1 `# 卷纲：第N卷 卷名（第X-Y章）` 提取
+  const h1Match = text.match(/第\s*(\d+)\s*[-–—]\s*(\d+)\s*章/)
+  if (h1Match) {
+    return { start: parseInt(h1Match[1], 10), end: parseInt(h1Match[2], 10) }
+  }
+  // 从「## 卷核心」的「章节范围」字段提取
+  const doc = parseDoc(text)
+  const coreSec = doc.sections.find((s) => s.title.includes('卷核心'))
+  if (coreSec) {
+    const rangeLine = coreSec.body.match(/章节范围[：:]\s*第\s*(\d+)\s*[-–—]\s*(\d+)\s*章/)
+    if (rangeLine) {
+      return { start: parseInt(rangeLine[1], 10), end: parseInt(rangeLine[2], 10) }
+    }
+  }
+  return null
 }
 
 function extractSynopsis(doc: ReturnType<typeof parseDoc>, mainLineSection: ReturnType<typeof findSection>): string {
@@ -86,30 +154,55 @@ function parseVolumeHeading(title: string): Volume | null {
 /** 从「逐章节奏标注」的所有 H3 子表提取逐章节奏 */
 function extractRhythmFallback(doc: ReturnType<typeof parseDoc>): RhythmEntry[] {
   const sec = findSection(doc, '逐章节奏标注')
-  if (!sec) return []
+  if (!sec) {
+    // 兼容：大纲.md 没有「逐章节奏标注」H2 节时，
+    // 尝试从 H1 body 中的表格直接提取（技能标准格式）
+    return extractRhythmFromTopLevelTable(doc)
+  }
   const entries: RhythmEntry[] = []
   for (const sub of parseSubsections(sec.body)) {
     const volNumMatch = sub.title.match(/第\s*(\d+)\s*卷/)
     const volDefault = volNumMatch ? parseInt(volNumMatch[1], 10) : 0
     const { headers, rows } = parseTable(sub.body)
     if (headers.length < 4) continue
-    // 列定位：章节 / 标题 / 情绪值 / 爽点类型 / 卷
-    const idxChapter = headers.findIndex((h) => h.includes('章节'))
-    const idxTitle = headers.findIndex((h) => h.includes('标题'))
-    const idxEmotion = headers.findIndex((h) => h.includes('情绪'))
-    const idxClimax = headers.findIndex((h) => h.includes('爽点'))
-    const idxVolume = headers.findIndex((h) => h.includes('卷'))
-    for (const row of rows) {
-      const chapterText = idxChapter >= 0 ? row[idxChapter] : ''
-      const cm = chapterText.match(/(\d+)/)
-      if (!cm) continue
-      const chapter = parseInt(cm[1], 10)
-      const title = idxTitle >= 0 ? row[idxTitle] : ''
-      const emotion = idxEmotion >= 0 ? num(row[idxEmotion]) : 0
-      const climax = idxClimax >= 0 ? num(row[idxClimax]) : 0
-      const volume = idxVolume >= 0 ? num(row[idxVolume]) || volDefault : volDefault
-      entries.push({ chapter, title, emotion, climax, volume, actualized: false })
-    }
+    entries.push(...extractRhythmRows(headers, rows, volDefault))
+  }
+  return entries
+}
+
+/** 从 H1 body 中的顶层表格提取逐章节奏（技能标准格式：H1 + 表格，无 H2 节） */
+function extractRhythmFromTopLevelTable(doc: ReturnType<typeof parseDoc>): RhythmEntry[] {
+  const { headers, rows } = parseTable(doc.body)
+  if (headers.length < 4) return []
+  // 确认是节奏表：包含 章节/标题/情绪/爽点/卷 列
+  const hasChapter = headers.some((h) => h.includes('章节'))
+  const hasEmotion = headers.some((h) => h.includes('情绪'))
+  if (!hasChapter || !hasEmotion) return []
+  return extractRhythmRows(headers, rows, 0)
+}
+
+/** 从表格行提取节奏条目 */
+function extractRhythmRows(
+  headers: string[],
+  rows: string[][],
+  volDefault: number
+): RhythmEntry[] {
+  const idxChapter = headers.findIndex((h) => h.includes('章节'))
+  const idxTitle = headers.findIndex((h) => h.includes('标题'))
+  const idxEmotion = headers.findIndex((h) => h.includes('情绪'))
+  const idxClimax = headers.findIndex((h) => h.includes('爽点'))
+  const idxVolume = headers.findIndex((h) => h.includes('卷'))
+  const entries: RhythmEntry[] = []
+  for (const row of rows) {
+    const chapterText = idxChapter >= 0 ? row[idxChapter] : ''
+    const cm = chapterText.match(/(\d+)/)
+    if (!cm) continue
+    const chapter = parseInt(cm[1], 10)
+    const title = idxTitle >= 0 ? row[idxTitle] : ''
+    const emotion = idxEmotion >= 0 ? num(row[idxEmotion]) : 0
+    const climax = idxClimax >= 0 ? num(row[idxClimax]) : 0
+    const volume = idxVolume >= 0 ? num(row[idxVolume]) || volDefault : volDefault
+    entries.push({ chapter, title, emotion, climax, volume, actualized: false })
   }
   return entries
 }

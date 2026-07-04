@@ -16,6 +16,9 @@ export interface GenerateOptions {
   systemPrompt?: string
   /** 临时续写上下文指导语 */
   tempContext?: string
+  /** 本章已写正文前部（续写用） */
+  existingText?: string
+
   /**
    * 生成上限 token 数。
    * - 不传时使用 DEFAULT_MAX_TOKENS
@@ -53,6 +56,29 @@ function endpointOf(p: ProviderConfig): string {
   return `${base}/chat/completions`
 }
 
+const LLM_STREAM_TIMEOUT_MS = 120_000
+
+function isRetryableStreamError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const msg = err.message.toLowerCase()
+  return (
+    msg.includes('terminated') ||
+    msg.includes('aborted') ||
+    msg.includes('socket') ||
+    msg.includes('connection') ||
+    msg.includes('network') ||
+    msg.includes('econnreset') ||
+    msg.includes('enotfound') ||
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    (err instanceof TypeError && msg.includes('fetch'))
+  )
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError'
+}
+
 export class LlmService {
   constructor(
     private readonly secret: SecretStore,
@@ -73,13 +99,14 @@ export class LlmService {
     if (!p.apiKey) return { ok: false, error: 'NO_KEY' }
     try {
       const { url, init } = buildPingRequest(p)
-      const res = await fetch(url, init)
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) })
       if (res.status === 401 || res.status === 403)
         return { ok: false, error: 'LLM_AUTH_FAILED' }
       if (res.status === 429) return { ok: false, error: 'LLM_RATE_LIMIT' }
       if (!res.ok) return { ok: false, error: 'LLM_REQUEST_FAILED' }
       return { ok: true, model: p.model, providerLabel: p.label }
     } catch (err) {
+      if (isAbortError(err)) return { ok: false, error: 'LLM_TIMEOUT' }
       return { ok: false, error: (err as Error).message || 'NETWORK_ERROR' }
     }
   }
@@ -88,16 +115,27 @@ export class LlmService {
     const p = await this.activeProvider()
     if (!p || !p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
-    // 重试配置：针对瞬态网络错误
     const MAX_RETRIES = 2
     const RETRY_DELAYS_MS = [1000, 2000]
+    let hasReceivedTokens = false
+    const wrappedOnToken = opts.onToken
+      ? (token: string) => {
+          hasReceivedTokens = true
+          opts.onToken!(token)
+        }
+      : undefined
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
+        const timeoutSignal = AbortSignal.timeout(LLM_STREAM_TIMEOUT_MS)
+        const combinedSignal = opts.signal
+          ? AbortSignal.any([opts.signal, timeoutSignal])
+          : timeoutSignal
+
         const { url, init } = buildStreamRequest(
           p,
           prompt,
-          opts.signal,
+          combinedSignal,
           opts.systemPrompt,
           opts.maxTokens
         )
@@ -106,20 +144,19 @@ export class LlmService {
         if (!res.ok) {
           if (res.status === 401 || res.status === 403) throw new Error('LLM_AUTH_FAILED')
           if (res.status === 429) throw new Error('LLM_RATE_LIMIT')
-          // 5xx 错误可重试
-          if (res.status >= 500 && attempt < MAX_RETRIES) {
+          if (res.status >= 500 && attempt < MAX_RETRIES && !hasReceivedTokens) {
             console.warn(`[llm-service] Server error ${res.status}, retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
             await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
             continue
           }
-          throw new Error('LLM_REQUEST_FAILED')
+          throw new Error(`LLM_REQUEST_FAILED_${res.status}`)
         }
 
         const proto = protocolOf(p)
         const { full, usage } =
           proto === 'anthropic'
-            ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
-            : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, opts.onToken)
+            ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
+            : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
 
         if (this.usage && usage) {
           try {
@@ -135,17 +172,21 @@ export class LlmService {
             })
           } catch (err) {
             console.error('[llm-service] Failed to record usage:', err)
-            // 用量记录失败不影响主流程
           }
         }
         return full
       } catch (err) {
-        // 网络错误可重试
-        const isNetworkError = err instanceof TypeError && err.message.includes('fetch')
-        if (isNetworkError && attempt < MAX_RETRIES) {
-          console.warn(`[llm-service] Network error, retrying in ${RETRY_DELAYS_MS[attempt]}ms...`, err)
+        if (isAbortError(err)) {
+          if (opts.signal?.aborted) throw err
+          throw new Error(hasReceivedTokens ? 'LLM_OUTPUT_TRUNCATED' : 'LLM_TIMEOUT')
+        }
+        if (!hasReceivedTokens && isRetryableStreamError(err) && attempt < MAX_RETRIES) {
+          console.warn(`[llm-service] Stream error (${(err as Error).message}), retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
           await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
           continue
+        }
+        if (hasReceivedTokens && isRetryableStreamError(err)) {
+          throw new Error('LLM_OUTPUT_TRUNCATED')
         }
         throw err
       }
@@ -267,6 +308,7 @@ async function parseOpenAiSse(
   let buffer = ''
   let full = ''
   let usage: UsageInfo | null = null
+  let finishReason = ''
   const MAX = MAX_RESPONSE_CHARS
   while (true) {
     const { done, value } = await reader.read()
@@ -281,12 +323,14 @@ async function parseOpenAiSse(
       if (data === '[DONE]') continue
       try {
         const json = JSON.parse(data)
-        const token = json.choices?.[0]?.delta?.content
+        const choice = json.choices?.[0]
+        const token = choice?.delta?.content
         if (token) {
           full += token
           if (full.length > MAX) throw new Error('LLM_RESPONSE_TOO_LARGE')
           onToken?.(token)
         }
+        if (choice?.finish_reason) finishReason = String(choice.finish_reason)
         const u = json.usage
         if (u && typeof u === 'object') {
           usage = {
@@ -301,6 +345,7 @@ async function parseOpenAiSse(
       }
     }
   }
+  if (finishReason === 'length') throw new Error('LLM_OUTPUT_TRUNCATED')
   if (!usage) {
     const out = Math.ceil(full.length / 1.5)
     usage = { inputTokens: 0, outputTokens: out, totalTokens: out }
@@ -327,6 +372,7 @@ async function parseAnthropicSse(
   let full = ''
   let inputTokens = 0
   let outputTokens = 0
+  let stopReason = ''
   const MAX = MAX_RESPONSE_CHARS
 
   const flushEvent = (eventLines: string[]): void => {
@@ -364,6 +410,8 @@ async function parseAnthropicSse(
     if (eventName === 'message_delta') {
       const u = json.usage as { output_tokens?: number } | undefined
       outputTokens = Number(u?.output_tokens ?? 0) || outputTokens
+      const reason = json.stop_reason
+      if (reason) stopReason = String(reason)
     }
   }
 
@@ -381,6 +429,8 @@ async function parseAnthropicSse(
   }
   // 残留 buffer 也尝试 flush
   if (buffer.trim()) flushEvent(buffer.split(/\r?\n/).filter(Boolean))
+
+  if (stopReason === 'max_tokens') throw new Error('LLM_OUTPUT_TRUNCATED')
 
   const usage: UsageInfo | null =
     inputTokens > 0 || outputTokens > 0

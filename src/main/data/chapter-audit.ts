@@ -235,6 +235,7 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
     pushLongParagraphViolations(content, thresholds, rules, violations)
     pushDialogueTagViolations(content, rules, violations)
     pushSensitiveViolations(content, rules, violations)
+    pushHookStrengthViolations(content, rules, violations)
     // 用户自定义算法检查项（keyword/regex）；传入 checks 开关表，关掉的项跳过
     runCustomAlgorithmChecks(content, rules.customChecks, violations, rules.checks)
   }
@@ -982,6 +983,66 @@ function pushSensitiveViolations(
       from = idx + word.length
     }
   }
+}
+
+/**
+ * 章末钩子强度检测（算法类）。出自「正文审核」技能 3.6 钩子检测。
+ * 检查最后几段是否包含悬念/冲突/反转/伏笔类关键词。
+ * 钩子类型：悬念型/冲突型（强）、转折型/伏笔型/对话留白（中）、场景型（弱）、无钩子（弱）。
+ */
+function pushHookStrengthViolations(
+  content: string,
+  rules: ReviewRulesConfig,
+  out: AuditViolation[]
+): void {
+  if (!isCheckOn(rules, 'hook_strength')) return
+  const paras = splitParagraphs(content)
+  if (paras.length === 0) return
+
+  // 取最后 3 段非空段落
+  const tailParas = paras.filter((p) => p.trim().length > 0).slice(-3)
+  if (tailParas.length === 0) return
+  const tail = tailParas.join('\n')
+
+  // 强钩子关键词：悬念/冲突/反转
+  const strongPatterns = [
+    /[？?]\s*$/, // 以问号结尾（悬念）
+    /到底是什么|究竟是谁|怎么会|不可能|怎么可能|难道说/,
+    /突然|忽然|猛地|陡然/, // 突发事件
+    /却发现|却不知|殊不知/, // 反转
+    /转身.*只见|回头.*看到/,
+    /出现在.*身后|站在.*背后/
+  ]
+  // 中等钩子关键词：伏笔/对话留白
+  const mediumPatterns = [
+    /……$/, // 省略号结尾（留白）
+    /没有.*说话|沉默|不再开口/,
+    /心中.*一动|若有所思|陷入了沉思/,
+    /这件事.*不简单|没那么简单/
+  ]
+  // 对话留白：末尾是对话
+  const dialoguePattern = /[""「].+?[""」]\s*$/
+
+  const hasStrong = strongPatterns.some((re) => re.test(tail))
+  const hasMedium = mediumPatterns.some((re) => re.test(tail))
+  const hasDialogue = dialoguePattern.test(tail.trim())
+
+  if (hasStrong) return // 强钩子，不报
+
+  if (hasMedium || hasDialogue) {
+    // 中等钩子，不报 error
+    return
+  }
+
+  // 场景型/无钩子 → warn
+  out.push({
+    category: 'paragraph',
+    severity: 'warn',
+    message: '章末钩子偏弱：末段未检测到悬念/冲突/反转/伏笔关键词或对话留白',
+    snippet: tailParas[tailParas.length - 1]?.slice(-60) ?? '',
+    ruleId: 'hook_strength',
+    suggestion: '建议章末以对话留白、悬念问句、突发事件或反转收尾，增强读者追读动力'
+  })
 }
 
 const CONTEXT_RADIUS = 12

@@ -154,3 +154,27 @@ describe('flattenForbiddenWords', () => {
     expect(flat).toContain('意味深长')
   })
 })
+
+describe('genre-voice suggestedParticles（题材语气词）', () => {
+  it('古风/仙侠有建议主动使用的语气词清单', () => {
+    const voice = resolveGenreVoice('古风')
+    expect(voice.suggestedParticles?.length).toBeGreaterThan(5)
+    expect(voice.suggestedParticles).toContain('约莫')
+    expect(voice.suggestedParticles).toContain('殊不知')
+    expect(voice.suggestedParticles).toContain('焉知')
+  })
+
+  it('古风语气词渲染进 system prompt', () => {
+    const prompt = buildSystemPrompt('古风')
+    expect(prompt).toContain('建议主动使用的题材语气词')
+    expect(prompt).toContain('约莫')
+    expect(prompt).toContain('殊不知')
+  })
+
+  it('现代都市没有 suggestedParticles（不渲染该行）', () => {
+    const voice = resolveGenreVoice('现代都市')
+    expect(voice.suggestedParticles).toBeUndefined()
+    const prompt = buildSystemPrompt('现代都市')
+    expect(prompt).not.toContain('建议主动使用的题材语气词')
+  })
+})

@@ -4,3 +4,11 @@ dist/
 release/
 *.log
 .DS_Store
+
+# 临时调试脚本/输出，勿提交
+invoke_calls.txt
+missing_methods.js
+restore_preload.js
+
+# 本地 agent 技能配置（含绝对路径，勿提交）
+.agents/

@@ -12,7 +12,7 @@ import {
   REVIEW_CHECK_SECTIONS,
   REVIEW_CHECK_KEYS
 } from '../data/skill-prompts'
-import type { ReviewCheckId } from '../../shared/types'
+import type { ReviewCheckId, ReviewRulesConfig } from '../../shared/types'
 
 export function registerSettingsIpc(
   repo: SettingsRepository,
@@ -300,6 +300,9 @@ export function registerSettingsIpc(
       }),
       patch
     )
-    return repo.setReviewRules(validated)
+    // zod schema 字段全 optional（深度 partial），运行时 repo.setReviewRules 会用默认值
+    // 填充缺失的 thresholds/wordLists 字段。zod 默认 strip 未知键，此处断言桥接类型。
+    const rules = validated as Partial<ReviewRulesConfig>
+    return repo.setReviewRules(rules)
   })
 }

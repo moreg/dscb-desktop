@@ -154,9 +154,17 @@ export function parseBoldFields(body: string): BoldFields {
     const sub: string[] = []
     let j = i + 1
     while (j < lines.length) {
+      // 连字符子列表：  - xxx
       const sm = lines[j].match(/^\s{2,}-\s+(.+)$/)
       if (sm) {
         sub.push(sm[1].trim())
+        j++
+        continue
+      }
+      // 数字子列表：  1. xxx /  2. xxx（技能 v3.2 细纲情节点序列等使用此格式）
+      const nm = lines[j].match(/^\s{2,}\d+\s*[.、)]\s+(.+)$/)
+      if (nm) {
+        sub.push(nm[1].trim())
         j++
         continue
       }

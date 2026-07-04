@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { promises as fs } from 'fs'
 import { readText, parseDoc, parseSubsections, parseBoldFields, findSection, parseTable, type FieldValue } from './md-parser'
 import {
   replaceH3Block,
@@ -26,19 +27,117 @@ export class CharacterCardMdRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<Character[]> {
+    // 1. 旧格式：记忆系统/角色卡.md（H2 分类 + H3 角色块）
     const file = join(this.projectDir, '记忆系统', '角色卡.md')
     const text = await readText(file)
-    if (!text) return []
-    const doc = parseDoc(text)
     const now = new Date().toISOString()
     const characters: Character[] = []
-    for (const section of doc.sections) {
-      const category = section.title.trim()
-      if (!isCharacterCategory(category)) continue
-      for (const sub of parseSubsections(section.body)) {
-        const c = parseCharacterBlock(sub.title, sub.body, category)
-        if (c) characters.push({ ...c, createdAt: now, updatedAt: now })
+    if (text) {
+      const doc = parseDoc(text)
+      for (const section of doc.sections) {
+        const category = section.title.trim()
+        if (!isCharacterCategory(category)) continue
+        for (const sub of parseSubsections(section.body)) {
+          const c = parseCharacterBlock(sub.title, sub.body, category)
+          if (c) characters.push({ ...c, createdAt: now, updatedAt: now })
+        }
       }
+    }
+
+    // 2. 新格式：设定/角色/{角色名}.md（每角色一文件）
+    // 如果旧格式已有同名角色则跳过（旧格式优先）
+    const existingNames = new Set(characters.map((c) => c.name))
+    const newFormatChars = await this.listPerCharacterFiles()
+    for (const c of newFormatChars) {
+      if (!existingNames.has(c.name)) {
+        characters.push({ ...c, createdAt: now, updatedAt: now })
+        existingNames.add(c.name)
+      }
+    }
+
+    return characters
+  }
+
+  /**
+   * 读取新格式角色文件：设定/角色/{角色名}.md
+   * 每文件 H1 = 角色名，H2 = 基本信息/性格/能力/人物弧线/关系/出场记录/路人记忆点。
+   * 解析所有 H2 节的 bold fields 到 rawFields，并提取标准字段。
+   */
+  private async listPerCharacterFiles(): Promise<Omit<Character, 'createdAt' | 'updatedAt'>[]> {
+    const dir = join(this.projectDir, '设定', '角色')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      if (e.code === 'ENOENT') return []
+      throw err
+    }
+    const characters: Omit<Character, 'createdAt' | 'updatedAt'>[] = []
+    for (const f of files.sort()) {
+      if (!f.endsWith('.md')) continue
+      const text = await readText(join(dir, f))
+      if (!text) continue
+      const doc = parseDoc(text)
+      const name = doc.h1Title.trim() || f.replace(/\.md$/, '')
+      if (!name) continue
+
+      // 合并所有 H2 节的 body 到一个字段源
+      let fullBody = ''
+      for (const sec of doc.sections) {
+        fullBody += sec.body + '\n'
+      }
+      const { fields, order } = parseBoldFields(fullBody)
+
+      // 从「基本信息」节提取标准字段
+      const basicSec = doc.sections.find((s) => s.title.includes('基本信息'))
+      let role: string | undefined
+      let identity: string | undefined
+      if (basicSec) {
+        const { fields: basicFields } = parseBoldFields(basicSec.body)
+        identity = toStr(basicFields.get('身份'))
+        // 从身份推断角色类型
+        const idStr = identity ?? ''
+        const faction = toStr(basicFields.get('阵营')) ?? ''
+        if (name === doc.h1Title.trim()) {
+          // 默认按身份推断角色
+          if (idStr.includes('主角') || faction.includes('主角')) role = '主角'
+          else if (idStr.includes('反派') || faction.includes('反派')) role = '核心反派'
+          else if (idStr.includes('配角') || faction.includes('配角')) role = '核心配角'
+          else role = '核心配角'
+        }
+      }
+
+      // 从「性格」节提取 personality
+      const personalitySec = doc.sections.find((s) => s.title.includes('性格'))
+      let personality: string | undefined
+      if (personalitySec) {
+        const { fields: pFields } = parseBoldFields(personalitySec.body)
+        personality = joinFields(pFields.get('显性性格'), pFields.get('隐性性格'))
+          ?? toStr(pFields.get('性格'))
+      }
+
+      // 从「能力」节提取 abilities
+      const abilitySec = doc.sections.find((s) => s.title.includes('能力'))
+      let abilities: string | undefined
+      if (abilitySec) {
+        const { fields: aFields } = parseBoldFields(abilitySec.body)
+        abilities = toStr(aFields.get('金手指'))
+          ?? toStr(aFields.get('当前境界'))
+          ?? toStr(aFields.get('当前修为'))
+      }
+
+      characters.push({
+        id: charId(name),
+        name,
+        role,
+        identity,
+        personality,
+        abilities,
+        tags: parseTags(fields.get('专属标签')),
+        synopsis: toStr(fields.get('当前状态')),
+        rawFields: toRawFields(fields, order)
+      })
     }
     return characters
   }

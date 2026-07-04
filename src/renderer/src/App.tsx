@@ -15,12 +15,17 @@ import OutlinePage from './OutlinePage'
 import RhythmChartPage from './RhythmChartPage'
 import FigurePage from './FigurePage'
 import StyleProfilePage from './StyleProfilePage'
+import TeardownPage from './TeardownPage'
+import CoverPage from './CoverPage'
+import ScanPage from './ScanPage'
 import type { Diagnostic, MemoryEntityType, ProjectMeta } from '../../shared/types'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
 type View =
   | { kind: 'projects' }
+  | { kind: 'teardown' }
+  | { kind: 'scan' }
   | { kind: 'chapters'; projectId: string }
   | { kind: 'editor'; projectId: string; chapterNumber: number }
   | { kind: 'characters'; projectId: string }
@@ -31,7 +36,8 @@ type View =
   | { kind: 'outline'; projectId: string }
   | { kind: 'rhythm'; projectId: string }
   | { kind: 'figures'; projectId: string }
-  | { kind: 'styles'; projectId: string }
+  | { kind: 'styles' }
+  | { kind: 'covers'; projectId: string }
   | { kind: 'settings' }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
@@ -66,12 +72,14 @@ function projectIdOf(view: View): string | null {
 
 function isNavActive(view: View, kind: string, projectId: string | null): boolean {
   if (kind === 'projects') return view.kind === 'projects'
+  if (kind === 'teardown') return view.kind === 'teardown'
+  if (kind === 'styles') return view.kind === 'styles'
   if (!projectId) return false
   if (kind === 'chapters') return view.kind === 'chapters' || view.kind === 'editor'
   if (kind === 'outline') return view.kind === 'outline'
   if (kind === 'rhythm') return view.kind === 'rhythm'
   if (kind === 'figures') return view.kind === 'figures'
-  if (kind === 'styles') return view.kind === 'styles'
+  if (kind === 'covers') return view.kind === 'covers'
   if (kind === 'characters') return view.kind === 'characters'
   if (kind === 'relationships') return view.kind === 'relationships'
   if (kind === 'memoryCenter') return view.kind === 'memoryCenter'
@@ -104,8 +112,12 @@ export default function App() {
     if (!currentProjectId) {
       setProjectName('')
       setDiagnostics([])
+      // 离开项目视图：停止文件监听
+      void window.api.stopWatchProject().catch((err) => console.error('[App] stopWatch failed:', err))
       return
     }
+    // 进入/切换项目：启动文件监听（主进程会先释放旧 watcher）
+    void window.api.watchProject(currentProjectId).catch((err) => console.error('[App] watch failed:', err))
     void window.api
       .listProjects()
       .then((list: ProjectMeta[]) => {
@@ -158,6 +170,27 @@ export default function App() {
             <span className="icon">📚</span>
             我的项目
           </button>
+          <button
+            className={`nav-item ${view.kind === 'teardown' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'teardown' })}
+          >
+            <span className="icon">🔍</span>
+            拆文库
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'scan' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'scan' })}
+          >
+            <span className="icon">📈</span>
+            扫榜
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'styles' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'styles' })}
+          >
+            <span className="icon">✒</span>
+            文风库
+          </button>
 
           {currentProjectId ? (
             <>
@@ -190,12 +223,13 @@ export default function App() {
                 <span className="icon">🗺</span>
                 关键图解
               </button>
+
               <button
-                className={`nav-item ${isNavActive(view, 'styles', currentProjectId) ? 'active' : ''}`}
-                onClick={() => setView({ kind: 'styles', projectId: currentProjectId })}
+                className={`nav-item ${isNavActive(view, 'covers', currentProjectId) ? 'active' : ''}`}
+                onClick={() => setView({ kind: 'covers', projectId: currentProjectId })}
               >
-                <span className="icon">✒</span>
-                文风
+                <span className="icon">🖼</span>
+                封面
               </button>
 
               <div className="sidebar-section">人物</div>
@@ -293,6 +327,14 @@ export default function App() {
             <ErrorBoundary>
               <SettingsPage />
             </ErrorBoundary>
+          ) : view.kind === 'teardown' ? (
+            <ErrorBoundary>
+              <TeardownPage />
+            </ErrorBoundary>
+          ) : view.kind === 'scan' ? (
+            <ErrorBoundary>
+              <ScanPage />
+            </ErrorBoundary>
           ) : view.kind === 'chapters' ? (
             <ErrorBoundary>
               <ChapterListPage
@@ -388,7 +430,11 @@ export default function App() {
             </ErrorBoundary>
           ) : view.kind === 'styles' ? (
             <ErrorBoundary>
-              <StyleProfilePage projectId={view.projectId} />
+              <StyleProfilePage projectId={currentProjectId || undefined} />
+            </ErrorBoundary>
+          ) : view.kind === 'covers' ? (
+            <ErrorBoundary>
+              <CoverPage projectId={view.projectId} />
             </ErrorBoundary>
           ) : null}
         </div>

@@ -1,0 +1,232 @@
+import { describe, it, expect } from 'vitest'
+import { scanAiPatterns } from '../src/main/data/deslop/check-ai-patterns'
+import { scanDegeneration } from '../src/main/data/deslop/check-degeneration'
+import { normalizePunctuation, countPunctuationIssues } from '../src/main/data/deslop/normalize-punctuation'
+
+describe('check-ai-patterns: not-is-comparison「不是A，而是B」', () => {
+  it('检测"不是A，而是B"（★★★★★ 最毒）', () => {
+    const text = '他不是冷漠，而是绝望。\n这是普通句子。'
+    const findings = scanAiPatterns(text)
+    const notIs = findings.filter((f) => f.type === 'not-is-comparison')
+    expect(notIs.length).toBeGreaterThanOrEqual(1)
+    expect(notIs[0].severity).toBe('blocking')
+    expect(notIs[0].gate).toBe('B')
+    expect(notIs[0].excerpt).toContain('不是')
+  })
+
+  it('检测紧凑式"不是A是B"', () => {
+    const text = '这不是勇气是愚蠢。'
+    const findings = scanAiPatterns(text)
+    const notIs = findings.filter((f) => f.type === 'not-is-comparison')
+    expect(notIs.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('不误报"是不是"疑问', () => {
+    const text = '你是不是傻？'
+    const findings = scanAiPatterns(text)
+    const notIs = findings.filter((f) => f.type === 'not-is-comparison')
+    expect(notIs).toHaveLength(0)
+  })
+
+  it('不误报"不是A就是B"（either-or 连词）', () => {
+    const text = '不是成就是败。'
+    const findings = scanAiPatterns(text)
+    const notIs = findings.filter((f) => f.type === 'not-is-comparison')
+    expect(notIs).toHaveLength(0)
+  })
+
+  it('不误报反问尾巴"是吗"', () => {
+    const text = '这样是对的吗？是吧。'
+    const findings = scanAiPatterns(text)
+    const notIs = findings.filter((f) => f.type === 'not-is-comparison')
+    expect(notIs).toHaveLength(0)
+  })
+})
+
+describe('check-ai-patterns: em-dash 破折号', () => {
+  it('检测双破折号 ——', () => {
+    const text = '他说——然后停了下来。'
+    const findings = scanAiPatterns(text)
+    const dash = findings.filter((f) => f.type === 'em-dash')
+    expect(dash).toHaveLength(1)
+    expect(dash[0].severity).toBe('blocking')
+    expect(dash[0].gate).toBe('D')
+  })
+
+  it('检测双连字符 --', () => {
+    const text = '他笑了 -- 然后离开。'
+    const findings = scanAiPatterns(text)
+    const dash = findings.filter((f) => f.type === 'em-dash')
+    expect(dash.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('check-ai-patterns: 长段落', () => {
+  it('检测 >200 字段落', () => {
+    const longPara = '这是一段很长的文字'.repeat(30)
+    const findings = scanAiPatterns(longPara)
+    const longP = findings.filter((f) => f.type === 'long-paragraph')
+    expect(longP.length).toBeGreaterThanOrEqual(1)
+    expect(longP[0].severity).toBe('advisory')
+  })
+
+  it('短段落不报', () => {
+    const text = '短句而已。'
+    const findings = scanAiPatterns(text)
+    expect(findings.filter((f) => f.type === 'long-paragraph')).toHaveLength(0)
+  })
+})
+
+describe('check-ai-patterns: 碎句号', () => {
+  it('连续 6+ 短叙述句报警', () => {
+    const text = '他来。他走。他停。他看。他笑。他哭。他转身离开。'
+    const findings = scanAiPatterns(text)
+    const stutter = findings.filter((f) => f.type === 'period-stutter')
+    expect(stutter.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('对话/弹幕短句豁免', () => {
+    const text = '「来。」「走。」「停。」「看。」「笑。」「哭。」'
+    const findings = scanAiPatterns(text)
+    const stutter = findings.filter((f) => f.type === 'period-stutter')
+    expect(stutter).toHaveLength(0)
+  })
+})
+
+describe('check-ai-patterns: Gate A 句式与禁用词', () => {
+  it('检测"仿佛…一般"', () => {
+    const text = '他的目光仿佛能穿透一切一般锐利。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'fangfo')).toBe(true)
+  })
+
+  it('检测"眼中闪过一丝"', () => {
+    const text = '她眼中闪过一丝悲伤。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'eye_flash')).toBe(true)
+  })
+
+  it('检测禁用词（一级）', () => {
+    const text = '他缓缓走向前。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'banned-word' && f.word === '缓缓')).toBe(true)
+  })
+
+  it('白名单豁免禁用词', () => {
+    const text = '他缓缓走向前。'
+    const findings = scanAiPatterns(text, { whitelist: new Set(['缓缓']) })
+    expect(findings.some((f) => f.type === 'banned-word' && f.word === '缓缓')).toBe(false)
+  })
+
+  it('检测排比"有的…有的…有的"', () => {
+    const text = '有的人哭，有的人笑，有的人沉默不语。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'parallelism')).toBe(true)
+  })
+})
+
+describe('check-degeneration: 复读检测', () => {
+  it('紧邻整行重复（可见字数 ≥8）', () => {
+    const text = '他慢慢地走向了那扇门。\n他慢慢地走向了那扇门。\n然后推开了它。'
+    const findings = scanDegeneration(text)
+    const rep = findings.filter((f) => f.type === 'repetition')
+    expect(rep.length).toBeGreaterThanOrEqual(1)
+    expect(rep[0].severity).toBe('blocking')
+  })
+
+  it('长句重复 ≥3 次（打转）', () => {
+    const text = '这是一段足够长的句子用来测试复读检测功能的准确性。'.repeat(3)
+    const findings = scanDegeneration(text)
+    const rep = findings.filter((f) => f.type === 'repetition')
+    expect(rep.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('短句复沓豁免（通俗网文手法）', () => {
+    const text = '好的。\n好的。\n好的。'
+    const findings = scanDegeneration(text)
+    // 短句（可见字数 < 12）不判打转
+    const longRep = findings.filter((f) => f.type === 'repetition' && f.message.includes('打转'))
+    expect(longRep).toHaveLength(0)
+  })
+})
+
+describe('check-degeneration: 占位符/拒绝语', () => {
+  it('检测英文 AI 腔', () => {
+    const text = 'Sure, here is the story.\n他走了。'
+    const findings = scanDegeneration(text)
+    expect(findings.some((f) => f.type === 'placeholder')).toBe(true)
+  })
+
+  it('检测括号省略占位符', () => {
+    const text = '他们聊了很多（此处省略五百字），然后离开了。'
+    const findings = scanDegeneration(text)
+    expect(findings.some((f) => f.type === 'placeholder')).toBe(true)
+  })
+
+  it('检测作为AI 自指（非对话行）', () => {
+    const text = '作为一个AI，我无法继续创作这个故事。'
+    const findings = scanDegeneration(text)
+    expect(findings.some((f) => f.type === 'placeholder')).toBe(true)
+  })
+
+  it('对话行的"我无法"豁免', () => {
+    const text = '「对不起，我无法答应你。」她摇头。'
+    const findings = scanDegeneration(text)
+    // 对话行内 soft 类豁免
+    const refuse = findings.filter((f) => f.message.includes('拒绝语'))
+    expect(refuse).toHaveLength(0)
+  })
+})
+
+describe('check-degeneration: 工程词泄漏', () => {
+  it('检测 tier1 纯流水线术语', () => {
+    const text = '这一章的细纲要求主角觉醒。'
+    const findings = scanDegeneration(text)
+    const meta = findings.filter((f) => f.type === 'meta-leak' && f.severity === 'blocking')
+    expect(meta.some((f) => f.excerpt.includes('细纲'))).toBe(true)
+  })
+
+  it('检测 tier2 章节词（非对话，advisory）', () => {
+    const text = '上一章提到的那把剑。'
+    const findings = scanDegeneration(text)
+    const meta = findings.filter((f) => f.type === 'meta-leak' && f.severity === 'advisory')
+    expect(meta.some((f) => f.excerpt.includes('上一章'))).toBe(true)
+  })
+})
+
+describe('normalize-punctuation: 标点兜底', () => {
+  it('双破折号 → 逗号', () => {
+    const { text, changes } = normalizePunctuation('他笑了——然后离开。')
+    expect(text).not.toContain('——')
+    expect(changes.emDash).toBe(1)
+  })
+
+  it('六点省略号 → 句号', () => {
+    const { text, changes } = normalizePunctuation('他沉默了……')
+    expect(text).not.toContain('……')
+    expect(changes.ellipsis).toBe(1)
+  })
+
+  it('三点省略号 → 句号', () => {
+    const { text, changes } = normalizePunctuation('他沉默了…')
+    expect(text).not.toContain('…')
+    expect(changes.singleEllipsis).toBe(1)
+  })
+
+  it('双连字符 → 逗号', () => {
+    const { text, changes } = normalizePunctuation('他笑了 -- 走了。')
+    expect(text).not.toContain('--')
+    expect(changes.doubleHyphen).toBeGreaterThanOrEqual(1)
+  })
+
+  it('正常文本不变', () => {
+    const { text, changes } = normalizePunctuation('他说：「你好。」然后走了。')
+    expect(text).toBe('他说：「你好。」然后走了。')
+    expect(changes.emDash + changes.ellipsis + changes.doubleHyphen).toBe(0)
+  })
+
+  it('countPunctuationIssues 仅计数不改', () => {
+    expect(countPunctuationIssues('他笑了——走了……')).toBeGreaterThanOrEqual(2)
+    expect(countPunctuationIssues('正常句子。')).toBe(0)
+  })
+})

@@ -506,6 +506,29 @@ describe('WriteService', () => {
       expect(prompt).toContain('这是编辑器里尚未保存的正文')
     })
 
+    it('buildReviewPrompt 约束改写成品自身去 AI 味（禁止把一种套路换成另一种）', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { writeFile, mkdir } = await import('fs/promises')
+      await mkdir(path.join(dir, '图解'), { recursive: true })
+      await writeFile(
+        path.join(dir, '图解', '节奏图谱.html'),
+        `<script>\nconst rhythmData = [\n  { chapter: 1, title: '开局', emotion: 5, climax: 1, volume: 1, actualized: false }\n];\n</script>`,
+        'utf-8'
+      )
+      await new ProseRepo(dir).write(1, '')
+
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildReviewPrompt(projectId, 1, '正文内容。')
+      // 改写成品必须自身去 AI 味的硬约束
+      expect(prompt).toContain('改写"成品必须自身去 AI 味')
+      // 关键禁用词必须在 prompt 里点名，防止 LLM 批评"仿佛"自己却写"缓缓"
+      expect(prompt).toContain('仿佛')
+      expect(prompt).toContain('缓缓')
+      expect(prompt).toContain('眼中闪过')
+      expect(prompt).toContain('嘴角勾起')
+      expect(prompt).toContain('不是A，而是B')
+    })
+
     it('detectCastStream succeeds for chapter 1 with new data source only', async () => {
       const dir = await ps.resolveDir(projectId)
       const { writeFile, mkdir } = await import('fs/promises')

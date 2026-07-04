@@ -62,6 +62,26 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /** 结构化审核报告（对齐正文审核技能第 6 步）：聚合算法 + LLM 检查为 10 节报告 */
+  safeHandle(
+    'write:reviewReport',
+    async (_e, payload: { projectId: string; content: string; chapterNumber: number }) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          content: chapterContentSchema,
+          chapterNumber: chapterNumberSchema
+        }),
+        payload
+      )
+      return service.generateReviewReport(
+        validated.projectId,
+        validated.content,
+        validated.chapterNumber
+      )
+    }
+  )
+
   ipcMain.handle(
     'write:generateChapter',
     async (
@@ -71,6 +91,7 @@ export function registerWriteIpc(service: WriteService): void {
         chapterNumber: number
         styleProfileId?: string | null
         tempContext?: string
+        existingText?: string
         requestId: string
       }
     ) => {
@@ -82,6 +103,7 @@ export function registerWriteIpc(service: WriteService): void {
             chapterNumber: chapterNumberSchema,
             styleProfileId: styleProfileIdSchema,
             tempContext: z.string().optional(),
+            existingText: z.string().optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -92,6 +114,7 @@ export function registerWriteIpc(service: WriteService): void {
           validated.styleProfileId,
           {
             tempContext: validated.tempContext,
+            existingText: validated.existingText,
             onToken: (token) =>
               win?.webContents.send('llm:token', {
                 requestId: validated.requestId,

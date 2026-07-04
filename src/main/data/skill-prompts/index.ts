@@ -19,10 +19,24 @@ export {
 } from './review-checks'
 export type { ReviewCheckSection, ReviewCheckKind, ReviewCheckGroup } from './review-checks'
 
+export interface BenchmarkRecallPrompt {
+  /** 召回的对标书名列表 */
+  bookNames: string[]
+  /** 情绪模块召回（EM-* 模块卡 / 读者需求 / 重组指南） */
+  emotion: string
+  /** 节奏召回（爆发节奏总结 / 爽点循环） */
+  rhythm: string
+  /** 文风召回（句长/标点/对话潜台词/锚点） */
+  style: string
+  /** 写法技巧召回（可借鉴套路 / 写法技巧） */
+  technique: string
+}
+
 export function buildSystemPrompt(
   genre?: string,
   style?: StyleProfile | null,
-  overrides?: Record<string, string>
+  overrides?: Record<string, string>,
+  benchmarkRecall?: BenchmarkRecallPrompt | null
 ): string {
   const voice = resolveGenreVoice(genre)
   const sections: string[] = []
@@ -39,6 +53,14 @@ export function buildSystemPrompt(
     sections.push('---')
     sections.push('## 1.5 文风对齐')
     sections.push(renderStyleProfileMarkdown(style))
+  }
+
+  // 对标召回（oh-story-claudecode 对标书方法论召回）：
+  // 在续写规则前注入，作为跨章节的稳定写作指导。
+  if (benchmarkRecall && hasAnyRecall(benchmarkRecall)) {
+    sections.push('---')
+    sections.push('## 1.6 对标书方法论召回（关键约束，勿照搬具体桥段）')
+    sections.push(renderBenchmarkRecallMarkdown(benchmarkRecall))
   }
 
   // 可编辑小节：动态编号。用户覆盖（含空串=停用）优先，否则内置默认；空串则跳过。
@@ -58,6 +80,41 @@ export function buildSystemPrompt(
   sections.push(renderForbiddenWordsMarkdown())
 
   return sections.join('\n\n')
+}
+
+function hasAnyRecall(r: BenchmarkRecallPrompt): boolean {
+  return !!(r.emotion.trim() || r.rhythm.trim() || r.style.trim() || r.technique.trim())
+}
+
+function renderBenchmarkRecallMarkdown(r: BenchmarkRecallPrompt): string {
+  const lines: string[] = []
+  lines.push(
+    `本次写作参考了拆文库对标书：${r.bookNames.map((n) => `《${n}》`).join('、')}。`
+  )
+  lines.push(
+    '**铁律：保留情绪链与功能位，替换人物/场景/动机/道具/事件素材；禁止照搬原文专名、具体桥段、标志性台词、独特设定。**'
+  )
+  if (r.emotion.trim()) {
+    lines.push('')
+    lines.push('### 情绪模块（套路与情绪引擎，召回 selected_emotion_module）')
+    lines.push(r.emotion.trim())
+  }
+  if (r.rhythm.trim()) {
+    lines.push('')
+    lines.push('### 节奏参照（爆发节奏与爽点循环，召回 rhythm_reference）')
+    lines.push(r.rhythm.trim())
+  }
+  if (r.style.trim()) {
+    lines.push('')
+    lines.push('### 文风约束（句长/标点/对话潜台词，向对标靠拢）')
+    lines.push(r.style.trim())
+  }
+  if (r.technique.trim()) {
+    lines.push('')
+    lines.push('### 可借鉴写法技巧')
+    lines.push(r.technique.trim())
+  }
+  return lines.join('\n')
 }
 
 export function buildHumanizerPrompt(

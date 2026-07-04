@@ -7,7 +7,7 @@ import StyleProfileEditor from './style-profile/components/StyleProfileEditor'
 import ConfirmDialog from './style-profile/components/ConfirmDialog'
 
 interface Props {
-  projectId: string
+  projectId?: string
 }
 
 export default function StyleProfilePage({ projectId }: Props) {
@@ -33,8 +33,8 @@ export default function StyleProfilePage({ projectId }: Props) {
       <div className="page-head">
         <div className="page-head-row">
           <div>
-            <h1>文风</h1>
-            <p className="desc">提取样文文风，保存为项目内可复用的文风卡，并设置项目默认文风。</p>
+            <h1>文风库</h1>
+            <p className="desc">提取样文文风，保存为全局可复用的文风预设卡片。</p>
           </div>
         </div>
       </div>

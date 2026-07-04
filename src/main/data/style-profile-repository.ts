@@ -13,13 +13,21 @@ const EMPTY_FILE: StyleProfileFile = {
 }
 
 export class StyleProfileRepository {
-  constructor(private readonly projectDir: string) {}
+  private readonly filePath: string
+
+  constructor(pathOrDir: string) {
+    if (pathOrDir.endsWith('.json')) {
+      this.filePath = pathOrDir
+    } else {
+      this.filePath = join(pathOrDir, 'styles.json')
+    }
+  }
 
   async read(): Promise<StyleProfileFile> {
-    return readJson(join(this.projectDir, 'styles.json'), EMPTY_FILE)
+    return readJson(this.filePath, EMPTY_FILE)
   }
 
   async write(data: StyleProfileFile): Promise<void> {
-    await writeJsonAtomic(join(this.projectDir, 'styles.json'), data)
+    await writeJsonAtomic(this.filePath, data)
   }
 }

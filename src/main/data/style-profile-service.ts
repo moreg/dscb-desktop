@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import type { GenerateOptions, LlmService } from './llm-service'
 import { ProjectService } from './project-service'
 import { StyleProfileRepository } from './style-profile-repository'
@@ -13,12 +15,18 @@ const MIN_SAMPLE_LENGTH = 300
 const MAX_SAMPLE_LENGTH = 20_000
 
 export class StyleProfileService {
+  private readonly repo: StyleProfileRepository
+
   constructor(
     private readonly projectService: ProjectService,
-    private readonly llm: LlmService
-  ) {}
+    private readonly llm: LlmService,
+    private readonly stylesFile?: string
+  ) {
+    const filePath = stylesFile || join(tmpdir(), `styles-${randomUUID()}.json`)
+    this.repo = new StyleProfileRepository(filePath)
+  }
 
-  async list(projectId: string): Promise<StyleProfile[]> {
+  async list(projectId?: string | null): Promise<StyleProfile[]> {
     const repo = await this.getRepo(projectId)
     const data = await repo.read()
     return data.items
@@ -128,7 +136,7 @@ export class StyleProfileService {
     return next
   }
 
-  async delete(projectId: string, styleProfileId: string): Promise<void> {
+  async delete(projectId: string | null | undefined, styleProfileId: string): Promise<void> {
     const repo = await this.getRepo(projectId)
     const data = await repo.read()
     const nextItems = data.items.filter((item) => item.id !== styleProfileId)
@@ -138,26 +146,30 @@ export class StyleProfileService {
     data.items = nextItems
     await repo.write(data)
 
-    const project = await this.projectService.getProjectData(projectId)
-    if (project.defaultStyleProfileId === styleProfileId) {
-      await this.projectService.updateProjectData(projectId, {
-        defaultStyleProfileId: undefined
-      })
+    if (projectId) {
+      const project = await this.projectService.getProjectData(projectId)
+      if (project.defaultStyleProfileId === styleProfileId) {
+        await this.projectService.updateProjectData(projectId, {
+          defaultStyleProfileId: undefined
+        })
+      }
     }
   }
 
   async extract(
-    projectId: string,
+    projectId: string | null | undefined,
     sampleText: string,
     name?: string,
     opts: GenerateOptions = {}
   ): Promise<StyleAnalysisResult> {
     const normalizedSample = normalizeSample(sampleText)
-    const project = await this.projectService.getProjectData(projectId)
-    const prompt = buildStyleExtractPrompt(project.name, project.genre, normalizedSample, name)
+    const project = projectId ? await this.projectService.getProjectData(projectId) : null
+    const projectName = project?.name ?? '文风库'
+    const genre = project?.genre ?? '通用'
+    const prompt = buildStyleExtractPrompt(projectName, genre, normalizedSample, name)
     const raw = await this.llm.generateStream(prompt, {
       ...opts,
-      meta: { feature: 'styleExtract', projectId }
+      meta: { feature: 'styleExtract', projectId: projectId ?? undefined }
     })
     return parseStyleAnalysisResult(raw)
   }
@@ -168,9 +180,13 @@ export class StyleProfileService {
     return items.find((item) => item.id === styleProfileId) ?? null
   }
 
-  private async getRepo(projectId: string): Promise<StyleProfileRepository> {
-    const dir = await this.projectService.resolveDir(projectId)
-    return new StyleProfileRepository(dir)
+  /**
+   * 获取文风仓库。当前文风为全局共享（所有项目共用同一 styles.json），
+   * projectId 仅用于 delete/extract 的项目元数据联动（如清除默认文风引用），不影响仓库选择。
+   * 若未来需要按项目隔离文风，可在此处按 projectId 返回不同的 repository。
+   */
+  private async getRepo(_projectId?: string | null): Promise<StyleProfileRepository> {
+    return this.repo
   }
 }
 

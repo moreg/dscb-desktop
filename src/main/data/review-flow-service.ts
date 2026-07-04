@@ -85,7 +85,8 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
   ellipsis_abuse: { checkId: 'ellipsis_abuse', instruction: '' },
   long_paragraph: { checkId: 'long_paragraph', instruction: '' },
   dialogue_tag: { checkId: 'dialogue_tag', instruction: '' },
-  sensitive: { checkId: 'sensitive', instruction: '' }
+  sensitive: { checkId: 'sensitive', instruction: '' },
+  hook_strength: { checkId: 'hook_strength', instruction: '' }
 }
 
 /** LLM 类 checkId 集合（用于过滤掉算法类占位） */

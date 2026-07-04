@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type {
   AuditReport,
+  ChapterReviewReport,
   FigureDraft,
   MemoryApplyResult,
   MemoryExtraction,
@@ -112,6 +113,25 @@ export default function ChapterFlowPanel(props: Props) {
   const [figureError, setFigureError] = useState('')
   const [figureSaving, setFigureSaving] = useState(false)
   const [figureSaved, setFigureSaved] = useState('')
+
+  // 结构化审核报告状态（对齐「正文审核」技能第 6 步，合并进 ChapterAuditPanel）
+  const [reviewReport, setReviewReport] = useState<ChapterReviewReport | null>(null)
+  const [reportLoading, setReportLoading] = useState(false)
+  const [reportError, setReportError] = useState('')
+
+  const generateReport = async () => {
+    if (!draft.trim()) return
+    setReportLoading(true)
+    setReportError('')
+    try {
+      const r = await window.api.generateReviewReport(projectId, draft, chapterNumber)
+      setReviewReport(r)
+    } catch (err) {
+      setReportError((err as Error).message || '生成审核报告失败')
+    } finally {
+      setReportLoading(false)
+    }
+  }
 
   const runOutlineCheck = async () => {
     if (!draft.trim()) {
@@ -404,6 +424,10 @@ export default function ChapterFlowPanel(props: Props) {
             onRedoRewrite={onRedoRewrite}
             redoStackCount={redoStackCount}
             rewriteHistory={rewriteHistory}
+            reviewReport={reviewReport}
+            reportLoading={reportLoading}
+            reportError={reportError}
+            onGenerateReport={generateReport}
           />
         </div>
       ) : null}

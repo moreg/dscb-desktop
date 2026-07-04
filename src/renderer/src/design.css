@@ -1462,7 +1462,7 @@ hr.soft {
 .editor-text {
   width: 100%;
   display: block;
-  min-height: calc(100vh - 280px);
+  min-height: calc(100vh - 120px);
   padding: 28px 36px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
@@ -1608,8 +1608,8 @@ hr.soft {
 
 .chapter-main-pane .editor-text {
   margin-top: 0 !important;
-  min-height: calc(100vh - 280px);
-  max-height: calc(100vh - 280px);
+  min-height: calc(100vh - 200px);
+  max-height: calc(100vh - 200px);
   resize: none;
 }
 
@@ -3682,3 +3682,5 @@ pre.body {
 }
 
 
+
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

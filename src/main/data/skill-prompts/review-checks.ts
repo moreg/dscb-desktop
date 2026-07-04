@@ -131,6 +131,14 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     defaultSeverity: 'info',
     hint: '政治/血腥/色情擦边/违法/迷信等（仅提醒，不强制修改）'
   },
+  {
+    checkId: 'hook_strength',
+    kind: 'algorithm',
+    group: 'paragraph',
+    label: '章末钩子强度',
+    defaultSeverity: 'warn',
+    hint: '末段缺乏悬念/冲突/反转/伏笔关键词，钩子偏弱'
+  },
   // ── LLM 类 ──
   {
     checkId: 'character_breakdown',

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import MarkdownView from './MarkdownView'
-import type { ChapterMeta, DetailedOutlineItem, MainOutline } from '../../shared/types'
+import type { ChapterMeta, DetailedOutlineItem, MainOutline, VolumeOutline } from '../../shared/types'
 import { getOutlineDetailRows, type OutlineDetailRow } from './outlineDetailFields'
 
 const DETAILED_PAGE_SIZE = 10
@@ -22,8 +22,11 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
   const [main, setMain] = useState<MainOutline | null>(null)
   const [items, setItems] = useState<DetailedOutlineItem[]>([])
   const [sections, setSections] = useState<{ title: string; body: string }[]>([])
+  const [volumeOutlines, setVolumeOutlines] = useState<VolumeOutline[]>([])
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [loadingMain, setLoadingMain] = useState(false)
+
+  const [activeVolume, setActiveVolume] = useState(0)
 
   const [editingMain, setEditingMain] = useState(false)
   const [mainDraft, setMainDraft] = useState('')
@@ -43,10 +46,22 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
     void window.api.getMainOutline(projectId).then(setMain)
     void window.api.listDetailedOutline(projectId).then(setItems)
     void window.api.getOutlineSections(projectId).then((res) => setSections(res.sections))
+    void window.api.getVolumeOutlines(projectId).then(setVolumeOutlines)
     void window.api.listChapters(projectId).then(setChapters)
   }
 
   useEffect(refresh, [projectId])
+
+  // 订阅外部文件变更：细纲/节奏图谱/角色卡变 → 刷新大纲页
+  useEffect(() => {
+    const off = window.api.onProjectFilesChanged((e) => {
+      if (e.projectId !== projectId) return
+      refresh()
+    })
+    return off
+    // refresh 依赖 projectId 内部状态，仅 projectId 变化时重新加载
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId])
 
   const chapterTitleOf = (n: number) =>
     chapters.find((c) => c.chapterNumber === n)?.title ?? `第 ${n} 章`
@@ -89,6 +104,56 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
       alert((err as Error).message)
     } finally {
       setSavingMain(false)
+    }
+  }
+
+  const [generatingBatch, setGeneratingBatch] = useState(false)
+
+  const handleBatchGenerate = async () => {
+    if (!(await window.api.hasLlmKey())) {
+      alert('请先在「⚙ 设置 → 模型服务」中配置 provider')
+      return
+    }
+
+    const input = window.prompt(
+      '请输入要批量生成细纲的章号范围（格式为 起始章-结束章，例如 1-10）：\n' +
+      '系统将根据故事设定和总纲，调用 AI 自动生成这部分章节的详细大纲。'
+    )
+    if (input === null) return
+
+    const trimmed = input.trim()
+    if (!trimmed) return
+
+    const m = trimmed.match(/^(\d+)\s*[-~至,，\s]\s*(\d+)$/)
+    if (!m) {
+      alert("格式不正确，请输入类似 '1-10' 的章号范围。")
+      return
+    }
+
+    const fromChapter = parseInt(m[1], 10)
+    const toChapter = parseInt(m[2], 10)
+    if (fromChapter < 1 || toChapter < fromChapter) {
+      alert('章号范围错误：起始章不能小于 1，且结束章不能小于起始章。')
+      return
+    }
+
+    const count = toChapter - fromChapter + 1
+    if (count > 20) {
+      const confirmLarge = window.confirm(
+        `您选择生成 ${count} 章，大批量生成可能需要较长时间，建议分批生成（每批 ≤20 章）。\n\n确定要继续吗？`
+      )
+      if (!confirmLarge) return
+    }
+
+    setGeneratingBatch(true)
+    try {
+      await window.api.generateDetailedOutlineRange(projectId, fromChapter, count)
+      alert(`成功生成第 ${fromChapter} 至 ${toChapter} 章的细纲！`)
+      refresh()
+    } catch (err) {
+      alert(`生成失败: ${(err as Error).message}`)
+    } finally {
+      setGeneratingBatch(false)
     }
   }
 
@@ -304,29 +369,72 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
             </div>
           ) : null}
 
-          <div className="card">
-            <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
-              <strong style={{ fontSize: 16 }}>总纲全文</strong>
-              <span className="meta" style={{ marginLeft: 'auto' }}>
-                {sections.length} 节
-              </span>
-              {main && !editingMain ? (
-                <button className="btn btn-sm btn-ghost" onClick={startEditMain}>
-                  编辑概要
-                </button>
-              ) : null}
-            </div>
-            {sections.length === 0 ? (
-              <div className="placeholder" style={{ padding: 16 }}>
-                <p style={{ margin: '0 0 10px' }}>暂无总纲内容</p>
-                <button className="btn btn-primary btn-sm" onClick={genMain} disabled={loadingMain}>
-                  {loadingMain ? '生成中…' : 'AI 生成总纲'}
-                </button>
+          {volumeOutlines.length > 0 ? (
+            <div>
+              {/* 卷纲 tab */}
+              <div className="outline-volume-tabs">
+                {[...volumeOutlines]
+                  .sort((a, b) => a.number - b.number)
+                  .map((vol) => (
+                  <button
+                    key={vol.number}
+                    className={`outline-volume-tab ${vol.number === activeVolume ? 'active' : ''}`}
+                    onClick={() => setActiveVolume(vol.number)}
+                  >
+                    <span>第{vol.number}卷</span>
+                    <span>{vol.name}</span>
+                  </button>
+                ))}
               </div>
-            ) : (
-              <MarkdownView sections={sections} skipTitles={['逐章节奏标注']} />
-            )}
-          </div>
+
+              {/* 选中卷的卷纲内容 */}
+              {(() => {
+                const vol = volumeOutlines.find((v) => v.number === activeVolume) ?? volumeOutlines[0]
+                if (!vol) return null
+                return (
+                  <div className="card" style={{ marginTop: 12 }}>
+                    <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
+                      <strong style={{ fontSize: 16 }}>
+                        第{vol.number}卷 · {vol.name}
+                      </strong>
+                      <span className="meta" style={{ marginLeft: 'auto' }}>
+                        {vol.sections.length} 节
+                      </span>
+                    </div>
+                    <MarkdownView
+                      sections={vol.sections}
+                      skipTitles={['逐章节奏标注']}
+                    />
+                  </div>
+                )
+              })()}
+            </div>
+          ) : (
+            /* 回退：没有卷纲文件时展示大纲.md 的 sections */
+            <div className="card">
+              <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
+                <strong style={{ fontSize: 16 }}>总纲全文</strong>
+                <span className="meta" style={{ marginLeft: 'auto' }}>
+                  {sections.length} 节
+                </span>
+                {main && !editingMain ? (
+                  <button className="btn btn-sm btn-ghost" onClick={startEditMain}>
+                    编辑概要
+                  </button>
+                ) : null}
+              </div>
+              {sections.length === 0 ? (
+                <div className="placeholder" style={{ padding: 16 }}>
+                  <p style={{ margin: '0 0 10px' }}>暂无总纲内容</p>
+                  <button className="btn btn-primary btn-sm" onClick={genMain} disabled={loadingMain}>
+                    {loadingMain ? '生成中…' : 'AI 生成总纲'}
+                  </button>
+                </div>
+              ) : (
+                <MarkdownView sections={sections} skipTitles={['逐章节奏标注']} />
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="outline-single">
@@ -335,8 +443,15 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
               <p>先在“章节”页创建章节，再为每章生成细纲。</p>
             </div>
           ) : sortedItems.length === 0 ? (
-            <div className="placeholder">
-              <p>暂无细纲。生成细纲文件后，这里会自动展示。</p>
+            <div className="placeholder" style={{ padding: 24, textAlign: 'center' }}>
+              <p style={{ marginBottom: 12 }}>暂无细纲。生成细纲文件后，这里会自动展示。</p>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleBatchGenerate}
+                disabled={generatingBatch}
+              >
+                {generatingBatch ? '细纲生成中…' : '✦ AI 批量生成细纲'}
+              </button>
             </div>
           ) : (
             <>
@@ -353,13 +468,22 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
                 ))}
               </div>
 
-              <div className="outline-toolbar">
-                <span className="meta">
-                  当前显示 {activeDetailedGroup?.label ?? '全部'} · 第 {detailedPage} / {totalDetailedPages} 页
-                </span>
-                <span className="meta">
-                  每页 {DETAILED_PAGE_SIZE} 章 · 本组共 {activeDetailedGroup?.items.length ?? 0} 章
-                </span>
+              <div className="outline-toolbar" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <span className="meta">
+                    当前显示 {activeDetailedGroup?.label ?? '全部'} · 第 {detailedPage} / {totalDetailedPages} 页
+                  </span>
+                  <span className="meta">
+                    每页 {DETAILED_PAGE_SIZE} 章 · 本组共 {activeDetailedGroup?.items.length ?? 0} 章
+                  </span>
+                </div>
+                <button
+                  className="btn btn-sm btn-primary"
+                  onClick={handleBatchGenerate}
+                  disabled={generatingBatch}
+                >
+                  {generatingBatch ? '细纲生成中…' : '✦ AI 批量生成细纲'}
+                </button>
               </div>
 
               {renderDetailedPager()}
