@@ -10,50 +10,30 @@ import type {
 } from '../../../shared/types'
 
 /**
- * 读取伏笔追踪。真相源：`记忆系统/伏笔追踪.md`。
+ * 读取伏笔追踪。真相源（双路径）：
+ * 1. `追踪/伏笔.md`（opening-service 创建路径，多 H2 节多表格，表头一致）
+ * 2. `记忆系统/伏笔追踪.md`（回退路径，老项目 / app 自身写入路径）
+ *
  * 解析大表（伏笔编号|内容|类型|埋设|预计回收|实际回收|状态）→ Foreshadowing[]。
  * v3.2 状态文本（未回收/强化/部分回收/已回收/续篇）映射到 app 的 4 态枚举。
+ *
+ * 注意：写入仍固定到 `记忆系统/伏笔追踪.md`（保持与 opening-service 创建路径一致，
+ * 避免 追踪/伏笔.md 与 记忆系统/伏笔追踪.md 双写分裂）。
  */
 export class ForeshadowingMdRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<Foreshadowing[]> {
-    const text = await readText(join(this.projectDir, '记忆系统', '伏笔追踪.md'))
-    if (!text) return []
-    const doc = parseDoc(text)
-    // 伏笔大表在文档顶层（H1 下、无 H2 包裹），从 doc.body 直接取第一个表
-    const { headers, rows } = parseTable(doc.body)
-    if (headers.length < 5) return []
-    const now = new Date().toISOString()
-    const items: Foreshadowing[] = []
-    const idx = {
-      id: headers.findIndex((h) => h.includes('编号')),
-      content: headers.findIndex((h) => h.includes('内容')),
-      type: headers.findIndex((h) => h.includes('类型')),
-      plant: headers.findIndex((h) => h.includes('埋设')),
-      expected: headers.findIndex((h) => h.includes('预计') && h.includes('回收')),
-      actual: headers.findIndex((h) => h.includes('实际') && h.includes('回收')),
-      status: headers.findIndex((h) => h.includes('状态'))
+    // 优先读 追踪/伏笔.md（opening-service 创建路径，更全）
+    const trackingText = await readText(join(this.projectDir, '追踪', '伏笔.md'))
+    if (trackingText) {
+      const items = parseForeshadowingTable(trackingText)
+      if (items.length > 0) return items
     }
-    for (const row of rows) {
-      const content = idx.content >= 0 ? row[idx.content] : ''
-      if (!content) continue
-      const id = idx.id >= 0 ? row[idx.id].trim() : ''
-      const typeText = idx.type >= 0 ? row[idx.type] : ''
-      const statusText = idx.status >= 0 ? row[idx.status] : ''
-      items.push({
-        id: id || `fb-${items.length + 1}`,
-        content,
-        status: mapStatus(statusText),
-        plantChapter: parseChapterNum(idx.plant >= 0 ? row[idx.plant] : ''),
-        expectedCollect: parseChapterNum(idx.expected >= 0 ? row[idx.expected] : ''),
-        actualCollect: parseChapterNum(idx.actual >= 0 ? row[idx.actual] : ''),
-        note: typeText || undefined,
-        createdAt: now,
-        updatedAt: now
-      })
-    }
-    return items
+    // 回退：记忆系统/伏笔追踪.md（老项目 / app 写入路径）
+    const memoryText = await readText(join(this.projectDir, '记忆系统', '伏笔追踪.md'))
+    if (!memoryText) return []
+    return parseForeshadowingTable(memoryText)
   }
 
   // ===== Phase 3b 写入（表行增删改） =====
@@ -163,6 +143,47 @@ function mapStatus(text: string): ForeshadowingStatus {
   if (text.includes('已错过') || text.includes('遗漏')) return 'missed'
   if (text.includes('已埋设') || text.includes('部分回收') || text.includes('强化')) return 'planted'
   return 'pending'
+}
+
+/**
+ * 解析伏笔大表（伏笔编号|内容|类型|埋设|预计回收|实际回收|状态）→ Foreshadowing[]。
+ * 支持单表（记忆系统/伏笔追踪.md）和多 H2 节多表格（追踪/伏笔.md，表头一致）。
+ * parseTable 会合并所有 | 开头的行，因表头相同能正确解析。
+ */
+function parseForeshadowingTable(text: string): Foreshadowing[] {
+  const doc = parseDoc(text)
+  const { headers, rows } = parseTable(doc.body)
+  if (headers.length < 5) return []
+  const now = new Date().toISOString()
+  const items: Foreshadowing[] = []
+  const idx = {
+    id: headers.findIndex((h) => h.includes('编号')),
+    content: headers.findIndex((h) => h.includes('内容')),
+    type: headers.findIndex((h) => h.includes('类型')),
+    plant: headers.findIndex((h) => h.includes('埋设')),
+    expected: headers.findIndex((h) => h.includes('预计') && h.includes('回收')),
+    actual: headers.findIndex((h) => h.includes('实际') && h.includes('回收')),
+    status: headers.findIndex((h) => h.includes('状态'))
+  }
+  for (const row of rows) {
+    const content = idx.content >= 0 ? row[idx.content] : ''
+    if (!content) continue
+    const id = idx.id >= 0 ? row[idx.id].trim() : ''
+    const typeText = idx.type >= 0 ? row[idx.type] : ''
+    const statusText = idx.status >= 0 ? row[idx.status] : ''
+    items.push({
+      id: id || `fb-${items.length + 1}`,
+      content,
+      status: mapStatus(statusText),
+      plantChapter: parseChapterNum(idx.plant >= 0 ? row[idx.plant] : ''),
+      expectedCollect: parseChapterNum(idx.expected >= 0 ? row[idx.expected] : ''),
+      actualCollect: parseChapterNum(idx.actual >= 0 ? row[idx.actual] : ''),
+      note: typeText || undefined,
+      createdAt: now,
+      updatedAt: now
+    })
+  }
+  return items
 }
 
 /** app 枚举 → v3.2 状态文本（写回用） */

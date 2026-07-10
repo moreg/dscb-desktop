@@ -165,7 +165,7 @@ export function registerSettingsIpc(
               id: z.string().min(1).max(100),
               name: z.string().min(1).max(100),
               description: z.string().max(300),
-              requirements: z.array(z.string().min(1).max(300)).max(20)
+              requirements: z.array(z.string().min(1).max(300)).max(100)
             })
           )
           .max(100),

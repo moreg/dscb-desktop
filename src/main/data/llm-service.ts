@@ -1,6 +1,8 @@
 import type { SecretStore } from './secret-store'
 import type { ProviderConfig } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
+import { runAntigravity, probeAntigravity } from './antigravity-runner'
+import { runCodex, probeCodex } from './codex-runner'
 
 export interface GenerateOptions {
   onToken?: (token: string) => void
@@ -27,13 +29,13 @@ export interface GenerateOptions {
   maxTokens?: number
 }
 
-interface UsageInfo {
+export interface UsageInfo {
   inputTokens: number
   outputTokens: number
   totalTokens: number
 }
 
-function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' {
+function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' | 'antigravity' | 'codex' {
   return p.protocol ?? 'openai'
 }
 
@@ -96,6 +98,38 @@ export class LlmService {
   async ping(): Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }> {
     const p = await this.activeProvider()
     if (!p) return { ok: false, error: 'NO_KEY' }
+    const proto = protocolOf(p)
+    // antigravity 协议：走本机 agy CLI，无需 apiKey
+    if (proto === 'antigravity') {
+      const version = await probeAntigravity()
+      if (!version) return { ok: false, error: 'AGY_NOT_FOUND' }
+      try {
+        // runAntigravity 内部已做 Error: 前缀检测与错误码映射，抛错即失败
+        await runAntigravity('回复一个字：好', {
+          model: p.model && p.model !== 'default' ? p.model : undefined,
+          timeoutSec: 60,
+          signal: AbortSignal.timeout(70_000)
+        })
+        return { ok: true, model: p.model, providerLabel: p.label }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message || 'AGY_ERROR' }
+      }
+    }
+    // codex 协议：走本机 codex CLI，无需 apiKey（靠 ChatGPT 登录）
+    if (proto === 'codex') {
+      const version = await probeCodex()
+      if (!version) return { ok: false, error: 'CODEX_NOT_FOUND' }
+      try {
+        await runCodex('回复一个字：好', {
+          model: p.model && p.model !== 'default' ? p.model : undefined,
+          timeoutSec: 60,
+          signal: AbortSignal.timeout(70_000)
+        })
+        return { ok: true, model: p.model, providerLabel: p.label }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message || 'CODEX_ERROR' }
+      }
+    }
     if (!p.apiKey) return { ok: false, error: 'NO_KEY' }
     try {
       const { url, init } = buildPingRequest(p)
@@ -113,7 +147,17 @@ export class LlmService {
 
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
     const p = await this.activeProvider()
-    if (!p || !p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
+    if (!p) throw new Error('LLM_NOT_CONFIGURED')
+    const proto = protocolOf(p)
+    // antigravity 协议：走本机 agy CLI 子进程，不需 apiKey（靠本机 OAuth 登录）
+    if (proto === 'antigravity') {
+      return this.generateViaAntigravity(p, prompt, opts)
+    }
+    // codex 协议：走本机 codex CLI 子进程，不需 apiKey（靠 ChatGPT 登录）
+    if (proto === 'codex') {
+      return this.generateViaCodex(p, prompt, opts)
+    }
+    if (!p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
     const MAX_RETRIES = 2
     const RETRY_DELAYS_MS = [1000, 2000]
@@ -192,6 +236,103 @@ export class LlmService {
       }
     }
     throw new Error('LLM_REQUEST_FAILED')
+  }
+
+  /**
+   * antigravity 协议调用：委托 antigravity-runner 跑 `agy -p` 子进程。
+   * systemPrompt 与 user prompt 合并为单条（agy -p 是单轮，不支持 system role）。
+   * 复用调用方的 onToken 回调（伪流式：agy 实际非流式，按 stdout 数据块喂回）。
+   * 用量记录与 HTTP 路径一致。
+   */
+  private async generateViaAntigravity(
+    p: ProviderConfig,
+    prompt: string,
+    opts: GenerateOptions
+  ): Promise<string> {
+    // 合并 system + user：agy -p 单轮，把 system 作为前置指令
+    const merged =
+      opts.systemPrompt && opts.systemPrompt.trim()
+        ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
+        : prompt
+
+    const timeoutMs = opts.maxTokens && opts.maxTokens > 8192 ? 600_000 : LLM_STREAM_TIMEOUT_MS
+    const timeoutSignal = AbortSignal.timeout(timeoutMs)
+    const combinedSignal = opts.signal
+      ? AbortSignal.any([opts.signal, timeoutSignal])
+      : timeoutSignal
+
+    const { full, usage } = await runAntigravity(merged, {
+      model: p.model && p.model !== 'default' ? p.model : undefined,
+      timeoutSec: Math.ceil(timeoutMs / 1000),
+      onToken: opts.onToken,
+      signal: combinedSignal
+    })
+
+    if (this.usage && usage) {
+      try {
+        await this.usage.add({
+          at: new Date().toISOString(),
+          feature: opts.meta?.feature ?? 'other',
+          projectId: opts.meta?.projectId,
+          chapterNumber: opts.meta?.chapterNumber,
+          model: p.model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens
+        })
+      } catch (err) {
+        console.error('[llm-service] Failed to record antigravity usage:', err)
+      }
+    }
+    return full
+  }
+
+  /**
+   * codex 协议调用：委托 codex-runner 跑 `codex exec` 子进程。
+   * systemPrompt 与 user prompt 合并为单条（codex exec 单轮，不支持 system role）。
+   * codex 返回精确 token 用量（turn.completed.usage），比 agy 估算更准。
+   * 不需串行化（--ephemeral session 隔离，并发安全）。
+   */
+  private async generateViaCodex(
+    p: ProviderConfig,
+    prompt: string,
+    opts: GenerateOptions
+  ): Promise<string> {
+    const merged =
+      opts.systemPrompt && opts.systemPrompt.trim()
+        ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
+        : prompt
+
+    const timeoutMs = opts.maxTokens && opts.maxTokens > 8192 ? 600_000 : LLM_STREAM_TIMEOUT_MS
+    const timeoutSignal = AbortSignal.timeout(timeoutMs)
+    const combinedSignal = opts.signal
+      ? AbortSignal.any([opts.signal, timeoutSignal])
+      : timeoutSignal
+
+    const { full, usage } = await runCodex(merged, {
+      model: p.model && p.model !== 'default' ? p.model : undefined,
+      timeoutSec: Math.ceil(timeoutMs / 1000),
+      onToken: opts.onToken,
+      signal: combinedSignal
+    })
+
+    if (this.usage && usage) {
+      try {
+        await this.usage.add({
+          at: new Date().toISOString(),
+          feature: opts.meta?.feature ?? 'other',
+          projectId: opts.meta?.projectId,
+          chapterNumber: opts.meta?.chapterNumber,
+          model: p.model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens
+        })
+      } catch (err) {
+        console.error('[llm-service] Failed to record codex usage:', err)
+      }
+    }
+    return full
   }
 }
 

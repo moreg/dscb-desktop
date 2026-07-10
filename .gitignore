@@ -12,3 +12,4 @@ restore_preload.js
 
 # 本地 agent 技能配置（含绝对路径，勿提交）
 .agents/
+.zcode/

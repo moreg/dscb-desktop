@@ -222,4 +222,37 @@ describe('ChapterService outline merge', () => {
     expect(ch1.title).toBe('新标题')
     expect(ch1.synopsis).toBe('新事件')
   })
+
+  it('listChapters 进度表无字数时回退正文实时统计（修复第一章字数为 0）', async () => {
+    // 场景：第一章已写正文，但 skill 包未回填「记忆系统/章节进度.md」的字数列
+    // （或该列为空/非数字 → ChapterProgressMdRepo 解析为 undefined）。
+    // 期望：listChapters 回退到正文实时 countWords，字数不为 0，与编辑器一致。
+    const proseDir = path.join(dir, '正文')
+    await mkdir(proseDir, { recursive: true })
+    // 节奏图谱里第一章标题是「旧标题」，ProseRepo 会按「第NNN章 *.md」匹配
+    await writeFile(
+      path.join(proseDir, '第001章 旧标题.md'),
+      '苏九踹开木窗，纵身跃出。',
+      'utf-8'
+    )
+
+    // 章节进度表第一章字数列留空（模拟 skill 包未回填）
+    await writeFile(
+      path.join(dir, '记忆系统', '章节进度.md'),
+      '# 章节进度\n\n## 第 1 卷\n\n' +
+        '| 章节 | 标题 | 状态 | 字数 | 备注 |\n' +
+        '| --- | --- | --- | --- | --- |\n' +
+        '| 第 1 章 | 旧标题 | 草稿 |  | 待回填 |\n',
+      'utf-8'
+    )
+
+    const service = new ChapterService(ps)
+    const list = await service.listChapters(projectId)
+    const ch1 = list.find((c) => c.chapterNumber === 1)!
+
+    // 字数应来自正文实时统计，而非进度表的空值兜底为 0
+    expect(ch1.wordCount).toBeGreaterThan(0)
+    const { meta } = await service.getChapter(projectId, 1)
+    expect(ch1.wordCount).toBe(meta.wordCount)
+  })
 })

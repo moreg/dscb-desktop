@@ -89,12 +89,20 @@ export class ChapterService {
       const prog = progress.get(e.chapter)
       const det = detailedMap.get(e.chapter)
       // 合并规则：细纲优先（用户在大纲页编辑的最新意图），细纲为空才回退旧源
+      // wordCount：进度表「字数」列是外部 skill 包维护的真相源；
+      // 但部分章节（如新生成的第一章）在该表里可能为空/非数字 → wordCount=undefined。
+      // 此时回退到正文实时统计，保证列表字数与编辑器一致、不为 0（除非正文也空）。
+      let wordCount = prog?.wordCount
+      if (wordCount === undefined) {
+        const content = has ? await prose.read(e.chapter) : ''
+        wordCount = content ? countWords(content) : 0
+      }
       metas.push({
         schemaVersion: 1,
         updatedAt: now,
         chapterNumber: e.chapter,
         title: det?.title || e.title,
-        wordCount: prog?.wordCount ?? 0,
+        wordCount,
         status: has ? 'draft' : 'outline',
         // synopsis 改用细纲 plotSummary（核心事件），细纲为空回退章节进度笔记的备注
         synopsis: det?.plotSummary || prog?.note,

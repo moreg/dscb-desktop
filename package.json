@@ -21,7 +21,12 @@
       "output": "release"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "node_modules/skia-canvas/**/*",
+      "node_modules/zod/**/*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/skia-canvas/**/*"
     ],
     "win": {
       "target": [

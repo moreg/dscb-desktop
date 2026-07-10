@@ -107,4 +107,62 @@ describe('registerOpeningIpc streaming protocol', () => {
       done: true
     })
   })
+
+  it('opening:persist forwards chaptersMd and fromChapter to service', async () => {
+    const service = {
+      persistOpening: vi.fn().mockResolvedValue({
+        settingsFile: '设定/题材定位.md',
+        outlineFile: '大纲/大纲.md',
+        chapterFiles: ['细纲/细纲_第001章_测试.md']
+      })
+    }
+
+    registerOpeningIpc(service as never)
+
+    const handler = handlers.get('opening:persist')
+    expect(handler).toBeDefined()
+
+    const result = await handler!({ sender: {} } as never, {
+      projectId: 'p1',
+      coreSettings: '核心设定',
+      volumeOutline: '卷级大纲',
+      chaptersMd: '=== 第1章 ===\n## 第 1 章：测试',
+      fromChapter: 1
+    })
+
+    expect(service.persistOpening).toHaveBeenCalledWith(
+      'p1',
+      '核心设定',
+      '卷级大纲',
+      '=== 第1章 ===\n## 第 1 章：测试',
+      1
+    )
+    expect(result).toEqual({
+      settingsFile: '设定/题材定位.md',
+      outlineFile: '大纲/大纲.md',
+      chapterFiles: ['细纲/细纲_第001章_测试.md']
+    })
+  })
+
+  it('opening:persist works without chaptersMd (settings+outline only)', async () => {
+    const service = {
+      persistOpening: vi.fn().mockResolvedValue({
+        settingsFile: '设定/题材定位.md',
+        outlineFile: '大纲/大纲.md',
+        chapterFiles: []
+      })
+    }
+
+    registerOpeningIpc(service as never)
+
+    const handler = handlers.get('opening:persist')
+    const result = await handler!({ sender: {} } as never, {
+      projectId: 'p1',
+      coreSettings: '设定',
+      volumeOutline: '大纲'
+    })
+
+    expect(service.persistOpening).toHaveBeenCalledWith('p1', '设定', '大纲', undefined, undefined)
+    expect(result.chapterFiles).toEqual([])
+  })
 })

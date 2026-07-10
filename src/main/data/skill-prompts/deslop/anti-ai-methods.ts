@@ -73,17 +73,27 @@ export function passesForLevel(level: DeslopLevel): number[] {
   }
 }
 
+/** buildDeslopPrompt / buildCleanupPrompt 的可选项：用户配置的 Gate 方法覆盖 + 禁用词表 */
+export interface DeslopPromptOverrides {
+  /** 用户覆盖的 Gate 方法文本（key = Gate 字母，如 'A'）；缺 key = 用 GATE_METHODS 默认 */
+  textOverrides?: Partial<Record<string, string>>
+  /** 用户配置的禁用词表（注入 prompt，让 LLM 改写时规避）；缺省 = 不额外注入 */
+  bannedWords?: string[]
+}
+
 /**
  * 构建改写 prompt（Phase 3，逐 Gate 改写）。
  * 只把命中的 Gate 说明 + 命中的 finding 注入，不全篇跑。
  * styleContext 注入项目题材与文风档案，让 LLM 替换语感对齐项目而非套通用模板。
+ * textOverrides/bannedWords 注入用户在设置里编辑过的 Gate 方法和禁用词表。
  */
 export function buildDeslopPrompt(
   text: string,
   level: DeslopLevel,
   findings: DeslopFinding[],
   gatesToProcess: string[],
-  styleContext?: DeslopStyleContext
+  styleContext?: DeslopStyleContext,
+  overrides?: DeslopPromptOverrides
 ): string {
   const maxDeleteRatio = level === 'mild' ? 0.15 : level === 'moderate' ? 0.25 : 0.35
 
@@ -96,7 +106,9 @@ export function buildDeslopPrompt(
     findingsByGate.set(f.gate, list)
   }
 
-  const gateDescriptions = gatesToProcess.map((g) => GATE_METHODS[g]).join('\n\n')
+  const gateDescriptions = gatesToProcess
+    .map((g) => overrides?.textOverrides?.[g] ?? GATE_METHODS[g])
+    .join('\n\n')
 
   const findingSummary = gatesToProcess
     .map((g) => {
@@ -109,6 +121,7 @@ export function buildDeslopPrompt(
     .join('\n\n')
 
   const styleSection = buildStyleSection(styleContext)
+  const bannedWordsSection = buildBannedWordsSection(overrides?.bannedWords)
 
   return `## 任务：去 AI 味改写（${LEVEL_NAMES[level]}，删除比例上限 ${Math.round(maxDeleteRatio * 100)}%）
 
@@ -121,7 +134,7 @@ export function buildDeslopPrompt(
 - **改写后不得引入新的 AI 味**：禁止用另一种 AI 套路替换原套路。改写后不得出现"仿佛/犹如/宛若/一丝/一抹/缓缓/微微/轻轻/淡淡/不禁/不由得/眼中闪过/嘴角勾起/心中涌起/深吸一口气/不是A而是B/，带着一丝X/这一刻他终于明白"等高频 AI 表达。改后仍含上述表达视为未完成，须再次降 AI 直至干净。
 
 ${styleSection}
-### 本次处理的 Gate 及改写方法
+${bannedWordsSection}### 本次处理的 Gate 及改写方法
 ${gateDescriptions}
 
 ${findingSummary || '（无具体命中项，按 Gate 通则整体降 AI）'}
@@ -161,16 +174,20 @@ export function buildCleanupPrompt(
   level: DeslopLevel,
   remainingFindings: DeslopFinding[],
   round: number,
-  styleContext?: DeslopStyleContext
+  styleContext?: DeslopStyleContext,
+  overrides?: DeslopPromptOverrides
 ): string {
   const maxDeleteRatio = level === 'mild' ? 0.15 : level === 'moderate' ? 0.25 : 0.35
   const gatesTouched = Array.from(new Set(remainingFindings.map((f) => f.gate)))
-  const gateDescriptions = gatesTouched.map((g) => GATE_METHODS[g]).join('\n\n')
+  const gateDescriptions = gatesTouched
+    .map((g) => overrides?.textOverrides?.[g] ?? GATE_METHODS[g])
+    .join('\n\n')
   const findingSummary = remainingFindings
     .slice(0, 12)
     .map((f) => `  - 第${f.line}行 [${f.gate}/${f.type}]: ${f.excerpt}`)
     .join('\n')
   const styleSection = buildStyleSection(styleContext)
+  const bannedWordsSection = buildBannedWordsSection(overrides?.bannedWords)
 
   return `## 任务：二次清理（第 ${round} 轮，删除比例上限 ${Math.round(maxDeleteRatio * 100)}%）
 
@@ -183,7 +200,7 @@ export function buildCleanupPrompt(
 - 替换语感对齐下方"风格语境"段
 
 ${styleSection}
-
+${bannedWordsSection}
 ### 本次需处理的 Gate 及方法
 ${gateDescriptions || '（无具体 Gate 说明，按通则降 AI）'}
 
@@ -242,6 +259,20 @@ function buildStyleSection(styleContext?: DeslopStyleContext): string {
   if (s?.styleConstraints?.length) lines.push(`- 写作手法约束：${s.styleConstraints.join('；')}`)
   if (s?.plotConstraints?.length) lines.push(`- 剧情/题材约束：${s.plotConstraints.join('；')}`)
   return lines.join('\n')
+}
+
+/**
+ * 把用户配置的禁用词表渲染成 prompt 段落。
+ * 无配置（undefined）时返回空串——让系统 prompt 里的铁律 7 内置清单接管。
+ * 用户显式配置（含空数组）时，注入"本项目禁用词清单"，让 LLM 改写时规避。
+ */
+function buildBannedWordsSection(bannedWords?: string[]): string {
+  if (!bannedWords || bannedWords.length === 0) return ''
+  const words = bannedWords.slice(0, 200).join('、')
+  return `### 本项目禁用词清单（改写时一并规避，出现即替换为具体动作/白描）
+${words}
+
+`
 }
 
 const LEVEL_NAMES: Record<DeslopLevel, string> = {

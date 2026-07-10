@@ -166,3 +166,33 @@ export function cleanVolumeContent(md: string): string {
   if (firstChIndex < 0) return ''
   return lines.slice(firstChIndex).join('\n').trim()
 }
+
+/**
+ * 从细纲内容中解析章节标题（用于生成符合番茄风格的文件名 `细纲_第NNN章_标题.md`）。
+ * 匹配 `## 第 N 章：标题` 或 `### 第 N 章：标题`，返回标题文本（去掉首尾空白）。
+ * 未找到返回空串。
+ */
+export function parseChapterTitle(content: string): string {
+  const m = content.match(/^#{2,3}\s+第\s*\d+\s*章\s*[：:]\s*(.+?)\s*$/m)
+  return m ? m[1].trim() : ''
+}
+
+/**
+ * 把章节标题清洗为文件名安全片段（用于 `细纲_第NNN章_标题.md` 的 `_标题` 部分）。
+ * - 去除 Windows/Unix 文件系统非法字符：/ \ : * ? " < > |
+ * - 去除控制字符
+ * - 截断到 30 字（番茄章名 12-20 字，留余量）
+ * - 去除首尾空白和点号（避免 Windows 末尾点问题）
+ */
+export function sanitizeTitleForFilename(title: string): string {
+  if (!title) return ''
+  const cleaned = title
+    .replace(/[/\\:*?"<>|]/g, '') // 文件系统非法字符（半角）
+    .replace(/[：]/g, '') // 全角冒号（避免与章号分隔符混淆）
+    .replace(/[\x00-\x1f\x7f]/g, '') // 控制字符
+    .replace(/\s+/g, ' ') // 折叠多空白为单空格
+    .replace(/[.]+$/g, '') // 末尾点号
+    .trim()
+    .slice(0, 30)
+  return cleaned
+}

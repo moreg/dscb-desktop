@@ -9,17 +9,16 @@ export type { ProviderConfig } from '../../shared/types'
 
 const EMPTY: ProvidersConfig = { activeId: '', providers: [] }
 
-// Provider 配置验证模式
+// Provider 配置验证模式（类型/长度约束层）
+// antigravity 协议：走本机 agy CLI，baseUrl 可为空/占位符、apiKey 可为空（靠 OAuth 登录）、model 可空。
+// 必填校验（非 antigravity 时要求 baseUrl/model/apiKey）由 IPC 层 sanitizeProvider 统一把关。
 const providerConfigSchema = z.object({
   id: z.string().min(1).max(100),
   label: z.string().min(1).max(100),
-  baseUrl: z.string().url().max(2048).refine(
-    (url) => url.startsWith('http://') || url.startsWith('https://'),
-    { message: 'baseUrl must use HTTP or HTTPS protocol' }
-  ),
-  model: z.string().min(1).max(255),
+  baseUrl: z.string().max(2048),
+  model: z.string().max(255),
   apiKey: z.string().max(1000),
-  protocol: z.enum(['openai', 'anthropic']).optional(),
+  protocol: z.enum(['openai', 'anthropic', 'antigravity', 'codex']).optional(),
   homepage: z.string().max(2048).optional(),
   temperature: z.number().min(0).max(2).optional()
 })
@@ -44,6 +43,7 @@ function isNewShape(o: unknown): o is ProvidersConfig {
     const it = item as Record<string, unknown>
     if (typeof it.id !== 'string') return false
     if (typeof it.baseUrl !== 'string') return false
+    // model 必须为 string，但允许空串（antigravity provider 可不指定 model，走 agy 默认）
     if (typeof it.model !== 'string') return false
     if (typeof it.apiKey !== 'string') return false
   }
@@ -142,10 +142,12 @@ export class SecretStore {
     // 验证输入
     const validated = validateInput(providersConfigSchema, config)
 
-    // 额外验证：API 密钥非空
+    // 额外验证：API 密钥非空（antigravity/codex 协议豁免，靠本机登录态）
     for (const provider of validated.providers) {
-      if (!provider.apiKey || provider.apiKey.trim().length === 0) {
-        throw new Error(`Provider ${provider.id} has empty API key`)
+      if (provider.protocol !== 'antigravity' && provider.protocol !== 'codex') {
+        if (!provider.apiKey || provider.apiKey.trim().length === 0) {
+          throw new Error(`Provider ${provider.id} has empty API key`)
+        }
       }
     }
 

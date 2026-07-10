@@ -66,6 +66,53 @@ describe('WriteService', () => {
     expect(llm.generateStream).toHaveBeenCalled()
   })
 
+  it('adjustChapterStream revises existing prose from a follow-up instruction', async () => {
+    const llm = mockLlm('修订后的完整正文')
+    const service = new WriteService(ps, llm)
+
+    const full = await service.adjustChapterStream(
+      projectId,
+      1,
+      '当前正文：主角只是站着解释。',
+      '加强动作冲突，删掉旁白解释。'
+    )
+
+    expect(full).toBe('修订后的完整正文')
+    expect(llm.generateStream).toHaveBeenCalled()
+    const [prompt, opts] = vi.mocked(llm.generateStream).mock.calls[0]
+    expect(prompt).toContain('按用户追问调整第 1 章已生成正文')
+    expect(prompt).toContain('加强动作冲突，删掉旁白解释。')
+    expect(prompt).toContain('当前正文：主角只是站着解释。')
+    expect(prompt).toContain('直接输出调整后的完整正文')
+    expect(opts?.meta).toEqual({ feature: 'chapter-adjust', projectId, chapterNumber: 1 })
+  })
+
+  it('adjustChapter prompt enforces user instruction as highest priority over outline/character', async () => {
+    const llm = mockLlm('修订后的完整正文')
+    const service = new WriteService(ps, llm)
+
+    await service.adjustChapterStream(
+      projectId,
+      1,
+      '当前正文：主角只是站着解释。',
+      '把这段改成女主主动反击，删掉所有旁白解释。'
+    )
+
+    const [prompt] = vi.mocked(llm.generateStream).mock.calls[0]
+    // 用户追问要求被标为最高优先级，覆盖细纲/人物/伏笔
+    expect(prompt).toContain('最高优先级')
+    expect(prompt).toContain('覆盖一切既有约束')
+    expect(prompt).toContain('以用户要求为准')
+    // 要求逐条落实 + 输出前自检，避免遗漏
+    expect(prompt).toContain('逐条')
+    expect(prompt).toContain('自检')
+    // 用户要求文本必须出现在当前正文之后、紧贴输出指令（注意力最靠后）
+    const instructionIdx = prompt.indexOf('把这段改成女主主动反击，删掉所有旁白解释。')
+    const contentIdx = prompt.indexOf('当前正文：主角只是站着解释。')
+    expect(instructionIdx).toBeGreaterThan(contentIdx)
+    expect(prompt).toContain('直接输出调整后的完整正文')
+  })
+
   it('buildChapterPrompt injects default style and allows temporary override', async () => {
     const dir = await ps.resolveDir(projectId)
     await new StyleProfileRepository(dir).write({

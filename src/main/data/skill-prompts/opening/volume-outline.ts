@@ -3,6 +3,8 @@
  * 根据总章数计算推荐卷数，并生成大纲主文件（大纲.md）及卷纲文件。
  */
 
+import { RHYTHM_FORMULA_SPEC, TOMATO_CHAPTER_NAME_SPEC } from './shared-specs'
+
 export function buildVolumeOutlinePrompt(
   coreSettings: string,
   targetChapters: number,
@@ -33,6 +35,10 @@ ${coreSettings}
   - 2. 本卷核心冲突是什么？
   - 3. 卷节奏（起承转合）哪段加速哪段减速？
   - 4. 本卷伏笔：需要新埋哪些伏笔？上一卷待回收的如何处理？
+
+${RHYTHM_FORMULA_SPEC}
+
+${TOMATO_CHAPTER_NAME_SPEC}
 
 ---
 

@@ -132,6 +132,55 @@ export function registerWriteIpc(service: WriteService): void {
   )
 
   ipcMain.handle(
+    'write:adjustChapter',
+    async (
+      e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        content: string
+        instruction: string
+        styleProfileId?: string | null
+        requestId: string
+      }
+    ) => {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            chapterNumber: chapterNumberSchema,
+            content: chapterContentSchema,
+            instruction: z.string().min(1).max(10_000),
+            styleProfileId: styleProfileIdSchema,
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
+        await service.adjustChapterStream(
+          validated.projectId,
+          validated.chapterNumber,
+          validated.content,
+          validated.instruction,
+          validated.styleProfileId,
+          {
+            onToken: (token) =>
+              win?.webContents.send('llm:token', {
+                requestId: validated.requestId,
+                token,
+                done: false
+              })
+          }
+        )
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'write:reviewChapter',
     async (
       e,

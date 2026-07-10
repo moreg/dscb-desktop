@@ -66,15 +66,28 @@ export class DetailedOutlineMdRepo {
 
     if (isPerChapterFile) {
       // 新格式：每章一文件，章号块是 H2「## 第 N 章：标题」
-      const chSec = doc.sections.find((s) => parseChapterNumber(s.title) != null)
-      if (!chSec) return []
+      let chSec = doc.sections.find((s) => parseChapterNumber(s.title) != null)
       // 从文件名提取章号（更可靠）
-      const fileNameChapter = parseChapterNumber(fileName) ?? parseChapterNumber(chSec.title)
-      if (fileNameChapter == null) return []
+      let fileNameChapter = parseChapterNumber(fileName) ?? parseChapterNumber(doc.h1Title)
       // 从 H1 提取标题
-      const titleFromFile = extractTitleFromH1(doc.h1Title)
-      // 合并所有 H2 节的 body 作为完整字段源（含扩展节）
-      const fullBody = collectAllSections(doc, chSec)
+      let titleFromFile = extractTitleFromH1(doc.h1Title)
+
+      let fullBody: string
+      if (!chSec) {
+        // 兼容变体：H1 形如「# 细纲：第 N 章 标题」，文件内无「## 第N章」H2 章号块。
+        // 此时整文件 body 作为字段源；章号/标题从文件名与 H1 兜底。
+        if (fileNameChapter == null) return []
+        if (!titleFromFile) titleFromFile = extractTitleFromH1Variant(doc.h1Title)
+        fullBody = doc.body
+        // 构造一个虚拟章号块标题供 parseChapterBlock 使用
+        chSec = { title: `第 ${fileNameChapter} 章${titleFromFile ? '：' + titleFromFile : ''}`, body: doc.body }
+      } else {
+        fileNameChapter = fileNameChapter ?? parseChapterNumber(chSec.title)
+        if (fileNameChapter == null) return []
+        // 合并所有 H2 节的 body 作为完整字段源（含扩展节）
+        fullBody = collectAllSections(doc, chSec)
+      }
+
       const d = parseChapterBlock(chSec.title, fullBody, volumeFromH1)
       if (!d) return []
       // 文件名章号优先
@@ -129,6 +142,11 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
     if (targetEmotion) {
       const em = targetEmotion.match(/情绪值[：:]\s*(\d+(?:\.\d+)?)/)
       if (em) emotion = Number(em[1])
+      else {
+        // 兼容纯数字值（如「- **目标情绪**：7」）
+        const num = targetEmotion.match(/^\s*(\d+(?:\.\d+)?)\s*$/)
+        if (num) emotion = Number(num[1])
+      }
     }
   }
   if (climax === undefined) {
@@ -138,6 +156,27 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
       if (cl) climax = Number(cl[1])
     }
   }
+  // 「基本信息」节里的「爽点类型」字段（纯数字）
+  if (climax === undefined) {
+    const coolPointType = toStr(fields.get('爽点类型'))
+    if (coolPointType) {
+      const cl = coolPointType.match(/爽点类型\s*(\d+(?:\.\d+)?)/)
+      if (cl) climax = Number(cl[1])
+      else {
+        const num = coolPointType.match(/^\s*(\d+(?:\.\d+)?)\s*$/)
+        if (num) climax = Number(num[1])
+      }
+    }
+  }
+  // 最后回退：扫描 body 全文里的「- **爽点类型**：N」（纯数字值）。
+  // 处理「基本信息」和「本章爽点」节里都出现「爽点类型」字段、后者覆盖前者的情形。
+  if (climax === undefined) {
+    const allMatches = body.matchAll(/^\s*-\s+\*\*爽点类型\*\*\s*[：:]\s*(\d+(?:\.\d+)?)\s*$/gm)
+    for (const m of allMatches) {
+      climax = Number(m[1])
+      break
+    }
+  }
 
   const detail: ChapterDetail = {
     chapterNumber,
@@ -145,11 +184,24 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
     volume: volumeDefault,
     emotion,
     climax,
-    plotSummary: toStr(fields.get('核心事件')),
-    coolPoint: toStr(fields.get('爽点/打脸')) ?? toStr(fields.get('爽点')) ?? toStr(fields.get('本章爽点')),
+    plotSummary:
+      toStr(fields.get('核心事件')) ??
+      extractSectionBody(body, '核心事件') ??
+      undefined,
+    coolPoint:
+      toStr(fields.get('爽点/打脸')) ??
+      toStr(fields.get('爽点')) ??
+      toStr(fields.get('本章爽点')) ??
+      toStr(fields.get('爽点描述')) ??
+      undefined,
     charactersAppearing: extractCharactersAppearing(fields, body),
-    foreshadowings: toArr(fields.get('伏笔铺设')),
-    hook: toStr(fields.get('章末钩子')) ?? toStr(fields.get('章尾钩子')),
+    foreshadowings: toArr(fields.get('伏笔铺设')) ?? toArr(fields.get('伏笔埋设')),
+    hook:
+      toStr(fields.get('章末钩子')) ??
+      toStr(fields.get('章尾钩子')) ??
+      toStr(fields.get('下章钩子')) ??
+      toStr(fields.get('结尾描述')) ??
+      undefined,
     wordEstimate: toStr(fields.get('字数预估')) ?? toStr(fields.get('字数目标')),
     goldenLine: toStr(fields.get('金句')),
     climaxTag: toStr(fields.get('卷终反转')) ?? toStr(fields.get('关键设定')),
@@ -169,6 +221,17 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
 function extractTitleFromH1(h1: string): string {
   // H1 形如 "细纲_第001章_痞子当场下跪.md"
   const m = h1.match(/^细纲_第\d+章[_\s]*(.+?)(?:\.md)?$/)
+  return m ? m[1].trim() : ''
+}
+
+/**
+ * 兼容变体 H1 提取标题。匹配形如：
+ * - `细纲：第 1 章 4位女嘉宾同时指向角落发呆的他`
+ * - `细纲:第1章标题`
+ * 即「细纲」+ 冒号 + 「第N章」+ 标题。
+ */
+function extractTitleFromH1Variant(h1: string): string {
+  const m = h1.match(/^细纲\s*[：:]\s*第\s*\d+\s*章\s*(.+?)\s*$/)
   return m ? m[1].trim() : ''
 }
 
@@ -197,6 +260,46 @@ function collectAllSections(
   return fullBody
 }
 
+/**
+ * 从合并后的 body 文本里提取指定 H2 节的纯段落体。
+ *
+ * 变体格式（H1 用冒号、无 H2 章号块）里，`## 核心事件` 等节的体是纯段落，
+ * 没有 `- **核心事件**：` 字段标记，parseBoldFields 拿不到。这里兜底：
+ * 找到 `## <sectionName>` 节，取其纯文本段落（跳过字段行、子标题、子列表）。
+ */
+function extractSectionBody(body: string, sectionName: string): string | undefined {
+  const lines = body.split(/\r?\n/)
+  let inSection = false
+  let foundH2 = false
+  const para: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    // 进入目标 H2 节
+    if (!inSection) {
+      if (new RegExp(`^##\\s+${sectionName}\\s*$`).test(line)) {
+        inSection = true
+        foundH2 = true
+      }
+      continue
+    }
+    // 已在目标节内
+    // 遇到下一个 H2/H3 标题则结束
+    if (/^#{2,3}\s/.test(line)) break
+    // 跳过字段行 `- **xxx**：`
+    if (/^\s*-\s+\*\*.+?\*\*\s*[：:]/.test(line)) continue
+    // 跳过数字子列表项
+    if (/^\s{2,}\d+\s*[.、)]\s+/.test(line)) continue
+    // 跳过连字符子列表项
+    if (/^\s{2,}-\s+/.test(line)) continue
+    // 跳过空行
+    if (line.trim() === '') continue
+    para.push(line.trim())
+  }
+  if (!foundH2) return undefined
+  const text = para.join(' ').trim()
+  return text || undefined
+}
+
 /** 从引用块/参考信息中提取卷号并应用 */
 function applyReferenceBlock(doc: ReturnType<typeof parseDoc>, detail: ChapterDetail): void {
   // 引用块形如 "> 所属卷：第 1 卷"
@@ -204,6 +307,15 @@ function applyReferenceBlock(doc: ReturnType<typeof parseDoc>, detail: ChapterDe
   const volMatch = body.match(/所属卷[：:]\s*第\s*(\d+)\s*卷/)
   if (volMatch) {
     detail.volume = parseInt(volMatch[1], 10)
+  }
+  // 「基本信息」节里的「卷号」字段（如「- **卷号**：第一卷」或「- **卷号**：第 3 卷」）
+  if (detail.volume === undefined) {
+    const allFields = parseBoldFields(doc.body).fields
+    const volField = toStr(allFields.get('卷号'))
+    if (volField) {
+      const n = parseVolumeNumber(volField)
+      if (n != null) detail.volume = n
+    }
   }
   // 引用块形如 "> 节奏对齐：情绪值 7、爽点类型 2"
   const rhythmMatch = body.match(/节奏对齐[：:]\s*情绪值\s*(\d+(?:\.\d+)?)[，,、]\s*爽点类型\s*(\d+(?:\.\d+)?)/)
@@ -289,6 +401,20 @@ function extractFieldSubList(rawBody: string, fieldName: string): string | null 
 
 /** 从出场顺序文本提取角色名（匹配 "N. 角色名（...）" 或 "角色名（...）" 格式） */
 function parseCharacterList(text: string): string[] {
+  // 兼容单行「A → B → C」/「A -> B -> C」格式（变体格式里出场顺序常为一行）
+  if (/→|->/.test(text) && !text.includes('\n')) {
+    const parts = text.split(/→|->/).map((s) => s.trim()).filter(Boolean)
+    const chars: string[] = []
+    for (const part of parts) {
+      // 去掉括号内注释
+      const name = part.replace(/[（(].*$/, '').trim()
+      if (name && name.length > 0 && name.length <= 10 && !name.includes('，') && !name.includes('。') && !chars.includes(name)) {
+        chars.push(name)
+      }
+    }
+    if (chars.length > 0) return chars
+  }
+
   const chars: string[] = []
   const lines = text.split(/\n/)
   for (const line of lines) {

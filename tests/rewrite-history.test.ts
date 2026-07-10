@@ -5,6 +5,7 @@ import {
   popEntryAt,
   revertInDraft,
   applyToDraft,
+  findRewriteTarget,
   findEntryByViolationKey,
   pushRedo,
   popRedo,
@@ -192,6 +193,40 @@ describe('applyToDraft / revertInDraft (draft 操作)', () => {
     const draft = '第一段。\n\n他似乎在想什么。\n\n第三段。'
     const after = applyToDraft(draft, '他似乎在想什么', '他沉默了一会儿')
     expect(after).toBe('第一段。\n\n他沉默了一会儿。\n\n第三段。')
+  })
+})
+
+describe('findRewriteTarget（审核摘录回填）', () => {
+  it('matches context snippets with edge omissions and collapsed whitespace', () => {
+    const draft = '前文。\n\n顶流女嘉宾看着光鲜亮丽，但林若初在躲、唐小棠在远、宋以安在假、周小鹿在空。\n\n后文。'
+    const snippet = '…顶流女嘉宾看着光鲜亮丽，但林若初在躲、唐小棠在远、宋以安在假、周小鹿在空。…'
+    const rewritten = '……顶流女嘉宾看着一个比一个光鲜，其实没一个省油的灯。林若初在躲，唐小棠在划清界限，宋以安在装，周小鹿全程打酱油。……'
+
+    const target = findRewriteTarget(draft, snippet, rewritten)
+
+    expect(target).toEqual({
+      start: 5,
+      end: 42,
+      oldSnippet: '顶流女嘉宾看着光鲜亮丽，但林若初在躲、唐小棠在远、宋以安在假、周小鹿在空。',
+      replacement: '顶流女嘉宾看着一个比一个光鲜，其实没一个省油的灯。林若初在躲，唐小棠在划清界限，宋以安在装，周小鹿全程打酱油。'
+    })
+  })
+
+  it('returns null when neither exact nor normalized context can be found', () => {
+    const target = findRewriteTarget('正文里没有这段。', '…不存在的片段…', '改写')
+    expect(target).toBeNull()
+  })
+
+  it('treats bullet-style edge omissions as display markers', () => {
+    const draft = '顶流女嘉宾看着光鲜亮丽，但周小鹿在空。'
+    const target = findRewriteTarget(
+      draft,
+      '•••顶流女嘉宾看着光鲜亮丽，但周小鹿在空。•••',
+      '•••顶流女嘉宾看着一个比一个光鲜，周小鹿全程打酱油。•••'
+    )
+
+    expect(target?.oldSnippet).toBe(draft)
+    expect(target?.replacement).toBe('顶流女嘉宾看着一个比一个光鲜，周小鹿全程打酱油。')
   })
 })
 

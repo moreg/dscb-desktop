@@ -326,6 +326,10 @@ a:hover { color: var(--vermilion); }
   margin: 0 auto;
   padding: 32px 36px 80px;
 }
+.main-inner.projects-wide {
+  max-width: min(1740px, calc(100vw - var(--sidebar-w) - 64px));
+  padding: 36px clamp(28px, 3vw, 52px) 80px;
+}
 .main-inner.wide { max-width: min(1580px, calc(100vw - 72px)); }
 .main-inner.editor-wide {
   max-width: none;
@@ -478,8 +482,8 @@ a:hover { color: var(--vermilion); }
    ========================================================= */
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
 }
 .project-card {
   background: var(--surface);
@@ -494,6 +498,7 @@ a:hover { color: var(--vermilion); }
   text-align: left;
   font-family: var(--font-sans);
   color: inherit;
+  min-height: 154px;
 }
 .project-card:hover {
   border-color: var(--vermilion);
@@ -1606,6 +1611,35 @@ hr.soft {
   grid-column: 3;
 }
 
+.chapter-flow-panel {
+  position: fixed;
+  top: 84px;
+  right: 24px;
+  z-index: 70;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 108px);
+  margin: 0 !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-shadow: var(--shadow-lg);
+  scrollbar-gutter: stable;
+}
+
+.chapter-flow-panel.dragging {
+  user-select: none;
+}
+
+.chapter-flow-panel .ep-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -14px -16px 10px;
+  padding: 14px 16px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+  cursor: move;
+}
+
 .chapter-main-pane .editor-text {
   margin-top: 0 !important;
   min-height: calc(100vh - 200px);
@@ -2143,6 +2177,23 @@ pre.body {
 }
 .outline-detail-list li {
   margin: 0 0 2px;
+}
+.outline-detail-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.outline-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  line-height: 1.7;
 }
 @media (max-width: 640px) {
   .outline-detail-field {

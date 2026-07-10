@@ -6,12 +6,13 @@ interface Props {
   onCompleted: () => void
 }
 
-type Step = 'brain' | 'settings' | 'volume' | 'done'
+type Step = 'brain' | 'settings' | 'volume' | 'chapters' | 'done'
 
 const STEP_LABELS: Record<Step, string> = {
   brain: '1 · 脑洞',
   settings: '2 · 核心设定',
   volume: '3 · 卷级大纲',
+  chapters: '4 · 前 N 章细纲',
   done: '完成'
 }
 
@@ -62,9 +63,15 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
   const [volumeOutline, setVolumeOutline] = useState(() => {
     return localStorage.getItem(cacheKey('volumeOutline')) || ''
   })
+  const [chaptersMd, setChaptersMd] = useState(() => {
+    return localStorage.getItem(cacheKey('chaptersMd')) || ''
+  })
 
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
+  const [rhythmPreview, setRhythmPreview] = useState('')
+  const [rhythmLoading, setRhythmLoading] = useState(false)
+  const [consistencyReport, setConsistencyReport] = useState<{ passed: boolean; stats: { total: number; blocking: number; advisory: number }; violations: Array<{ check: number; checkName: string; severity: string; file: string; detail: string; fix: string }> } | null>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   // 监听状态改变并自动同步到 localStorage
   useEffect(() => {
@@ -82,6 +89,10 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
   useEffect(() => {
     localStorage.setItem(cacheKey('volumeOutline'), volumeOutline)
   }, [volumeOutline])
+
+  useEffect(() => {
+    localStorage.setItem(cacheKey('chaptersMd'), chaptersMd)
+  }, [chaptersMd])
 
   // Esc 关闭（流式生成时禁止，避免中断）；打开时聚焦对话框
   useEffect(() => {
@@ -104,6 +115,7 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
     localStorage.removeItem(cacheKey('brainDump'))
     localStorage.removeItem(cacheKey('coreSettings'))
     localStorage.removeItem(cacheKey('volumeOutline'))
+    localStorage.removeItem(cacheKey('chaptersMd'))
   }
 
   // 重置/清空重来
@@ -113,6 +125,7 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
       setBrainDump('')
       setCoreSettings('')
       setVolumeOutline('')
+      setChaptersMd('')
       clearCache()
     }
   }
@@ -184,6 +197,50 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
     )
   }
 
+  // Step 3 → 4：生成前 N 章细纲
+  const genFirstChapters = async (): Promise<void> => {
+    if (!volumeOutline.trim()) {
+      setError('卷级大纲为空')
+      return
+    }
+    setStep('chapters')
+    setChaptersMd('')
+    await streamCall(
+      (onToken) =>
+        window.api.openingFirstChaptersStream(
+          projectId,
+          coreSettings,
+          volumeOutline,
+          1,
+          10,
+          onToken
+        ),
+      (md) => setChaptersMd(md)
+    )
+  }
+
+  // 预览节奏图谱（不落盘，Step2 大纲确认后、Step3 细纲生成前可调）
+  const previewRhythm = async (): Promise<void> => {
+    if (!volumeOutline.trim()) {
+      setError('卷级大纲为空，无法生成节奏图谱')
+      return
+    }
+    setRhythmLoading(true)
+    setError('')
+    try {
+      const res = await window.api.generateRhythm(projectId, volumeOutline)
+      if (res.ok && res.html) {
+        setRhythmPreview(res.html)
+      } else {
+        setError(res.error ?? '节奏图谱生成失败')
+      }
+    } catch (err) {
+      setError(friendlyError((err as Error).message))
+    } finally {
+      setRhythmLoading(false)
+    }
+  }
+
 
 
   // 续写：从已有内容断点继续生成核心设定
@@ -208,6 +265,26 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
     if (ok) setError('')
   }
 
+  // 续写：从已有内容断点继续生成前 N 章细纲
+  const continueFirstChapters = async (): Promise<void> => {
+    if (!chaptersMd.trim()) return
+    const ok = await streamCall(
+      (onToken) =>
+        window.api.continueFirstChaptersStream(
+          projectId,
+          coreSettings,
+          volumeOutline,
+          1,
+          10,
+          chaptersMd,
+          onToken
+        ),
+      (md) => setChaptersMd(md),
+      chaptersMd
+    )
+    if (ok) setError('')
+  }
+
 
 
   // Step 4：落盘
@@ -215,7 +292,16 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
     setStreaming(true)
     setError('')
     try {
-      await window.api.persistOpening(projectId, coreSettings, volumeOutline)
+      const res = await window.api.persistOpening(
+        projectId,
+        coreSettings,
+        volumeOutline,
+        chaptersMd || undefined,
+        chaptersMd ? 1 : undefined
+      )
+      if (res?.consistencyReport) {
+        setConsistencyReport(res.consistencyReport)
+      }
       setStep('done')
     } catch (err) {
       setError(friendlyError((err as Error).message))
@@ -240,12 +326,12 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
           <h3 style={{ borderBottom: 'none', margin: 0, paddingBottom: 0 }}>🚀 开书向导</h3>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ display: 'flex', gap: 6, fontSize: 12 }}>
-              {(['brain', 'settings', 'volume', 'done'] as Step[]).map((s, i) => (
+              {(['brain', 'settings', 'volume', 'chapters', 'done'] as Step[]).map((s, i) => (
                 <span
                   key={s}
                   className={`filter-chip ${step === s ? 'active' : ''}`}
                   style={{
-                    opacity: step === s || i < (['brain', 'settings', 'volume', 'done'] as Step[]).indexOf(step) ? 1 : 0.5,
+                    opacity: step === s || i < (['brain', 'settings', 'volume', 'chapters', 'done'] as Step[]).indexOf(step) ? 1 : 0.5,
                     cursor: 'default',
                     whiteSpace: 'nowrap'
                   }}
@@ -337,29 +423,122 @@ export default function OpeningDialog({ projectId, onClose, onCompleted }: Props
 
         {/* Step 3：卷级大纲 */}
         {step === 'volume' ? (
+          <>
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => void previewRhythm()}
+                disabled={streaming || rhythmLoading || !volumeOutline.trim()}
+              >
+                {rhythmLoading ? '📐 生成中…' : '📐 预览节奏图谱'}
+              </button>
+            </div>
+            <StepEditor
+              title="卷级大纲（可编辑确认）"
+              value={volumeOutline}
+              onChange={setVolumeOutline}
+              streaming={streaming}
+              error={error}
+              onNext={() => void genFirstChapters()}
+              onPrev={() => setStep('settings')}
+              onRetry={() => void genVolumeOutline()}
+              onContinue={() => void continueVolumeOutline()}
+              nextLabel="✦ 生成前 10 章细纲"
+            />
+            {rhythmPreview ? (
+              <div
+                style={{
+                  position: 'fixed',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.5)',
+                  zIndex: 1000,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                onClick={() => setRhythmPreview('')}
+              >
+                <div
+                  style={{
+                    width: '90vw',
+                    height: '90vh',
+                    background: 'white',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column'
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 16px', borderBottom: '1px solid var(--line)' }}>
+                    <strong>📐 节奏图谱预览</strong>
+                    <button className="btn btn-ghost" onClick={() => setRhythmPreview('')} style={{ padding: '2px 8px' }}>✕</button>
+                  </div>
+                  <iframe
+                    srcDoc={rhythmPreview}
+                    style={{ flex: 1, border: 'none', width: '100%' }}
+                    sandbox="allow-scripts"
+                    title="节奏图谱预览"
+                  />
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+
+        {/* Step 4：前 N 章细纲 */}
+        {step === 'chapters' ? (
           <StepEditor
-            title="卷级大纲（可编辑确认）"
-            value={volumeOutline}
-            onChange={setVolumeOutline}
+            title="前 10 章细纲（可编辑确认）"
+            value={chaptersMd}
+            onChange={setChaptersMd}
             streaming={streaming}
             error={error}
             onNext={() => void persist()}
-            onPrev={() => setStep('settings')}
-            onRetry={() => void genVolumeOutline()}
-            onContinue={() => void continueVolumeOutline()}
+            onPrev={() => setStep('volume')}
+            onRetry={() => void genFirstChapters()}
+            onContinue={() => void continueFirstChapters()}
             nextLabel="💾 落盘保存"
           />
         ) : null}
 
         {/* 完成 */}
         {step === 'done' ? (
-          <div style={{ marginTop: 16, textAlign: 'center' }}>
+          <div style={{ marginTop: 16, textAlign: 'center', overflow: 'auto', flex: 1 }}>
             <p style={{ fontSize: 16 }}>✅ 开书完成！</p>
             <p className="meta" style={{ marginTop: 8 }}>
-              开书产物已按新技能结构落盘到「设定/」「大纲/」「追踪/」「图解/」。
-              其中主设定入口是「设定/题材定位.md」，卷级总纲在「大纲/大纲.md」，前 10 章细纲已同步到按卷文件和逐章文件。
+              开书产物已按新技能结构落盘到「设定/」「大纲/」「细纲/」「追踪/」「图解/」。
+              其中主设定入口是「设定/题材定位.md」，卷级总纲在「大纲/大纲.md」，前 10 章细纲在「细纲/细纲_第NNN章_标题.md」。
             </p>
             <p className="meta">现在可以开始续写正文了。建议先在「📐 大纲」页检查细纲，再逐章续写。</p>
+
+            {consistencyReport ? (
+              <div style={{ marginTop: 16, textAlign: 'left', background: 'var(--bg-2)', padding: 12, borderRadius: 6, maxHeight: 300, overflow: 'auto' }}>
+                <strong>
+                  {consistencyReport.passed
+                    ? '✅ 逻辑自洽检查通过'
+                    : `⚠️ 逻辑自洽检查发现 ${consistencyReport.stats.total} 项问题（blocking ${consistencyReport.stats.blocking} / advisory ${consistencyReport.stats.advisory}）`}
+                </strong>
+                {consistencyReport.violations.length > 0 ? (
+                  <ul style={{ marginTop: 8, paddingLeft: 20, fontSize: 12 }}>
+                    {consistencyReport.violations.map((v, i) => (
+                      <li key={i} style={{ marginBottom: 4 }}>
+                        <span style={{ color: v.severity === 'blocking' ? '#dc2626' : '#d97706', fontWeight: 600 }}>
+                          [{v.severity === 'blocking' ? '必须修' : '建议'}]
+                        </span>{' '}
+                        <span style={{ fontWeight: 600 }}>{v.checkName}</span>{' '}
+                        <span style={{ color: 'var(--ink-3)' }}>{v.file}</span>
+                        <div style={{ color: 'var(--ink-2)' }}>→ {v.detail}</div>
+                        <div style={{ color: 'var(--ink-3)', fontSize: 11 }}>修复：{v.fix}</div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="meta" style={{ marginTop: 8 }}>6 项硬性检查全部通过，无 blocking 违规。</p>
+                )}
+              </div>
+            ) : null}
+
             <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={handleCompleted}>
               完成，开始写作
             </button>

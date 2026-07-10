@@ -268,7 +268,9 @@ export function registerOpeningIpc(service: OpeningService): void {
   const persistSchema = z.object({
     projectId: projectIdSchema,
     coreSettings: coreSettingsSchema,
-    volumeOutline: volumeOutlineSchema
+    volumeOutline: volumeOutlineSchema,
+    chaptersMd: chaptersMdSchema.optional(),
+    fromChapter: chapterNumberSchema.optional()
   })
 
   ipcMain.handle('opening:persist', async (_e, payload: unknown) => {
@@ -276,7 +278,28 @@ export function registerOpeningIpc(service: OpeningService): void {
     return service.persistOpening(
       validated.projectId,
       validated.coreSettings,
-      validated.volumeOutline
+      validated.volumeOutline,
+      validated.chaptersMd,
+      validated.fromChapter
     )
+  })
+
+  /* 节奏图谱预览：大纲确认后、细纲生成前生成 HTML（不落盘） */
+  const generateRhythmSchema = z.object({
+    projectId: projectIdSchema,
+    volumeOutline: volumeOutlineSchema
+  })
+
+  ipcMain.handle('opening:generateRhythm', async (_e, payload: unknown) => {
+    const validated = validateInput(generateRhythmSchema, payload)
+    try {
+      const html = await service.generateRhythmHtml(
+        validated.projectId,
+        validated.volumeOutline
+      )
+      return { ok: true as const, html }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message }
+    }
   })
 }

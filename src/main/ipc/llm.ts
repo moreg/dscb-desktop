@@ -2,6 +2,8 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { safeHandle } from './safe-handle'
 import { LlmService } from '../data/llm-service'
 import { SecretStore } from '../data/secret-store'
+import { listAntigravityModels } from '../data/antigravity-runner'
+import { listCodexModels } from '../data/codex-runner'
 import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../../shared/types'
 
 /**
@@ -19,16 +21,23 @@ function maskKey(apiKey: string): string {
 }
 
 function summarize(p: ProviderConfig): ProviderSummary {
+  const proto = p.protocol ?? 'openai'
+  const isCli = proto === 'antigravity' || proto === 'codex'
   return {
     id: p.id,
     label: p.label,
     homepage: p.homepage,
     baseUrl: p.baseUrl,
     model: p.model,
-    protocol: p.protocol ?? 'openai',
+    protocol: proto,
     temperature: p.temperature,
-    hasKey: Boolean(p.apiKey),
-    keyMasked: maskKey(p.apiKey)
+    // CLI 协议靠本机登录态，无需 apiKey，视为已配置
+    hasKey: isCli || Boolean(p.apiKey),
+    keyMasked: proto === 'antigravity'
+      ? 'agy 登录态'
+      : proto === 'codex'
+        ? 'codex 登录态'
+        : maskKey(p.apiKey)
   }
 }
 
@@ -43,10 +52,37 @@ function sanitizeProvider(input: unknown): ProviderConfig {
   const apiKeyRaw = typeof o.apiKey === 'string' ? o.apiKey : ''
   const homepage = typeof o.homepage === 'string' ? o.homepage.trim() : undefined
   const protocolRaw = o.protocol
-  const protocol: 'openai' | 'anthropic' = protocolRaw === 'anthropic' ? 'anthropic' : 'openai'
+  const protocol: 'openai' | 'anthropic' | 'antigravity' | 'codex' =
+    protocolRaw === 'anthropic' ? 'anthropic'
+    : protocolRaw === 'antigravity' ? 'antigravity'
+    : protocolRaw === 'codex' ? 'codex'
+    : 'openai'
   if (!id) throw new Error('PROVIDER_INVALID: missing id')
   if (!label) throw new Error('PROVIDER_INVALID: missing label')
-  // 严格 URL 校验：必须是 http(s) 且能 new URL 解析
+  // CLI 协议（antigravity/codex）：走本机 CLI，无需 baseUrl/apiKey，model 可空（走默认）
+  if (protocol === 'antigravity' || protocol === 'codex') {
+    let temperature: number | undefined
+    if (
+      typeof o.temperature === 'number' &&
+      Number.isFinite(o.temperature) &&
+      !Number.isNaN(o.temperature)
+    ) {
+      temperature = Math.min(2, Math.max(0, o.temperature))
+    }
+    const placeholderUrl = protocol === 'antigravity' ? 'antigravity://local' : 'codex://local'
+    const out: ProviderConfig = {
+      id,
+      label,
+      baseUrl: baseUrl || placeholderUrl,
+      model: model || 'default',
+      apiKey: apiKeyRaw,
+      protocol,
+      ...(homepage ? { homepage } : {}),
+      ...(temperature !== undefined ? { temperature } : {})
+    }
+    return out
+  }
+  // 非 antigravity：要求合法 http(s) URL + model
   if (!baseUrl) throw new Error('PROVIDER_INVALID: missing baseUrl')
   let parsedUrl: URL
   try {
@@ -132,14 +168,29 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   })
 
   // 是否存在任意已配置 key（仅判断 active provider）
+  // CLI 协议（antigravity/codex）靠本机登录态，无需 apiKey，视为已配置
   safeHandle('llm:hasKey', async (): Promise<boolean> => {
     const cfg = await secret.read()
-    return Boolean(cfg.activeId && cfg.providers.find((p) => p.id === cfg.activeId)?.apiKey)
+    if (!cfg.activeId) return false
+    const p = cfg.providers.find((x) => x.id === cfg.activeId)
+    if (!p) return false
+    if (p.protocol === 'antigravity' || p.protocol === 'codex') return true
+    return Boolean(p.apiKey)
   })
 
   // 联通测试
   safeHandle('llm:ping', async () => {
     return service.ping()
+  })
+
+  // 列出 agy 可用模型（供前端做模型下拉选择）
+  safeHandle('llm:listAntigravityModels', async (): Promise<string[]> => {
+    return listAntigravityModels()
+  })
+
+  // 列出 codex 可用模型（读 config.toml，供前端做模型选择）
+  safeHandle('llm:listCodexModels', async (): Promise<string[]> => {
+    return listCodexModels()
   })
 
   // 流式生成（保持原协议：onToken + requestId）

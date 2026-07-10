@@ -709,16 +709,28 @@ export default function OutlinePage({ projectId, onOpenChapter }: Props) {
 }
 
 function OutlineDetailField({ row }: { row: OutlineDetailRow }) {
+  // 角色出场用横排标签展示，其余列表字段保持竖排
+  const isInline = row.label === '角色出场'
   return (
     <section className="outline-detail-field">
       <div className="outline-detail-label">{row.label}</div>
       {row.value ? <div className="outline-detail-value">{row.value}</div> : null}
       {row.items && row.items.length > 0 ? (
-        <ul className="outline-detail-list">
-          {row.items.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
+        isInline ? (
+          <div className="outline-detail-inline">
+            {row.items.map((item) => (
+              <span key={item} className="outline-chip">
+                {item}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <ul className="outline-detail-list">
+            {row.items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        )
       ) : null}
     </section>
   )

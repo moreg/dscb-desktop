@@ -326,4 +326,135 @@ describe('registerLlmIpc handlers', () => {
     expect(p.apiKey).toBe(TEST_API_KEY) // 旧 key 保留
     expect(p.temperature).toBeCloseTo(1.1) // 新温度生效
   })
+
+  /* ---- antigravity 协议（agy CLI）---- */
+
+  it('llm:upsertProvider accepts antigravity protocol without baseUrl/apiKey', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_agy',
+      label: 'agy 主力',
+      baseUrl: '',
+      model: '',
+      apiKey: '',
+      protocol: 'antigravity'
+    })
+    const cfg = await store.read()
+    const p = cfg.providers[0]
+    expect(p.protocol).toBe('antigravity')
+    expect(p.apiKey).toBe('') // agy 不需要 key
+    expect(p.model).toBe('default') // 空 model 被填充为 default
+    expect(p.baseUrl).toBe('antigravity://local')
+  })
+
+  it('llm:listProviders reports antigravity provider as hasKey=true', async () => {
+    await store.write({
+      activeId: 'p_agy',
+      providers: [
+        {
+          id: 'p_agy',
+          label: 'agy',
+          baseUrl: 'antigravity://local',
+          model: 'default',
+          apiKey: '',
+          protocol: 'antigravity'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:listProviders')
+    const out = (await handler!(null)) as {
+      providers: Array<{ hasKey: boolean; keyMasked: string; protocol: string }>
+    }
+    expect(out.providers[0].hasKey).toBe(true) // agy 靠 OAuth，视为已配置
+    expect(out.providers[0].protocol).toBe('antigravity')
+    expect(out.providers[0].keyMasked).toBe('agy 登录态')
+  })
+
+  it('llm:hasKey returns true for active antigravity provider (no apiKey needed)', async () => {
+    await store.write({
+      activeId: 'p_agy',
+      providers: [
+        {
+          id: 'p_agy',
+          label: 'agy',
+          baseUrl: 'antigravity://local',
+          model: 'default',
+          apiKey: '',
+          protocol: 'antigravity'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:hasKey')
+    const result = (await handler!(null)) as boolean
+    expect(result).toBe(true) // 关键：agy provider 无 apiKey 但应通过检查
+  })
+
+  it('llm:hasKey returns false when no active provider configured', async () => {
+    await store.write({ activeId: '', providers: [] })
+    const handler = handlers.get('llm:hasKey')
+    const result = (await handler!(null)) as boolean
+    expect(result).toBe(false)
+  })
+
+  /* ---- codex 协议（codex CLI）---- */
+
+  it('llm:upsertProvider accepts codex protocol without baseUrl/apiKey', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_codex',
+      label: 'codex 主力',
+      baseUrl: '',
+      model: '',
+      apiKey: '',
+      protocol: 'codex'
+    })
+    const cfg = await store.read()
+    const p = cfg.providers[0]
+    expect(p.protocol).toBe('codex')
+    expect(p.apiKey).toBe('')
+    expect(p.model).toBe('default')
+    expect(p.baseUrl).toBe('codex://local')
+  })
+
+  it('llm:listProviders reports codex provider as hasKey=true with codex 登录态', async () => {
+    await store.write({
+      activeId: 'p_codex',
+      providers: [
+        {
+          id: 'p_codex',
+          label: 'codex',
+          baseUrl: 'codex://local',
+          model: 'default',
+          apiKey: '',
+          protocol: 'codex'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:listProviders')
+    const out = (await handler!(null)) as {
+      providers: Array<{ hasKey: boolean; keyMasked: string; protocol: string }>
+    }
+    expect(out.providers[0].hasKey).toBe(true)
+    expect(out.providers[0].protocol).toBe('codex')
+    expect(out.providers[0].keyMasked).toBe('codex 登录态')
+  })
+
+  it('llm:hasKey returns true for active codex provider (no apiKey needed)', async () => {
+    await store.write({
+      activeId: 'p_codex',
+      providers: [
+        {
+          id: 'p_codex',
+          label: 'codex',
+          baseUrl: 'codex://local',
+          model: 'default',
+          apiKey: '',
+          protocol: 'codex'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:hasKey')
+    const result = (await handler!(null)) as boolean
+    expect(result).toBe(true)
+  })
 })

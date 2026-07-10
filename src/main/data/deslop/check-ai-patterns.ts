@@ -34,6 +34,8 @@ const TAG_PARTICLES = new Set(['吗', '吧', '嘛'])
 export interface ScanOptions {
   /** 项目级白名单（豁免词，命中不报） */
   whitelist?: Set<string>
+  /** 用户配置的禁用词表（覆盖内置 FLATTENED_LEVEL1）；缺省 = 用内置默认 */
+  bannedWords?: string[]
 }
 
 /**
@@ -56,8 +58,8 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
   // 3. Gate A 句式：toxic patterns
   findings.push(...scanToxicPatterns(proseLines))
 
-  // 4. Gate A 禁用词
-  findings.push(...scanBannedWords(proseLines, opts.whitelist))
+  // 4. Gate A 禁用词（用户配置优先，否则内置默认）
+  findings.push(...scanBannedWords(proseLines, opts.bannedWords ?? FLATTENED_LEVEL1, opts.whitelist))
 
   // 5. Gate B 排比
   findings.push(...scanParallelism(proseLines))
@@ -368,9 +370,13 @@ function scanToxicPatterns(proseLines: ProseLine[]): DeslopFinding[] {
   return findings
 }
 
-function scanBannedWords(proseLines: ProseLine[], whitelist?: Set<string>): DeslopFinding[] {
+function scanBannedWords(
+  proseLines: ProseLine[],
+  bannedWords: string[],
+  whitelist?: Set<string>
+): DeslopFinding[] {
   const findings: DeslopFinding[] = []
-  const words = FLATTENED_LEVEL1.filter((w) => !whitelist?.has(w))
+  const words = bannedWords.filter((w) => !whitelist?.has(w))
   for (const { text, lineNo } of proseLines) {
     for (const word of words) {
       let idx = text.indexOf(word)

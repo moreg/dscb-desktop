@@ -24,7 +24,7 @@ export interface CreateProjectInput {
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
-export type ProviderProtocol = 'openai' | 'anthropic'
+export type ProviderProtocol = 'openai' | 'anthropic' | 'antigravity' | 'codex'
 
 export interface ProviderConfig {
   id: string
@@ -42,6 +42,11 @@ export interface ProviderConfig {
    * 请求协议：
    * - 'openai'（默认）：POST {baseUrl}/chat/completions，Authorization: Bearer
    * - 'anthropic'：POST {baseUrl}/v1/messages，x-api-key + anthropic-version
+   * - 'antigravity'：调用本机 agy CLI（`agy -p` 子进程），用 Google 登录态，不走 HTTP。
+   *   此时 baseUrl 可空（占位符即可）、apiKey 可空（靠本机 OAuth 登录）、
+   *   model 为 agy 模型显示名（可空，走 agy 默认）。
+   * - 'codex'：调用本机 codex CLI（`codex exec` 子进程），用 ChatGPT 登录态，不走 HTTP。
+   *   此时 baseUrl 可空、apiKey 可空、model 为 codex 模型名（可空，走 config.toml 默认）。
    */
   protocol?: ProviderProtocol
   /**
@@ -239,6 +244,41 @@ export interface ChapterRulesBundle {
   overrides: Record<string, string>
 }
 
+/** 一条可编辑的去 AI 味规则小节（renderer 视图：标题 + 内置默认正文） */
+export interface DeslopRuleSectionView {
+  key: string
+  title: string
+  defaultText: string
+}
+
+/** 一条只读展示的去 AI 味规则（正则类，锁定不可编辑，避免写错正则让扫描崩溃） */
+export interface DeslopLockedSectionView {
+  key: string
+  title: string
+  /** 多行展示内容（每条规则一行） */
+  content: string
+}
+
+/** getDeslopRules 返回：可编辑分节 + 只读锁定区 + 当前覆盖 + 禁用词表 */
+export interface DeslopRulesBundle {
+  /** 可编辑分节（系统铁律 + Gate A-G） */
+  sections: DeslopRuleSectionView[]
+  /** 锁定只读区（最毒句式正则、排比正则、心理词） */
+  lockedSections: DeslopLockedSectionView[]
+  /** 当前文本覆盖（key→正文） */
+  overrides: Record<string, string>
+  /** 当前禁用词表（未配置时 = 内置默认） */
+  bannedWords: string[]
+}
+
+/** 去 AI 味规则配置（settings.deslopRules，可被用户编辑后真正生效） */
+export interface DeslopRulesConfig {
+  /** 文本规则覆盖：systemPrompt / gateA-G。缺 key = 用内置默认；空串 = 该节停用 */
+  textOverrides?: Record<string, string>
+  /** 禁用词表（注入确定性扫描器 + LLM 改写 prompt）；缺省 = 用内置默认 */
+  bannedWords?: string[]
+}
+
 /** 自定义检查项的检测类型（用户在 UI 选）。 */
 export type CustomCheckType = 'keyword' | 'regex' | 'llm'
 
@@ -412,6 +452,10 @@ export interface RendererApi {
   configureLlm: (apiKey: string) => Promise<boolean>
   hasLlmKey: () => Promise<boolean>
   pingLlm: () => Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }>
+  /** 列出 agy CLI 可用模型（供 antigravity provider 的模型下拉选择） */
+  listAntigravityModels: () => Promise<string[]>
+  /** 列出 codex CLI 可用模型（读 config.toml，供 codex provider 的模型选择） */
+  listCodexModels: () => Promise<string[]>
   listProviders: () => Promise<ListProvidersResult>
   upsertProvider: (p: ProviderConfig) => Promise<ProviderConfig>
   deleteProvider: (id: string) => Promise<void>
@@ -449,6 +493,14 @@ export interface RendererApi {
     styleProfileId: string | null | undefined,
     tempContext: string | undefined,
     existingText: string | undefined,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  adjustChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
   getProjectsRoot: () => Promise<string>
@@ -643,6 +695,18 @@ export interface RendererApi {
   getDeslopWhitelist: (projectId: string) => Promise<string[]>
   /** 写入项目级去 AI 味白名单 */
   setDeslopWhitelist: (projectId: string, words: string[]) => Promise<string[]>
+  /** 读取去 AI 味规则（可编辑分节 + 只读锁定区 + 当前覆盖 + 禁用词表） */
+  getDeslopRules: () => Promise<DeslopRulesBundle>
+  /** 保存去 AI 味规则（文本覆盖 + 禁用词表），保存后真正生效 */
+  setDeslopRules: (cfg: {
+    textOverrides: Record<string, string>
+    bannedWords: string[]
+  }) => Promise<DeslopRulesBundle>
+  /** 用自然语言让 AI 改写去 AI 味规则（流式输出完整 Markdown，完成后前端解析拆分） */
+  editDeslopRulesStream: (
+    instruction: string,
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<string>
   /* ---- 封面生成（story-cover）---- */
   /** 生成封面（调图像 API），返回封面文件信息 */
   generateCover: (input: GenerateCoverInput) => Promise<CoverFile>

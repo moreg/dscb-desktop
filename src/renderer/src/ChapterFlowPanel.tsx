@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
   AuditReport,
   ChapterReviewReport,
@@ -118,6 +119,61 @@ export default function ChapterFlowPanel(props: Props) {
   const [reviewReport, setReviewReport] = useState<ChapterReviewReport | null>(null)
   const [reportLoading, setReportLoading] = useState(false)
   const [reportError, setReportError] = useState('')
+  const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
+  const [panelDragging, setPanelDragging] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const panelDragRef = useRef<{ offsetX: number; offsetY: number; width: number } | null>(null)
+
+  const clampPanelPosition = (left: number, top: number, width: number) => {
+    const margin = 8
+    const maxLeft = Math.max(margin, window.innerWidth - width - margin)
+    const maxTop = Math.max(margin, window.innerHeight - 80)
+    return {
+      left: Math.min(Math.max(margin, left), maxLeft),
+      top: Math.min(Math.max(margin, top), maxTop)
+    }
+  }
+
+  const startPanelDrag = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.closest('button, a, input, select, textarea')) return
+
+    const rect = panelRef.current?.getBoundingClientRect()
+    if (!rect) return
+
+    panelDragRef.current = {
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      width: rect.width
+    }
+    setPanelPosition(clampPanelPosition(rect.left, rect.top, rect.width))
+    setPanelDragging(true)
+    e.preventDefault()
+  }
+
+  useEffect(() => {
+    if (!panelDragging) return
+
+    const handleMove = (e: MouseEvent) => {
+      const drag = panelDragRef.current
+      if (!drag) return
+      setPanelPosition(
+        clampPanelPosition(e.clientX - drag.offsetX, e.clientY - drag.offsetY, drag.width)
+      )
+    }
+
+    const handleUp = () => {
+      setPanelDragging(false)
+      panelDragRef.current = null
+    }
+
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+    }
+  }, [panelDragging])
 
   const generateReport = async () => {
     if (!draft.trim()) return
@@ -386,8 +442,12 @@ export default function ChapterFlowPanel(props: Props) {
   }, [syncAllTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="editor-panel" style={{ marginTop: 12 }}>
-      <div className="ep-head">
+    <div
+      ref={panelRef}
+      className={`editor-panel chapter-flow-panel${panelDragging ? ' dragging' : ''}`}
+      style={panelPosition ? { left: panelPosition.left, top: panelPosition.top } : undefined}
+    >
+      <div className="ep-head" onMouseDown={startPanelDrag}>
         <div className="ep-title">续写流程面板</div>
         <div className="btn-group">
           <button

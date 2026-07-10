@@ -7,6 +7,8 @@ import type {
   ProjectUsage,
   ChapterUsage,
   ChapterRuleSectionView,
+  DeslopRuleSectionView,
+  DeslopLockedSectionView,
   ReviewCheckSectionView,
   ReviewRulesConfig,
   ReviewCheckId,
@@ -50,6 +52,63 @@ function mergeRuleDrafts(
   return drafts
 }
 
+/** 去 AI 味规则：由分节清单 + 覆盖表合成文本草稿（逻辑同 mergeRuleDrafts，类型独立） */
+function mergeDeslopDrafts(
+  sections: DeslopRuleSectionView[],
+  overrides: Record<string, string>
+): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const s of sections) drafts[s.key] = overrides[s.key] ?? s.defaultText
+  return drafts
+}
+
+/**
+ * 把 AI 输出的完整 Markdown 解析回各分节草稿 + 禁用词。
+ * 与 main 端 parseDeslopRulesFromMd 逻辑一致（按 ## 二级标题切节），前端独立实现避免类型穿透。
+ * 只识别已知的节标题，未知节丢弃。
+ */
+function parseDeslopRulesMd(
+  md: string,
+  sections: DeslopRuleSectionView[]
+): { overrides: Record<string, string>; bannedWords: string[] } {
+  const titleByKey = new Map(sections.map((s) => [s.title, s.key]))
+  const overrides: Record<string, string> = {}
+  let bannedWords: string[] = []
+  const lines = md.split(/\r?\n/)
+  let curTitle = ''
+  let curBody: string[] = []
+  const flush = (): void => {
+    if (!curTitle) return
+    const body = curBody.join('\n').replace(/\s+$/u, '')
+    if (curTitle === '禁用词表（每行一个词）') {
+      const seen = new Set<string>()
+      const words: string[] = []
+      for (const raw of body.split(/\r?\n/)) {
+        const w = raw.trim()
+        if (!w || seen.has(w)) continue
+        seen.add(w)
+        words.push(w)
+      }
+      bannedWords = words
+      return
+    }
+    const key = titleByKey.get(curTitle)
+    if (key) overrides[key] = body
+  }
+  for (const line of lines) {
+    const m = /^##\s+(.+?)\s*$/u.exec(line)
+    if (m) {
+      flush()
+      curTitle = m[1].trim()
+      curBody = []
+    } else if (curTitle) {
+      curBody.push(line)
+    }
+  }
+  flush()
+  return { overrides, bannedWords }
+}
+
 export default function SettingsPage(_: Props) {
   const [activeTab, setActiveTab] = useState('appearance')
   const writingTemplateApi = window.api as typeof window.api & {
@@ -68,6 +127,7 @@ export default function SettingsPage(_: Props) {
     { id: 'writing', label: '写作节奏' },
     { id: 'writingReq', label: '写作要求' },
     { id: 'writingRules', label: '续写规则' },
+    { id: 'deslopRules', label: '去AI味规则' },
     { id: 'reviewRules', label: '审稿规则' }
   ] as const
 
@@ -119,6 +179,16 @@ export default function SettingsPage(_: Props) {
   // 续写规则分节编辑：内置小节清单 + 本地草稿（预填生效正文）
   const [ruleSections, setRuleSections] = useState<ChapterRuleSectionView[]>([])
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({})
+
+  // 去 AI 味规则：可编辑分节草稿 + 只读锁定区 + 禁用词草稿 + AI 改写相关
+  const [deslopSections, setDeslopSections] = useState<DeslopRuleSectionView[]>([])
+  const [deslopLockedSections, setDeslopLockedSections] = useState<DeslopLockedSectionView[]>([])
+  const [deslopDrafts, setDeslopDrafts] = useState<Record<string, string>>({})
+  const [deslopBannedDraft, setDeslopBannedDraft] = useState('')
+  const [deslopEditInstruction, setDeslopEditInstruction] = useState('')
+  const [deslopEditing, setDeslopEditing] = useState(false)
+  const [deslopEditPreview, setDeslopEditPreview] = useState('')
+  const deslopEditGenRef = useRef(0)
   const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
   // 审稿规则：检查项清单（含默认信息）+ 当前配置（开关/阈值/词表本地草稿）
   const [reviewSections, setReviewSections] = useState<ReviewCheckSectionView[]>([])
@@ -170,6 +240,14 @@ export default function SettingsPage(_: Props) {
       setRuleDrafts(mergeRuleDrafts(bundle.sections, bundle.overrides))
     })
   }
+  const refreshDeslopRules = () => {
+    void window.api.getDeslopRules().then((bundle) => {
+      setDeslopSections(bundle.sections)
+      setDeslopLockedSections(bundle.lockedSections)
+      setDeslopDrafts(mergeDeslopDrafts(bundle.sections, bundle.overrides))
+      setDeslopBannedDraft(bundle.bannedWords.join('\n'))
+    })
+  }
   const refreshReviewRules = () => {
     void window.api.getReviewRules().then((bundle) => {
       setReviewSections(bundle.sections)
@@ -205,6 +283,7 @@ export default function SettingsPage(_: Props) {
     refreshAiHighFreq()
     refreshWritingTemplates()
     refreshChapterRules()
+    refreshDeslopRules()
     refreshReviewRules()
     refreshByProject()
     refreshByChapter()
@@ -841,11 +920,18 @@ export default function SettingsPage(_: Props) {
                         })
                         return
                       }
-                      const saved = await writingTemplateApi.setWritingRequirementTemplates(
-                        normalized
-                      )
-                      setWritingTemplates(saved)
-                      setMsg({ kind: 'ok', text: '写作模板已保存' })
+                      try {
+                        const saved = await writingTemplateApi.setWritingRequirementTemplates(
+                          normalized
+                        )
+                        setWritingTemplates(saved)
+                        setMsg({ kind: 'ok', text: '写作模板已保存' })
+                      } catch (err) {
+                        setMsg({
+                          kind: 'err',
+                          text: `写作模板保存失败：${err instanceof Error ? err.message : String(err)}`
+                        })
+                      }
                     }}
                   >
                     保存模板
@@ -1083,6 +1169,257 @@ export default function SettingsPage(_: Props) {
                   )
                 })}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'deslopRules' && (
+            <div className="card" style={{ maxWidth: 760 }}>
+              <div
+                className="row"
+                style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}
+              >
+                <div>
+                  <h3 className="sub" style={{ margin: 0, fontSize: 15 }}>
+                    去 AI 味规则（分节可编辑）
+                  </h3>
+                  <p className="muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+                    这些规则会注入「去 AI 味」的扫描与改写。改完点「保存规则」生效——保存后影响正文润色、开书去 AI 等所有 deslop 流程。
+                    与内置默认完全相同的小节不会存储、仍随内置升级；清空某节等于停用该规则。最毒句式正则、排比正则、心理词是确定性扫描的内核，锁定只读，避免写错正则让扫描崩溃。
+                  </p>
+                </div>
+                <button
+                  className="btn btn-primary btn-sm"
+                  style={{ flexShrink: 0 }}
+                  disabled={deslopSections.length === 0}
+                  onClick={async () => {
+                    // 只保存与默认不同的 key（含清空=停用）；与默认相同的剔除，回到内置
+                    const pruned: Record<string, string> = {}
+                    for (const s of deslopSections) {
+                      const cur = deslopDrafts[s.key] ?? ''
+                      if (cur !== s.defaultText) pruned[s.key] = cur
+                    }
+                    // 禁用词表：按行 split、去空、去重；与默认等价时后端会自动 prune（不存储）
+                    const seen = new Set<string>()
+                    const bannedWords: string[] = []
+                    for (const raw of deslopBannedDraft.split(/\r?\n/)) {
+                      const w = raw.trim()
+                      if (!w || seen.has(w)) continue
+                      seen.add(w)
+                      bannedWords.push(w)
+                    }
+                    try {
+                      const saved = await window.api.setDeslopRules({
+                        textOverrides: pruned,
+                        bannedWords
+                      })
+                      setDeslopDrafts(mergeDeslopDrafts(saved.sections, saved.overrides))
+                      setDeslopBannedDraft(saved.bannedWords.join('\n'))
+                      setMsg({ kind: 'ok', text: '去 AI 味规则已保存' })
+                    } catch {
+                      setMsg({ kind: 'err', text: '保存失败，请重试' })
+                    }
+                  }}
+                >
+                  保存规则
+                </button>
+              </div>
+
+              {/* 可编辑分节：系统铁律 + Gate A-G */}
+              <div style={{ display: 'grid', gap: 16, marginTop: 14 }}>
+                {deslopSections.map((s) => {
+                  const cur = deslopDrafts[s.key] ?? ''
+                  const customized = cur !== s.defaultText
+                  return (
+                    <div key={s.key} className="field" style={{ marginBottom: 0 }}>
+                      <div className="row" style={{ marginBottom: 6 }}>
+                        <label style={{ margin: 0 }}>
+                          {s.title}{' '}
+                          <span
+                            className="meta"
+                            style={{
+                              marginLeft: 6,
+                              color: customized ? 'var(--vermilion)' : 'var(--ink-3)'
+                            }}
+                          >
+                            {customized ? '已自定义' : '默认'}
+                          </span>
+                        </label>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() =>
+                            setDeslopDrafts((prev) => ({ ...prev, [s.key]: s.defaultText }))
+                          }
+                          disabled={!customized}
+                        >
+                          恢复默认
+                        </button>
+                      </div>
+                      <textarea
+                        className="textarea"
+                        style={{ minHeight: 160, fontFamily: 'inherit', fontSize: 12.5 }}
+                        value={cur}
+                        onChange={(e) =>
+                          setDeslopDrafts((prev) => ({ ...prev, [s.key]: e.target.value }))
+                        }
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* 禁用词表（每行一个词） */}
+              <div className="field" style={{ marginBottom: 0, marginTop: 16 }}>
+                <div className="row" style={{ marginBottom: 6 }}>
+                  <label style={{ margin: 0 }}>禁用词表（每行一个词，扫描器与改写都会用到）</label>
+                </div>
+                <textarea
+                  className="textarea"
+                  style={{ minHeight: 120, fontFamily: 'inherit', fontSize: 12.5 }}
+                  placeholder="仿佛&#10;缓缓&#10;眼中闪过"
+                  value={deslopBannedDraft}
+                  onChange={(e) => setDeslopBannedDraft(e.target.value)}
+                />
+              </div>
+
+              {/* AI 自然语言改写区 */}
+              <div
+                className="field"
+                style={{
+                  marginTop: 16,
+                  padding: 12,
+                  border: '1px solid var(--border)',
+                  borderRadius: 6
+                }}
+              >
+                <label className="sub" style={{ margin: 0, fontSize: 13 }}>
+                  AI 改写规则（自然语言）
+                </label>
+                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                  用一句话描述想怎么改，例如「禁用词里加上『眼眸』和『凝视』，Gate B 增加对『与其说不如说』的处理」。
+                  AI 会流式输出改写后的完整规则，完成后自动填回各分节，可继续微调，最后点「保存规则」落盘。
+                </p>
+                <div className="row" style={{ gap: 8, marginTop: 8, alignItems: 'flex-end' }}>
+                  <textarea
+                    className="textarea"
+                    style={{ minHeight: 60, flex: 1, fontSize: 12.5 }}
+                    placeholder="描述你想怎么改去 AI 味规则……"
+                    value={deslopEditInstruction}
+                    onChange={(e) => setDeslopEditInstruction(e.target.value)}
+                    disabled={deslopEditing}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm"
+                    disabled={deslopEditing || !deslopEditInstruction.trim() || deslopSections.length === 0}
+                    onClick={async () => {
+                      const myGen = ++deslopEditGenRef.current
+                      setDeslopEditing(true)
+                      setDeslopEditPreview('')
+                      let accumulated = ''
+                      try {
+                        await window.api.editDeslopRulesStream(
+                          deslopEditInstruction.trim(),
+                          (token, done) => {
+                            if (deslopEditGenRef.current !== myGen) return
+                            if (token) {
+                              accumulated += token
+                              setDeslopEditPreview(accumulated)
+                            }
+                            if (done) setDeslopEditing(false)
+                          }
+                        )
+                        // 防竞态：若被新请求取代则不应用
+                        if (deslopEditGenRef.current !== myGen) return
+                        // 解析 AI 输出，拆分填回各分节 + 禁用词；保留 preview 供用户核对 AI 全貌
+                        const parsed = parseDeslopRulesMd(accumulated, deslopSections)
+                        setDeslopDrafts(mergeDeslopDrafts(deslopSections, parsed.overrides))
+                        setDeslopBannedDraft(parsed.bannedWords.join('\n'))
+                        setDeslopEditInstruction('')
+                        setMsg({ kind: 'ok', text: 'AI 已改写规则并填回，请检查后点「保存规则」' })
+                      } catch {
+                        if (deslopEditGenRef.current === myGen) {
+                          setDeslopEditPreview('') // 失败时清空，避免残留半截输出误导用户
+                          setMsg({ kind: 'err', text: 'AI 改写失败，请重试' })
+                        }
+                      } finally {
+                        if (deslopEditGenRef.current === myGen) setDeslopEditing(false)
+                      }
+                    }}
+                  >
+                    {deslopEditing ? '改写中…' : 'AI 改写'}
+                  </button>
+                </div>
+                {deslopEditPreview ? (
+                  <div style={{ marginTop: 8 }}>
+                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span className="muted" style={{ fontSize: 11.5 }}>
+                        {deslopEditing ? 'AI 输出中…' : 'AI 完整输出（已自动填回上方各分节）'}
+                      </span>
+                      {!deslopEditing ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setDeslopEditPreview('')}
+                        >
+                          收起预览
+                        </button>
+                      ) : null}
+                    </div>
+                    <pre
+                      style={{
+                        marginTop: 4,
+                        maxHeight: 320,
+                        overflow: 'auto',
+                        padding: 10,
+                        background: 'var(--bg-2, #f7f7f5)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}
+                    >
+                      {deslopEditPreview}
+                    </pre>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* 锁定只读区：最毒句式正则 / 排比正则 / 心理词 */}
+              {deslopLockedSections.length > 0 ? (
+                <div style={{ marginTop: 16 }}>
+                  <h4 className="sub" style={{ margin: '0 0 8px', fontSize: 13 }}>
+                    锁定规则（只读，确定性扫描内核）
+                  </h4>
+                  <div style={{ display: 'grid', gap: 10 }}>
+                    {deslopLockedSections.map((s) => (
+                      <div
+                        key={s.key}
+                        className="field"
+                        style={{
+                          marginBottom: 0,
+                          padding: 10,
+                          background: 'var(--bg-2, #f7f7f5)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 4
+                        }}
+                      >
+                        <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                          {s.title}
+                        </div>
+                        <pre
+                          style={{
+                            margin: 0,
+                            fontSize: 11.5,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word'
+                          }}
+                        >
+                          {s.content}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
 
@@ -1742,7 +2079,7 @@ function ProviderRow({
             </strong>
             {active ? <span className="chip-seal">当前</span> : null}
             {provider.hasKey ? (
-              <span className="chip chip-success" title="已配置 API Key">
+              <span className="chip chip-success" title="已配置">
                 ✓ {provider.keyMasked || 'Key'}
               </span>
             ) : (
@@ -1752,16 +2089,38 @@ function ProviderRow({
               className="chip"
               style={{
                 background:
-                  provider.protocol === 'anthropic' ? 'var(--inkstone-soft)' : 'var(--surface-2)',
+                  provider.protocol === 'anthropic'
+                    ? 'var(--inkstone-soft)'
+                    : provider.protocol === 'antigravity'
+                      ? 'var(--vermilion-soft, rgba(229,57,53,0.12))'
+                      : provider.protocol === 'codex'
+                        ? 'rgba(16,163,127,0.12)'
+                        : 'var(--surface-2)',
                 color:
-                  provider.protocol === 'anthropic' ? 'var(--inkstone)' : 'var(--ink-3)'
+                  provider.protocol === 'anthropic'
+                    ? 'var(--inkstone)'
+                    : provider.protocol === 'antigravity'
+                      ? 'var(--vermilion, #e53935)'
+                      : provider.protocol === 'codex'
+                        ? '#10a37f'
+                        : 'var(--ink-3)'
               }}
             >
-              {provider.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+              {provider.protocol === 'anthropic'
+                ? 'Anthropic'
+                : provider.protocol === 'antigravity'
+                  ? 'Antigravity (agy)'
+                  : provider.protocol === 'codex'
+                    ? 'Codex CLI'
+                    : 'OpenAI'}
             </span>
           </div>
           <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
-            {provider.baseUrl || '(未填 baseUrl)'} · {provider.model || '(未填 model)'}
+            {provider.protocol === 'antigravity'
+              ? `本机 agy CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'agy 默认模型'}`
+              : provider.protocol === 'codex'
+                ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
+                : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`}
           </div>
           {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
           <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -1819,30 +2178,82 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // CLI 协议的模型列表（切到对应协议时懒加载）
+  const [agyModels, setAgyModels] = useState<string[]>([])
+  const [agyModelsLoading, setAgyModelsLoading] = useState(false)
+  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexModelsLoading, setCodexModelsLoading] = useState(false)
+
+  const isAg = protocol === 'antigravity'
+  const isCodex = protocol === 'codex'
+  const isCli = isAg || isCodex
+
+  // 切到 antigravity 时拉取 agy 可用模型列表
+  useEffect(() => {
+    if (!isAg || agyModels.length > 0 || agyModelsLoading) return
+    let cancelled = false
+    setAgyModelsLoading(true)
+    window.api
+      .listAntigravityModels()
+      .then((list) => {
+        if (!cancelled) setAgyModels(list)
+      })
+      .catch(() => {
+        // 拉取失败不阻塞，回退为文本输入
+      })
+      .finally(() => {
+        if (!cancelled) setAgyModelsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isAg, agyModels.length, agyModelsLoading])
+
+  // 切到 codex 时拉取 codex 可用模型（读 config.toml 默认模型）
+  useEffect(() => {
+    if (!isCodex || codexModels.length > 0 || codexModelsLoading) return
+    let cancelled = false
+    setCodexModelsLoading(true)
+    window.api
+      .listCodexModels()
+      .then((list) => {
+        if (!cancelled) setCodexModels(list)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setCodexModelsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isCodex, codexModels.length, codexModelsLoading])
 
   const submit = async () => {
     setErr(null)
     if (!label.trim()) return setErr('请填写名称')
-    // 严格 URL 校验：必须能 new URL() 解析且协议是 http(s)
-    const baseUrlTrim = baseUrl.trim()
-    let parsed: URL
-    try {
-      parsed = new URL(baseUrlTrim)
-    } catch {
-      return setErr('baseUrl 不是合法 URL（需含协议与域名，如 https://api.example.com/v1）')
+    // CLI 协议（antigravity/codex）：无需 baseUrl/apiKey，model 可空（走默认）
+    if (!isCli) {
+      // 严格 URL 校验：必须能 new URL() 解析且协议是 http(s)
+      const baseUrlTrim = baseUrl.trim()
+      let parsed: URL
+      try {
+        parsed = new URL(baseUrlTrim)
+      } catch {
+        return setErr('baseUrl 不是合法 URL（需含协议与域名，如 https://api.example.com/v1）')
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return setErr('baseUrl 仅支持 http / https 协议')
+      }
+      if (!model.trim()) return setErr('请填写模型名')
     }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return setErr('baseUrl 仅支持 http / https 协议')
-    }
-    if (!model.trim()) return setErr('请填写模型名')
     setSaving(true)
     try {
       await window.api.upsertProvider({
         id: newId(),
         label: label.trim(),
-        baseUrl: baseUrlTrim.replace(/\/+$/, ''),
-        model: model.trim(),
-        apiKey: apiKey.trim(),
+        baseUrl: isAg ? '' : baseUrl.trim().replace(/\/+$/, ''),
+        model: isAg ? (model.trim() || 'default') : model.trim(),
+        apiKey: isAg ? '' : apiKey.trim(),
         protocol
       })
       setLabel('')
@@ -1867,26 +2278,71 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             placeholder="主力 / 备用 / DeepSeek"
           />
         </div>
-        <div className="field" style={{ flex: 2, marginBottom: 10 }}>
-          <label>Base URL</label>
-          <input
-            className="input"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-          />
-        </div>
+        {isCli ? (
+          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
+            <label>
+              模型
+              {isAg && agyModels.length > 0 ? `（${agyModels.length} 个可选）`
+                : isCodex && codexModels.length > 0 ? `（默认 ${codexModels[0]}）`
+                : '（可选）'}
+            </label>
+            {isAg && agyModels.length > 0 ? (
+              <select
+                className="select"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              >
+                <option value="">agy 默认模型</option>
+                {agyModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : isCodex ? (
+              <input
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  codexModels.length > 0
+                    ? `留空用 ${codexModels[0]}，或填其他模型名`
+                    : '留空用 codex 默认，或填模型名'
+                }
+              />
+            ) : (isAg && agyModelsLoading) || (isCodex && codexModelsLoading) ? (
+              <input className="input" disabled placeholder="加载模型列表…" />
+            ) : (
+              <input
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="无法拉取列表，请手动填模型显示名"
+              />
+            )}
+          </div>
+        ) : (
+          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
+            <label>Base URL</label>
+            <input
+              className="input"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://api.openai.com/v1"
+            />
+          </div>
+        )}
       </div>
       <div className="row" style={{ gap: 8 }}>
-        <div className="field" style={{ flex: 1, marginBottom: 10 }}>
-          <label>模型</label>
-          <input
-            className="input"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="例如 gpt-4o-mini / deepseek-chat"
-          />
-        </div>
+        {isCli ? null : (
+          <div className="field" style={{ flex: 1, marginBottom: 10 }}>
+            <label>模型</label>
+            <input
+              className="input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="例如 gpt-4o-mini / deepseek-chat"
+            />
+          </div>
+        )}
         <div className="field" style={{ flex: 1, marginBottom: 10 }}>
           <label>协议</label>
           <select
@@ -1896,24 +2352,46 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
           >
             <option value="openai">OpenAI 兼容</option>
             <option value="anthropic">Anthropic</option>
+            <option value="antigravity">Antigravity (agy CLI)</option>
+            <option value="codex">Codex (codex CLI)</option>
           </select>
         </div>
-        <div className="field" style={{ flex: 2, marginBottom: 10 }}>
-          <label>API Key</label>
-          <input
-            className="input"
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-…"
-          />
-        </div>
+        {isCli ? (
+          <div className="field" style={{ flex: 3, marginBottom: 10 }}>
+            <label>认证方式</label>
+            <div
+              className="meta"
+              style={{
+                padding: '8px 10px',
+                background: 'var(--surface-2)',
+                borderRadius: 6,
+                fontSize: 12
+              }}
+            >
+              {isAg
+                ? <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成 Google 登录。</>
+                : <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成 ChatGPT 登录。</>
+              }
+            </div>
+          </div>
+        ) : (
+          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
+            <label>API Key</label>
+            <input
+              className="input"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-…"
+            />
+          </div>
+        )}
       </div>
       <div className="row" style={{ gap: 8 }}>
         <button
           className="btn btn-primary btn-sm"
           onClick={submit}
-          disabled={saving || !label.trim() || !model.trim()}
+          disabled={saving || !label.trim() || (!isCli && !model.trim())}
         >
           {saving ? '保存中…' : '保存并设为默认'}
         </button>

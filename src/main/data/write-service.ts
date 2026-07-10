@@ -1,4 +1,5 @@
 import { join, dirname } from 'path'
+import { promises as fs } from 'fs'
 import type { ProjectService } from './project-service'
 import type { LlmService, GenerateOptions } from './llm-service'
 import { OutlineRepository } from './outline-repository'
@@ -20,6 +21,10 @@ import { WriteFlowService } from './write-flow-service'
 import { ReviewFlowService } from './review-flow-service'
 import { MemoryWriter } from './memory-writer'
 import { FigureHtmlRepo } from './skill-format/figure-html-repo'
+import { OutlineMdRepo } from './skill-format/outline-md-repo'
+import { TrackingMdRepo, type TrackingContext } from './skill-format/tracking-md-repo'
+import { SettingsMdRepo, type SettingsContext } from './skill-format/settings-md-repo'
+import { readText, parseDoc } from './skill-format/md-parser'
 import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
 import type {
   AuditReport,
@@ -41,7 +46,8 @@ import type {
   RhythmApplyResult,
   RhythmEntry,
   RhythmEvaluation,
-  StyleProfile
+  StyleProfile,
+  VolumeOutline
 } from '../../shared/types'
 import {
   parseFigureDraftJson,
@@ -75,6 +81,13 @@ const TARGET_WORDS = 2500
  */
 const MIN_TARGET_WORDS = 800
 const MAX_TARGET_WORDS = 8000
+
+/**
+ * 时间线注入 prompt 的最大字符数。
+ * 平衡上下文完整性与 token 预算：全书时间线可能很长，截断防止 prompt 膨胀。
+ * 2000 字符约 1200 token，足够覆盖民国类项目的时间轴要点。
+ */
+const TIMELINE_MAX_CHARS = 2000
 
 /**
  * 从细纲「字数预估」文本解析出整数目标字数。
@@ -158,6 +171,8 @@ export class WriteService {
       projectName: project.name,
       genre: project.genre,
       mainSynopsis: ctx.mainSynopsis,
+      volumeOutline: ctx.volumeOutline,
+      settings: ctx.settings,
       chapterDetail: ctx.detail,
       prevDetail: ctx.prevDetail,
       prevTail: ctx.prevTail,
@@ -165,6 +180,7 @@ export class WriteService {
       rhythmEntry: ctx.rhythmEntry,
       foreshadowings: ctx.foreshadowings,
       characters: ctx.characters,
+      tracking: ctx.tracking,
       chapterNumber,
       targetWords,
       tempContext,
@@ -194,6 +210,72 @@ export class WriteService {
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
+    })
+  }
+
+  /**
+   * 构造「按用户追问调整已生成正文」的 prompt。
+   *
+   * 优先级语义：用户追问要求（instruction）为最高优先级，覆盖细纲、人物、伏笔、长期写作要求等既有约束；
+   * 冲突时以用户要求为准。user prompt 的渲染细节见 renderAdjustUserPrompt。
+   */
+  async buildAdjustChapterPrompt(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileId?: string | null
+  ): Promise<{ system: string; user: string }> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const project = await this.projectService.getProjectData(projectId)
+    const style = await this.loadStyleProfile(
+      dir,
+      styleProfileId ?? project.defaultStyleProfileId ?? null
+    )
+    const ctx = await this.loadChapterContext(dir, chapterNumber)
+    const overrides = this.settings
+      ? (await this.settings.get()).chapterRuleOverrides ?? {}
+      : {}
+    const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const user = renderAdjustUserPrompt({
+      projectName: project.name,
+      genre: project.genre,
+      chapterNumber,
+      instruction,
+      content,
+      chapterRequirements: ctx.detail?.writingRequirements?.trim(),
+      chapterDetail: ctx.detail,
+      prevTail: ctx.prevTail,
+      characters: ctx.characters,
+      foreshadowings: ctx.foreshadowings
+    })
+
+    return { system, user }
+  }
+
+  async adjustChapterStream(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileIdOrOpts?: string | null | GenerateOptions,
+    maybeOpts: GenerateOptions = {}
+  ): Promise<string> {
+    const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    const prompt = await this.buildAdjustChapterPrompt(
+      projectId,
+      chapterNumber,
+      content,
+      instruction,
+      styleProfileId
+    )
+    return this.llm.generateStream(prompt.user, {
+      ...opts,
+      systemPrompt: prompt.system,
+      maxTokens:
+        opts.maxTokens ?? tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
+      meta: { feature: 'chapter-adjust', projectId, chapterNumber }
     })
   }
 
@@ -1198,14 +1280,33 @@ export class WriteService {
       // skip
     }
 
-    // 总纲 synopsis（保留旧 OutlineRepository）
+    // 总纲 synopsis + 卷结构：优先 OutlineMdRepo（大纲/大纲.md），回退旧 OutlineRepository（outlines/main.json）
     let mainSynopsis = ''
+    let volumeOutline: VolumeOutline | undefined
     try {
-      const main = await new OutlineRepository(dir).readMain()
-      mainSynopsis = main?.synopsis ?? ''
+      const outlineRead = await new OutlineMdRepo(dir).read()
+      if (outlineRead) {
+        mainSynopsis = outlineRead.main.synopsis ?? ''
+        // 找本章所属卷，加载卷纲文件
+        const vol = outlineRead.volumes.find(
+          (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
+        )
+        if (vol) volumeOutline = await this.loadVolumeOutline(dir, vol.number)
+      }
     } catch (err) {
-      console.warn('[loadChapterContext] Failed to load main outline synopsis:', err)
+      console.warn('[loadChapterContext] Failed to load outline from md:', err)
       // skip
+    }
+    // 大纲.md 的 synopsis 为空或「（待生成）」占位时，回退读 outlines/main.json（老项目兼容）
+    if (!mainSynopsis || mainSynopsis === '（待生成）') {
+      try {
+        const main = await new OutlineRepository(dir).readMain()
+        const fallback = main?.synopsis ?? ''
+        if (fallback && fallback !== '（待生成）') mainSynopsis = fallback
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load main outline synopsis:', err)
+        // skip
+      }
     }
 
     // 上一章正文末尾：使用新数据源 ProseRepo；写第 1 章时 chapterNumber-1=0，没有上一章，直接跳过
@@ -1267,21 +1368,73 @@ export class WriteService {
       }
     }
 
+    // 追踪目录（角色状态/时间线/进度摘要/问题记录）
+    let tracking: TrackingContext | null = null
+    try {
+      tracking = await new TrackingMdRepo(dir).read(chapterNumber)
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load tracking:', err)
+      // skip
+    }
+
+    // 设定目录（题材定位/世界观/势力/规则）
+    let settings: SettingsContext | null = null
+    try {
+      settings = await new SettingsMdRepo(dir).read()
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load settings:', err)
+      // skip
+    }
+
     return {
       mainSynopsis,
+      volumeOutline,
+      settings,
       detail,
       prevDetail,
       prevTail,
       prevEndingState,
       rhythmEntry,
       foreshadowings,
-      characters
+      characters,
+      tracking
+    }
+  }
+
+  /**
+   * 加载卷纲文件（大纲/第N卷_卷名.md），返回 H2 节列表。
+   * 用于注入卷级情绪弧线、爽点节奏、伏笔规划等强约束素材。
+   */
+  private async loadVolumeOutline(dir: string, volumeNumber: number): Promise<VolumeOutline | undefined> {
+    try {
+      const outlineDir = join(dir, '大纲')
+      const files = await fs.readdir(outlineDir)
+      const target = files.find((f) => {
+        const m = f.match(/^第(\d+)卷/)
+        return m && parseInt(m[1], 10) === volumeNumber
+      })
+      if (!target) return undefined
+      const text = await readText(join(outlineDir, target))
+      if (!text) return undefined
+      const doc = parseDoc(text)
+      return {
+        number: volumeNumber,
+        name: target.replace(/^第\d+卷[_\s]*/, '').replace(/\.md$/, ''),
+        h1Title: doc.h1Title,
+        fileName: target,
+        sections: doc.sections.map((s) => ({ title: s.title, body: s.body }))
+      }
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load volume outline:', err)
+      return undefined
     }
   }
 }
 
 interface ChapterContext {
   mainSynopsis: string
+  volumeOutline?: VolumeOutline
+  settings: SettingsContext | null
   detail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
@@ -1289,6 +1442,7 @@ interface ChapterContext {
   rhythmEntry?: RhythmEntry
   foreshadowings: Foreshadowing[]
   characters: Character[]
+  tracking: TrackingContext | null
 }
 
 /** 取尾部 n 字符（按字符数，不按字节） */
@@ -1301,6 +1455,8 @@ interface RenderInput {
   projectName: string
   genre?: string
   mainSynopsis: string
+  volumeOutline?: VolumeOutline
+  settings?: SettingsContext | null
   chapterDetail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
@@ -1308,11 +1464,27 @@ interface RenderInput {
   rhythmEntry?: RhythmEntry
   foreshadowings: Foreshadowing[]
   characters: Character[]
+  tracking?: TrackingContext | null
   chapterNumber: number
   /** 本章目标字数（用于强约束 LLM 写够）。 */
   targetWords: number
   tempContext?: string
   existingText?: string
+}
+
+interface AdjustRenderInput {
+  projectName: string
+  genre?: string
+  chapterNumber: number
+  /** 用户追问要求：最高优先级，覆盖细纲/人物/伏笔等既有约束。 */
+  instruction: string
+  /** 本章已生成的待调整正文。 */
+  content: string
+  chapterRequirements?: string
+  chapterDetail?: ChapterDetail
+  prevTail: string
+  characters: Character[]
+  foreshadowings: Foreshadowing[]
 }
 
 function normalizeStyleGenerateArgs(
@@ -1340,11 +1512,23 @@ function renderUserPrompt(input: RenderInput): string {
   )
   if (input.mainSynopsis) parts.push(`总纲：${input.mainSynopsis}`)
 
+  // 1.1 项目设定（题材定位/世界观/势力/规则文档）
+  if (input.settings) {
+    parts.push(...renderSettingsSection(input.settings, input.characters))
+  }
+
+  // 1.2 卷级定位（卷核心/情绪弧线/爽点节奏/伏笔规划）
+  if (input.volumeOutline) {
+    parts.push(...renderVolumeSection(input.volumeOutline))
+  }
+
   // 2. 本章细纲
   parts.push('---')
   parts.push(`# 第 ${input.chapterNumber} 章 写作任务`)
   if (input.tempContext) {
-    parts.push(`**【本章临时写作要求（临时上下文）】**：\n${input.tempContext}`)
+    parts.push(`**【本章临时写作要求（临时上下文）】**（最高优先级，覆盖本章细纲、硬性写作要求、节奏标注等一切既有约束；冲突时以此为准）：`)
+    parts.push(input.tempContext)
+    parts.push('（下笔时必须逐条落实上面的临时要求；输出前自检是否全部满足，遗漏则补齐再输出。）')
   }
   if (chapterRequirements) {
     parts.push('**【本章硬性写作要求】**')
@@ -1431,6 +1615,11 @@ function renderUserPrompt(input: RenderInput): string {
     }
   }
 
+  // 5.1 角色状态追踪（当前实力/立场/目标 + 近期变更 + 进度摘要 + 待处理问题）
+  if (input.tracking) {
+    parts.push(...renderTrackingSection(input.tracking, input.chapterNumber))
+  }
+
   // 6. 伏笔
   if (input.foreshadowings.length > 0) {
     parts.push('---')
@@ -1481,8 +1670,14 @@ function renderUserPrompt(input: RenderInput): string {
       `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
     )
   }
+  // 7.1 临时写作要求复述（最高优先级，紧贴输出指令强化注意力）
+  if (input.tempContext) {
+    parts.push(`**【再次强调 · 本章临时写作要求（最高优先级，必须逐条落实，覆盖细纲与硬性写作要求）】**：`)
+    parts.push(input.tempContext)
+    parts.push('若与本章细纲冲突，以本临时要求为准；写完后逐条自检是否已落实，遗漏则补齐。')
+  }
   if (chapterRequirements) {
-    parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】。如果没有，先补足再输出。`)
+    parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】（在不违背临时写作要求的前提下）。如果没有，先补足再输出。`)
   }
   // 7.1 写完后的自检回执（仅自用，会被前端自动剥离，不会出现在正文中）
   parts.push('---')
@@ -1494,6 +1689,74 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('- collected：你本章回收的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
   parts.push('若本章无任何伏笔变动，整行可省略。')
   return parts.join('\n\n')
+}
+
+/**
+ * 渲染「追问调整正文」的 user prompt。
+ *
+ * 优先级语义：用户追问要求为最高优先级，覆盖细纲、人物、伏笔、长期写作要求等一切既有约束；
+ * 冲突时以用户要求为准。结构上把用户要求放在当前正文之后、紧贴输出指令，使其处于 LLM 注意力最靠后处。
+ */
+function renderAdjustUserPrompt(input: AdjustRenderInput): string {
+  const trimmedContent =
+    input.content.length > 30_000 ? input.content.slice(0, 30_000) + '\n\n（后文因长度限制省略）' : input.content
+  const charactersSection =
+    input.characters.length > 0
+      ? `## 主要人物参考\n${input.characters
+          .slice(0, 20)
+          .map((c) => `- ${c.name}${c.role ? `：${c.role}` : ''}${c.personality ? `，${c.personality}` : ''}`)
+          .join('\n')}`
+      : ''
+  const foreshadowingsSection =
+    input.foreshadowings.length > 0
+      ? `## 相关伏笔参考\n${input.foreshadowings
+          .slice(0, 20)
+          .map((f) => `- ${f.content}`)
+          .join('\n')}`
+      : ''
+
+  return [
+    `## 任务：按用户追问调整第 ${input.chapterNumber} 章已生成正文`,
+    '',
+    '你将收到一章已经生成好的小说正文，以及用户这次提出的修改要求。',
+    '请直接输出调整后的完整正文，不要输出解释、标题、修改清单、Markdown 代码块或前后缀。',
+    '',
+    '## 优先级（务必严格遵守）',
+    '1. **用户追问要求是最高优先级，覆盖一切既有约束。** 凡用户明确要求改的（剧情走向、人物行为、场景、写法、节奏、删减、增写等），必须改到位；若用户要求与细纲、人物卡、伏笔、长期写作要求冲突，以用户要求为准，并在调整后让正文自洽。',
+    '2. 用户**没有**提及的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与用户要求直接冲突，无条件让位于用户要求。',
+    '3. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非用户要求明确涉及增减篇幅。',
+    '4. 不要把修改要求、分析过程、对照清单或免责声明写进正文。',
+    '5. 避免引入新的 AI 味套话，保持动作、对话、细节和因果推进。',
+    '',
+    '## 执行方式',
+    '- 先逐条拆解用户的追问要求，明确每一条要落到正文的哪个段落/情节。',
+    '- 改写时逐一落实，不要遗漏任何一条；与原意冲突处，按用户要求重写而非折中。',
+    '- 输出前自检：用户提出的每一条要求是否都已体现在正文中；若有遗漏，回头补齐再输出。',
+    '',
+    `## 小说信息`,
+    `- 书名：${input.projectName}`,
+    `- 题材：${input.genre ?? '未指定'}`,
+    '',
+    input.chapterRequirements
+      ? `## 本章长期写作要求（仅作参考，被用户追问要求覆盖时以用户为准）\n${renderRequirementChecklist(input.chapterRequirements)}`
+      : '',
+    input.chapterDetail
+      ? `## 本章细纲（仅作参考，被用户追问要求覆盖时以用户为准）\n${renderChapterDetail(input.chapterDetail, '本章细纲')}`
+      : '',
+    input.prevTail ? `## 上一章结尾参考\n${input.prevTail}` : '',
+    charactersSection,
+    foreshadowingsSection,
+    '',
+    `------ 第 ${input.chapterNumber} 章当前正文 ------`,
+    trimmedContent,
+    '',
+    `## 用户追问要求（最高优先级，必须逐条落实到上方正文）`,
+    input.instruction.trim(),
+    '',
+    '请基于上述追问要求，直接输出调整后的完整正文：'
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function renderRequirementChecklist(text: string): string {
@@ -1567,6 +1830,154 @@ function renderCharacterDetail(c: Character): string {
 
 function normalizeName(name: string): string {
   return name.trim().replace(/\s+/g, '')
+}
+
+/**
+ * 渲染项目设定段（题材定位/世界观/势力/规则文档）。
+ * 势力档案按本章出场角色筛选——若本章出场角色能匹配到势力文件名，只注入匹配的；
+ * 无匹配则全部注入（兜底），避免遗漏关键势力信息。
+ */
+function renderSettingsSection(settings: SettingsContext, characters: Character[]): string[] {
+  const parts: string[] = []
+  const hasContent =
+    settings.genrePositioning ||
+    settings.worldview.length > 0 ||
+    settings.factions.length > 0 ||
+    settings.customRules.length > 0
+  if (!hasContent) return parts
+
+  parts.push('---')
+  parts.push('# 项目设定')
+
+  if (settings.genrePositioning) {
+    parts.push('## 题材定位（核心梗/卖点/主角人设/节奏规划，强约束）')
+    parts.push(settings.genrePositioning)
+  }
+
+  if (settings.worldview.length > 0) {
+    parts.push('## 世界观（金手指规则/力量体系/背景设定，强约束）')
+    for (const w of settings.worldview) {
+      parts.push(`### ${w.name}`)
+      parts.push(w.body)
+    }
+  }
+
+  if (settings.factions.length > 0) {
+    // 按本章出场角色筛选势力：角色名出现在势力文件名中才注入
+    // 只检查 factionName.includes(n)（势力名包含角色名）方向，
+    // 避免 n.includes(factionName) 导致单字角色名误匹配（如"陈四"匹配所有含"四"的文件名）
+    const appearNames = new Set(characters.map((c) => normalizeName(c.name)))
+    const matched = settings.factions.filter((f) => {
+      const factionName = normalizeName(f.name)
+      for (const n of appearNames) {
+        if (factionName.includes(n)) return true
+      }
+      return false
+    })
+    const list = matched.length > 0 ? matched : settings.factions
+    parts.push('## 势力档案')
+    for (const f of list) {
+      parts.push(`### ${f.name}`)
+      parts.push(f.body)
+    }
+  }
+
+  if (settings.customRules.length > 0) {
+    parts.push('## 规则文档（项目自创机制，强约束）')
+    for (const r of settings.customRules) {
+      parts.push(`### ${r.name}`)
+      parts.push(r.body)
+    }
+  }
+
+  return parts
+}
+
+/**
+ * 渲染卷级定位段（卷核心/情绪弧线/爽点节奏/伏笔规划）。
+ * 从卷纲文件的 H2 节中提取关键约束素材。
+ */
+function renderVolumeSection(vol: VolumeOutline): string[] {
+  const parts: string[] = []
+  // 只注入有价值的节：卷核心/情绪弧线/爽点节奏/伏笔/反转
+  const usefulTitles = ['卷核心', '情绪弧线', '爽点节奏', '伏笔', '反转', '核心冲突', '人物弧线']
+  const sections = vol.sections.filter((s) =>
+    usefulTitles.some((t) => s.title.includes(t))
+  )
+  if (sections.length === 0) return parts
+
+  parts.push('---')
+  parts.push(`# 卷级定位：第 ${vol.number} 卷 ${vol.name}`)
+  for (const s of sections) {
+    parts.push(`## ${s.title}`)
+    parts.push(s.body.trim())
+  }
+  return parts
+}
+
+/**
+ * 渲染角色状态追踪段（当前实力/立场/目标 + 近期变更 + 进度摘要 + 待处理问题）。
+ * 仅注入本章出场角色的状态快照，避免 token 浪费。
+ */
+function renderTrackingSection(tracking: TrackingContext, chapterNumber: number): string[] {
+  const parts: string[] = []
+  const hasContent =
+    tracking.characterStates.length > 0 ||
+    tracking.stateChanges.length > 0 ||
+    tracking.timeline ||
+    tracking.recentProgress.length > 0 ||
+    tracking.openIssues.length > 0
+  if (!hasContent) return parts
+
+  parts.push('---')
+  parts.push('# 角色状态追踪')
+
+  // 当前状态快照（全部角色，让 LLM 知道谁在什么状态）
+  if (tracking.characterStates.length > 0) {
+    parts.push('## 当前状态快照')
+    parts.push('| 角色 | 实力 | 立场 | 目标 | 道具 | 关系 |')
+    parts.push('|------|------|------|------|------|------|')
+    for (const s of tracking.characterStates) {
+      parts.push(
+        `| ${s.name} | ${s.power || '-'} | ${s.stance || '-'} | ${s.goal || '-'} | ${s.items || '-'} | ${s.relations || '-'} |`
+      )
+    }
+  }
+
+  // 近期状态变更（截到本章为止）
+  if (tracking.stateChanges.length > 0) {
+    parts.push(`## 近期状态变更（第 ${chapterNumber} 章及之前）`)
+    for (const c of tracking.stateChanges.slice(-15)) {
+      parts.push(`- 第 ${c.chapter} 章 · ${c.name}：${c.change}`)
+    }
+  }
+
+  // 时间线（全书时间轴，截断防 token 爆炸）
+  if (tracking.timeline) {
+    parts.push('## 时间线')
+    parts.push(tracking.timeline.slice(0, TIMELINE_MAX_CHARS))
+  }
+
+  // 日更进度摘要（最后 3 条，含下一章目标/阻塞点）
+  if (tracking.recentProgress.length > 0) {
+    parts.push('## 近期写作进度')
+    for (const p of tracking.recentProgress) {
+      parts.push(`- ${p.date}（${p.chapter}）：${p.summary}`)
+      if (p.nextGoal && p.nextGoal !== '—') parts.push(`  · 下一章目标：${p.nextGoal}`)
+      if (p.blocker && p.blocker !== '—' && p.blocker !== '无') parts.push(`  · ⚠️ 阻塞点：${p.blocker}`)
+    }
+  }
+
+  // 待处理问题
+  if (tracking.openIssues.length > 0) {
+    parts.push('## ⚠️ 待处理问题（写作时需注意）')
+    for (const i of tracking.openIssues) {
+      parts.push(`- ${i.problem}（${i.status}）`)
+      if (i.fix) parts.push(`  · 修正方案：${i.fix}`)
+    }
+  }
+
+  return parts
 }
 
 /**

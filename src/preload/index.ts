@@ -35,6 +35,7 @@ import type {
   DeslopScanReport,
   DeslopLevel,
   DeslopResult,
+  DeslopRulesBundle,
   GenerateCoverInput,
   CoverFile,
   CoverImageConfigSummary,
@@ -137,6 +138,10 @@ const api = {
   configureLlm: (apiKey: string) => ipcRenderer.invoke('llm:configure', apiKey),
   hasLlmKey: () => ipcRenderer.invoke('llm:hasKey'),
   pingLlm: () => ipcRenderer.invoke('llm:ping'),
+  listAntigravityModels: () =>
+    ipcRenderer.invoke('llm:listAntigravityModels') as Promise<string[]>,
+  listCodexModels: () =>
+    ipcRenderer.invoke('llm:listCodexModels') as Promise<string[]>,
   listProviders: () => ipcRenderer.invoke('llm:listProviders'),
   upsertProvider: (p: ProviderConfig) => ipcRenderer.invoke('llm:upsertProvider', p),
   deleteProvider: (id: string) => ipcRenderer.invoke('llm:deleteProvider', id),
@@ -194,6 +199,26 @@ const api = {
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
       .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, existingText, requestId })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  adjustChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileId: string | null | undefined,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:adjustChapter', { projectId, chapterNumber, content, instruction, styleProfileId, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
@@ -609,6 +634,30 @@ const api = {
     ipcRenderer.invoke('deslop:getWhitelist', projectId) as Promise<string[]>,
   setDeslopWhitelist: (projectId: string, words: string[]) =>
     ipcRenderer.invoke('deslop:setWhitelist', { projectId, words }) as Promise<string[]>,
+  /* 去 AI 味规则（设置页展示/编辑/AI 改写） */
+  getDeslopRules: () =>
+    ipcRenderer.invoke('deslop:getRules') as Promise<DeslopRulesBundle>,
+  setDeslopRules: (cfg: {
+    textOverrides: Record<string, string>
+    bannedWords: string[]
+  }) =>
+    ipcRenderer.invoke('deslop:setRules', cfg) as Promise<DeslopRulesBundle>,
+  editDeslopRulesStream: (
+    instruction: string,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('deslopRules:token', handler as never)
+    return ipcRenderer
+      .invoke('deslop:editRulesStream', { instruction, requestId })
+      .finally(() => ipcRenderer.removeListener('deslopRules:token', handler as never)) as Promise<string>
+  },
 
   /* ---- 封面生成（story-cover）---- */
   generateCover: (input: GenerateCoverInput) =>
@@ -688,10 +737,21 @@ const api = {
     projectId: string,
     coreSettings: string,
     volumeOutline: string,
-    _chaptersMarkdown?: string,
-    _fromChapter?: number
+    chaptersMarkdown?: string,
+    fromChapter?: number
   ) =>
-    ipcRenderer.invoke('opening:persist', { projectId, coreSettings, volumeOutline }),
+    ipcRenderer.invoke('opening:persist', {
+      projectId,
+      coreSettings,
+      volumeOutline,
+      chaptersMd: chaptersMarkdown,
+      fromChapter
+    }),
+  generateRhythm: (
+    projectId: string,
+    volumeOutline: string
+  ): Promise<{ ok: boolean; html?: string; error?: string }> =>
+    ipcRenderer.invoke('opening:generateRhythm', { projectId, volumeOutline }),
   continueCoreSettingsStream: (
     projectId: string,
     brainDump: string,

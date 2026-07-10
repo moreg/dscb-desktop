@@ -34,6 +34,7 @@ import { registerFigureIpc } from './ipc/figure'
 import { registerStyleIpc } from './ipc/styles'
 import { registerTeardownIpc } from './ipc/teardown'
 import { registerDeslopIpc } from './ipc/deslop'
+import { registerDeslopRulesIpc } from './ipc/deslop-rules'
 import { registerCoverIpc } from './ipc/cover'
 import { registerScanIpc } from './ipc/scan'
 import { registerOpeningIpc } from './ipc/opening'
@@ -139,7 +140,9 @@ app.whenReady().then(async () => {
 
   // 去 AI 味润色（story-deslop）—— 确定性检测 + LLM 改写
   const deslopService = new DeslopService(llmService)
-  registerDeslopIpc(deslopService, projectService, styleProfileService)
+  registerDeslopIpc(deslopService, projectService, styleProfileService, settings)
+  // 去 AI 味规则可配置化（设置页展示/编辑/AI 改写，保存后影响扫描与改写）
+  registerDeslopRulesIpc(settings, llmService)
 
   // 封面生成（story-cover）—— 图像 API + skia-canvas 裁剪
   const imageService = new ImageService(settings)
@@ -151,7 +154,7 @@ app.whenReady().then(async () => {
   registerScanIpc(scanService)
 
   // 开书（story-long-write Phase 1-3）—— 脑洞 → 核心设定 + 卷级大纲 + 细纲
-  const openingService = new OpeningService(projectService, llmService, benchmarkResolver)
+  const openingService = new OpeningService(projectService, llmService, benchmarkResolver, deslopService)
   registerOpeningIpc(openingService)
 
   if (!process.env['ELECTRON_RENDERER_URL']) {
@@ -160,7 +163,7 @@ app.whenReady().then(async () => {
         responseHeaders: {
           ...details.responseHeaders,
           'Content-Security-Policy': [
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:"
           ]
         }
       })

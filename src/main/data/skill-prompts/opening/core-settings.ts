@@ -3,6 +3,11 @@
  * 根据用户脑洞与立项规则，生成完整的设定结构，并采用 "=== 路径 ===" 进行多文件合并输出。
  */
 
+import {
+  CHARACTER_DESIGN_RULES,
+  CORE_SETTINGS_QUALITY_CHECK
+} from './shared-specs'
+
 export interface BenchmarkRecallContext {
   bookNames: string[]
   emotion: string
@@ -68,6 +73,10 @@ ${benchmarkSection}
    - **一句话梗概** 映射到新版的 **核心梗** 中体现。
    - **世界观骨架** 映射到新版的 **背景设定**、**力量体系** 与 **金手指** 文件中。
    - 保留原有的 **核心冲突** 以及 **金手指** 设定设计。
+
+${CHARACTER_DESIGN_RULES}
+
+${CORE_SETTINGS_QUALITY_CHECK}
 
 ---
 
@@ -248,6 +257,12 @@ ${benchmarkSection}
 
 ## 出场记录
 - 第 1 章：{}
+
+## 路人记忆点
+> 仅路人角色文件需要本节；主角/配角本节可省略
+- 姓名/代号：（如"包子铺大爷"）
+- 记忆点：（如"歪着脖子算账"）
+- 服务剧情：（传递信息 / 触发冲突 / 烘托氛围）
 
 === 设定/角色/{核心配角名}.md ===
 **版本**：v1.0（${today} 创建）

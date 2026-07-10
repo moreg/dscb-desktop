@@ -18,6 +18,7 @@ import {
   popEntryAt,
   revertInDraft,
   applyToDraft,
+  findRewriteTarget,
   findEntryByViolationKey,
   pushRedo,
   popRedo,
@@ -269,6 +270,9 @@ export default function ChapterEditor({
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
   const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [showAdjustDialog, setShowAdjustDialog] = useState(false)
+  const [adjustInstruction, setAdjustInstruction] = useState('')
+  const [adjusting, setAdjusting] = useState(false)
   const [deslopScanReport, setDeslopScanReport] = useState<DeslopScanReport | null>(null)
   const [deslopScanning, setDeslopScanning] = useState(false)
   const [deslopRunning, setDeslopRunning] = useState(false)
@@ -554,6 +558,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   useEffect(() => {
     ++genRef.current
     setGenerating(false)
+    setAdjusting(false)
     // 切章/project 时清空内存中的改写历史（避免跨章串台）
     setRewriteHistory([])
     setRedoStack([])
@@ -800,9 +805,22 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (gutter) gutter.style.height = `${textarea.clientHeight}px`
     }
     measure()
-    const observer = new ResizeObserver(measure)
+    // ResizeObserver 回调用 rAF 合并同帧内的多次触发，避免回调里改 DOM 尺寸
+    // 又触发新回调，形成 "ResizeObserver loop" 警告（被全局 error 监听器升级成崩溃）。
+    let rafId = 0
+    const scheduleMeasure = () => {
+      if (rafId) return
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        measure()
+      })
+    }
+    const observer = new ResizeObserver(scheduleMeasure)
     observer.observe(textareaRef.current)
-    return () => observer.disconnect()
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      observer.disconnect()
+    }
   }, [draft, showLineNumbers])
 
   const handleEditorScroll = useCallback(() => {
@@ -836,6 +854,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         return
       }
       // Undo/Redo：通过纯函数判断（跨平台兼容 + 不在 textarea 内拦截）
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'S' || e.key === 's')) {
+        e.preventDefault()
+        if (dirty && !saving) void saveAndClearDraft()
+        return
+      }
       const intent = detectUndoRedoShortcut({
         ctrl: e.ctrlKey,
         meta: e.metaKey,
@@ -855,7 +878,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // 闭包依赖 rewriteHistory.length + redoStack.length + reAudit/undoLastRewrite/redoLastRewrite；
-  }, [draft, rewriteHistory.length, redoStack.length])
+  }, [dirty, draft, rewriteHistory.length, redoStack.length, saveAndClearDraft, saving])
 
   // P19-A：离开页面/切章前提醒未保存内容
   useEffect(() => {
@@ -1020,6 +1043,84 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       void runPostGenerateReview(myGen, finalDraft)
     } catch {
       if (genRef.current === myGen) setGenerating(false)
+    }
+  }
+
+  const adjustChapter = async () => {
+    const instruction = adjustInstruction.trim()
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法追问调整' })
+      return
+    }
+    if (!instruction) {
+      setAlertInfo({ message: '请先写下这次要怎么调整正文' })
+      return
+    }
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
+      return
+    }
+    if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
+      const proceed = window.confirm(
+        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续追问调整？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
+      )
+      if (!proceed) return
+    }
+
+    setShowAdjustDialog(false)
+    setAdjusting(true)
+    setFlowPanelOpen(false)
+    setAutoAudit(null)
+    setReviewText('')
+    setFlowSyncTrigger(0)
+    setRewriteHistory([])
+    setRedoStack([])
+
+    const sourceDraft = draft
+    const myGen = ++genRef.current
+    let revised = ''
+    try {
+      const result = await window.api.adjustChapterStream(
+        projectId,
+        chapterNumber,
+        sourceDraft,
+        instruction,
+        requestedStyleProfileId,
+        (token, done) => {
+          if (genRef.current !== myGen) return
+          if (token) {
+            revised += token
+            setDraft(revised)
+          }
+          if (done) {
+            setAdjusting(false)
+            refreshUsage()
+          }
+        }
+      )
+      if (genRef.current !== myGen) return
+      if (!result.ok) {
+        setAdjusting(false)
+        const msg =
+          result.error === 'LLM_AUTH_FAILED'
+            ? '认证失败，请检查 API Key'
+            : result.error === 'LLM_RATE_LIMIT'
+              ? '请求过于频繁，请稍后再试'
+              : '追问调整失败，请重试'
+        setAlertInfo({ message: msg })
+        setDraft(sourceDraft)
+        return
+      }
+      setDirty(true)
+      setFlowPanelOpen(true)
+      setFlowSyncTrigger((t) => t + 1)
+      void runPostGenerateAudit(myGen, revised)
+      void runPostGenerateReview(myGen, revised)
+    } catch {
+      if (genRef.current === myGen) {
+        setAdjusting(false)
+        setDraft(sourceDraft)
+      }
     }
   }
 
@@ -1822,6 +1923,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </button>
         <button
           className="btn btn-sm"
+          onClick={() => setShowAdjustDialog(true)}
+          disabled={adjusting || generating}
+          title="按新的追问要求调整当前已生成正文"
+        >
+          {adjusting ? '调整中…' : '按要求重写'}
+        </button>
+        <button
+          className="btn btn-sm"
           onClick={() => void startDeslopScan()}
           disabled={deslopScanning || deslopRunning || !draft.trim()}
           title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
@@ -1839,9 +1948,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
               setShowContinueDialog(true)
             }
           }}
-          disabled={generating}
+          disabled={generating || adjusting}
         >
           {generating ? '落墨中…' : '✦ 续写'}
+        </button>
+        <button
+          className={`btn btn-sm${flowPanelOpen ? ' btn-primary' : ''}`}
+          onClick={() => setFlowPanelOpen((open) => !open)}
+          title="展开或收起可拖动的续写流程面板"
+        >
+          流程面板
         </button>
         <span className="spacer" />
         {/* P11-A：保存指示器 */}
@@ -2149,16 +2265,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onApplyRewrite={(snippet, rewritten, violationKey) => {
             // 用改写后的文本替换 draft 中的命中段（保留前后原文）
             if (!snippet) return false
-            const idx = draft.indexOf(snippet)
-            if (idx < 0) {
+            const target = findRewriteTarget(draft, snippet, rewritten)
+            if (!target) {
               setAlertInfo({ message: '未在正文中找到原片段（可能已被改写），请手动应用' })
               return false
             }
-            const next = draft.slice(0, idx) + rewritten + draft.slice(idx + snippet.length)
+            const next = draft.slice(0, target.start) + target.replacement + draft.slice(target.end)
             setDraft(next)
             setDirty(true)
             // 压栈：记录这次 apply 用于"↶ 撤销"。P6-B 传 violationKey 用于 per-violation 撤销。
-            pushRewrite(snippet, rewritten, violationKey)
+            pushRewrite(target.oldSnippet, target.replacement, violationKey)
             // 应用后自动重跑一次，让违例清单反映新正文
             void reAudit()
             return true
@@ -2816,6 +2932,43 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
       ) : null}
 
+      {showAdjustDialog ? (
+        <div className="dialog-overlay" onClick={() => setShowAdjustDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 480, background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 16, boxShadow: 'var(--shadow-lg)' }}>
+            <header>
+              <strong>追问调整正文</strong>
+            </header>
+            <div className="dialog-body" style={{ marginTop: 8 }}>
+              <p style={{ fontSize: 12.5, color: 'var(--ink-2)', margin: 0 }}>
+                写下这次想怎么改，AI 会基于当前编辑器里的正文生成一版完整修订稿，先替换草稿，不会自动保存。
+              </p>
+              <textarea
+                className="textarea"
+                placeholder="例如：把高潮前的铺垫压短一点；加强女主的反击，不要只靠旁白解释；结尾改成一句对话钩子。"
+                value={adjustInstruction}
+                onChange={(e) => setAdjustInstruction(e.target.value)}
+                style={{ width: '100%', minHeight: 110, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
+              />
+            </div>
+            <footer style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setShowAdjustDialog(false)}
+              >
+                取消
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => void adjustChapter()}
+                disabled={adjusting || !adjustInstruction.trim()}
+              >
+                {adjusting ? '调整中…' : '开始调整'}
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
       {showContinueDialog ? (
         <div className="dialog-overlay" onClick={() => setShowContinueDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
           <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 440, background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 16, boxShadow: 'var(--shadow-lg)' }}>
@@ -2916,16 +3069,28 @@ function renderMarkdownPreview(text: string) {
 }
 
 function OutlineDetailField({ row }: { row: { label: string; value?: string; items?: string[] } }) {
+  // 角色出场用横排标签展示，其余列表字段保持竖排
+  const isInline = row.label === '角色出场'
   return (
     <section className="outline-detail-field">
       <div className="outline-detail-label">{row.label}</div>
       {row.value ? <div className="outline-detail-value">{row.value}</div> : null}
       {row.items && row.items.length > 0 ? (
-        <ul className="outline-detail-list">
-          {row.items.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
+        isInline ? (
+          <div className="outline-detail-inline">
+            {row.items.map((item) => (
+              <span key={item} className="outline-chip">
+                {item}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <ul className="outline-detail-list">
+            {row.items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        )
       ) : null}
     </section>
   )

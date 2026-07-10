@@ -3,6 +3,11 @@ import { z } from 'zod'
 import { DeslopService } from '../data/deslop/deslop-service'
 import { ProjectService } from '../data/project-service'
 import { StyleProfileService } from '../data/style-profile-service'
+import { SettingsRepository } from '../data/settings-repository'
+import {
+  resolveDeslopTextOverrides,
+  resolveDeslopBannedWords
+} from '../data/skill-prompts/deslop/deslop-rules'
 import { safeHandle } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 import { join } from 'path'
@@ -16,9 +21,10 @@ const requestIdSchema = z.string().min(1)
 export function registerDeslopIpc(
   deslopService: DeslopService,
   projectService: ProjectService,
-  styleProfileService: StyleProfileService
+  styleProfileService: StyleProfileService,
+  settings: SettingsRepository
 ): void {
-  /* 扫描正文（确定性，不调 LLM） */
+  /* 扫描正文（确定性，不调 LLM）—— 用户配置的禁用词表优先 */
   safeHandle(
     'deslop:scan',
     async (_e, payload: { projectId: string; text: string }) => {
@@ -27,7 +33,9 @@ export function registerDeslopIpc(
         payload
       )
       const whitelist = await resolveWhitelist(projectService, validated.projectId)
-      return deslopService.scan(validated.text, whitelist)
+      const deslopRules = await settings.getDeslopRules()
+      const bannedWords = resolveDeslopBannedWords(deslopRules.bannedWords)
+      return deslopService.scan(validated.text, { whitelist, bannedWords })
     }
   )
 
@@ -60,6 +68,10 @@ export function registerDeslopIpc(
           styleProfileService,
           validated.projectId
         )
+        // 用户配置的禁用词表 + 文本规则覆盖优先（保存后真正生效）
+        const deslopRules = await settings.getDeslopRules()
+        const bannedWords = resolveDeslopBannedWords(deslopRules.bannedWords)
+        const textOverrides = resolveDeslopTextOverrides(deslopRules.textOverrides ?? {})
         const send = (token: string): void => {
           win?.webContents.send('deslop:token', {
             requestId: validated.requestId,
@@ -71,6 +83,8 @@ export function registerDeslopIpc(
           levelOverride: validated.levelOverride,
           onToken: send,
           whitelist,
+          bannedWords,
+          textOverrides,
           styleContext
         })
         win?.webContents.send('deslop:token', {

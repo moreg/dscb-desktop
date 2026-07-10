@@ -47,8 +47,11 @@ export class DeslopService {
      ========================================================= */
 
   /** @param whitelist 项目级豁免词（IPC 层按 projectId 解析后传入） */
-  async scan(text: string, whitelist?: Set<string>): Promise<DeslopScanReport> {
-    const aiFindings = scanAiPatterns(text, { whitelist })
+  async scan(
+    text: string,
+    opts: { whitelist?: Set<string>; bannedWords?: string[] } = {}
+  ): Promise<DeslopScanReport> {
+    const aiFindings = scanAiPatterns(text, { whitelist: opts.whitelist, bannedWords: opts.bannedWords })
     const degenFindings = scanDegeneration(text)
     const findings = [...aiFindings, ...degenFindings]
     const counts = {
@@ -88,14 +91,24 @@ export class DeslopService {
       onToken?: (token: string) => void
       levelOverride?: DeslopLevel
       whitelist?: Set<string>
+      /** 用户配置的禁用词表（覆盖内置默认）；缺省 = 用内置默认 */
+      bannedWords?: string[]
+      /** 用户配置的文本规则覆盖（系统铁律 + Gate 方法），缺省 = 用内置默认 */
+      textOverrides?: {
+        systemPrompt?: string
+        gates?: Partial<Record<string, string>>
+      }
       /** 项目题材 + 文风档案摘要（IPC 层解析后注入），让改写语感对齐项目 */
       styleContext?: DeslopStyleContext
     } = {}
   ): Promise<DeslopResult> {
     const beforeWords = countWords(text)
 
-    // Phase 1 扫描
-    const report = await this.scan(text, opts.whitelist)
+    // Phase 1 扫描（用户配置的禁用词表优先，否则内置默认）
+    const report = await this.scan(text, {
+      whitelist: opts.whitelist,
+      bannedWords: opts.bannedWords
+    })
 
     // Phase 2 分级
     const level = opts.levelOverride ?? this.classify(report.metrics, report.counts)
@@ -113,12 +126,16 @@ export class DeslopService {
     // Phase 3：逐项清除（调 LLM 改写命中的 Gate）
     let rewritten = text
     let changeSummary: string[] = []
+    const effectiveSystemPrompt = opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT
     if (report.counts.blocking > 0 || report.counts.advisory > 0) {
       emit(`\n✍️ Phase 3：按 Gate 改写（${levelName(level)}，删除比例上限 ${deleteLimitPct(level)}%）...\n`)
       const relevantFindings = report.findings.filter((f) => gates.includes(f.gate))
-      const prompt = buildDeslopPrompt(text, level, relevantFindings, gates, opts.styleContext)
+      const prompt = buildDeslopPrompt(text, level, relevantFindings, gates, opts.styleContext, {
+        textOverrides: opts.textOverrides?.gates,
+        bannedWords: opts.bannedWords
+      })
       const llmOutput = await this.llm.generateStream(prompt, {
-        systemPrompt: DESLOP_SYSTEM_PROMPT,
+        systemPrompt: effectiveSystemPrompt,
         maxTokens: 12288, // 改写输出可能比原文长，给足空间
         meta: { feature: 'deslop' },
         onToken: emit
@@ -152,7 +169,7 @@ export class DeslopService {
     // Phase 3.6：二次清理循环（复扫后对剩余 blocking finding 再改一轮，直到干净或达到上限）
     const MAX_CLEANUP_ROUNDS = 2
     let cleanupRound = 0
-    let cleanupReport = await this.scan(finalText)
+    let cleanupReport = await this.scan(finalText, { bannedWords: opts.bannedWords })
     let remainingBlocking = cleanupReport.findings.filter((f) => f.severity === 'blocking')
     const allChangeSummary = [...changeSummary]
 
@@ -167,10 +184,11 @@ export class DeslopService {
           level,
           remainingBlocking,
           cleanupRound,
-          opts.styleContext
+          opts.styleContext,
+          { textOverrides: opts.textOverrides?.gates, bannedWords: opts.bannedWords }
         )
         const cleanupOutput = await this.llm.generateStream(cleanupPrompt, {
-          systemPrompt: DESLOP_SYSTEM_PROMPT,
+          systemPrompt: effectiveSystemPrompt,
           maxTokens: 12288,
           meta: { feature: `deslop:cleanup:${cleanupRound}` },
           onToken: emit
@@ -192,7 +210,7 @@ export class DeslopService {
           finalText = cleanupRewritten
         }
         // 复扫判断是否还需要下一轮
-        cleanupReport = await this.scan(finalText)
+        cleanupReport = await this.scan(finalText, { bannedWords: opts.bannedWords })
         remainingBlocking = cleanupReport.findings.filter((f) => f.severity === 'blocking')
       }
 

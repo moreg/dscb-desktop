@@ -13,6 +13,7 @@ import { buildCoreSettingsPrompt } from '../src/main/data/skill-prompts/opening/
 import { buildVolumeOutlinePrompt } from '../src/main/data/skill-prompts/opening/volume-outline'
 import { buildChapterOutlinePrompt, FIRST_CHAPTERS_BATCH } from '../src/main/data/skill-prompts/opening/chapter-outline'
 import { splitByChapterMarker } from '../src/main/data/opening-service'
+import { parseChapterTitle, sanitizeTitleForFilename } from '../src/main/data/opening-markdown'
 
 describe('inferStrength 脑洞→优势推断', () => {
   it('脑洞类关键词 → brain', () => {
@@ -117,6 +118,28 @@ describe('buildCoreSettingsPrompt 核心设定 prompt', () => {
     expect(prompt).toContain('《盘龙》')
     expect(prompt).toContain('打脸循环')
   })
+
+  it('注入全员人设记忆点铁规', () => {
+    const prompt = buildCoreSettingsPrompt('t', 't', undefined)
+    expect(prompt).toContain('全员人设记忆点铁规')
+    expect(prompt).toContain('核心配角')
+    expect(prompt).toContain('标志性动作')
+    expect(prompt).toContain('路人角色')
+  })
+
+  it('注入提示词质量自检清单', () => {
+    const prompt = buildCoreSettingsPrompt('t', 't', undefined)
+    expect(prompt).toContain('提示词质量自检')
+    expect(prompt).toContain('基础爽点检查')
+    expect(prompt).toContain('题材适配性检查')
+    expect(prompt).toContain('逆袭起点')
+  })
+
+  it('角色卡模板含路人记忆点节', () => {
+    const prompt = buildCoreSettingsPrompt('t', 't', undefined)
+    expect(prompt).toContain('路人记忆点')
+    expect(prompt).toContain('服务剧情')
+  })
 })
 
 describe('buildVolumeOutlinePrompt 卷级大纲 prompt', () => {
@@ -141,6 +164,30 @@ describe('buildVolumeOutlinePrompt 卷级大纲 prompt', () => {
     expect(prompt).toContain('第一卷')
     expect(prompt).toContain('最终卷')
     expect(prompt).toContain('卷纲_第一卷.md')
+  })
+
+  it('注入爽文节奏公式（按卷长分级）', () => {
+    const prompt = buildVolumeOutlinePrompt('cs', 100, 2000)
+    expect(prompt).toContain('爽文节奏公式')
+    expect(prompt).toContain('短卷')
+    expect(prompt).toContain('长卷')
+    expect(prompt).toContain('卷中决战')
+    expect(prompt).toContain('卷终决战')
+  })
+
+  it('注入 6 类节奏违规自检', () => {
+    const prompt = buildVolumeOutlinePrompt('cs', 100, 2000)
+    expect(prompt).toContain('6 类节奏违规')
+    expect(prompt).toContain('连续无爽点')
+    expect(prompt).toContain('高潮拖沓')
+    expect(prompt).toContain('开篇过曝')
+    expect(prompt).toContain('卷中决战过早')
+  })
+
+  it('注入番茄章名风格规范', () => {
+    const prompt = buildVolumeOutlinePrompt('cs', 100, 2000)
+    expect(prompt).toContain('番茄小说章名风格规范')
+    expect(prompt).toContain('三处标题一致性')
   })
 })
 
@@ -173,6 +220,46 @@ describe('buildChapterOutlinePrompt 细纲 prompt', () => {
 
   it('FIRST_CHAPTERS_BATCH 默认 10', () => {
     expect(FIRST_CHAPTERS_BATCH).toBe(10)
+  })
+
+  it('注入番茄章名风格规范', () => {
+    const prompt = buildChapterOutlinePrompt('cs', 'vo', 1, 10, 2500, true)
+    expect(prompt).toContain('番茄小说章名风格规范')
+    expect(prompt).toContain('三处标题一致性')
+    expect(prompt).toContain('七禁七必自检')
+    expect(prompt).toContain('8 大爆款结构')
+    expect(prompt).toContain('12-20 字')
+  })
+
+  it('注入完整细纲必填字段', () => {
+    const prompt = buildChapterOutlinePrompt('cs', 'vo', 1, 10, 2500, true)
+    expect(prompt).toContain('目标情绪')
+    expect(prompt).toContain('章首钩子')
+    expect(prompt).toContain('情绪变化曲线')
+    expect(prompt).toContain('内容概括（五段式）')
+    expect(prompt).toContain('情节安排（多线）')
+    expect(prompt).toContain('人物关系和出场顺序')
+    expect(prompt).toContain('情节细化')
+    expect(prompt).toContain('代价兑现')
+    expect(prompt).toContain('结尾设定和钩子')
+    expect(prompt).toContain('写作禁区')
+    expect(prompt).toContain('章首/章尾钩子类型标注')
+    expect(prompt).toContain('字数预算契约')
+    expect(prompt).toContain('追踪关联')
+  })
+
+  it('注入卡文处理流程', () => {
+    const prompt = buildChapterOutlinePrompt('cs', 'vo', 1, 10, 2500, true)
+    expect(prompt).toContain('卡文处理流程')
+    expect(prompt).toContain('检查节奏图谱')
+    expect(prompt).toContain('参考伏笔清单')
+    expect(prompt).toContain('用户介入')
+  })
+
+  it('强调三处标题一致性', () => {
+    const prompt = buildChapterOutlinePrompt('cs', 'vo', 1, 10, 2500, true)
+    expect(prompt).toContain('三处标题一致性')
+    expect(prompt).toContain('细纲_第NNN章_标题.md')
   })
 })
 
@@ -235,6 +322,106 @@ describe('splitByChapterMarker 多章细纲解析', () => {
   })
 })
 
+describe('parseChapterTitle 章节标题解析', () => {
+  it('解析 ## 第 N 章：标题', () => {
+    expect(parseChapterTitle('## 第 1 章：反派以为她好拿捏\n- **核心事件**：测试')).toBe('反派以为她好拿捏')
+  })
+
+  it('解析 ### 第 N 章：标题', () => {
+    expect(parseChapterTitle('### 第 5 章：她让全班看他出丑\n内容')).toBe('她让全班看他出丑')
+  })
+
+  it('支持英文冒号', () => {
+    expect(parseChapterTitle('## 第 1 章: 觉醒\n')).toBe('觉醒')
+  })
+
+  it('无标题行返回空串', () => {
+    expect(parseChapterTitle('- **核心事件**：无标题')).toBe('')
+  })
+
+  it('标题含特殊字符时保留（清洗由 sanitize 处理）', () => {
+    expect(parseChapterTitle('## 第 1 章：一巴掌？打回原形！\n')).toBe('一巴掌？打回原形！')
+  })
+})
+
+describe('sanitizeTitleForFilename 文件名清洗', () => {
+  it('去除文件系统非法字符并折叠空白', () => {
+    expect(sanitizeTitleForFilename('反派/ secretly: bad*')).toBe('反派 secretly bad')
+  })
+
+  it('去除反斜杠和管道符', () => {
+    expect(sanitizeTitleForFilename('他\\她|大家')).toBe('他她大家')
+  })
+
+  it('截断到 30 字', () => {
+    const long = '一二三四五六七八九十'.repeat(10) // 100 字
+    expect(sanitizeTitleForFilename(long)).toHaveLength(30)
+  })
+
+  it('去除末尾点号', () => {
+    expect(sanitizeTitleForFilename('觉醒...')).toBe('觉醒')
+  })
+
+  it('空标题返回空串', () => {
+    expect(sanitizeTitleForFilename('')).toBe('')
+    expect(sanitizeTitleForFilename('   ')).toBe('')
+  })
+
+  it('正常番茄风标题保留', () => {
+    expect(sanitizeTitleForFilename('反派以为她好拿捏，结果她读心了三秒')).toBe('反派以为她好拿捏，结果她读心了三秒')
+  })
+})
+
+describe('persistChapterOutlines 细纲落盘路径（技能规范对齐）', () => {
+  it('有标题时写入 细纲/细纲_第NNN章_标题.md', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const tempDir = await mkdtemp(join(tmpdir(), 'aw-opening-title-'))
+    const projectServiceMock = {
+      resolveDir: async () => tempDir,
+      getProjectData: async () => ({})
+    }
+    const svc = new OpeningService(projectServiceMock as never, {} as never, undefined)
+
+    const res = await svc.persistOpening(
+      'p1',
+      '=== 设定/题材定位.md ===\n# 题材定位',
+      '=== 大纲/大纲.md ===\n# 大纲',
+      '=== 第1章 ===\n## 第 1 章：反派以为她好拿捏\n- **核心事件**：测试',
+      1
+    )
+
+    expect(res.chapterFiles).toContain('细纲/细纲_第001章_反派以为她好拿捏.md')
+    const content = await fs.readFile(
+      join(tempDir, '细纲', '细纲_第001章_反派以为她好拿捏.md'),
+      'utf-8'
+    )
+    expect(content).toContain('## 第 1 章：反派以为她好拿捏')
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('标题含非法字符时清洗后落盘', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const tempDir = await mkdtemp(join(tmpdir(), 'aw-opening-sanitize-'))
+    const projectServiceMock = {
+      resolveDir: async () => tempDir,
+      getProjectData: async () => ({})
+    }
+    const svc = new OpeningService(projectServiceMock as never, {} as never, undefined)
+
+    const res = await svc.persistOpening(
+      'p1',
+      '设定',
+      '大纲',
+      '=== 第1章 ===\n## 第 1 章：他/她的秘密：真相\n- **核心事件**：测试',
+      1
+    )
+
+    // 标题「他/她的秘密：真相」→ 清洗掉 / 和 : → 「他她的秘密真相」
+    expect(res.chapterFiles[0]).toBe('细纲/细纲_第001章_他她的秘密真相.md')
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+})
+
 describe('persistOpening 落盘校验（M2 防御）', () => {
   it('空核心设定抛错', async () => {
     const { OpeningService } = await import('../src/main/data/opening-service')
@@ -279,7 +466,8 @@ describe('persistOpening 落盘校验（M2 防御）', () => {
 
     expect(res.settingsFile).toBe('设定/题材定位.md')
     expect(res.outlineFile).toBe('大纲/大纲.md')
-    expect(res.chapterFiles).toEqual(['大纲/细纲_第001章.md'])
+    // 技能规范：细纲逐章独立文件 细纲/细纲_第NNN章.md（无标题时不带 _标题 后缀）
+    expect(res.chapterFiles).toEqual(['细纲/细纲_第001章.md'])
 
     // 校验写入的文件内容
     const settingsContent = await fs.readFile(join(tempDir, res.settingsFile), 'utf-8')
@@ -316,7 +504,7 @@ describe('persistOpening 落盘校验（M2 防御）', () => {
       1 // fromChapter=1, maxAllowed=51
     )
 
-    expect(res.chapterFiles).toEqual(['大纲/细纲_第003章.md'])
+    expect(res.chapterFiles).toEqual(['细纲/细纲_第003章.md'])
     await fs.rm(tempDir, { recursive: true, force: true })
   })
 
@@ -355,6 +543,72 @@ describe('persistOpening 落盘校验（M2 防御）', () => {
 
     await fs.rm(tempDir, { recursive: true, force: true })
   })
+
+  it('注入 DeslopService 时落盘前去 AI 味', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const tempDir = await mkdtemp(join(tmpdir(), 'aw-opening-deslop-'))
+    const projectServiceMock = {
+      resolveDir: async () => tempDir,
+      getProjectData: async () => ({})
+    }
+    // mock DeslopService：把"AI味词"替换掉，返回 rewritten
+    const deslopServiceMock = {
+      deslop: vi.fn().mockImplementation(async (text: string) => ({
+        rewritten: text.replace(/眼神中闪过一丝冷意/g, '他眯了眯眼'),
+        processedGates: ['A', 'B', 'G'] as never,
+        beforeWords: 100,
+        afterWords: 95,
+        deleteRatio: 0.05,
+        remainingFindings: [],
+        changeSummary: ['替换 AI 味词 1 处']
+      }))
+    }
+    const svc = new OpeningService(
+      projectServiceMock as never,
+      {} as never,
+      undefined,
+      deslopServiceMock as never
+    )
+
+    const res = await svc.persistOpening(
+      'p1',
+      '=== 设定/题材定位.md ===\n# 题材定位\n\n主角眼神中闪过一丝冷意。',
+      '=== 大纲/大纲.md ===\n# 大纲\n\n## 伏笔清单\n| 伏笔编号 | 伏笔内容 | 伏笔类型 | 埋设章节 | 预计回收章节 | 实际回收章节 | 状态 |\n|---|---|---|---|---|---|---|\n',
+      '=== 第1章 ===\n## 第 1 章：测试\n眼神中闪过一丝冷意',
+      1
+    )
+
+    // deslop 应被调用（设定 + 大纲 + 细纲）
+    expect(deslopServiceMock.deslop).toHaveBeenCalled()
+    // 落盘的题材定位应已替换 AI 味词
+    const settingsContent = await fs.readFile(join(tempDir, '设定', '题材定位.md'), 'utf-8')
+    expect(settingsContent).not.toContain('眼神中闪过一丝冷意')
+    expect(settingsContent).toContain('他眯了眯眼')
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('未注入 DeslopService 时降级为原文（不阻塞）', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const tempDir = await mkdtemp(join(tmpdir(), 'aw-opening-nodeslop-'))
+    const projectServiceMock = {
+      resolveDir: async () => tempDir,
+      getProjectData: async () => ({})
+    }
+    const svc = new OpeningService(projectServiceMock as never, {} as never, undefined, undefined)
+
+    const res = await svc.persistOpening(
+      'p1',
+      '=== 设定/题材定位.md ===\n# 题材定位\n眼神中闪过一丝冷意',
+      '=== 大纲/大纲.md ===\n# 大纲\n\n## 伏笔清单\n| 伏笔编号 | 伏笔内容 | 伏笔类型 | 埋设章节 | 预计回收章节 | 实际回收章节 | 状态 |\n|---|---|---|---|---|---|---|\n',
+      undefined,
+      undefined
+    )
+
+    // 无 deslop 时原文直接落盘
+    const settingsContent = await fs.readFile(join(tempDir, '设定', '题材定位.md'), 'utf-8')
+    expect(settingsContent).toContain('眼神中闪过一丝冷意')
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
 })
 
 describe('OPENING_SYSTEM_PROMPT 开书系统 prompt', () => {
@@ -363,5 +617,56 @@ describe('OPENING_SYSTEM_PROMPT 开书系统 prompt', () => {
     expect(OPENING_SYSTEM_PROMPT).toContain('优势匹配')
     expect(OPENING_SYSTEM_PROMPT).toContain('对标借鉴')
     expect(OPENING_SYSTEM_PROMPT).toContain('调性差异')
+  })
+})
+
+describe('generateRhythmHtml 节奏图谱独立生成', () => {
+  it('从卷级大纲生成 HTML（含 rhythmData 条目）', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const tempDir = await mkdtemp(join(tmpdir(), 'aw-opening-rhythm-'))
+    const projectServiceMock = {
+      resolveDir: async () => tempDir,
+      getProjectData: async () => ({ name: '测试书', targetChapters: 30 })
+    }
+    const svc = new OpeningService(projectServiceMock as never, {} as never, undefined)
+
+    const volumeOutline = [
+      '=== 大纲/大纲.md ===',
+      '# 《测试书》大纲',
+      '',
+      '## 逐章节奏标注',
+      '',
+      '### 第1卷',
+      '| 章节 | 标题 | 情绪值 | 爽点类型 | 卷 |',
+      '|---|---|---|---|---|',
+      '| 第 1 章 | 反派以为她好拿捏 | 5 | 1 | 1 |',
+      '| 第 2 章 | 全员震惊 | 7 | 2 | 1 |',
+      '| 第 30 章 | 卷终决战 | 10 | 4 | 1 |',
+      ''
+    ].join('\n')
+
+    const html = await svc.generateRhythmHtml('p1', volumeOutline)
+
+    // HTML 含模板填充结果
+    expect(html).toContain('《测试书》节奏图谱')
+    expect(html).toContain('rhythmData')
+    // 含三条 rhythmData 条目
+    expect(html).toContain("chapter: 1")
+    expect(html).toContain("chapter: 2")
+    expect(html).toContain("chapter: 30")
+    expect(html).toContain('反派以为她好拿捏')
+    expect(html).toContain('卷终决战')
+
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('空大纲抛错', async () => {
+    const { OpeningService } = await import('../src/main/data/opening-service')
+    const projectServiceMock = {
+      resolveDir: async () => '/tmp',
+      getProjectData: async () => ({})
+    }
+    const svc = new OpeningService(projectServiceMock as never, {} as never, undefined)
+    await expect(svc.generateRhythmHtml('p1', '')).rejects.toThrow('卷级大纲为空')
   })
 })

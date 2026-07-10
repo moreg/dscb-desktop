@@ -187,6 +187,94 @@ export function revertInDraft(draft: string, newText: string, oldSnippet: string
   return draft.slice(0, idx) + oldSnippet + draft.slice(idx + newText.length)
 }
 
+export interface RewriteTarget {
+  start: number
+  end: number
+  oldSnippet: string
+  replacement: string
+}
+
+const EDGE_OMISSION_RE = /^[\s.…·•]+|[\s.…·•]+$/g
+const LEADING_OMISSION_RE = /^[\s.…·•]+/
+const TRAILING_OMISSION_RE = /[\s.…·•]+$/
+
+function normalizeWithMap(text: string): { normalized: string; map: number[] } {
+  let normalized = ''
+  const map: number[] = []
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (/\s/.test(ch)) continue
+    normalized += ch
+    map.push(i)
+  }
+  return { normalized, map }
+}
+
+function hasLeadingOmission(text: string): boolean {
+  return LEADING_OMISSION_RE.test(text)
+}
+
+function hasTrailingOmission(text: string): boolean {
+  return TRAILING_OMISSION_RE.test(text)
+}
+
+function stripEdgeOmission(text: string): string {
+  return text.replace(EDGE_OMISSION_RE, '')
+}
+
+/**
+ * 找到一次改写应替换的正文范围。
+ *
+ * 审核面板里的 snippet 可能来自 extractContext：前后带展示用省略号，且正文空白会被
+ * 折叠成单空格。这里先走精确匹配；失败后把边缘省略号去掉，并按"忽略空白"的文本
+ * 映射找回 draft 中的真实字符范围。
+ */
+export function findRewriteTarget(
+  draft: string,
+  snippet: string,
+  replacement: string
+): RewriteTarget | null {
+  if (!snippet) return null
+
+  const exactIdx = draft.indexOf(snippet)
+  if (exactIdx >= 0) {
+    return {
+      start: exactIdx,
+      end: exactIdx + snippet.length,
+      oldSnippet: snippet,
+      replacement
+    }
+  }
+
+  const needle = stripEdgeOmission(snippet)
+  if (!needle) return null
+
+  const draftNorm = normalizeWithMap(draft)
+  const needleNorm = normalizeWithMap(needle)
+  if (!needleNorm.normalized) return null
+
+  const normIdx = draftNorm.normalized.indexOf(needleNorm.normalized)
+  if (normIdx < 0) return null
+
+  const start = draftNorm.map[normIdx]
+  const lastNormIdx = normIdx + needleNorm.normalized.length - 1
+  const end = draftNorm.map[lastNormIdx] + 1
+  let nextReplacement = replacement
+  if (hasLeadingOmission(snippet)) {
+    nextReplacement = nextReplacement.replace(LEADING_OMISSION_RE, '')
+  }
+  if (hasTrailingOmission(snippet)) {
+    nextReplacement = nextReplacement.replace(TRAILING_OMISSION_RE, '')
+  }
+
+  return {
+    start,
+    end,
+    oldSnippet: draft.slice(start, end),
+    replacement: nextReplacement
+  }
+}
+
 /**
  * 把 oldSnippet 在 draft 里替换为 newText，返回新 draft。
  * 找不到 oldSnippet 时返回原 draft。

@@ -139,7 +139,9 @@ export default function App() {
   }
 
   const mainInnerClass = `main-inner ${
-    view.kind === 'editor'
+    view.kind === 'projects'
+      ? 'projects-wide'
+      : view.kind === 'editor'
       ? 'editor-wide'
       : view.kind === 'relationships'
         ? 'relationship-wide'

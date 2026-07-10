@@ -170,6 +170,16 @@ function extractRhythmFallback(doc: ReturnType<typeof parseDoc>): RhythmEntry[] 
   return entries
 }
 
+/**
+ * 纯函数：从大纲 Markdown 文本中提取逐章节奏条目（不读文件）。
+ * 供 generateRhythmHtml 在内存中复用，避免落盘才能预览节奏图谱。
+ */
+export function extractRhythmFromText(text: string): RhythmEntry[] {
+  if (!text || !text.trim()) return []
+  const doc = parseDoc(text)
+  return extractRhythmFallback(doc)
+}
+
 /** 从 H1 body 中的顶层表格提取逐章节奏（技能标准格式：H1 + 表格，无 H2 节） */
 function extractRhythmFromTopLevelTable(doc: ReturnType<typeof parseDoc>): RhythmEntry[] {
   const { headers, rows } = parseTable(doc.body)

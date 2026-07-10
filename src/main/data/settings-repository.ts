@@ -13,7 +13,8 @@ import type {
   ReviewThresholds,
   ReviewWordLists,
   CoverImageConfigInput,
-  CoverImageConfigSummary
+  CoverImageConfigSummary,
+  DeslopRulesConfig
 } from '../../shared/types'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
 import {
@@ -28,6 +29,20 @@ import {
   DEFAULT_REVIEW_THRESHOLDS,
   DEFAULT_REVIEW_WORD_LISTS
 } from './skill-prompts'
+import {
+  DESLOP_RULE_SECTIONS,
+  DEFAULT_DESLOP_BANNED_WORDS
+} from './skill-prompts/deslop/deslop-rules'
+
+/** 比较两个禁用词表是否元素相同（忽略顺序与重复） */
+function bannedWordsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = new Set(a)
+  const sb = new Set(b)
+  if (sa.size !== sb.size) return false
+  for (const w of sa) if (!sb.has(w)) return false
+  return true
+}
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -60,6 +75,8 @@ export interface AppSettings {
   chapterRuleOverrides?: Record<string, string>
   /** 审稿规则配置（按「正文审核」技能） */
   reviewRules?: Partial<ReviewRulesConfig>
+  /** 去 AI 味规则配置（系统铁律/Gate 方法覆盖 + 禁用词表，保存后真正生效） */
+  deslopRules?: DeslopRulesConfig
   /** 图像生成 API 配置（封面生成用，独立于文本 LLM provider） */
   coverImage?: Partial<CoverImageConfigInput>
 }
@@ -107,6 +124,50 @@ function sanitizeChapterRuleOverrides(raw: unknown): Record<string, string> {
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (CHAPTER_RULE_KEYS.has(k) && typeof v === 'string') out[k] = v
   }
+  return out
+}
+
+/** 去 AI 味文本规则覆盖白名单：只保留注册表内的 key、字符串值 */
+const DESLOP_RULE_KEYS: Set<string> = new Set(DESLOP_RULE_SECTIONS.map((s) => s.key))
+function sanitizeDeslopTextOverrides(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (DESLOP_RULE_KEYS.has(k) && typeof v === 'string') out[k] = v
+  }
+  return out
+}
+
+/**
+ * 去 AI 味禁用词表清洗：去空白、去重、限长（单词 ≤30 字、总数 ≤500）。
+ * 与内置默认（DEFAULT_DESLOP_BANNED_WORDS）元素等价时返回 undefined（prune，不污染配置、回落默认）。
+ * 返回 undefined 表示「未配置」，让下游回落到内置默认。
+ */
+function sanitizeDeslopBannedWords(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const w of raw) {
+    if (typeof w !== 'string') continue
+    const t = w.trim().slice(0, 30)
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+    if (out.length >= 500) break
+  }
+  // prune：清洗后与内置默认等价则不存（仍随内置升级，与文本规则覆盖的 prune 语义一致）
+  if (bannedWordsEqual(out, DEFAULT_DESLOP_BANNED_WORDS)) return undefined
+  return out
+}
+
+/** 完整清洗 DeslopRulesConfig（textOverrides + bannedWords）；返回 undefined 表示全用默认 */
+function sanitizeDeslopRules(raw: unknown): DeslopRulesConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeslopRulesConfig>
+  const out: DeslopRulesConfig = {}
+  const textOverrides = sanitizeDeslopTextOverrides(r.textOverrides)
+  if (Object.keys(textOverrides).length > 0) out.textOverrides = textOverrides
+  const bannedWords = sanitizeDeslopBannedWords(r.bannedWords)
+  if (bannedWords !== undefined) out.bannedWords = bannedWords
   return out
 }
 
@@ -340,7 +401,8 @@ export class SettingsRepository {
         stored.writingRequirementTemplates
       ),
       chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides),
-      reviewRules: sanitizeReviewRules(stored.reviewRules)
+      reviewRules: sanitizeReviewRules(stored.reviewRules),
+      deslopRules: sanitizeDeslopRules(stored.deslopRules)
     }
   }
 
@@ -351,6 +413,7 @@ export class SettingsRepository {
       costAlert?: Partial<CostAlertConfig>
       aiHighFreq?: Partial<AiHighFreqConfig>
       reviewRules?: Partial<ReviewRulesConfig>
+      deslopRules?: DeslopRulesConfig
     }
   ): Promise<AppSettings> {
     const current = await this.get()
@@ -378,7 +441,9 @@ export class SettingsRepository {
           ? sanitizeChapterRuleOverrides(patch.chapterRuleOverrides)
           : current.chapterRuleOverrides,
       reviewRules:
-        patch.reviewRules !== undefined ? sanitizeReviewRules(patch.reviewRules) : current.reviewRules
+        patch.reviewRules !== undefined ? sanitizeReviewRules(patch.reviewRules) : current.reviewRules,
+      deslopRules:
+        patch.deslopRules !== undefined ? sanitizeDeslopRules(patch.deslopRules) : current.deslopRules
     }
     await writeJsonAtomic(this.settingsFile, next)
     return next
@@ -453,6 +518,22 @@ export class SettingsRepository {
     }
     await this.update({ reviewRules: merged })
     return this.getReviewRules()
+  }
+
+  /** 取去 AI 味规则配置（清洗后；缺省为空对象，表示全用内置默认） */
+  async getDeslopRules(): Promise<DeslopRulesConfig> {
+    const s = await this.get()
+    return sanitizeDeslopRules(s.deslopRules)
+  }
+
+  /**
+   * 整体替换去 AI 味规则（文本覆盖 + 禁用词表）。
+   * 前端传入完整的 textOverrides（已 prune 与默认相同的 key）+ bannedWords。
+   */
+  async setDeslopRules(cfg: DeslopRulesConfig): Promise<DeslopRulesConfig> {
+    const sanitized = sanitizeDeslopRules(cfg)
+    await this.update({ deslopRules: sanitized })
+    return this.getDeslopRules()
   }
 
   /** 获取 AI 高频词配置 */

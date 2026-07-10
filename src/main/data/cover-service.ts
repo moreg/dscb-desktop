@@ -1,6 +1,5 @@
 import { promises as fs } from 'fs'
 import { join, resolve, sep } from 'path'
-import { Canvas, loadImage } from 'skia-canvas'
 import { ImageService } from './image-service'
 import { ProjectService } from './project-service'
 import {
@@ -264,6 +263,7 @@ export class CoverService {
     const targetH = parseInt(hStr, 10)
     if (!Number.isFinite(targetW) || !Number.isFinite(targetH)) return
 
+    const { Canvas, loadImage } = await import('skia-canvas')
     const image = await loadImage(srcPath)
     const srcW = image.width
     const srcH = image.height
