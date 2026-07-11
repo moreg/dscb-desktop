@@ -255,7 +255,28 @@ async function runAntigravityOnce(
           // 优先取 stderr 的 Error 行，其次 stdout
           const errorSource = stderrTrimmed || trimmed
           const msg = errorSource.split('\n')[0].replace(/^Error:\s*/i, '')
+          // 仅开发环境记录详细诊断信息，生产环境避免敏感信息泄露
+          if (process.env.NODE_ENV === 'development') {
+            console.error('[antigravity] execution failed.', {
+              code,
+              msg,
+              hint:
+                /Agent execution terminated/i.test(msg) ? 'agent 内部调用失败，通常是模型超时/限流或网络问题' :
+                /timeout/i.test(msg) ? '打印超时，可尝试在设置中增大 --print-timeout' :
+                code !== 0 && !errorSource ? '进程异常退出，无错误输出，可能是被系统杀死或内存不足' :
+                '检查网络连接或 CLI 登录状态'
+            })
+          }
           if (/authenticat|sign\s*in|credential|unauthorized|401|403/i.test(msg)) {
+            // 仅开发环境记录认证失败上下文
+            if (process.env.NODE_ENV === 'development') {
+              console.error('[antigravity] auth failed.', {
+                cwd: process.cwd(),
+                APPDATA: process.env.APPDATA,
+                USERPROFILE: process.env.USERPROFILE,
+                LOCALAPPDATA: process.env.LOCALAPPDATA
+              })
+            }
             reject(new Error('LLM_AUTH_FAILED'))
           } else if (/timed?\s*out|timeout/i.test(msg)) {
             reject(new Error('LLM_TIMEOUT'))
@@ -271,6 +292,7 @@ async function runAntigravityOnce(
         }
 
         // stderr 有内容但 stdout 也成功 -- 记日志但不阻断（agy 有时往 stderr 写警告）
+        // 截断 200 字符；仅含 CLI 诊断信息（非密钥），保留生产日志便于排障
         if (stderrTrimmed) {
           console.warn('[antigravity] stderr:', stderrTrimmed.slice(0, 200))
         }

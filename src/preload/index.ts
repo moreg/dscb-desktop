@@ -20,6 +20,8 @@ import type {
   RhythmEvaluation,
   ChapterFlowResult,
   ListProvidersResult,
+  FeatureCategory,
+  FeatureRoutingEntry,
   CreateStyleProfileInput,
   UpdateStyleProfileInput,
   TeardownEntry,
@@ -146,6 +148,8 @@ const api = {
   upsertProvider: (p: ProviderConfig) => ipcRenderer.invoke('llm:upsertProvider', p),
   deleteProvider: (id: string) => ipcRenderer.invoke('llm:deleteProvider', id),
   setActiveProvider: (id: string) => ipcRenderer.invoke('llm:setActive', id),
+  setFeatureRouting: (routing: Partial<Record<FeatureCategory, FeatureRoutingEntry>>) =>
+    ipcRenderer.invoke('llm:setFeatureRouting', routing),
   generateStream: (
     prompt: string,
     onToken: (token: string, done: boolean) => void

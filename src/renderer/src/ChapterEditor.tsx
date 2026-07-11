@@ -52,7 +52,7 @@ import {
 import type { UsageSummary, CostAlertConfig, UsageRecord } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type { DetailedOutlineItem, DeslopScanReport, DeslopResult } from '../../shared/types'
-import { buildForeshadowingReminders } from './foreshadowingReminders'
+import { buildForeshadowingReminders, type ForeshadowingReminderItem } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
@@ -92,11 +92,19 @@ function friendlyLlmError(err: string | undefined): string {
     AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
     AGY_SPAWN_FAILED: 'agy CLI 启动失败，请检查安装',
     CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
-    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名'
+    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名',
+    // agy 内部 agent 执行失败的通用错误
+    'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络连接后重试',
+    'exited with code': 'agy 进程异常退出，请重试或检查 CLI 安装',
+    // codex 网络错误
+    'tls handshake': 'TLS 握手失败，请检查网络代理设置或 OpenAI 服务器连接',
+    'stream disconnected': '连接中断，请检查网络稳定性后重试',
+    'Reconnecting': '正在重连，请检查网络连接'
   }
   // 精确匹配（err 可能是 "AGY_ERROR: xxx" 形式，用 includes 匹配前缀）
+  const lowerErr = err.toLowerCase()
   for (const [key, msg] of Object.entries(map)) {
-    if (err.includes(key)) return msg
+    if (lowerErr.includes(key.toLowerCase())) return msg
   }
   // AGY_ERROR / CODEX_ERROR 带具体信息
   if (err.startsWith('AGY_ERROR: ')) return `agy 执行出错：${err.slice(11).slice(0, 100)}`
@@ -213,7 +221,6 @@ export default function ChapterEditor({
   const [showPreview, setShowPreview] = useState(false)
   const [previewTab, setPreviewTab] = useState<'highlight' | 'markdown'>('highlight')
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
-  const [showChapterOutline, setShowChapterOutline] = useState(false)
   const [generatingOutline, setGeneratingOutline] = useState(false)
   const [isEditingReqs, setIsEditingReqs] = useState(false)
   const [editingReqsTemplateId, setEditingReqsTemplateId] = useState('')
@@ -324,6 +331,7 @@ export default function ChapterEditor({
   const [castApplied, setCastApplied] = useState(false)
   const [showCastPanel, setShowCastPanel] = useState(false)
   const [flowPanelOpen, setFlowPanelOpen] = useState(false)
+  const [outlinePanelOpen, setOutlinePanelOpen] = useState(true) // 细纲展开/收起
   const [autoAudit, setAutoAudit] = useState<AuditReport | null>(null)
   const [reAuditLoading, setReAuditLoading] = useState(false)
   const [writeAuditMode, setWriteAuditMode] = useState<'soft' | 'strict'>('soft')
@@ -1775,10 +1783,70 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     () => buildForeshadowingReminders(chapterNumber, chapterOutline, foreshadowings),
     [chapterNumber, chapterOutline, foreshadowings]
   )
+
+  const dismissedReminderKey = `ai-writer:dismissed-foreshadow:${projectId}:${chapterNumber}`
+  // ref 始终指向当前章节的 localStorage key，供写入 effect 使用而不把它纳入依赖
+  // （避免章节切换时把上一章的忽略集合误写入本章 key）。
+  const dismissedKeyRef = useRef(dismissedReminderKey)
+  dismissedKeyRef.current = dismissedReminderKey
+  const [dismissedReminders, setDismissedReminders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(dismissedReminderKey)
+      return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set()
+    }
+  })
+  // 章节切换（chapterNumber 变化但组件未重挂载）时，重新加载本章的忽略集合，
+  // 避免上一章的忽略状态串入本章。
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(dismissedReminderKey)
+      setDismissedReminders(new Set(raw ? (JSON.parse(raw) as string[]) : []))
+    } catch {
+      setDismissedReminders(new Set())
+    }
+  }, [dismissedReminderKey])
+  // 持久化：仅当忽略集合变化时写入当前章节 key（不依赖 key，防止跨章串写）
+  useEffect(() => {
+    try {
+      localStorage.setItem(dismissedKeyRef.current, JSON.stringify([...dismissedReminders]))
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [dismissedReminders])
+
+  const dismissReminder = useCallback(
+    (kind: 'plant' | 'reinforce' | 'collect', content: string) => {
+      setDismissedReminders((prev) => {
+        const next = new Set(prev)
+        next.add(`${kind}:${content.trim()}`)
+        return next
+      })
+    },
+    []
+  )
+
+  const isDismissed = useCallback(
+    (kind: 'plant' | 'reinforce' | 'collect', content: string) =>
+      dismissedReminders.has(`${kind}:${content.trim()}`),
+    [dismissedReminders]
+  )
+
+  const visiblePlant = useMemo(
+    () => foreshadowingReminders.plant.filter((it) => !isDismissed('plant', it.content)),
+    [foreshadowingReminders.plant, isDismissed]
+  )
+  const visibleReinforce = useMemo(
+    () => foreshadowingReminders.reinforce.filter((it) => !isDismissed('reinforce', it.content)),
+    [foreshadowingReminders.reinforce, isDismissed]
+  )
+  const visibleCollect = useMemo(
+    () => foreshadowingReminders.collect.filter((it) => !isDismissed('collect', it.content)),
+    [foreshadowingReminders.collect, isDismissed]
+  )
   const foreshadowingReminderCount =
-    foreshadowingReminders.plant.length +
-    foreshadowingReminders.reinforce.length +
-    foreshadowingReminders.collect.length
+    visiblePlant.length + visibleReinforce.length + visibleCollect.length
 
   if (!data) return <p className="empty">展卷中…</p>
 
@@ -2161,72 +2229,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
       <WeeklyWritingStats projectId={projectId} dailyTarget={dailyGoal} />
 
-      {/* 本章细纲 */}
-      <div className="row" style={{ marginBottom: 8 }}>
-        <button
-          className="btn btn-sm btn-ghost"
-          onClick={() => setShowChapterOutline((s) => !s)}
-        >
-          {showChapterOutline ? '收起本章细纲' : '📜 本章细纲'}
-        </button>
-        {onOpenOutline ? (
-          <button className="btn btn-sm btn-ghost" onClick={onOpenOutline}>
-            大纲页 →
-          </button>
-        ) : null}
-      </div>
-      {showChapterOutline ? (
-        <div className="chapter-outline-panel">
-          <div className="row" style={{ alignItems: 'baseline' }}>
-            <strong style={{ fontSize: 13.5 }}>
-              第 {chapterNumber} 章细纲
-            </strong>
-            <button
-              className="btn btn-sm"
-              onClick={generateThisChapterOutline}
-              disabled={generatingOutline}
-              style={{ marginLeft: 'auto' }}
-            >
-              {generatingOutline
-                ? '运笔中…'
-                : chapterOutline
-                  ? '重新生成'
-                  : '✦ 生成细纲'}
-            </button>
-          </div>
-          {chapterOutline ? (
-            <>
-              <div className="outline-detail-fields">
-                {getOutlineDetailRows(chapterOutline).map((row) => (
-                  <OutlineDetailField key={row.label} row={row} />
-                ))}
-              </div>
-              {/* P19-D：本章出场角色速查 */}
-              {chapterOutline.charactersAppearing?.length ? (
-                <div className="outline-characters-row" style={{ marginTop: 6 }}>
-                  <span className="muted" style={{ fontSize: 11.5 }}>本章出场：</span>
-                  {chapterOutline.charactersAppearing.map((name) => {
-                    const c = characters.find((x) => x.name === name)
-                    return (
-                      <span
-                        key={name}
-                        className="character-chip"
-                        title={c ? `${c.role ?? '角色'}` : '本章规划出场'}
-                      >
-                        {name}
-                      </span>
-                    )
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <p className="missing">本章暂无细纲，点「生成细纲」让 AI 据总纲铺陈。</p>
-          )}
-        </div>
-      ) : null}
-
-      <div className="chapter-outline-panel" style={{ marginTop: 10, marginBottom: 10 }}>
+      <div className="chapter-outline-panel" style={{ marginBottom: 10 }}>
         <div className="row" style={{ alignItems: 'baseline' }}>
           <strong style={{ fontSize: 13.5 }}>本章伏笔提醒</strong>
           <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
@@ -2237,14 +2240,29 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
         {foreshadowingReminderCount > 0 ? (
           <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-            {foreshadowingReminders.plant.length > 0 ? (
-              <ReminderGroup title="细纲提示" items={foreshadowingReminders.plant.map((item) => item.content)} tone="hook" />
+            {visiblePlant.length > 0 ? (
+              <ReminderGroup
+                title="细纲提示"
+                items={visiblePlant}
+                tone="hook"
+                onDismiss={(it) => dismissReminder('plant', it.content)}
+              />
             ) : null}
-            {foreshadowingReminders.reinforce.length > 0 ? (
-              <ReminderGroup title="待埋 / 待强化" items={foreshadowingReminders.reinforce.map((item) => item.content)} tone="cool" />
+            {visibleReinforce.length > 0 ? (
+              <ReminderGroup
+                title="待埋 / 待强化"
+                items={visibleReinforce}
+                tone="cool"
+                onDismiss={(it) => dismissReminder('reinforce', it.content)}
+              />
             ) : null}
-            {foreshadowingReminders.collect.length > 0 ? (
-              <ReminderGroup title="本章待回收" items={foreshadowingReminders.collect.map((item) => item.content)} tone="emotion" />
+            {visibleCollect.length > 0 ? (
+              <ReminderGroup
+                title="本章待回收"
+                items={visibleCollect}
+                tone="emotion"
+                onDismiss={(it) => dismissReminder('collect', it.content)}
+              />
             ) : null}
           </div>
         ) : (
@@ -2299,6 +2317,57 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
 
         <div className="chapter-main-pane">
+          {/* 本章细纲（正文上方，可收起/展开） */}
+          <div className="chapter-outline-panel-above" style={{ marginBottom: 16, padding: 12, background: 'var(--surface)', borderRadius: 8, border: '1px solid var(--line)' }}>
+            <div className="row" style={{ alignItems: 'baseline' }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setOutlinePanelOpen(!outlinePanelOpen)}
+                style={{ padding: '2px 6px', marginRight: 6 }}
+                title={outlinePanelOpen ? '收起细纲' : '展开细纲'}
+              >
+                {outlinePanelOpen ? '▼' : '▶'}
+              </button>
+              <strong style={{ fontSize: 13.5 }}>本章细纲</strong>
+              <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                {chapterOutline ? `第 ${chapterNumber} 章` : '暂无细纲'}
+              </span>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {onOpenOutline ? (
+                  <button className="btn btn-sm btn-ghost" onClick={onOpenOutline}>
+                    大纲页 →
+                  </button>
+                ) : null}
+                <button
+                  className="btn btn-sm"
+                  onClick={generateThisChapterOutline}
+                  disabled={generatingOutline}
+                >
+                  {generatingOutline
+                    ? '运笔中…'
+                    : chapterOutline
+                      ? '重新生成'
+                      : '✦ 生成细纲'}
+                </button>
+              </div>
+            </div>
+            {outlinePanelOpen && (
+              chapterOutline ? (
+                <>
+                  <div className="outline-detail-fields" style={{ marginTop: 8 }}>
+                    {getOutlineDetailRows(chapterOutline).map((row) => (
+                      <OutlineDetailField key={row.label} row={row} />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p className="missing" style={{ marginTop: 8 }}>
+                  本章暂无细纲，点「✦ 生成细纲」让 AI 据总纲铺陈。
+                </p>
+              )
+            )}
+          </div>
+
           {findBarOpen ? (
             <div className="find-replace-bar" onClick={(e) => e.stopPropagation()}>
               <div className="bar-row">
@@ -3105,18 +3174,33 @@ function OutlineDetailField({ row }: { row: { label: string; value?: string; ite
 function ReminderGroup({
   title,
   items,
-  tone
+  tone,
+  onDismiss
 }: {
   title: string
-  items: string[]
+  items: ForeshadowingReminderItem[]
   tone: 'hook' | 'cool' | 'emotion'
+  onDismiss?: (item: ForeshadowingReminderItem) => void
 }) {
   return (
     <div className="outline-tags">
       <span className={`outline-tag ${tone}`}>{title}</span>
       {items.map((item) => (
-        <span key={item} className="outline-tag">
-          {item}
+        <span key={item.id ?? item.content} className="outline-tag reminder-tag">
+          <span className="reminder-tag-text">{item.content}</span>
+          {onDismiss ? (
+            <button
+              type="button"
+              className="reminder-dismiss"
+              title="忽略这条提示"
+              onClick={(e) => {
+                e.stopPropagation()
+                onDismiss(item)
+              }}
+            >
+              ×
+            </button>
+          ) : null}
         </span>
       ))}
     </div>

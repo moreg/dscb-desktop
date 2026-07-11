@@ -1,5 +1,5 @@
 import type { SecretStore } from './secret-store'
-import type { ProviderConfig } from '../../shared/types'
+import type { ProviderConfig, FeatureCategory } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
 import { runCodex, probeCodex } from './codex-runner'
@@ -40,12 +40,54 @@ function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' | 'antigravity' |
 }
 
 /**
+ * feature 标识 -> 功能大类 映射。
+ * 用于按任务类型路由到不同 provider（见 resolveProvider）。
+ * 匹配规则：先精确命中，未命中再按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）。
+ * 前缀仍未列出的 feature（如 'other'、'deslop:editRules'）无对应大类 -> 回退 activeId。
+ */
+const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
+  // 正文生成
+  chapter: 'chapter',
+  'chapter-adjust': 'chapter',
+  // 审稿质检
+  review: 'review',
+  deepReview: 'review',
+  outlineCheck: 'review',
+  rhythmEval: 'review',
+  batchDeepReview: 'review',
+  batchRhythm: 'review',
+  // 去AI味改写
+  humanize: 'humanize',
+  deslop: 'humanize',
+  // 开局大纲
+  opening: 'opening',
+  'outline-generate': 'opening',
+  batchOutline: 'opening',
+  cast: 'opening',
+  relationship: 'opening',
+  styleExtract: 'opening',
+  // 辅助提取
+  endingState: 'auxiliary',
+  memoryExtract: 'auxiliary',
+  figureGen: 'auxiliary',
+  batchMemory: 'auxiliary',
+  batchFigure: 'auxiliary',
+  teardown: 'auxiliary',
+  scan: 'auxiliary'
+}
+
+/**
  * 默认单次生成上限（token）。
  * 中文约 1 字 ≈ 1.5~2 token；典型章节 2500~4000 字需约 8192 token 才不会被截断。
  * 旧值 4096 只够 ~2000 字，导致"提示词要 2500 字但写不够/突然断尾"。
  * 调用方可用 GenerateOptions.maxTokens 按目标字数动态覆盖（见 write-service）。
  */
 const DEFAULT_MAX_TOKENS = 8192
+
+/** 触发长超时的 token 阈值：超过此值视为大段生成，给予更长超时 */
+const LARGE_TOKEN_THRESHOLD = 8192
+/** 大段生成的超时（10 分钟），避免长章节被默认超时误杀 */
+const LARGE_STREAM_TIMEOUT_MS = 600_000
 
 function endpointOf(p: ProviderConfig): string {
   const base = p.baseUrl.replace(/\/+$/, '')
@@ -87,16 +129,30 @@ export class LlmService {
     private readonly usage?: UsageRepository
   ) {}
 
-  private async activeProvider(): Promise<ProviderConfig | null> {
+  /**
+   * 解析本次调用应使用的 provider。
+   * 路由优先级：feature -> 功能大类 -> featureRouting -> 对应 provider（含模型覆盖）
+   * 回退条件：无 feature / feature 未映射 / 路由未配置 / 路由指向的 provider 已删除 -> activeId
+   * 模型覆盖：routing.model 非空时覆盖 provider.model，返回新对象（下游无感知）。
+   */
+  private async resolveProvider(feature?: string): Promise<ProviderConfig | null> {
     const cfg = await this.secret.read()
-    const p = cfg.providers.find((x) => x.id === cfg.activeId)
-    if (!p) return null
-    return p
+    // 精确匹配优先；未命中时按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）
+    const category = feature
+      ? FEATURE_TO_CATEGORY[feature] ?? FEATURE_TO_CATEGORY[feature.split(':')[0]]
+      : undefined
+    const routing = category ? cfg.featureRouting?.[category] : undefined
+    const routed = routing ? cfg.providers.find((x) => x.id === routing.providerId) : undefined
+    if (routed) {
+      const modelOverride = routing!.model?.trim()
+      return modelOverride ? { ...routed, model: modelOverride } : routed
+    }
+    return cfg.providers.find((x) => x.id === cfg.activeId) ?? null
   }
 
   /** 轻量连通测试：发送 1 token 的请求，成功即返回模型名 */
   async ping(): Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }> {
-    const p = await this.activeProvider()
+    const p = await this.resolveProvider()
     if (!p) return { ok: false, error: 'NO_KEY' }
     const proto = protocolOf(p)
     // antigravity 协议：走本机 agy CLI，无需 apiKey
@@ -146,7 +202,7 @@ export class LlmService {
   }
 
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
-    const p = await this.activeProvider()
+    const p = await this.resolveProvider(opts.meta?.feature)
     if (!p) throw new Error('LLM_NOT_CONFIGURED')
     const proto = protocolOf(p)
     // antigravity 协议：走本机 agy CLI 子进程，不需 apiKey（靠本机 OAuth 登录）
@@ -171,7 +227,8 @@ export class LlmService {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const timeoutSignal = AbortSignal.timeout(LLM_STREAM_TIMEOUT_MS)
+        const timeoutMs = opts.maxTokens && opts.maxTokens > LARGE_TOKEN_THRESHOLD ? LARGE_STREAM_TIMEOUT_MS : LLM_STREAM_TIMEOUT_MS
+        const timeoutSignal = AbortSignal.timeout(timeoutMs)
         const combinedSignal = opts.signal
           ? AbortSignal.any([opts.signal, timeoutSignal])
           : timeoutSignal

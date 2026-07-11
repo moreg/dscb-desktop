@@ -396,3 +396,184 @@ describe('LlmService', () => {
     fetchSpy.mockRestore()
   })
 })
+
+describe('LlmService feature routing', () => {
+  it('routes to provider configured for the feature category', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_chapter' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://chapter.example.com/v1/chat/completions')
+    const body = JSON.parse(init.body as string)
+    expect(body.model).toBe('chapter-model')
+    fetchSpy.mockRestore()
+  })
+
+  it('model override takes precedence over provider default model', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-model-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_chapter', model: 'overridden-model' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(body.model).toBe('overridden-model')
+    fetchSpy.mockRestore()
+  })
+
+  it('falls back to activeId when feature has no routing entry', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-noroute-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' }
+      ],
+      featureRouting: {}
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('falls back to activeId when routed provider was deleted (dangling ref)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-deleted-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' }
+      ],
+      // p_chapter 已不存在（死引用）-> 回退 activeId
+      featureRouting: { chapter: { providerId: 'p_chapter' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('unmapped feature falls back to activeId', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-unmapped-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_active' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    // 'other' 未映射到任何大类 -> activeId
+    await svc.generateStream('hi', { meta: { feature: 'other' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('backward compat: config without featureRouting uses activeId', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-compat-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' }
+      ]
+      // 无 featureRouting 字段（旧配置）
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('category aggregates multiple features (chapter-adjust -> chapter routing)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-agg-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_chapter' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    // chapter-adjust 归入 chapter 大类
+    await svc.generateStream('hi', { meta: { feature: 'chapter-adjust' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://chapter.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('deslop:cleanup:N resolves to humanize category via prefix normalization', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-cleanup-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_human', label: 'human', baseUrl: 'https://human.example.com/v1', model: 'human-model', apiKey: 'k2' }
+      ],
+      featureRouting: { humanize: { providerId: 'p_human' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    // deslop:cleanup:1 未精确命中映射表，按 ':' 前缀归一化 -> deslop -> humanize 大类
+    await svc.generateStream('hi', { meta: { feature: 'deslop:cleanup:1' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://human.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+})

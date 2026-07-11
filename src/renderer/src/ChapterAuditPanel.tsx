@@ -107,6 +107,8 @@ export default function ChapterAuditPanel({
   // LLM 深度审稿（M3）：手动触发，结果合并进同一面板的「深度审稿」分组
   const [deepReviewRunning, setDeepReviewRunning] = useState(false)
   const [deepReviewFindings, setDeepReviewFindings] = useState<AuditViolation[]>([])
+  // 已忽略的违例集合（M3：忽略提醒功能）
+  const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(new Set())
   // 每条 violation 的 humanize 状态：key = violationKey(v)，value = {loading, result, error, appliedAt}
   // appliedAt 标记"用户已把此条改写应用到正文"，用于显示"已应用"角标和"↶ 撤销这次"按钮。
   const [humanizeMap, setHumanizeMap] = useState<
@@ -253,10 +255,25 @@ export default function ChapterAuditPanel({
     }
   }
 
+  const handleIgnoreViolation = (key: string) => {
+    setIgnoredKeys((prev) => new Set(prev).add(key))
+  }
+
+  const handleRestoreViolation = (key: string) => {
+    setIgnoredKeys((prev) => {
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  const isIgnored = (v: AuditViolation) => ignoredKeys.has(violationKey(v))
+
   // 合并算法审稿（report.violations）+ LLM 深度审稿（deepReviewFindings）
+  // 过滤掉已忽略的违例
   const grouped = useMemo(
-    () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings]),
-    [report, deepReviewFindings]
+    () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings].filter(v => !isIgnored(v))),
+    [report, deepReviewFindings, ignoredKeys]
   )
   // 展示计数基于去重后的 grouped，与列表实际条数一致；
   // report.counts 仍含前缀重叠的重复命中（如「轰」+「轰然」），不宜直接用于展示。
@@ -281,7 +298,7 @@ export default function ChapterAuditPanel({
         )}
         {onGenerateReport && (
           <button
-            className="btn btn-sm"
+            className="btn btn-sm audit-rewrite-btn-primary"
             onClick={onGenerateReport}
             disabled={reportLoading || !draft}
             title="按「正文审核」技能六步流程生成结构化审核报告（含 LLM 深度审稿）"
@@ -338,11 +355,27 @@ export default function ChapterAuditPanel({
               字数 <strong>{report.wordCount}</strong>
               {report.passed.wordCount ? '' : ' ⚠'}
             </span>
+            {ignoredKeys.size > 0 && (
+              <span
+                className="audit-pill"
+                style={{
+                  marginLeft: 8,
+                  background: 'var(--surface-2)',
+                  color: 'var(--ink-3)',
+                  borderColor: 'var(--line-soft)',
+                  cursor: 'pointer'
+                }}
+                title="点击恢复所有已忽略的提醒"
+                onClick={() => setIgnoredKeys(new Set())}
+              >
+                已忽略 {ignoredKeys.size} 条（点击恢复）
+              </span>
+            )}
           </>
         )}
         {onGenerateReport && (
           <button
-            className="btn btn-sm"
+            className="btn btn-sm audit-rewrite-btn-primary"
             onClick={onGenerateReport}
             disabled={reportLoading || !draft}
             title="按「正文审核」技能六步流程生成结构化审核报告（含 LLM 深度审稿）"
@@ -469,7 +502,7 @@ export default function ChapterAuditPanel({
           </div>
         )}
         <button
-          className="btn btn-sm"
+          className="btn btn-sm audit-rewrite-btn-primary"
           onClick={handleBatchHumanize}
           disabled={batchRunning || !report}
           title="串行改写所有可改写的违例（约 1-2 秒/条）"
@@ -477,7 +510,7 @@ export default function ChapterAuditPanel({
           {batchRunning ? `改写中…` : '✎ 批量改写'}
         </button>
         <button
-          className="btn btn-sm"
+          className="btn btn-sm audit-rewrite-btn-primary"
           onClick={handleDeepReview}
           disabled={deepReviewRunning || !draft}
           title="调 LLM 做角色崩坏/逻辑漏洞/钩子分级等语义检查（按需触发，省 token）"
@@ -486,7 +519,7 @@ export default function ChapterAuditPanel({
         </button>
         {deepReviewFindings.length > 0 && (
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-sm audit-rewrite-btn"
             onClick={() => setDeepReviewFindings([])}
             title="清空深度审稿结果"
           >
@@ -494,7 +527,7 @@ export default function ChapterAuditPanel({
           </button>
         )}
         {onRunAgain && (
-          <button className="btn btn-sm" onClick={onRunAgain} disabled={loading}>
+          <button className="btn btn-sm audit-rewrite-btn" onClick={onRunAgain} disabled={loading}>
             重新质检
           </button>
         )}
@@ -579,11 +612,22 @@ export default function ChapterAuditPanel({
                         {v.suggestion && (
                           <span className="audit-suggestion">→ {v.suggestion}</span>
                         )}
+                        {/* 忽略按钮 - error 级别不允许忽略 */}
+                        {v.severity !== 'error' && (
+                          <button
+                            className="btn btn-sm audit-rewrite-btn"
+                            onClick={() => handleIgnoreViolation(hKey)}
+                            title="忽略此提醒（隐藏不再显示）"
+                            style={{ marginLeft: 8, fontSize: '11px', padding: '2px 6px' }}
+                          >
+                            ✕ 忽略
+                          </button>
+                        )}
                         {/* 改写按钮：仅当有 snippet 且不是章末/字数违例时启用 */}
                         {v.snippet && v.category !== 'word_count' && (
                           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             <button
-                              className="btn btn-ghost btn-sm"
+                              className="btn btn-sm audit-rewrite-btn-primary"
                               onClick={() => handleHumanize(v, hKey)}
                               disabled={hState?.loading}
                               title="调用 LLM 按 humanizer 技能改写这段"
@@ -593,14 +637,14 @@ export default function ChapterAuditPanel({
                             {hState?.result && (
                               <>
                                 <button
-                                  className="btn btn-ghost btn-sm"
+                                  className="btn btn-sm audit-rewrite-btn"
                                   onClick={() => copyRewrite(hState.result!.rewritten)}
                                 >
-                                  复制改写
+                                  📋 复制改写
                                 </button>
                                 {onApplyRewrite && !hState.appliedAt && (
                                   <button
-                                    className="btn btn-ghost btn-sm"
+                                    className="btn btn-sm audit-rewrite-btn-success"
                                     onClick={() => {
                                       // 1. 通知父组件 apply（修改 draft + 压栈）。
                                       // 必须按返回值决定是否标记 appliedAt——
@@ -617,7 +661,7 @@ export default function ChapterAuditPanel({
                                     }}
                                     title="用改写后的文本替换正文中的命中段"
                                   >
-                                    应用到正文
+                                    ✓ 应用到正文
                                   </button>
                                 )}
                                 {hState.appliedAt && onUndoRewrite && (
@@ -630,7 +674,7 @@ export default function ChapterAuditPanel({
                                 )}
                                 {hState.appliedAt && onUndoRewriteByKey && (
                                   <button
-                                    className="btn btn-ghost btn-sm"
+                                    className="btn btn-sm audit-rewrite-btn-warning"
                                     onClick={() => {
                                       // P6-B：按 violationKey 精确撤销（不影响其他已应用条目）
                                       void onUndoRewriteByKey(hKey)

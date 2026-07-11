@@ -29,14 +29,19 @@ function friendlyError(err: string): string {
     AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
     AGY_SPAWN_FAILED: 'agy CLI 启动失败，请检查安装',
     CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
-    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名'
+    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名',
+    'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络后重试',
+    // codex 网络错误
+    'tls handshake': 'TLS 握手失败，请检查网络代理设置或 OpenAI 服务器连接',
+    'stream disconnected': '连接中断，请检查网络稳定性后重试',
+    'Reconnecting': '正在重连，请检查网络连接'
   }
+  const lowerErr = err.toLowerCase()
   for (const [key, msg] of Object.entries(map)) {
-    if (err.includes(key)) return msg
+    if (lowerErr.includes(key.toLowerCase())) return msg
   }
   if (err.includes('AGY_ERROR:')) return `agy 执行出错：${err.slice(err.indexOf(':') + 1).trim().slice(0, 100)}`
   if (err.includes('CODEX_ERROR:')) return `codex 执行出错：${err.slice(err.indexOf(':') + 1).trim().slice(0, 100)}`
-  if (err.toLowerCase().includes('terminated')) return '连接被中断，正在重试...'
   // Zod 字段超长错误：解析出字段名和实际字符数
   const tooBig = err.match(/(\w+): Too big: expected string to have <=(\d+) characters/g)
   if (tooBig) {

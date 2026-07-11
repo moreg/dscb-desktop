@@ -19,6 +19,7 @@ import {
   normalizeWritingRequirementLines,
   type WritingRequirementTemplate
 } from '../../shared/writing-requirement-templates'
+import FeatureRoutingForm from './FeatureRoutingForm'
 
 interface Props {
   onBack?: () => void
@@ -335,16 +336,32 @@ export default function SettingsPage(_: Props) {
           NETWORK_ERROR: '网络错误',
           AGY_NOT_FOUND: '未检测到 agy CLI，请先安装并运行 agy 登录',
           AGY_SPAWN_FAILED: 'agy CLI 启动失败',
+          'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络',
           CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装并运行 codex login',
-          CODEX_MODEL_ERROR: 'codex 模型配置有误'
+          CODEX_MODEL_ERROR: 'codex 模型配置有误',
+          // codex 网络错误
+          'tls handshake': 'TLS 握手失败，请检查网络代理设置',
+          'stream disconnected': '连接中断，请检查网络稳定性',
+          'Reconnecting': '正在重连，请检查网络'
         }
         const err = r.error ?? ''
-        // 精确匹配优先，再尝试前缀匹配（AGY_ERROR: xxx / CODEX_ERROR: xxx）
+        // 精确匹配优先，再尝试包含匹配（AGY_ERROR: xxx / CODEX_ERROR: xxx）
         let msg = map[err]
         if (!msg) {
-          if (err.startsWith('AGY_ERROR: ')) msg = `agy 出错：${err.slice(11).slice(0, 80)}`
-          else if (err.startsWith('CODEX_ERROR: ')) msg = `codex 出错：${err.slice(13).slice(0, 80)}`
-          else msg = err || '未知错误'
+          const lowerErr = err.toLowerCase()
+          // 先尝试 key 包含匹配（处理 Agent execution terminated 这类动态错误）
+          for (const [key, val] of Object.entries(map)) {
+            if (lowerErr.includes(key.toLowerCase())) {
+              msg = val
+              break
+            }
+          }
+          // 再尝试前缀匹配
+          if (!msg) {
+            if (err.startsWith('AGY_ERROR: ')) msg = `agy 出错：${err.slice(11).slice(0, 80)}`
+            else if (err.startsWith('CODEX_ERROR: ')) msg = `codex 出错：${err.slice(13).slice(0, 80)}`
+            else msg = err || '未知错误'
+          }
         }
         setPingResult({ ok: false, text: '✗ ' + msg })
       }
@@ -503,6 +520,16 @@ export default function SettingsPage(_: Props) {
                   尚未添加任何 provider，请在下方填写表单添加。
                 </div>
               )}
+
+              {/* 功能模型分配 */}
+              {providers.providers.length > 0 ? (
+                <FeatureRoutingForm
+                  key={JSON.stringify(providers.featureRouting)}
+                  providers={providers.providers}
+                  routing={providers.featureRouting}
+                  onSaved={refreshProviders}
+                />
+              ) : null}
 
               {/* 联通测试 */}
               <div className="row" style={{ gap: 8, marginTop: 14 }}>
@@ -2014,6 +2041,7 @@ function ProviderRow({
   const [tempDraft, setTempDraft] = useState<number | null>(
     typeof provider.temperature === 'number' ? provider.temperature : null
   )
+  const [savedHint, setSavedHint] = useState(false)
   // 防抖定时器：拖动/键盘连续调节时，停止输入 400ms 后才写盘，避免狂发请求
   const tempTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // provider 切换后同步草稿（例如重新拉取列表）
@@ -2043,6 +2071,9 @@ function ProviderRow({
           protocol: provider.protocol,
           ...(v === null ? {} : { temperature: v })
         })
+        // 显示"已保存"提示 1.2s
+        setSavedHint(true)
+        setTimeout(() => setSavedHint(false), 1200)
       } catch {
         // 失败回滚到 props 当前值，避免滑块与存储不一致
         setTempDraft(
@@ -2170,6 +2201,18 @@ function ProviderRow({
                     ? '均衡（适合续写）'
                     : '发散（更有惊喜，易跑偏）'}
             </span>
+            {savedHint && (
+              <span
+                style={{
+                  fontSize: 11,
+                  color: 'var(--success)',
+                  fontWeight: 500,
+                  animation: 'fade-in 0.2s ease'
+                }}
+              >
+                ✓ 已保存
+              </span>
+            )}
           </div>
         </div>
         <div className="btn-group">

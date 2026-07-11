@@ -203,6 +203,18 @@ async function runCodexOnce(
         if (!settled) {
           settled = true
           cleanup()
+          // 仅开发环境记录详细诊断信息，生产环境避免敏感信息泄露
+          if (process.env.NODE_ENV === 'development') {
+            console.error('[codex] execution failed.', {
+              type,
+              msg,
+              hint:
+                /tls|handshake|ssl|certificate|eof/i.test(msg) ? 'TLS/SSL 握手失败，通常是网络代理问题或 OpenAI 服务器连接不稳定' :
+                /reconnect|disconnected|network/i.test(msg) ? '网络连接中断，请检查网络稳定性或代理设置' :
+                /auth|login|credential/i.test(msg) ? '认证失败，请运行 codex login 重新登录' :
+                '检查网络连接或 CLI 版本'
+            })
+          }
           if (/auth|login|credential|401|403/i.test(msg)) {
             reject(new Error('LLM_AUTH_FAILED'))
           } else if (/rate|quota|limit|429/i.test(msg)) {

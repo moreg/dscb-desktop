@@ -64,16 +64,30 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
   keyMasked: string
 }
 
+/** 功能大类：用于按任务类型路由到不同 provider/模型 */
+export type FeatureCategory = 'chapter' | 'review' | 'humanize' | 'opening' | 'auxiliary'
+
+/** 单个功能大类的路由配置：指向某个 provider，可选覆盖模型名 */
+export interface FeatureRoutingEntry {
+  /** 目标 provider id（必须存在于 providers 中，否则回退 activeId） */
+  providerId: string
+  /** 覆盖 provider.model；空/缺省则用 provider 自带模型 */
+  model?: string
+}
+
 export interface ProvidersConfig {
-  /** 当前选中的 provider id */
+  /** 当前选中的 provider id（未配置路由的功能大类走此 provider） */
   activeId: string
   providers: ProviderConfig[]
+  /** 功能大类 -> provider 路由；未列出的类别回退 activeId */
+  featureRouting?: Partial<Record<FeatureCategory, FeatureRoutingEntry>>
 }
 
 /** 列表接口的返回结构（脱敏） */
 export interface ListProvidersResult {
   activeId: string
   providers: ProviderSummary[]
+  featureRouting?: Partial<Record<FeatureCategory, FeatureRoutingEntry>>
 }
 
 export interface ProjectData {
@@ -460,6 +474,9 @@ export interface RendererApi {
   upsertProvider: (p: ProviderConfig) => Promise<ProviderConfig>
   deleteProvider: (id: string) => Promise<void>
   setActiveProvider: (id: string) => Promise<string>
+  setFeatureRouting: (
+    routing: Partial<Record<FeatureCategory, FeatureRoutingEntry>>
+  ) => Promise<Partial<Record<FeatureCategory, FeatureRoutingEntry>> | undefined>
   generateStream: (
     prompt: string,
     onToken: (token: string, done: boolean) => void

@@ -23,9 +23,24 @@ const providerConfigSchema = z.object({
   temperature: z.number().min(0).max(2).optional()
 })
 
+const featureRoutingEntrySchema = z.object({
+  providerId: z.string().min(1).max(100),
+  model: z.string().max(255).optional()
+})
+
 const providersConfigSchema = z.object({
   activeId: z.string().max(100),
-  providers: z.array(providerConfigSchema)
+  providers: z.array(providerConfigSchema),
+  // 功能大类 -> provider 路由（可选）。每个大类独立可选，未列出的回退 activeId。
+  featureRouting: z
+    .object({
+      chapter: featureRoutingEntrySchema.optional(),
+      review: featureRoutingEntrySchema.optional(),
+      humanize: featureRoutingEntrySchema.optional(),
+      opening: featureRoutingEntrySchema.optional(),
+      auxiliary: featureRoutingEntrySchema.optional()
+    })
+    .optional()
 })
 
 interface LegacyShape {

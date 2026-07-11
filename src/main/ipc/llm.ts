@@ -122,7 +122,8 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     const cfg = await secret.read()
     return {
       activeId: cfg.activeId,
-      providers: cfg.providers.map(summarize)
+      providers: cfg.providers.map(summarize),
+      featureRouting: cfg.featureRouting
     }
   })
 
@@ -152,6 +153,14 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     const cfg = await secret.read()
     cfg.providers = cfg.providers.filter((p) => p.id !== id)
     if (cfg.activeId === id) cfg.activeId = cfg.providers[0]?.id ?? ''
+    // 清理 featureRouting 中指向已删除 provider 的条目（避免死引用）
+    if (cfg.featureRouting) {
+      const cleaned: Record<string, { providerId: string; model?: string }> = {}
+      for (const [cat, entry] of Object.entries(cfg.featureRouting)) {
+        if (entry && entry.providerId !== id) cleaned[cat] = entry
+      }
+      cfg.featureRouting = cleaned
+    }
     await secret.write(cfg)
   })
 
@@ -165,6 +174,31 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     cfg.activeId = id
     await secret.write(cfg)
     return id
+  })
+
+  // 设置功能大类 -> provider 路由（白名单校验 + 引用存在性校验）
+  safeHandle('llm:setFeatureRouting', async (_e, raw: unknown) => {
+    if (!raw || typeof raw !== 'object') throw new Error('PROVIDER_INVALID: routing required')
+    const incoming = raw as Record<string, unknown>
+    const validCategories = new Set(['chapter', 'review', 'humanize', 'opening', 'auxiliary'])
+    const cfg = await secret.read()
+    const ids = new Set(cfg.providers.map((p) => p.id))
+    const cleaned: Record<string, { providerId: string; model?: string }> = {}
+    for (const [cat, entry] of Object.entries(incoming)) {
+      if (!validCategories.has(cat)) continue
+      if (!entry || typeof entry !== 'object') continue
+      const e = entry as { providerId?: unknown; model?: unknown }
+      if (typeof e.providerId !== 'string' || !e.providerId.trim()) continue
+      const providerId = e.providerId.trim()
+      // 引用的 provider 必须存在，否则丢弃该条目
+      if (!ids.has(providerId)) continue
+      const model =
+        typeof e.model === 'string' && e.model.trim() ? e.model.trim() : undefined
+      cleaned[cat] = model ? { providerId, model } : { providerId }
+    }
+    cfg.featureRouting = cleaned
+    await secret.write(cfg)
+    return cfg.featureRouting
   })
 
   // 是否存在任意已配置 key（仅判断 active provider）
