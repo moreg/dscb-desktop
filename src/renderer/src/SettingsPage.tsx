@@ -327,12 +327,26 @@ export default function SettingsPage(_: Props) {
       } else {
         const map: Record<string, string> = {
           NO_KEY: '尚未配置 API Key',
-          LLM_AUTH_FAILED: '认证失败，请检查 API Key',
+          LLM_NOT_CONFIGURED: '尚未配置 provider',
+          LLM_AUTH_FAILED: '认证失败，请检查 API Key 或 CLI 登录状态',
           LLM_RATE_LIMIT: '请求过于频繁',
+          LLM_TIMEOUT: '连通测试超时',
           LLM_REQUEST_FAILED: '请求失败',
-          NETWORK_ERROR: '网络错误'
+          NETWORK_ERROR: '网络错误',
+          AGY_NOT_FOUND: '未检测到 agy CLI，请先安装并运行 agy 登录',
+          AGY_SPAWN_FAILED: 'agy CLI 启动失败',
+          CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装并运行 codex login',
+          CODEX_MODEL_ERROR: 'codex 模型配置有误'
         }
-        setPingResult({ ok: false, text: '✗ ' + (map[r.error ?? ''] ?? r.error ?? '未知错误') })
+        const err = r.error ?? ''
+        // 精确匹配优先，再尝试前缀匹配（AGY_ERROR: xxx / CODEX_ERROR: xxx）
+        let msg = map[err]
+        if (!msg) {
+          if (err.startsWith('AGY_ERROR: ')) msg = `agy 出错：${err.slice(11).slice(0, 80)}`
+          else if (err.startsWith('CODEX_ERROR: ')) msg = `codex 出错：${err.slice(13).slice(0, 80)}`
+          else msg = err || '未知错误'
+        }
+        setPingResult({ ok: false, text: '✗ ' + msg })
       }
     } catch {
       setPingResult({ ok: false, text: '✗ 测试失败' })
@@ -2189,8 +2203,10 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const isCli = isAg || isCodex
 
   // 切到 antigravity 时拉取 agy 可用模型列表
+  // 注意：loading 状态不能放进依赖数组，否则 setAgyModelsLoading(true) 触发重渲染时
+  // 会 cleanup 当前 effect（cancelled=true），导致 IPC 结果被丢弃、列表永远为空。
   useEffect(() => {
-    if (!isAg || agyModels.length > 0 || agyModelsLoading) return
+    if (!isAg || agyModels.length > 0) return
     let cancelled = false
     setAgyModelsLoading(true)
     window.api
@@ -2207,11 +2223,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     return () => {
       cancelled = true
     }
-  }, [isAg, agyModels.length, agyModelsLoading])
+  }, [isAg, agyModels.length])
 
   // 切到 codex 时拉取 codex 可用模型（读 config.toml 默认模型）
   useEffect(() => {
-    if (!isCodex || codexModels.length > 0 || codexModelsLoading) return
+    if (!isCodex || codexModels.length > 0) return
     let cancelled = false
     setCodexModelsLoading(true)
     window.api
@@ -2226,7 +2242,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     return () => {
       cancelled = true
     }
-  }, [isCodex, codexModels.length, codexModelsLoading])
+  }, [isCodex, codexModels.length])
 
   const submit = async () => {
     setErr(null)

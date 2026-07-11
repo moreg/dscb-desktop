@@ -29,6 +29,8 @@ function createFakeChild(opts: {
   stderr?: string
   exitCode: number
   spawnError?: { code: string; message: string }
+  /** 自定义分块：把 stdout 按指定 Buffer 数组分多次 emit（测试 UTF-8 截断） */
+  stdoutChunks?: Buffer[]
 }): FakeChild {
   const child = new EventEmitter() as FakeChild
   child.stdin = { write: vi.fn(), end: vi.fn() }
@@ -48,7 +50,13 @@ function createFakeChild(opts: {
       child.emit('error', err)
       return
     }
-    child.stdout.emit('data', Buffer.from(opts.stdout, 'utf8'))
+    if (opts.stdoutChunks) {
+      for (const c of opts.stdoutChunks) {
+        child.stdout.emit('data', c)
+      }
+    } else {
+      child.stdout.emit('data', Buffer.from(opts.stdout, 'utf8'))
+    }
     if (opts.stderr) child.stderr.emit('data', Buffer.from(opts.stderr, 'utf8'))
     child.emit('close', opts.exitCode)
   })
@@ -64,7 +72,7 @@ beforeEach(() => {
 })
 
 describe('runAntigravity', () => {
-  it('用 stdin 传 prompt，args 含 -p --sandbox --dangerously-skip-permissions', async () => {
+  it('prompt 作为 -p 参数传入，args 含 --dangerously-skip-permissions 且不含 --sandbox', async () => {
     fakeChildFactory = () =>
       createFakeChild({ stdout: '你好，世界', exitCode: 0 })
 
@@ -73,15 +81,15 @@ describe('runAntigravity', () => {
     expect(lastSpawnArgs).not.toBeNull()
     // bin 可能是 'agy'（Unix）或绝对路径 .exe（Windows）
     expect(lastSpawnArgs!.bin.endsWith('agy') || lastSpawnArgs!.bin.endsWith('agy.exe')).toBe(true)
-    expect(lastSpawnArgs!.args).toContain('-p')
-    expect(lastSpawnArgs!.args).toContain('--sandbox')
+    // -p 后紧跟 prompt 内容（agy 不从 stdin 读取，prompt 必须作为 -p 的参数）
+    const pIdx = lastSpawnArgs!.args.indexOf('-p')
+    expect(pIdx).toBeGreaterThan(-1)
+    expect(lastSpawnArgs!.args[pIdx + 1]).toBe('回复两个字')
+    // --sandbox 会触发 agy "是否创建 sandbox 目录"引导话术，不能加
+    expect(lastSpawnArgs!.args).not.toContain('--sandbox')
     expect(lastSpawnArgs!.args).toContain('--dangerously-skip-permissions')
     expect(lastSpawnArgs!.args).toContain('--print-timeout')
-    // prompt 经 stdin 传入，不在 args 里
     expect(result.full).toBe('你好，世界')
-    // stdin.write 被调用，内容是 prompt
-    const child = createFakeChild({ stdout: '', exitCode: 0 })
-    expect(child.stdin.write).toBeDefined()
   })
 
   it('model 非空时追加 --model', async () => {
@@ -115,6 +123,45 @@ describe('runAntigravity', () => {
     expect(tokens).toEqual(['第一段第二段'])
   })
 
+  it('UTF-8 多字节字符被 chunk 边界截断时不产生乱码', async () => {
+    // "冰" = UTF-8 [e6 99 b4]，"霜" = [e9 9c 9c]
+    // 把 "冰冷冰霜" 的字节在 "冰"和"霜"中间断开，模拟 chunk 截断
+    const full = Buffer.from('冰冷冰霜', 'utf8')
+    // 找到第 3 个字符（"霜"）的起始字节位置（前 3 个字符 = 9 字节）
+    const splitAt = 9
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '',
+        exitCode: 0,
+        stdoutChunks: [full.subarray(0, splitAt), full.subarray(splitAt)]
+      })
+
+    const tokens: string[] = []
+    const result = await runAntigravity('测试', { onToken: (t) => tokens.push(t) })
+
+    // 完整结果不能有乱码字符 �
+    expect(result.full).toBe('冰冷冰霜')
+    expect(result.full).not.toContain('\uFFFD')
+    // onToken 回调也不能有乱码
+    expect(tokens.join('')).toBe('冰冷冰霜')
+    expect(tokens.every((t) => !t.includes('\uFFFD'))).toBe(true)
+  })
+
+  it('单 chunk 内多个不完整尾部拼接后正确解码', async () => {
+    // "震惊" = [e9 9c 87 e6 83 8a]，拆成 3 个 chunk：每 2 字节一段
+    const full = Buffer.from('震惊', 'utf8')
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '',
+        exitCode: 0,
+        stdoutChunks: [full.subarray(0, 2), full.subarray(2, 4), full.subarray(4)]
+      })
+
+    const result = await runAntigravity('测试', {})
+    expect(result.full).toBe('震惊')
+    expect(result.full).not.toContain('\uFFFD')
+  })
+
   it('用量估算：按 1 字 ≈ 1.5 token', async () => {
     fakeChildFactory = () =>
       createFakeChild({ stdout: '你好', exitCode: 0 })
@@ -127,44 +174,81 @@ describe('runAntigravity', () => {
     expect(result.usage!.inputTokens).toBe(0)
   })
 
-  it('stdout 前缀 Error: + 认证失败 -> LLM_AUTH_FAILED', async () => {
+  it('stderr Error + 认证失败 -> LLM_AUTH_FAILED（agy 1.1.1 真实行为）', async () => {
     fakeChildFactory = () =>
       createFakeChild({
-        stdout: 'Error: authentication failed or timed out',
-        exitCode: 0
+        stdout: '',
+        stderr: 'Error: Please sign in to continue',
+        exitCode: 1
       })
 
     await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_AUTH_FAILED')
   })
 
-  it('stdout 前缀 Error: + 超时 -> LLM_TIMEOUT', async () => {
+  it('stderr Error + 超时 -> LLM_TIMEOUT', async () => {
     fakeChildFactory = () =>
       createFakeChild({
-        stdout: 'Error: command timed out after 300s',
-        exitCode: 0
+        stdout: '',
+        stderr: 'Error: timeout waiting for response',
+        exitCode: 1
       })
 
     await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_TIMEOUT')
   })
 
-  it('stdout 前缀 Error: + 限流 -> LLM_RATE_LIMIT', async () => {
+  it('stderr Error + 限流 -> LLM_RATE_LIMIT', async () => {
     fakeChildFactory = () =>
       createFakeChild({
-        stdout: 'Error: rate limit exceeded, please try again later',
-        exitCode: 0
+        stdout: '',
+        stderr: 'Error: rate limit exceeded',
+        exitCode: 1
       })
 
     await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_RATE_LIMIT')
   })
 
-  it('stdout 前缀 Error: + 其他 -> AGY_ERROR', async () => {
+  it('stderr Error + 其他 -> AGY_ERROR', async () => {
     fakeChildFactory = () =>
       createFakeChild({
-        stdout: 'Error: something unexpected happened',
-        exitCode: 0
+        stdout: '',
+        stderr: 'Error: something unexpected happened',
+        exitCode: 1
       })
 
     await expect(runAntigravity('测试', {})).rejects.toThrow('AGY_ERROR')
+  })
+
+  it('exit 非 0 且 stdout/stderr 均空 -> AGY_ERROR', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '',
+        exitCode: 1
+      })
+
+    await expect(runAntigravity('测试', {})).rejects.toThrow('AGY_ERROR')
+  })
+
+  it('exit 非 0 且 stdout 有部分内容（agent 思考过程）-> 不当成功返回', async () => {
+    // agy 超时时 stdout 可能有 agent 的部分思考文本，不应作为正文返回
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: 'I will check the permissions to see what actions are available.',
+        stderr: 'Error: timeout waiting for response',
+        exitCode: 1
+      })
+
+    await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_TIMEOUT')
+  })
+
+  it('stdout 含 Error 前缀（向后兼容旧 agy 行为）-> 正确映射', async () => {
+    // 旧版 agy 可能把错误打到 stdout，保留兼容
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: 'Error: authentication failed',
+        exitCode: 0
+      })
+
+    await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_AUTH_FAILED')
   })
 
   it('spawn ENOENT -> AGY_NOT_FOUND', async () => {
@@ -241,6 +325,13 @@ describe('runAntigravity', () => {
 
     // 顺序：[1, 2] -- 证明第二个 spawn 在第一个 close 后才发生
     expect(order).toEqual([1, 2])
+  })
+
+  it('超长 prompt（> 30000 字符）直接报错，不尝试不可靠的文件读取', async () => {
+    const longPrompt = 'a'.repeat(30001)
+    await expect(runAntigravity(longPrompt, {})).rejects.toThrow('AGY_ERROR')
+    // 不应 spawn 子进程
+    expect(lastSpawnArgs).toBeNull()
   })
 })
 

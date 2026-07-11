@@ -74,6 +74,36 @@ interface Props {
   onNavigateChapter?: (chapterNumber: number) => void
 }
 
+/**
+ * LLM 错误码 -> 用户可读的中文提示。
+ * 覆盖所有协议（openai/anthropic/antigravity/codex）的错误码。
+ */
+function friendlyLlmError(err: string | undefined): string {
+  if (!err) return '生成失败，请重试'
+  const map: Record<string, string> = {
+    LLM_NOT_CONFIGURED: '请先在「⚙ 设置 -> 模型服务」中配置 provider',
+    LLM_AUTH_FAILED: '认证失败，请检查 API Key 或 CLI 登录状态',
+    LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
+    LLM_TIMEOUT: '生成超时（内容过长或网络较慢），请重试',
+    LLM_OUTPUT_TRUNCATED: '输出不完整，可点击重试',
+    LLM_RESPONSE_TOO_LARGE: '生成内容过长，请尝试简化提示词',
+    LLM_REQUEST_FAILED: '请求失败，请检查网络连接',
+    NETWORK_ERROR: '网络连接失败，请检查网络',
+    AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
+    AGY_SPAWN_FAILED: 'agy CLI 启动失败，请检查安装',
+    CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
+    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名'
+  }
+  // 精确匹配（err 可能是 "AGY_ERROR: xxx" 形式，用 includes 匹配前缀）
+  for (const [key, msg] of Object.entries(map)) {
+    if (err.includes(key)) return msg
+  }
+  // AGY_ERROR / CODEX_ERROR 带具体信息
+  if (err.startsWith('AGY_ERROR: ')) return `agy 执行出错：${err.slice(11).slice(0, 100)}`
+  if (err.startsWith('CODEX_ERROR: ')) return `codex 执行出错：${err.slice(13).slice(0, 100)}`
+  return err
+}
+
 const SOURCE_LABEL: Record<ChapterSource, string> = {
   manual: '手写',
   ai: 'AI',
@@ -1024,13 +1054,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (genRef.current !== myGen) return
       if (!result.ok) {
         setGenerating(false)
-        const msg =
-          result.error === 'LLM_AUTH_FAILED'
-            ? '认证失败，请检查 API Key'
-            : result.error === 'LLM_RATE_LIMIT'
-              ? '请求过于频繁，请稍后再试'
-              : '生成失败，请重试'
-        setAlertInfo({ message: msg })
+        setAlertInfo({ message: friendlyLlmError(result.error) })
         return
       }
       setDirty(true)
@@ -1101,13 +1125,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (genRef.current !== myGen) return
       if (!result.ok) {
         setAdjusting(false)
-        const msg =
-          result.error === 'LLM_AUTH_FAILED'
-            ? '认证失败，请检查 API Key'
-            : result.error === 'LLM_RATE_LIMIT'
-              ? '请求过于频繁，请稍后再试'
-              : '追问调整失败，请重试'
-        setAlertInfo({ message: msg })
+        setAlertInfo({ message: friendlyLlmError(result.error) })
         setDraft(sourceDraft)
         return
       }
@@ -1159,13 +1177,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (reviewRef.current !== myReview) return
       if (!r.ok) {
         setReviewing(false)
-        setReviewText(
-          (t) =>
-            t +
-            (r.error === 'LLM_AUTH_FAILED'
-              ? '\n\n⚠ 认证失败，请检查 API Key'
-              : '\n\n⚠ 生成失败：' + (r.error ?? '未知错误'))
-        )
+        setReviewText((t) => t + '\n\n⚠ ' + friendlyLlmError(r.error))
       }
     } catch {
       if (reviewRef.current === myReview) setReviewing(false)
@@ -1243,13 +1255,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (reviewRef.current !== myReview) return
       if (!result.ok) {
         setReviewing(false)
-        setReviewText(
-          (t) =>
-            t +
-            (result.error === 'LLM_AUTH_FAILED'
-              ? '\n\n⚠ 认证失败，请检查 API Key'
-              : '\n\n⚠ 生成失败：' + (result.error ?? '未知错误'))
-        )
+        setReviewText((t) => t + '\n\n⚠ ' + friendlyLlmError(result.error))
       }
     } catch {
       if (reviewRef.current === myReview) setReviewing(false)
@@ -1280,7 +1286,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (castRef.current !== myCast) return
       if (!result.ok) {
         setDetecting(false)
-        setAlertInfo({ message: '识别失败：' + (result.error ?? '未知错误') })
+        setAlertInfo({ message: friendlyLlmError(result.error) })
         return
       }
       const parsed = parseCastJson(buffer)

@@ -33,6 +33,8 @@ function createFakeChild(opts: {
   stderr?: string
   exitCode: number
   spawnError?: { code: string; message: string }
+  /** 自定义分块：把 stdout 按指定 Buffer 数组分多次 emit（测试 UTF-8 截断） */
+  stdoutChunks?: Buffer[]
 }): FakeChild {
   const child = new EventEmitter() as FakeChild
   child.stdin = { write: vi.fn(), end: vi.fn() }
@@ -51,7 +53,13 @@ function createFakeChild(opts: {
       child.emit('error', err)
       return
     }
-    child.stdout.emit('data', Buffer.from(opts.stdout, 'utf8'))
+    if (opts.stdoutChunks) {
+      for (const c of opts.stdoutChunks) {
+        child.stdout.emit('data', c)
+      }
+    } else {
+      child.stdout.emit('data', Buffer.from(opts.stdout, 'utf8'))
+    }
     if (opts.stderr) child.stderr.emit('data', Buffer.from(opts.stderr, 'utf8'))
     child.emit('close', opts.exitCode)
   })
@@ -191,6 +199,30 @@ describe('runCodex', () => {
     await runCodex('测试', { onToken: (t) => tokens.push(t) })
 
     expect(tokens).toEqual(['你好'])
+  })
+
+  it('UTF-8 多字节字符被 chunk 边界截断时 JSONL 仍能正确解析', async () => {
+    // 构造一条完整的 JSONL，其中 text 含中文"冰冷冰霜"
+    // 把字节在"冰"和"霜"中间断开，模拟 chunk 截断
+    const jsonl = [
+      '{"type":"thread.started","thread_id":"t1"}',
+      '{"type":"turn.started"}',
+      JSON.stringify({ type: 'item.completed', item: { id: 'i0', type: 'agent_message', text: '冰冷冰霜' } }),
+      '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+    ].join('\n') + '\n'
+    const full = Buffer.from(jsonl, 'utf8')
+    // 在 "冰冷冰" 和 "霜" 之间断开（前半段含完整 JSON 到 text 字段值的中间）
+    const splitAt = Math.floor(full.length / 2)
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '',
+        exitCode: 0,
+        stdoutChunks: [full.subarray(0, splitAt), full.subarray(splitAt)]
+      })
+
+    const result = await runCodex('测试', {})
+    expect(result.full).toBe('冰冷冰霜')
+    expect(result.full).not.toContain('\uFFFD')
   })
 
   it('turn.failed 事件 -> reject 错误', async () => {

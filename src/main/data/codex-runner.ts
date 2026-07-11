@@ -69,6 +69,27 @@ const CODEX_SHELL = CODEX_BIN.endsWith('.cmd')
 const DEFAULT_TIMEOUT_SEC = 300
 
 /**
+ * 计算 Buffer 中最后一个完整 UTF-8 字符的结束位置。
+ * 防止多字节字符（如中文，3 字节）被 chunk 边界截断成乱码（�）。
+ * 与 antigravity-runner 中的实现一致。
+ */
+function utf8CompleteLength(buf: Buffer): number {
+  if (buf.length === 0) return 0
+  for (let i = buf.length - 1; i >= Math.max(0, buf.length - 3); i--) {
+    const byte = buf[i]
+    let charLen: number
+    if ((byte & 0x80) === 0) continue
+    if ((byte & 0xe0) === 0xc0) charLen = 2
+    else if ((byte & 0xf0) === 0xe0) charLen = 3
+    else if ((byte & 0xf8) === 0xf0) charLen = 4
+    else continue
+    if (i + charLen <= buf.length) return buf.length
+    return i
+  }
+  return buf.length
+}
+
+/**
  * 调用 codex exec 执行单轮生成。
  *
  * prompt 经 stdin 传入；stdout JSONL 逐行解析，累积 agent_message 文本并喂回 onToken。
@@ -104,6 +125,7 @@ async function runCodexOnce(
     })
 
     let stderrBuf = ''
+    let stdoutPending = Buffer.alloc(0) // 跨 chunk 的不完整 UTF-8 尾部字节
     let settled = false
     let timedOut = false
     let full = ''
@@ -195,7 +217,11 @@ async function runCodexOnce(
     }
 
     child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8')
+      // 防止 UTF-8 多字节字符被 chunk 边界截断（与 antigravity-runner 一致）
+      const combined = Buffer.concat([stdoutPending, chunk])
+      const completeLen = utf8CompleteLength(combined)
+      const text = combined.subarray(0, completeLen).toString('utf8')
+      stdoutPending = combined.subarray(completeLen)
       // JSONL 逐行解析
       lineBuf += text
       const lines = lineBuf.split('\n')
@@ -222,6 +248,11 @@ async function runCodexOnce(
     })
 
     child.on('close', () => {
+      // flush 残留的不完整 UTF-8 尾部字节
+      if (stdoutPending.length > 0) {
+        lineBuf += stdoutPending.toString('utf8')
+        stdoutPending = Buffer.alloc(0)
+      }
       // 处理残留 buffer
       if (lineBuf.trim()) processLine(lineBuf)
 
@@ -258,8 +289,7 @@ async function runCodexOnce(
     })
 
     // prompt 经 stdin 传入
-    child.stdin.write(prompt, 'utf8')
-    child.stdin.end()
+    child.stdin.end(prompt, 'utf8')
   })
 }
 

@@ -25,11 +25,17 @@ function friendlyError(err: string): string {
     LLM_OUTPUT_TRUNCATED: '输出不完整（已尝试自动续写但仍未完成），可点击「重新生成」重试',
     LLM_RESPONSE_TOO_LARGE: '生成内容过长，请尝试简化提示词',
     LLM_REQUEST_FAILED: '请求失败，请检查网络连接',
-    NETWORK_ERROR: '网络连接失败，请检查网络'
+    NETWORK_ERROR: '网络连接失败，请检查网络',
+    AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
+    AGY_SPAWN_FAILED: 'agy CLI 启动失败，请检查安装',
+    CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
+    CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名'
   }
   for (const [key, msg] of Object.entries(map)) {
     if (err.includes(key)) return msg
   }
+  if (err.includes('AGY_ERROR:')) return `agy 执行出错：${err.slice(err.indexOf(':') + 1).trim().slice(0, 100)}`
+  if (err.includes('CODEX_ERROR:')) return `codex 执行出错：${err.slice(err.indexOf(':') + 1).trim().slice(0, 100)}`
   if (err.toLowerCase().includes('terminated')) return '连接被中断，正在重试...'
   // Zod 字段超长错误：解析出字段名和实际字符数
   const tooBig = err.match(/(\w+): Too big: expected string to have <=(\d+) characters/g)
