@@ -22,7 +22,8 @@ describe('buildForeshadowingReminders', () => {
         ...baseForeshadowing,
         id: 'FB-001',
         content: '旧钥匙',
-        status: 'pending'
+        status: 'pending',
+        plantChapter: 12
       },
       {
         ...baseForeshadowing,
@@ -49,6 +50,39 @@ describe('buildForeshadowingReminders', () => {
     expect(result.collect[0].id).toBe('FB-002')
   })
 
+  it('filters reinforce by plantChapter', () => {
+    const outline: DetailedOutlineItem = {
+      chapterNumber: 5,
+      foreshadowings: []
+    }
+    const foreshadowings: Foreshadowing[] = [
+      {
+        ...baseForeshadowing,
+        id: 'FB-001',
+        content: '本章伏笔',
+        status: 'pending',
+        plantChapter: 5
+      },
+      {
+        ...baseForeshadowing,
+        id: 'FB-002',
+        content: '其他章节伏笔',
+        status: 'pending',
+        plantChapter: 10
+      },
+      {
+        ...baseForeshadowing,
+        id: 'FB-003',
+        content: '无指定章节',
+        status: 'pending'
+      }
+    ]
+
+    const result = buildForeshadowingReminders(5, outline, foreshadowings)
+    expect(result.reinforce).toHaveLength(1)
+    expect(result.reinforce[0].content).toBe('本章伏笔')
+  })
+
   it('deduplicates blank and repeated reminders', () => {
     const outline: DetailedOutlineItem = {
       chapterNumber: 3,
@@ -59,7 +93,8 @@ describe('buildForeshadowingReminders', () => {
         ...baseForeshadowing,
         id: 'FB-001',
         content: ' 铜镜 ',
-        status: 'pending'
+        status: 'pending',
+        plantChapter: 3
       }
     ]
 

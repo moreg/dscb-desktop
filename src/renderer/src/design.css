@@ -499,6 +499,7 @@ a:hover { color: var(--vermilion); }
   font-family: var(--font-sans);
   color: inherit;
   min-height: 154px;
+  overflow: hidden;
 }
 .project-card:hover {
   border-color: var(--vermilion);
@@ -535,9 +536,6 @@ a:hover { color: var(--vermilion); }
   font-weight: 700;
   color: var(--ink);
   letter-spacing: 0.03em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .project-card .pc-genre {
   font-size: 11.5px;

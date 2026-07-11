@@ -78,9 +78,10 @@ export function buildForeshadowingReminders(
     }
   }
 
-  // 2. 强化：伏笔库 pending 状态（建议本章铺）
+  // 2. 强化：伏笔库 pending 状态且 plantChapter === 当前章节（建议本章铺）
+  // 仅显示明确指定了埋设章节且匹配当前章节的伏笔，避免无关章节的伏笔干扰
   const reinforce: ForeshadowingReminderItem[] = foreshadowings
-    .filter((f) => f.status === 'pending')
+    .filter((f) => f.status === 'pending' && f.plantChapter !== undefined && f.plantChapter === chapterNumber)
     .map((f) => ({
       kind: 'reinforce' as const,
       source: 'library' as const,

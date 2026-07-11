@@ -33,17 +33,24 @@ export class UsageRepository {
 
   async add(record: UsageRecord): Promise<void> {
     const file = this.file()
-    await withFileLock(file, async () => {
-      const data = await readJson<UsageLog>(file, { records: [] })
-      const records = [...data.records, record]
-      // 保留最近 MAX_RECORDS 条
-      const trimmed =
-        records.length > MAX_RECORDS ? records.slice(records.length - MAX_RECORDS) : records
-      await writeJsonAtomic(file, { records: trimmed })
-    })
+    try {
+      await withFileLock(file, async () => {
+        const data = await readJson<UsageLog>(file, { records: [] })
+        const records = [...data.records, record]
+        const trimmed =
+          records.length > MAX_RECORDS ? records.slice(records.length - MAX_RECORDS) : records
+        await writeJsonAtomic(file, { records: trimmed })
+      })
+    } catch (err) {
+      console.error('[usage-repository] Failed to add usage record:', err)
+    }
   }
 
   async clear(): Promise<void> {
-    await writeJsonAtomic(this.file(), { records: [] })
+    try {
+      await writeJsonAtomic(this.file(), { records: [] })
+    } catch (err) {
+      console.error('[usage-repository] Failed to clear usage:', err)
+    }
   }
 }
