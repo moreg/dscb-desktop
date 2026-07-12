@@ -27,15 +27,6 @@ import {
   type RewriteEntry
 } from '../../main/data/rewrite-history'
 import {
-  parseSuggestions,
-  isRewritable,
-  applyCandidate,
-  buildReviewKey,
-  parseReviewIndex,
-  computeSuggestionPositions,
-  type ReviewSuggestion
-} from '../../shared/review-suggestions'
-import {
   loadState,
   saveState,
   getLocalStorage
@@ -305,7 +296,6 @@ export default function ChapterEditor({
   const [findResults, setFindResults] = useState<number[]>([])
   const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
-  const [reviewOpen, setReviewOpen] = useState(false)
   const [reviewing, setReviewing] = useState(false)
   const [reviewText, setReviewText] = useState('')
   const [showContinueDialog, setShowContinueDialog] = useState(false)
@@ -1024,9 +1014,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setReviewText('')
     setFlowSyncTrigger(0)
     // 续写会用全新正文替换整章，旧的"已应用改写"记录（含 oldSnippet/newText、
-    // 用于 ✎ AI 改稿建议 的 applied 标记）都对不上新正文了。必须一并清掉，
-    // 否则新审稿结果的 index 会错误匹配到残留 rewriteHistory 里的 applied 标记，
-    // 导致"明明没点应用却显示已应用"。redoStack 是配套撤销/重做栈，一起清。
+    // 用于流程面板 AI 审稿建议折叠区的 applied 标记）都对不上新正文了。
+    // 必须一并清掉，否则新审稿结果的 index 会错误匹配到残留 rewriteHistory
+    // 里的 applied 标记，导致"明明没点应用却显示已应用"。redoStack 是配套
+    // 撤销/重做栈，一起清。
     setRewriteHistory([])
     setRedoStack([])
     const myGen = ++genRef.current
@@ -1166,7 +1157,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   /** 续写后的自动审稿：流式填充 reviewText；失败降级为错误提示；中途切走则丢弃结果。 */
   const runPostGenerateReview = async (myGen: number, finalDraft: string) => {
     if (!(await window.api.hasLlmKey())) return
-    setReviewOpen(true)
     setReviewing(true)
     setReviewText('')
     const myReview = ++reviewRef.current
@@ -1240,36 +1230,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setDeslopResult(null)
     setDeslopScanReport(null)
     setDeslopLog('')
-  }
-
-  const startReview = async () => {
-    if (!(await window.api.hasLlmKey())) {
-      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
-      return
-    }
-    setReviewOpen(true)
-    setReviewing(true)
-    setReviewText('')
-    const myReview = ++reviewRef.current
-    try {
-      const result = await window.api.reviewChapterStream(
-        projectId,
-        chapterNumber,
-        draft,
-        (token, done) => {
-          if (reviewRef.current !== myReview) return
-          if (token) setReviewText((t) => t + token)
-          if (done) setReviewing(false)
-        }
-      )
-      if (reviewRef.current !== myReview) return
-      if (!result.ok) {
-        setReviewing(false)
-        setReviewText((t) => t + '\n\n⚠ ' + friendlyLlmError(result.error))
-      }
-    } catch {
-      if (reviewRef.current === myReview) setReviewing(false)
-    }
   }
 
   const startDetectCast = async () => {
@@ -1570,106 +1530,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
-  const suggestions = useMemo(() => (reviewText ? parseSuggestions(reviewText) : []), [reviewText])
-
-  /**
-   * 从 rewriteHistory 反向推导哪些 AI 改稿建议已经应用：
-   * pushRewrite 时用 buildReviewKey(index, pos) 作为 violationKey，
-   * 撤销时会从 history 移除，所以这个集合天然与撤销/重做同步——
-   * 不需要单独维护 appliedSuggestionIndexes 状态。
-   */
-  const appliedReviewIndexes = useMemo(() => {
-    const set = new Set<number>()
-    for (const e of rewriteHistory) {
-      if (!e.violationKey) continue
-      const idx = parseReviewIndex(e.violationKey)
-      if (idx != null) set.add(idx)
-    }
-    return set
-  }, [rewriteHistory])
-
-  // 同 quote 多条建议依次匹配 draft 中的下一处，避免 indexOf 永远命中首处导致错位/重复替换。
-  const suggestionPositions = useMemo(
-    () => computeSuggestionPositions(suggestions, draft, appliedReviewIndexes),
-    [suggestions, draft, appliedReviewIndexes]
-  )
-
-  const handleApplySuggestion = (quote: string, candidate: string, index: number) => {
-    if (!quote) {
-      setUndoToast({ message: '此建议无匹配原文，无法自动应用。建议直接复制。', type: 'warning' })
-      return
-    }
-    const check = isRewritable(candidate, quote)
-    if (!check.ok) {
-      setUndoToast({ message: check.reason ?? '该建议无法自动应用，请手动修改或复制。', type: 'warning' })
-      return
-    }
-    const pos = suggestionPositions[index] ?? -1
-    if (pos === -1) {
-      setUndoToast({ message: '未在正文中找到对应的原文片段，可能已被修改。', type: 'warning' })
-      return
-    }
-    const nextDraft = draft.slice(0, pos) + candidate + draft.slice(pos + quote.length)
-    setDraft(nextDraft)
-    setDirty(true)
-    pushRewrite(quote, candidate, buildReviewKey(index, pos))
-    setUndoToast({ message: '已应用改稿建议到正文', type: 'info' })
-  }
-
-  const handleApplyAllSuggestions = () => {
-    let nextDraft = draft
-    let appliedCount = 0
-    let skippedConflict = 0
-    // 按位置升序、同位置则长 quote 优先（更具体的匹配优先），剔除区间重叠/重复条目。
-    const finalList = [...suggestions]
-      .map((s, i) => {
-        const candidate = applyCandidate(s)
-        return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
-      })
-      .filter(
-        (item) =>
-          !!item.s.quote &&
-          item.pos !== -1 &&
-          !!item.candidate &&
-          isRewritable(item.candidate, item.s.quote).ok
-      )
-      .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
-    // 升序后只有紧邻的上一段可能重叠，用标量 lastEnd 即可判定，无需维护区间数组
-    let lastEnd = -1
-    for (let i = 0; i < finalList.length; i++) {
-      const item = finalList[i]
-      if (item.pos < lastEnd) {
-        skippedConflict++
-        finalList.splice(i, 1)
-        i--
-        continue
-      }
-      lastEnd = item.pos + item.s.quote.length
-    }
-    // 倒序应用，保证靠前位置的下标不被先替换的内容影响
-    finalList.sort((a, b) => b.pos - a.pos)
-
-    for (const item of finalList) {
-      const candidate = item.candidate as string
-      nextDraft = nextDraft.slice(0, item.pos) + candidate + nextDraft.slice(item.pos + item.s.quote.length)
-      pushRewrite(item.s.quote, candidate, buildReviewKey(item.originalIndex, item.pos))
-      appliedCount++
-    }
-    if (appliedCount > 0) {
-      setDraft(nextDraft)
-      setDirty(true)
-      const note = skippedConflict > 0 ? `，跳过 ${skippedConflict} 条重复/冲突` : ''
-      setUndoToast({ message: `已成功一键应用 ${appliedCount} 条建议${note}`, type: 'info' })
-    } else {
-      setUndoToast({ message: '未找到可直接应用的建议', type: 'warning' })
-    }
-  }
-
-  const handleFocusSuggestion = (quote: string, index: number) => {
+  /** 流程面板卡片点击后聚焦正文中对应 quote：传给 ChapterFlowPanel.onFocusQuote */
+  const focusQuoteInEditor = (quote: string) => {
     if (!quote || !textareaRef.current) return
-    // 优先用预分配位置（处理同 quote 多处情形）；已应用建议或越界时降级 indexOf 首处。
-    let pos = suggestionPositions[index] ?? -1
-    if (pos === -1) pos = draft.indexOf(quote)
+    const pos = draft.indexOf(quote)
     if (pos === -1) return
     const el = textareaRef.current
     el.focus()
@@ -1866,7 +1730,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   return (
-    <div className={`chapter-editor-shell${reviewOpen ? ' review-open' : ''}`}>
+    <div className="chapter-editor-shell">
       <div className="page-head">
         <div className="page-head-row">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -1993,9 +1857,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </button>
         <button className="btn btn-sm" onClick={() => void handleCopyDraft()} title="复制当前正文到剪贴板">
           复制正文
-        </button>
-        <button className="btn btn-sm" onClick={startReview} disabled={reviewing}>
-          {reviewing ? '审稿中…' : '✎ AI 改稿'}
         </button>
         <button
           className="btn btn-sm"
@@ -2312,6 +2173,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onUndoRewriteByKey={undoRewriteByKey}
           onRedoRewrite={redoLastRewrite}
           syncAllTrigger={flowSyncTrigger}
+          onFocusQuote={focusQuoteInEditor}
         />
       ) : null}
 
@@ -2961,22 +2823,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
       ) : null}
 
-      {reviewOpen ? (
-        <ReviewPanel
-          text={reviewText}
-          streaming={reviewing}
-          suggestions={suggestions}
-          appliedIndexes={appliedReviewIndexes}
-          onClose={() => setReviewOpen(false)}
-          onCopy={async () => {
-            await navigator.clipboard.writeText(reviewText)
-          }}
-          onApplySuggestion={handleApplySuggestion}
-          onApplyAll={handleApplyAllSuggestions}
-          onFocusSuggestion={handleFocusSuggestion}
-        />
-      ) : null}
-
       {previewCard ? (
         <div
           className="preview-inline-card"
@@ -3206,125 +3052,6 @@ function ReminderGroup({
         </span>
       ))}
     </div>
-  )
-}
-
-function ReviewPanel({
-  text,
-  streaming,
-  suggestions,
-  appliedIndexes,
-  onClose,
-  onCopy,
-  onApplySuggestion,
-  onApplyAll,
-  onFocusSuggestion
-}: {
-  text: string
-  streaming: boolean
-  suggestions: ReviewSuggestion[]
-  appliedIndexes: ReadonlySet<number>
-  onClose: () => void
-  onCopy: () => void | Promise<void>
-  onApplySuggestion: (quote: string, advice: string, index: number) => void
-  onApplyAll: () => void
-  onFocusSuggestion: (quote: string, index: number) => void
-}) {
-  return (
-    <aside className="review-panel">
-      <header>
-        <h3>AI 改稿建议</h3>
-        <div className="btn-group">
-          {suggestions.length > 0 && !streaming && (
-            <button className="btn btn-primary btn-sm" onClick={onApplyAll}>
-              应用全部
-            </button>
-          )}
-          <button className="btn btn-sm" onClick={onCopy} disabled={!text}>
-            复制
-          </button>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>
-            关闭
-          </button>
-        </div>
-      </header>
-      <div className="body-area">
-        {suggestions.length === 0 && !streaming ? (
-          <div className="review-empty">
-            点击「✎ AI 改稿」后，建议会出现在这里。
-          </div>
-        ) : suggestions.length === 0 ? (
-          <div className="review-empty review-streaming">审稿中…</div>
-        ) : (
-          <>
-            {suggestions.map((s, i) => {
-              const candidate = applyCandidate(s)
-              const rewritable = !!candidate && isRewritable(candidate, s.quote).ok
-              const copyText = [candidate, s.why].filter(Boolean).join('\n\n')
-              const applied = appliedIndexes.has(i)
-              return (
-                <div
-                  key={i}
-                  className={`review-suggestion ${applied ? 'review-suggestion-applied' : ''}`}
-                  onClick={() => onFocusSuggestion(s.quote, i)}
-                  style={{ cursor: s.quote ? 'pointer' : 'default' }}
-                >
-                  {s.quote ? <div className="quote">「{s.quote}」</div> : null}
-                  {s.rewrite ? (
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                      改写 · {s.rewrite}
-                    </div>
-                  ) : s.advice ? (
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                      说明 · {s.advice}
-                    </div>
-                  ) : null}
-                  {s.why ? <div className="why">理由 · {s.why}</div> : null}
-                  {(rewritable || copyText) && (
-                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
-                      {applied ? (
-                        <span
-                          className="audit-applied-badge"
-                          title="此建议已应用到正文。如需撤销请点编辑器顶部的「↶ 撤销」按钮。"
-                        >
-                          ✓ 已应用
-                        </span>
-                      ) : rewritable && s.quote ? (
-                        <button
-                          className="btn btn-primary btn-sm"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onApplySuggestion(s.quote, candidate!, i)
-                          }}
-                        >
-                          应用
-                        </button>
-                      ) : (
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          title="该建议无法自动应用，复制说明后手动修改"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void navigator.clipboard.writeText(copyText).catch(() => {})
-                          }}
-                        >
-                          复制说明
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-            {streaming ? (
-              <div className="review-streaming muted" style={{ fontSize: 12 }}>
-                ▍ 还在收尾…
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
-    </aside>
   )
 }
 
