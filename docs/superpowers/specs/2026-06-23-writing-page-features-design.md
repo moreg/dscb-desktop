@@ -9,7 +9,7 @@
 ### 1.1 状态管理与数据流动 (UI & State)
 大部分新增功能基于纯前端逻辑实现，依赖组件的 State 及浏览器本地存储（`localStorage`）。
 - **章节字数目标**：存储于 `localStorage`，键名 `ai-writer:word-target:${projectId}:${chapterNumber}`。
-- **改写历史 diff 与规则回溯**：利用 `RewriteEntry` 已有的 `violationKey` 属性。如来自质检规则，在下拉菜单中通过 `report.violations` 或解析 `violationKey` 提取具体规则名称；如来自 AI 改稿，显示为“AI 改稿建议”。
+- **改写历史 diff 与规则回溯**：利用 `RewriteEntry` 已有的 `violationKey` 属性。如来自质检规则，在下拉菜单中通过 `report.violations` 或解析 `violationKey` 提取具体规则名称；如来自 AI 审稿建议，显示为“AI 改稿建议”（badge 文案沿用历史命名，实际数据源是流程面板折叠区）。
 - **章节导航**：在组件加载时请求 `window.api.getChapterWordSummary(projectId)` 获取整本书的章节列表，以此判断当前章节索引，从而提供上一章/下一章导航。
 - **查找替换 (Find & Replace)**：通过正则表达式以及 Range Selection API 对正文 `<textarea>` 进行匹配、高亮与替换。
 
@@ -23,13 +23,15 @@
 ## 2. 12个功能点的具体设计
 
 ### P0 级核心需求
-#### ① AI改稿建议「一键应用」与「应用全部」
-- **单个应用**：为 `ReviewPanel` 的每一条建议提供「应用」按钮。点击时：
-  1. 在 `draft` 中搜索建议的 `quote` (原文片段)。
-  2. 若找到且唯一，替换为 `advice` (改稿建议文本)，并调用 `pushRewrite` 压入历史栈，同时显示“已应用”通知。
-  3. 若未找到或不唯一，使用 `setUndoToast` 给出警告。
-- **应用全部**：在 `ReviewPanel` 顶部增加「应用全部」按钮，依次对所有具有唯一匹配 `quote` 的建议执行替换。
-- **定位跳转**：点击建议卡片时，在正文 `<textarea>` 中选中匹配的 `quote` 并自动聚焦/滚动定位。
+#### ① AI 审稿建议「一键应用」与「应用全部」（位于续写流程面板内）
+- **入口迁移**：原独立 `ReviewPanel` 侧栏（按钮 ✎ AI 改稿）已下线；卡片渲染与一键应用能力迁入**续写流程面板的"AI 审稿建议"折叠区**，避免重复 UI。
+- **触发**：续写完成后自动调用 `reviewChapterStream`（`runPostGenerateReview`），结果灌入 `ChapterFlowPanel.props.reviewText`，折叠区立即渲染卡片。用户**不再手动触发**——只有续写后自动跑这一条入口。
+- **单个应用**：折叠区每条卡片提供「应用」按钮。点击时：
+  1. 通过 `computeSuggestionPositions` 预分配的位置找到建议 `quote` 在 draft 中的下标。
+  2. 校验通过 `isRewritable` 后，调用 `props.onApplyRewrite(quote, candidate, buildReviewKey(index, pos))` 经 `pushRewrite` 压入历史栈，触发重跑质检。
+- **应用全部**：折叠区顶部提供「应用全部」按钮，按位置倒序应用所有可自动替换的改写建议（避免下标漂移），逐条 `pushRewrite`。
+- **定位跳转**：点击建议卡片时，通过新增的 `ChapterFlowPanel.onFocusQuote` 回调，让 `ChapterEditor` 在 `<textarea>` 中选中匹配的 `quote` 并自动聚焦/滚动定位。
+- **复制说明**：无法自动应用的建议（缺 quote / rewrite 不合规），显示「复制说明」按钮，把 `rewrite + why` 写到剪贴板供用户手动粘贴调整。
 
 #### ② 查找 & 替换 (Find & Replace)
 - **UI 呈现**：在编辑器区顶部（输入区正上方）增加悬浮/嵌入式查找栏（`FindReplaceBar`），可通过 `Ctrl+F` 快捷键或工具栏上的「🔍 查找」按钮唤起。
@@ -70,7 +72,7 @@
 
 #### ⑧ 改写历史 diff 视图与触发规则标记
 - **UI 呈现**：点击「↶ 撤销」下拉菜单展开改写历史列表时：
-  - 每个历史记录卡片顶部显示“触发规则/来源”（如“AI 改稿建议”、“禁用词: xx”、“规则 4: 空洞结尾”等）；
+  - 每个历史记录卡片顶部显示“触发规则/来源”（badge 文案如“AI 改稿建议”、“禁用词: xx”、“规则 4: 空洞结尾”等——`AI 改稿建议` 字面保留，含义现在是"流程面板 AI 审稿建议折叠区应用的改写”），
   - 卡片中以 Diff 形式显示修改前后对照（`- 原文片段` 与 `+ 改写文本`），方便用户精细核对后再决定回退。
 
 ---
