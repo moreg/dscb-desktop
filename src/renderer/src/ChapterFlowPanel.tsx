@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
   AuditReport,
@@ -16,6 +16,16 @@ import {
   parseOutlineDiffJson,
   parseRhythmEvaluationJson
 } from '../../shared/parsers'
+import {
+  parseSuggestions,
+  isRewritable,
+  applyCandidate,
+  buildReviewKey,
+  parseReviewIndex,
+  computeSuggestionPositions,
+  type ReviewSuggestion
+} from '../../shared/review-suggestions'
+import type { RewriteEntry } from '../../main/data/rewrite-history'
 import ChapterAuditPanel from './ChapterAuditPanel'
 
 interface Props {
@@ -39,11 +49,13 @@ interface Props {
   /** P6-B：按 violationKey 精确撤销对应那条应用 */
   onUndoRewriteByKey?: (violationKey: string) => void | Promise<void>
   /** 改写历史栈（完整数据，用于下拉菜单显示每条） */
-  rewriteHistory?: Array<{ oldSnippet: string; newText: string; at: number }>
+  rewriteHistory?: RewriteEntry[]
   /** P7-A：redoStack 长度（用于显示"重做 ×N"按钮） */
   redoStackCount?: number
   /** P7-A：重做最近一次被撤销的应用 */
   onRedoRewrite?: () => void | Promise<void>
+  /** 续写应用 review 建议后跳到对应的 quote 位置（编辑器焦点定位） */
+  onFocusQuote?: (quote: string) => void
   /** 细纲对照完成后回调 */
   onCompleteOutline?: () => void
   /** 记忆提取完成后回调 */
@@ -85,8 +97,89 @@ export default function ChapterFlowPanel(props: Props) {
     onCompleteMemory,
     onCompleteRhythm,
     onCompleteFigure,
-    syncAllTrigger
+    syncAllTrigger,
+    onFocusQuote
   } = props
+
+  // 解析流式 review 文本为结构化卡片（原句 / 改写 / 理由）
+  const reviewSuggestions = useMemo(
+    () => (reviewText ? parseSuggestions(reviewText) : []),
+    [reviewText]
+  )
+
+  // 从 rewriteHistory 反推已应用的建议索引（与 ChapterEditor 旧实现一致）
+  const appliedReviewIndexes = useMemo(() => {
+    const set = new Set<number>()
+    for (const e of rewriteHistory ?? []) {
+      if (!e.violationKey) continue
+      const idx = parseReviewIndex(e.violationKey)
+      if (idx != null) set.add(idx)
+    }
+    return set
+  }, [rewriteHistory])
+
+  // 同 quote 多条建议依次匹配 draft 中的下一处
+  const suggestionPositions = useMemo(
+    () => computeSuggestionPositions(reviewSuggestions, draft, appliedReviewIndexes),
+    [reviewSuggestions, draft, appliedReviewIndexes]
+  )
+
+  const handleApplyReviewSuggestion = (
+    quote: string,
+    candidate: string,
+    index: number
+  ): boolean => {
+    if (!quote || !onApplyRewrite) return false
+    const check = isRewritable(candidate, quote)
+    if (!check.ok) return false
+    const pos = suggestionPositions[index] ?? -1
+    if (pos === -1) return false
+    return onApplyRewrite(quote, candidate, buildReviewKey(index, pos))
+  }
+
+  const handleApplyAllReviewSuggestions = (): number => {
+    if (!onApplyRewrite) return 0
+    const finalList = [...reviewSuggestions]
+      .map((s, i) => {
+        const candidate = applyCandidate(s)
+        return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
+      })
+      .filter(
+        (item) =>
+          !!item.s.quote &&
+          item.pos !== -1 &&
+          !!item.candidate &&
+          isRewritable(item.candidate, item.s.quote).ok
+      )
+      .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
+    let lastEnd = -1
+    for (let i = 0; i < finalList.length; i++) {
+      const item = finalList[i]
+      if (item.pos < lastEnd) {
+        finalList.splice(i, 1)
+        i--
+        continue
+      }
+      lastEnd = item.pos + item.s.quote.length
+    }
+    finalList.sort((a, b) => b.pos - a.pos)
+    let appliedCount = 0
+    for (const item of finalList) {
+      const ok = onApplyRewrite(
+        item.s.quote,
+        item.candidate as string,
+        buildReviewKey(item.originalIndex, item.pos)
+      )
+      if (ok) appliedCount++
+    }
+    return appliedCount
+  }
+
+  const handleFocusReviewQuote = (quote: string) => {
+    if (!quote || !onFocusQuote) return
+    onFocusQuote(quote)
+  }
+
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
   const [outlineError, setOutlineError] = useState('')
@@ -493,12 +586,32 @@ export default function ChapterFlowPanel(props: Props) {
       ) : null}
 
       <div style={{ marginTop: 10 }}>
-        <strong style={{ fontSize: 13 }}>AI 审稿建议</strong>
-        {reviewing ? (
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <strong style={{ fontSize: 13 }}>AI 审稿建议</strong>
+          {reviewSuggestions.length > 0 && !reviewing && onApplyRewrite && (
+            <button
+              className="btn btn-sm"
+              onClick={() => {
+                const n = handleApplyAllReviewSuggestions()
+                if (n === 0) {
+                  // 静默失败：没有可应用的，不弹错误——卡片按钮已能单独尝试
+                }
+              }}
+              title="按位置倒序应用所有可自动替换的改写建议"
+            >
+              应用全部
+            </button>
+          )}
+        </div>
+        {reviewing && reviewSuggestions.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
             审稿中…
           </p>
-        ) : reviewText ? (
+        ) : reviewSuggestions.length === 0 && !reviewText ? (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+            暂无审稿结果（续写完成后会自动生成）。
+          </p>
+        ) : reviewSuggestions.length === 0 ? (
           <pre
             className="body"
             style={{ whiteSpace: 'pre-wrap', marginTop: 4, fontSize: 12.5, maxHeight: 240, overflow: 'auto' }}
@@ -506,9 +619,68 @@ export default function ChapterFlowPanel(props: Props) {
             {reviewText}
           </pre>
         ) : (
-          <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-            暂无审稿结果。
-          </p>
+          <div className="review-suggestion-list">
+            {reviewSuggestions.map((s, i) => {
+              const candidate = applyCandidate(s)
+              const rewritable = !!candidate && isRewritable(candidate, s.quote).ok
+              const copyText = [candidate, s.why].filter(Boolean).join('\n\n')
+              const applied = appliedReviewIndexes.has(i)
+              return (
+                <div
+                  key={i}
+                  className={`review-suggestion ${applied ? 'review-suggestion-applied' : ''}`}
+                  onClick={() => handleFocusReviewQuote(s.quote)}
+                  style={{ cursor: s.quote ? 'pointer' : 'default' }}
+                >
+                  {s.quote ? <div className="quote">「{s.quote}」</div> : null}
+                  {s.rewrite ? (
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>改写 · {s.rewrite}</div>
+                  ) : s.advice ? (
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>说明 · {s.advice}</div>
+                  ) : null}
+                  {s.why ? <div className="why">理由 · {s.why}</div> : null}
+                  {(rewritable || copyText) && (
+                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      {applied ? (
+                        <span
+                          className="audit-applied-badge"
+                          title="已应用到正文。撤销请用编辑器顶部「↶ 撤销」。"
+                        >
+                          ✓ 已应用
+                        </span>
+                      ) : rewritable && s.quote ? (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleApplyReviewSuggestion(s.quote, candidate!, i)
+                          }}
+                        >
+                          应用
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          title="无法自动应用，复制说明后手动修改"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void navigator.clipboard.writeText(copyText).catch(() => {})
+                          }}
+                        >
+                          复制说明
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {reviewing ? (
+              <div className="review-streaming muted" style={{ fontSize: 12 }}>
+                ▍ 还在收尾…
+              </div>
+            ) : null}
+          </div>
         )}
       </div>
 
