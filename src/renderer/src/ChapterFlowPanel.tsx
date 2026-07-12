@@ -39,6 +39,11 @@ interface Props {
   /** AI 改写命中段后，把 snippet 替换为 rewritten（P6-B：第三参 violationKey 用于 per-violation 撤销）。
    *  返回是否真正应用成功（见 ChapterAuditPanel.onApplyRewrite 契约）。 */
   onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => boolean
+  /** 批量应用：ChapterEditor 本地构造 nextDraft、最后只 setDraft + reAudit 一次，
+   *  避免 setDraft/stale closure 丢改动且避免连发 N 次审计。edits 由调用方按位置倒序排列。 */
+  onApplyRewriteBatch?: (
+    edits: Array<{ snippet: string; rewritten: string; violationKey: string }>
+  ) => number
   onJumpToOffset?: (offset: number) => void
   /** 重新跑质检（用于"立即质检"按钮） */
   onRunAudit?: () => void | Promise<void>
@@ -85,6 +90,7 @@ export default function ChapterFlowPanel(props: Props) {
     reviewText,
     onClose,
     onApplyRewrite,
+    onApplyRewriteBatch,
     onJumpToOffset,
     onRunAudit,
     onUndoRewrite,
@@ -138,6 +144,43 @@ export default function ChapterFlowPanel(props: Props) {
   }
 
   const handleApplyAllReviewSuggestions = (): number => {
+    // 优先用批量通道：ChapterEditor 本地构造 nextDraft，避免同步循环 setDraft
+    // 只会保留最后一次的 closure-staleness 问题；并避免连发 N 次 reAudit。
+    if (onApplyRewriteBatch) {
+      const finalList = [...reviewSuggestions]
+        .map((s, i) => {
+          const candidate = applyCandidate(s)
+          return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
+        })
+        .filter(
+          (item) =>
+            !!item.s.quote &&
+            item.pos !== -1 &&
+            !!item.candidate &&
+            isRewritable(item.candidate, item.s.quote).ok
+        )
+        .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
+      let lastEnd = -1
+      for (let i = 0; i < finalList.length; i++) {
+        const item = finalList[i]
+        if (item.pos < lastEnd) {
+          finalList.splice(i, 1)
+          i--
+          continue
+        }
+        lastEnd = item.pos + item.s.quote.length
+      }
+      // 倒序传给 ChapterEditor：让那边在本地 nextDraft 上 indexOf 也不会因为前序替换错位
+      finalList.sort((a, b) => b.pos - a.pos)
+      const edits = finalList.map((item) => ({
+        snippet: item.s.quote,
+        rewritten: item.candidate as string,
+        violationKey: buildReviewKey(item.originalIndex, item.pos)
+      }))
+      return onApplyRewriteBatch(edits)
+    }
+
+    // 兼容性回退：单条通道（旧用法），保留原本 N 次 onApplyRewrite 行为。
     if (!onApplyRewrite) return 0
     const finalList = [...reviewSuggestions]
       .map((s, i) => {
@@ -588,20 +631,17 @@ export default function ChapterFlowPanel(props: Props) {
       <div style={{ marginTop: 10 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
           <strong style={{ fontSize: 13 }}>AI 审稿建议</strong>
-          {reviewSuggestions.length > 0 && !reviewing && onApplyRewrite && (
+          {reviewSuggestions.length > 0 && !reviewing && (onApplyRewriteBatch || onApplyRewrite) ? (
             <button
               className="btn btn-sm"
               onClick={() => {
-                const n = handleApplyAllReviewSuggestions()
-                if (n === 0) {
-                  // 静默失败：没有可应用的，不弹错误——卡片按钮已能单独尝试
-                }
+                handleApplyAllReviewSuggestions()
               }}
               title="按位置倒序应用所有可自动替换的改写建议"
             >
               应用全部
             </button>
-          )}
+          ) : null}
         </div>
         {reviewing && reviewSuggestions.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>

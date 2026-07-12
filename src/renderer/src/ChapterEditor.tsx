@@ -2166,6 +2166,44 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             void reAudit()
             return true
           }}
+          // 批量应用：edits 已按位置倒序排列；ChapterEditor 本地构造 nextDraft，
+          // 每条独立 pushRewrite，最后只 setDraft + reAudit 一次，避免 setDraft/stale closure
+          // 丢改动且避免连发 N 次审计。
+          onApplyRewriteBatch={(edits) => {
+            if (edits.length === 0) return 0
+            let nextDraft = draft
+            let applied = 0
+            let firstFailedPos = -1
+            for (const edit of edits) {
+              if (!edit.snippet) continue
+              // 因为 edits 已按位置倒序、且每条 snippet 都基于初始 draft 算出，
+              // 在已变更的 nextDraft 上 indexOf 仍然能命中（除非 snippet 长度有边界 trim 差异）。
+              const target = findRewriteTarget(nextDraft, edit.snippet, edit.rewritten)
+              if (!target) {
+                if (firstFailedPos === -1) firstFailedPos = nextDraft.length
+                continue
+              }
+              nextDraft =
+                nextDraft.slice(0, target.start) +
+                target.replacement +
+                nextDraft.slice(target.end)
+              // P6-B：每条独立 violationKey → 独立 undo 入口，与"应用全部"过去的契约一致
+              pushRewrite(target.oldSnippet, target.replacement, edit.violationKey)
+              applied++
+            }
+            if (applied > 0) {
+              setDraft(nextDraft)
+              setDirty(true)
+              const note = applied < edits.length ? `（跳过 ${edits.length - applied} 条）` : ''
+              setUndoToast({ message: `已应用 ${applied} 条改写${note}`, type: 'info' })
+            }
+            if (applied === 0 && firstFailedPos !== -1) {
+              setAlertInfo({ message: '未在正文中找到任何原片段（可能已被改写），请手动应用' })
+            }
+            // 不论多少，都跑一次审计反映新正文
+            void reAudit()
+            return applied
+          }}
           rewriteHistory={rewriteHistory}
           redoStackCount={redoStack.length}
           onUndoRewrite={undoLastRewrite}
