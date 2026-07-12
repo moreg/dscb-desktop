@@ -215,8 +215,10 @@ async function runCodexOnce(
                 '检查网络连接或 CLI 版本'
             })
           }
+          // codex 靠本机 ChatGPT 登录态，通常自动保持有效。认证失败多为暂时性，
+          // 用独立错误码 CODEX_AUTH_EXPIRED 与 HTTP API Key 失效区分，前端提示"稍后重试"。
           if (/auth|login|credential|401|403/i.test(msg)) {
-            reject(new Error('LLM_AUTH_FAILED'))
+            reject(new Error('CODEX_AUTH_EXPIRED'))
           } else if (/rate|quota|limit|429/i.test(msg)) {
             reject(new Error('LLM_RATE_LIMIT'))
           } else if (/model.*not supported|invalid_request/i.test(msg)) {

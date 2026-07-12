@@ -236,13 +236,13 @@ describe('runCodex', () => {
     await expect(runCodex('测试', {})).rejects.toThrow('CODEX_MODEL_ERROR')
   })
 
-  it('error 事件含 auth -> LLM_AUTH_FAILED', async () => {
+  it('error 事件含 auth -> CODEX_AUTH_EXPIRED', async () => {
     const jsonl = [
       '{"type":"error","message":"authentication failed, please login"}'
     ].join('\n') + '\n'
     fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
 
-    await expect(runCodex('测试', {})).rejects.toThrow('LLM_AUTH_FAILED')
+    await expect(runCodex('测试', {})).rejects.toThrow('CODEX_AUTH_EXPIRED')
   })
 
   it('error 事件含 rate/limit -> LLM_RATE_LIMIT', async () => {

@@ -329,7 +329,9 @@ export default function SettingsPage(_: Props) {
         const map: Record<string, string> = {
           NO_KEY: '尚未配置 API Key',
           LLM_NOT_CONFIGURED: '尚未配置 provider',
-          LLM_AUTH_FAILED: '认证失败，请检查 API Key 或 CLI 登录状态',
+          LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
+          AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+          CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
           LLM_RATE_LIMIT: '请求过于频繁',
           LLM_TIMEOUT: '连通测试超时',
           LLM_REQUEST_FAILED: '请求失败',

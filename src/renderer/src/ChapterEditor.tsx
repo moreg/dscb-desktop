@@ -82,7 +82,9 @@ function friendlyLlmError(err: string | undefined): string {
   if (!err) return '生成失败，请重试'
   const map: Record<string, string> = {
     LLM_NOT_CONFIGURED: '请先在「⚙ 设置 -> 模型服务」中配置 provider',
-    LLM_AUTH_FAILED: '认证失败，请检查 API Key 或 CLI 登录状态',
+    LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
+    AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+    CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
     LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
     LLM_TIMEOUT: '生成超时（内容过长或网络较慢），请重试',
     LLM_OUTPUT_TRUNCATED: '输出不完整，可点击重试',
@@ -1225,7 +1227,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       })
       setDeslopResult(result)
     } catch (err) {
-      setAlertInfo({ message: `去 AI 味失败：${(err as Error).message}` })
+      setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError((err as Error).message)}` })
     } finally {
       setDeslopRunning(false)
     }

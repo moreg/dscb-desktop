@@ -277,7 +277,11 @@ async function runAntigravityOnce(
                 LOCALAPPDATA: process.env.LOCALAPPDATA
               })
             }
-            reject(new Error('LLM_AUTH_FAILED'))
+            // agy 靠本机 Google OAuth，access token 过期会自动用 refresh token 刷新，
+            // 通常无需手动重新登录。此处认证失败多为刷新瞬间的暂时性失效，重试即可恢复。
+            // 用独立错误码 AGY_AUTH_EXPIRED 与 HTTP API Key 失效（LLM_AUTH_FAILED）区分，
+            // 前端据此给出"稍后重试"而非"检查 API Key"的提示。
+            reject(new Error('AGY_AUTH_EXPIRED'))
           } else if (/timed?\s*out|timeout/i.test(msg)) {
             reject(new Error('LLM_TIMEOUT'))
           } else if (/rate|quota|limit/i.test(msg)) {

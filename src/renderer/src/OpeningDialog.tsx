@@ -19,7 +19,9 @@ const STEP_LABELS: Record<Step, string> = {
 function friendlyError(err: string): string {
   const map: Record<string, string> = {
     LLM_NOT_CONFIGURED: '请先在设置中配置大模型 API Key',
-    LLM_AUTH_FAILED: 'API Key 无效或认证失败，请检查设置',
+    LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
+    AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+    CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
     LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
     LLM_TIMEOUT: '生成超时（网络较慢或内容过长），请重试',
     LLM_OUTPUT_TRUNCATED: '输出不完整（已尝试自动续写但仍未完成），可点击「重新生成」重试',

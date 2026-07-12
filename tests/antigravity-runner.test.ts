@@ -174,7 +174,7 @@ describe('runAntigravity', () => {
     expect(result.usage!.inputTokens).toBe(0)
   })
 
-  it('stderr Error + 认证失败 -> LLM_AUTH_FAILED（agy 1.1.1 真实行为）', async () => {
+  it('stderr Error + 认证失败 -> AGY_AUTH_EXPIRED（agy 1.1.1 真实行为）', async () => {
     fakeChildFactory = () =>
       createFakeChild({
         stdout: '',
@@ -182,7 +182,7 @@ describe('runAntigravity', () => {
         exitCode: 1
       })
 
-    await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_AUTH_FAILED')
+    await expect(runAntigravity('测试', {})).rejects.toThrow('AGY_AUTH_EXPIRED')
   })
 
   it('stderr Error + 超时 -> LLM_TIMEOUT', async () => {
@@ -248,7 +248,7 @@ describe('runAntigravity', () => {
         exitCode: 0
       })
 
-    await expect(runAntigravity('测试', {})).rejects.toThrow('LLM_AUTH_FAILED')
+    await expect(runAntigravity('测试', {})).rejects.toThrow('AGY_AUTH_EXPIRED')
   })
 
   it('spawn ENOENT -> AGY_NOT_FOUND', async () => {
