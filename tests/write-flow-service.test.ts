@@ -110,6 +110,24 @@ describe('WriteFlowService.checkOutlineStream', () => {
     const report = parseOutlineDiffJson(raw, 4)
     expect(report.diffs[0].priority).toBe('P2')
   })
+
+  it('parses outlinePatch for update-outline path', () => {
+    const raw = JSON.stringify([
+      {
+        type: 3,
+        typeLabel: '细节调整',
+        outline: '客栈',
+        actual: '酒楼',
+        suggestion: '以正文更新细纲',
+        priority: 'P2',
+        resolution: 'either',
+        outlinePatch: { plotSummary: '主角在酒楼遇见故人' }
+      }
+    ])
+    const report = parseOutlineDiffJson(raw, 2)
+    expect(report.diffs[0].resolution).toBe('either')
+    expect(report.diffs[0].outlinePatch?.plotSummary).toBe('主角在酒楼遇见故人')
+  })
 })
 
 describe('WriteFlowService.evaluateRhythmStream', () => {

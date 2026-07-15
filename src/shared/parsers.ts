@@ -6,6 +6,7 @@ import type {
   OutlineDiffType,
   RhythmEvaluation
 } from './types'
+import { defaultResolutionForType, sanitizeOutlinePatch } from './outline-diff-apply'
 
 /**
  * 纯解析函数集合（main 与 renderer 共享）。
@@ -21,6 +22,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
     4: '核心事件改',
     5: '结构性偏离'
   }
+  const resolutions = new Set(['updateOutline', 'updateContent', 'either', 'review'])
   try {
     const m = raw.match(/\[[\s\S]*\]/)
     if (!m) return { chapterNumber, diffs: [], passed: true }
@@ -28,14 +30,24 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
     if (!Array.isArray(arr)) return { chapterNumber, diffs: [], passed: true }
     const diffs: OutlineDiffItem[] = arr
       .filter((x) => x && typeof x === 'object' && typeof x.type === 'number')
-      .map((x) => ({
-        type: x.type as OutlineDiffType,
-        typeLabel: labels[x.type] ?? '细节调整',
-        outline: typeof x.outline === 'string' ? x.outline : undefined,
-        actual: typeof x.actual === 'string' ? x.actual : undefined,
-        suggestion: typeof x.suggestion === 'string' ? x.suggestion : '',
-        priority: ['P0', 'P1', 'P2'].includes(x.priority) ? x.priority : 'P2'
-      }))
+      .map((x) => {
+        const type = x.type as OutlineDiffType
+        const item: OutlineDiffItem = {
+          type,
+          typeLabel: labels[type] ?? '细节调整',
+          outline: typeof x.outline === 'string' ? x.outline : undefined,
+          actual: typeof x.actual === 'string' ? x.actual : undefined,
+          suggestion: typeof x.suggestion === 'string' ? x.suggestion : '',
+          priority: ['P0', 'P1', 'P2'].includes(x.priority) ? x.priority : 'P2',
+          resolution:
+            typeof x.resolution === 'string' && resolutions.has(x.resolution)
+              ? (x.resolution as OutlineDiffItem['resolution'])
+              : defaultResolutionForType(type)
+        }
+        const outlinePatch = sanitizeOutlinePatch(x.outlinePatch)
+        if (outlinePatch) item.outlinePatch = outlinePatch
+        return item
+      })
     const passed = !diffs.some((d) => d.priority === 'P0' || d.priority === 'P1')
     return { chapterNumber, diffs, passed }
   } catch {

@@ -2371,6 +2371,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             setFlowPanelOpen(false)
             setFlowSyncTrigger(0)
           }}
+          onOutlineUpdated={(item) => setChapterOutline(item)}
           onRunAudit={reAudit}
           onJumpToOffset={jumpToOffset}
           onApplyRewrite={(snippet, rewritten, violationKey) => {

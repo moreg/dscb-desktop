@@ -3,9 +3,11 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
   AuditReport,
   ChapterReviewReport,
+  DetailedOutlineItem,
   FigureDraft,
   MemoryApplyResult,
   MemoryExtraction,
+  OutlineDiffItem,
   OutlineDiffReport,
   RhythmApplyResult,
   RhythmEvaluation
@@ -16,6 +18,14 @@ import {
   parseOutlineDiffJson,
   parseRhythmEvaluationJson
 } from '../../shared/parsers'
+import {
+  canUpdateOutlineFromDiff,
+  collectOutlinePatchesFromDiffs,
+  formatOutlinePatchPreview,
+  isRecommendedOutlineUpdate,
+  needsConfirmOutlineUpdate,
+  recomputeOutlineDiffPassed
+} from '../../shared/outline-diff-apply'
 import type { RewriteEntry } from '../../main/data/rewrite-history'
 import ChapterAuditPanel from './ChapterAuditPanel'
 
@@ -52,6 +62,8 @@ interface Props {
   onFocusQuote?: (quote: string) => void
   /** 细纲对照完成后回调 */
   onCompleteOutline?: () => void
+  /** 以正文回写细纲成功后，把最新细纲同步到编辑器 */
+  onOutlineUpdated?: (item: DetailedOutlineItem) => void
   /** 记忆提取完成后回调 */
   onCompleteMemory?: () => void
   /** 节奏评估完成后回调 */
@@ -87,6 +99,7 @@ export default function ChapterFlowPanel(props: Props) {
     redoStackCount,
     rewriteHistory,
     onCompleteOutline,
+    onOutlineUpdated,
     onCompleteMemory,
     onCompleteRhythm,
     onCompleteFigure,
@@ -96,6 +109,14 @@ export default function ChapterFlowPanel(props: Props) {
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
   const [outlineError, setOutlineError] = useState('')
+  /** 已忽略的差异下标（相对于 outlineDiff.diffs 原序） */
+  const [outlineIgnored, setOutlineIgnored] = useState<Set<number>>(() => new Set())
+  /** 已成功回写细纲的差异下标 */
+  const [outlineApplied, setOutlineApplied] = useState<Set<number>>(() => new Set())
+  const [outlineApplying, setOutlineApplying] = useState(false)
+  const [outlineApplyError, setOutlineApplyError] = useState('')
+  /** 防连点：state 禁用前的同步锁 */
+  const outlineApplyingRef = useRef(false)
 
   // 记忆提取状态
   const [memoryExtracting, setMemoryExtracting] = useState(false)
@@ -204,6 +225,9 @@ export default function ChapterFlowPanel(props: Props) {
     setOutlineChecking(true)
     setOutlineDiff(null)
     setOutlineError('')
+    setOutlineIgnored(new Set())
+    setOutlineApplied(new Set())
+    setOutlineApplyError('')
     let buffer = ''
     try {
       const r = await window.api.checkOutlineStream(
@@ -227,6 +251,120 @@ export default function ChapterFlowPanel(props: Props) {
       setOutlineError((e as Error).message)
       setOutlineChecking(false)
     }
+  }
+
+  const markOutlineResolved = (indexes: number[], mode: 'ignore' | 'apply') => {
+    if (mode === 'ignore') {
+      setOutlineIgnored((prev) => {
+        const next = new Set(prev)
+        for (const i of indexes) next.add(i)
+        return next
+      })
+    } else {
+      setOutlineApplied((prev) => {
+        const next = new Set(prev)
+        for (const i of indexes) next.add(i)
+        return next
+      })
+    }
+  }
+
+  const loadCurrentOutline = async (): Promise<DetailedOutlineItem | null> => {
+    const items = await window.api.listDetailedOutline(projectId)
+    return items.find((x) => x.chapterNumber === chapterNumber) ?? null
+  }
+
+  /**
+   * 将选中的差异以正文为准合并后写回细纲。
+   * indexes 为 outlineDiff.diffs 原序下标。
+   * 仅标记真正产出补丁的项；顺序叠合 plotSummary，避免互相覆盖。
+   */
+  const applyOutlineFromContent = async (indexes: number[]) => {
+    if (!outlineDiff || indexes.length === 0) return
+    if (outlineApplyingRef.current) return
+
+    const unique = [...new Set(indexes)].filter(
+      (i) =>
+        i >= 0 &&
+        i < outlineDiff.diffs.length &&
+        !outlineIgnored.has(i) &&
+        !outlineApplied.has(i)
+    )
+    if (unique.length === 0) return
+
+    const targets = unique
+      .map((i) => ({ index: i, diff: outlineDiff.diffs[i] }))
+      .filter(({ diff }) => canUpdateOutlineFromDiff(diff))
+
+    if (targets.length === 0) {
+      setOutlineApplyError('选中项无法回写细纲（漏写类请补写正文）')
+      return
+    }
+
+    outlineApplyingRef.current = true
+    setOutlineApplying(true)
+    setOutlineApplyError('')
+    try {
+      const current = await loadCurrentOutline()
+      const collected = collectOutlinePatchesFromDiffs(targets, current)
+
+      if (collected.appliedIndexes.length === 0 || Object.keys(collected.merged).length === 0) {
+        setOutlineApplyError('无法从差异生成细纲补丁（缺少正文侧描述）')
+        return
+      }
+
+      const needsConfirm = targets.some(({ diff }) => needsConfirmOutlineUpdate(diff))
+      // 任意回写都展示字段预览；核心/结构类额外提示
+      const preview = formatOutlinePatchPreview(current, collected.merged)
+      const head = needsConfirm
+        ? `以下差异涉及核心事件或结构，将以正文为准更新细纲。\n（后续章节若依赖旧细纲，请一并检查。）\n\n`
+        : `将以正文为准更新细纲，请确认字段变更：\n\n`
+      const ok = window.confirm(`${head}${preview}`)
+      if (!ok) return
+
+      const updated = await window.api.updateDetailedOutline(
+        projectId,
+        chapterNumber,
+        collected.merged
+      )
+      markOutlineResolved(collected.appliedIndexes, 'apply')
+      onOutlineUpdated?.(updated)
+
+      if (collected.skippedIndexes.length > 0) {
+        setOutlineApplyError(
+          `${collected.skippedIndexes.length} 项无法生成补丁，未标记为已回写`
+        )
+      }
+    } catch (e) {
+      setOutlineApplyError((e as Error).message || '回写细纲失败')
+    } finally {
+      outlineApplyingRef.current = false
+      setOutlineApplying(false)
+    }
+  }
+
+  const ignoreOutlineDiff = (index: number) => {
+    markOutlineResolved([index], 'ignore')
+    setOutlineApplyError('')
+  }
+
+  const applyRecommendedOutlineUpdates = async () => {
+    if (!outlineDiff) return
+    const indexes = outlineDiff.diffs
+      .map((d, i) => ({ d, i }))
+      .filter(
+        ({ d, i }) =>
+          !outlineIgnored.has(i) &&
+          !outlineApplied.has(i) &&
+          isRecommendedOutlineUpdate(d) &&
+          !needsConfirmOutlineUpdate(d)
+      )
+      .map(({ i }) => i)
+    if (indexes.length === 0) {
+      setOutlineApplyError('没有可一键回写的推荐项（类型 2/3）；核心偏离请逐条确认')
+      return
+    }
+    await applyOutlineFromContent(indexes)
   }
 
   const runMemoryExtract = async () => {
@@ -412,12 +550,40 @@ export default function ChapterFlowPanel(props: Props) {
     }
   }
 
-  const sortedDiffs = outlineDiff
-    ? [...outlineDiff.diffs].sort((a, b) => {
-        const order = { P0: 0, P1: 1, P2: 2 } as const
-        return order[a.priority] - order[b.priority]
-      })
-    : []
+  const sortedDiffs = useMemo(() => {
+    if (!outlineDiff) return [] as { diff: OutlineDiffItem; index: number }[]
+    const order = { P0: 0, P1: 1, P2: 2 } as const
+    return outlineDiff.diffs
+      .map((diff, index) => ({ diff, index }))
+      .sort((a, b) => order[a.diff.priority] - order[b.diff.priority])
+  }, [outlineDiff])
+
+  const outlineResolvedIndexes = useMemo(() => {
+    const s = new Set<number>()
+    for (const i of outlineIgnored) s.add(i)
+    for (const i of outlineApplied) s.add(i)
+    return s
+  }, [outlineIgnored, outlineApplied])
+
+  const outlineEffectivePassed = useMemo(() => {
+    if (!outlineDiff) return true
+    return recomputeOutlineDiffPassed(outlineDiff.diffs, outlineResolvedIndexes)
+  }, [outlineDiff, outlineResolvedIndexes])
+
+  const recommendedOutlineCount = useMemo(() => {
+    if (!outlineDiff) return 0
+    return outlineDiff.diffs.filter(
+      (d, i) =>
+        !outlineResolvedIndexes.has(i) &&
+        isRecommendedOutlineUpdate(d) &&
+        !needsConfirmOutlineUpdate(d)
+    ).length
+  }, [outlineDiff, outlineResolvedIndexes])
+
+  const pendingOutlineCount = useMemo(() => {
+    if (!outlineDiff) return 0
+    return outlineDiff.diffs.filter((_, i) => !outlineResolvedIndexes.has(i)).length
+  }, [outlineDiff, outlineResolvedIndexes])
 
   const hasAutoItems =
     memoryExtraction &&
@@ -530,60 +696,141 @@ export default function ChapterFlowPanel(props: Props) {
               {outlineChecking ? '对照中…' : outlineDiff ? '重新对照' : '✦ 开始对照'}
             </button>
           </div>
+          <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+            差异可「以正文更新细纲」或「忽略」。类型 2/3 推荐回写细纲；类型 1 请补写正文；类型 4/5
+            需确认。
+          </p>
           {outlineError ? (
             <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
               {outlineError}
             </p>
           ) : null}
+          {outlineApplyError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              {outlineApplyError}
+            </p>
+          ) : null}
           {outlineDiff ? (
-            outlineDiff.passed ? (
+            outlineDiff.diffs.length === 0 ? (
               <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-                ✓ 无 P0/P1 差异，可放心保存。
+                ✓ 无差异，可放心保存。
               </p>
             ) : (
               <div style={{ marginTop: 8 }}>
-                <p className="meta" style={{ fontSize: 12, marginBottom: 6 }}>
-                  共 {outlineDiff.diffs.length} 项差异（按优先级排序，仅报告 + 建议，由你决策处理）
-                </p>
-                <ul className="bare" style={{ display: 'grid', gap: 8 }}>
-                  {sortedDiffs.map((d, i) => (
-                    <li
-                      key={i}
-                      style={{
-                        border: '1px solid var(--line-soft)',
-                        borderRadius: 'var(--r-sm)',
-                        padding: 8,
-                        fontSize: 12.5
-                      }}
+                <div className="row" style={{ alignItems: 'baseline', marginBottom: 6, gap: 8 }}>
+                  <p className="meta" style={{ fontSize: 12, margin: 0 }}>
+                    共 {outlineDiff.diffs.length} 项 · 待处理 {pendingOutlineCount}
+                    {pendingOutlineCount === 0
+                      ? ' · 已全部处理'
+                      : outlineEffectivePassed
+                        ? ' · 无未处理 P0/P1'
+                        : ' · 仍有 P0/P1 待处理'}
+                  </p>
+                  {recommendedOutlineCount > 0 ? (
+                    <button
+                      className="btn btn-sm"
+                      disabled={outlineApplying}
+                      onClick={() => void applyRecommendedOutlineUpdates()}
+                      title="将类型 2/3 等推荐项以正文为准批量回写细纲"
+                      style={{ marginLeft: 'auto' }}
                     >
-                      <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
-                        <span
-                          className={`chip ${d.priority === 'P0' ? 'chip-danger' : d.priority === 'P1' ? 'chip-warning' : ''}`}
-                        >
-                          {d.priority}
-                        </span>
-                        <strong>{d.typeLabel}</strong>
-                        <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
-                          类型 {d.type}
-                        </span>
-                      </div>
-                      {d.outline ? (
-                        <div className="meta" style={{ marginBottom: 2 }}>
-                          <strong>细纲</strong>：{d.outline}
+                      {outlineApplying
+                        ? '回写中…'
+                        : `以正文更新细纲（推荐 ${recommendedOutlineCount}）`}
+                    </button>
+                  ) : null}
+                </div>
+                {pendingOutlineCount === 0 ? (
+                  <p className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    ✓ 待处理差异已全部忽略或已回写细纲（下方可回看处理结果）。
+                  </p>
+                ) : null}
+                <ul className="bare" style={{ display: 'grid', gap: 8 }}>
+                  {sortedDiffs.map(({ diff: d, index }) => {
+                    const ignored = outlineIgnored.has(index)
+                    const applied = outlineApplied.has(index)
+                    const resolved = ignored || applied
+                    const canUpdate = canUpdateOutlineFromDiff(d)
+                    return (
+                      <li
+                        key={index}
+                        style={{
+                          border: '1px solid var(--line-soft)',
+                          borderRadius: 'var(--r-sm)',
+                          padding: 8,
+                          fontSize: 12.5,
+                          opacity: resolved ? 0.65 : 1
+                        }}
+                      >
+                        <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
+                          <span
+                            className={`chip ${d.priority === 'P0' ? 'chip-danger' : d.priority === 'P1' ? 'chip-warning' : ''}`}
+                          >
+                            {d.priority}
+                          </span>
+                          <strong>{d.typeLabel}</strong>
+                          {applied ? (
+                            <span className="chip" style={{ marginLeft: 6 }}>
+                              已回写细纲
+                            </span>
+                          ) : null}
+                          {ignored ? (
+                            <span className="chip" style={{ marginLeft: 6 }}>
+                              已忽略
+                            </span>
+                          ) : null}
+                          <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
+                            类型 {d.type}
+                          </span>
                         </div>
-                      ) : null}
-                      {d.actual ? (
-                        <div className="meta" style={{ marginBottom: 2 }}>
-                          <strong>正文</strong>：{d.actual}
-                        </div>
-                      ) : null}
-                      {d.suggestion ? (
-                        <div style={{ marginTop: 4 }}>
-                          <span className="muted">建议</span>：{d.suggestion}
-                        </div>
-                      ) : null}
-                    </li>
-                  ))}
+                        {d.outline ? (
+                          <div className="meta" style={{ marginBottom: 2 }}>
+                            <strong>细纲</strong>：{d.outline}
+                          </div>
+                        ) : null}
+                        {d.actual ? (
+                          <div className="meta" style={{ marginBottom: 2 }}>
+                            <strong>正文</strong>：{d.actual}
+                          </div>
+                        ) : null}
+                        {d.suggestion ? (
+                          <div style={{ marginTop: 4 }}>
+                            <span className="muted">建议</span>：{d.suggestion}
+                          </div>
+                        ) : null}
+                        {!resolved ? (
+                          <div className="row" style={{ marginTop: 8, gap: 6, flexWrap: 'wrap' }}>
+                            {canUpdate ? (
+                              <button
+                                className="btn btn-sm"
+                                disabled={outlineApplying}
+                                onClick={() => void applyOutlineFromContent([index])}
+                                title={
+                                  needsConfirmOutlineUpdate(d)
+                                    ? '核心/结构级差异，点击后需确认'
+                                    : '把正文实际内容写回细纲对应字段'
+                                }
+                              >
+                                以正文更新细纲
+                                {needsConfirmOutlineUpdate(d) ? '（需确认）' : ''}
+                              </button>
+                            ) : (
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                漏写类请在正文补写，不宜改细纲
+                              </span>
+                            )}
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              disabled={outlineApplying}
+                              onClick={() => ignoreOutlineDiff(index)}
+                            >
+                              忽略
+                            </button>
+                          </div>
+                        ) : null}
+                      </li>
+                    )
+                  })}
                 </ul>
               </div>
             )

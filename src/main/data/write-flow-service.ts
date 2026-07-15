@@ -60,7 +60,8 @@ export class WriteFlowService {
 
   /**
    * 细纲对照：让 LLM 对照细纲检查正文，输出 5 种差异类型。
-   * 只报告 + 建议，由用户决策处理。
+   * 同时给出 resolution + outlinePatch，供 UI「以正文更新细纲」一键回写。
+   * 不自动落盘，由用户决策处理。
    */
   async checkOutlineStream(
     outline: string,
@@ -73,16 +74,39 @@ export class WriteFlowService {
       ``,
       `5 种差异类型：`,
       `- 类型 1 漏写：细纲有 + 正文无 + 必填项（核心事件/伏笔/钩子）缺失`,
-      `- 类型 2 超纲增量：细纲无 + 正文有（新角色/新地点/新设定）`,
+      `- 类型 2 超纲增量：细纲无 + 正文有（新角色/新地点/新设定/新情节）`,
       `- 类型 3 细节调整：细纲 A + 正文 B，但核心要素（参与方/事件类型/结果）一致`,
       `- 类型 4 核心事件改：细纲事件 X + 正文事件 Y，任一核心要素变化`,
       `- 类型 5 结构性偏离：字数偏离 > 30% / 核心事件偏离 > 2 个 / 卷终决战提前延后`,
       ``,
-      `输出要求：严格 JSON 数组，每项 { type: 1-5, typeLabel, outline, actual, suggestion, priority: "P0"|"P1"|"P2" }。`,
+      `resolution（推荐处理方向）指引：`,
+      `- 类型 1 → "updateContent"（应补写/改正文，不要给 outlinePatch）`,
+      `- 类型 2 → "updateOutline"（以正文为准回写细纲；必须给 outlinePatch）`,
+      `- 类型 3 → "either"（默认可回写细纲；尽量给 outlinePatch，用正文表述覆盖对应字段）`,
+      `- 类型 4 → "review"（需作者确认；若接受正文则给 outlinePatch，覆盖 plotSummary 等）`,
+      `- 类型 5 → "review"（需作者确认；字数问题可写 wordEstimate）`,
+      ``,
+      `outlinePatch 可写字段（只填需要更新的）：`,
+      `title, plotSummary, coolPoint, hook, charactersAppearing(字符串数组), foreshadowings(字符串数组), wordEstimate, goldenLine`,
+      `- 新角色 → charactersAppearing 只列新增名`,
+      `- 新伏笔 → foreshadowings`,
+      `- 情节/细节变化 → plotSummary（写完整的一句话核心事件，不是 diff 片段）`,
+      `- 爽点/钩子变化 → coolPoint / hook`,
+      ``,
+      `输出要求：严格 JSON 数组，每项 {`,
+      `  type: 1-5,`,
+      `  typeLabel,`,
+      `  outline,`,
+      `  actual,`,
+      `  suggestion,  // 明确说建议「补写正文」还是「以正文更新细纲」`,
+      `  priority: "P0"|"P1"|"P2",`,
+      `  resolution: "updateOutline"|"updateContent"|"either"|"review",`,
+      `  outlinePatch?: { ... }  // 可回写细纲时给出`,
+      `}。`,
       `无差异时输出空数组 []。不要任何解释、Markdown 代码块。`,
       ``,
       `------ 本章细纲 ------`,
-      outline,
+      outline || '（无细纲文本）',
       ``,
       `------ 本章正文 ------`,
       content

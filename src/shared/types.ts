@@ -1546,6 +1546,30 @@ export interface PrevEndingState {
 /** 细纲对照差异类型（SKILL.md 5 种） */
 export type OutlineDiffType = 1 | 2 | 3 | 4 | 5
 
+/**
+ * 差异推荐处理方向：
+ * - updateOutline：以正文为准回写细纲
+ * - updateContent：改正文以贴合细纲
+ * - either：两者皆可（默认倾向回写细纲）
+ * - review：需人工判断（核心事件/结构级）
+ */
+export type OutlineDiffResolution = 'updateOutline' | 'updateContent' | 'either' | 'review'
+
+/** 细纲对照可回写的字段补丁（与 DetailedOutlineItem 可写字段对齐） */
+export type OutlineDiffPatch = Partial<
+  Pick<
+    DetailedOutlineItem,
+    | 'title'
+    | 'plotSummary'
+    | 'coolPoint'
+    | 'hook'
+    | 'charactersAppearing'
+    | 'foreshadowings'
+    | 'wordEstimate'
+    | 'goldenLine'
+  >
+>
+
 export interface OutlineDiffItem {
   /** 1=漏写 2=超纲增量 3=细节调整 4=核心事件改 5=结构性偏离 */
   type: OutlineDiffType
@@ -1558,6 +1582,13 @@ export interface OutlineDiffItem {
   suggestion: string
   /** 优先级 P0-P2 */
   priority: 'P0' | 'P1' | 'P2'
+  /** 推荐处理方向（LLM 给出；缺省时由类型推断） */
+  resolution?: OutlineDiffResolution
+  /**
+   * 以正文为准时，应写入细纲的字段补丁。
+   * resolution 为 updateOutline / either / review（接受正文）时尽量给出。
+   */
+  outlinePatch?: OutlineDiffPatch
 }
 
 export interface OutlineDiffReport {
@@ -1566,6 +1597,15 @@ export interface OutlineDiffReport {
   diffs: OutlineDiffItem[]
   /** 总体通过判定（无 P0/P1 即通过） */
   passed: boolean
+}
+
+/** 以正文回写细纲的应用结果 */
+export interface OutlineDiffApplyResult {
+  applied: boolean
+  updated?: DetailedOutlineItem
+  /** 成功应用的差异条数 */
+  appliedCount: number
+  errors: string[]
 }
 
 /* ==========================================================
