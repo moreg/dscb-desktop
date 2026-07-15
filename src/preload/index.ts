@@ -81,11 +81,26 @@ const api = {
     ipcRenderer.invoke('chapters:readDraft', projectId, chapterNumber),
   discardDraft: (projectId: string, chapterNumber: number) =>
     ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber),
-  /** P19-E：字数汇总（节奏图谱 + 章节进度笔记） */
+  /** P19-E：字数汇总（正文 / 节奏图谱） */
   getChapterWordSummary: (projectId: string) =>
     ipcRenderer.invoke('chapters:wordSummary', projectId),
   updateChapterMeta: (id: string, n: number, patch: UpdateChapterMetaInput) =>
     ipcRenderer.invoke('chapters:updateMeta', id, n, patch),
+  /** AI 章名命名：基于当前未保存草稿生成候选章名（绝不写盘，需用户确认） */
+  suggestChapterName: (
+    projectId: string,
+    chapterNumber: number,
+    currentTitle: string,
+    draft: string,
+    genre?: string
+  ) =>
+    ipcRenderer.invoke('chapters:suggestName', {
+      projectId,
+      chapterNumber,
+      currentTitle,
+      draft,
+      genre
+    }) as Promise<{ ok: boolean; title: string; reason: string; error?: string }>,
   deleteChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:delete', id, n),
   listCharacters: (id: string) => ipcRenderer.invoke('memory:character:list', id),
   getCharacter: (id: string, cid: string) => ipcRenderer.invoke('memory:character:get', id, cid),
@@ -137,9 +152,23 @@ const api = {
     ipcRenderer.invoke('memory:relationship:update', id, rid, patch),
   deleteRelationship: (id: string, rid: string) =>
     ipcRenderer.invoke('memory:relationship:delete', id, rid),
+  /** v4：刷新记忆索引（从 设定/ + 追踪/ + 细纲/ 增量同步到 记忆/） */
+  syncMemoryIndex: (id: string) => ipcRenderer.invoke('memory:syncIndex', id),
+  /** 读取 追踪/ 目录的聚合展示数据（角色状态/时间线/进度/问题/伏笔统计） */
+  readTracking: (id: string) => ipcRenderer.invoke('tracking:read', id),
+  /** v4：获取实体完整 Markdown（用于详情面板） */
+  getMemoryDetail: (id: string, type: string, entityId: string) =>
+    ipcRenderer.invoke('memory:getDetail', id, type, entityId),
+  /** v4：在系统资源管理器中打开源文件 */
+  openMemorySource: (id: string, relativePath: string) =>
+    ipcRenderer.invoke('memory:openSource', id, relativePath),
+  /** v4：老项目 v3 → v4 一次性迁移（dryRun=true 只预览） */
+  migrateV3ToV4: (id: string, options?: { dryRun?: boolean }) =>
+    ipcRenderer.invoke('memory:migrateV3ToV4', id, options),
   configureLlm: (apiKey: string) => ipcRenderer.invoke('llm:configure', apiKey),
   hasLlmKey: () => ipcRenderer.invoke('llm:hasKey'),
   pingLlm: () => ipcRenderer.invoke('llm:ping'),
+  pingProvider: (id: string) => ipcRenderer.invoke('llm:pingProvider', id),
   listAntigravityModels: () =>
     ipcRenderer.invoke('llm:listAntigravityModels') as Promise<string[]>,
   listCodexModels: () =>
@@ -249,6 +278,33 @@ const api = {
       .invoke('write:reviewChapter', { projectId, chapterNumber, content, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
+  answerChapterQuestionStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    question: string,
+    history: { role: 'user' | 'assistant'; text: string }[],
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:answerChapterQuestion', {
+        projectId,
+        chapterNumber,
+        content,
+        question,
+        history,
+        requestId
+      })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
   detectCastStream: (
     projectId: string,
     chapterNumber: number,
@@ -328,6 +384,10 @@ const api = {
     projectId: string,
     locs: MemoryExtraction['newLocations']
   ) => ipcRenderer.invoke('write:applyNewLocations', { projectId, locs }),
+  applyNewItems: (
+    projectId: string,
+    items: MemoryExtraction['newItems']
+  ) => ipcRenderer.invoke('write:applyNewItems', { projectId, items }),
   applyNewForeshadowings: (
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
@@ -675,152 +735,6 @@ const api = {
   setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) =>
     ipcRenderer.invoke('cover:setConfig', cfg) as Promise<CoverImageConfigSummary>,
 
-  /* ---- 开书（story-long-write Phase 1-3）---- */
-  openingCoreSettingsStream: (
-    projectId: string,
-    brainDump: string,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:coreSettings', { projectId, brainDump, requestId })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
-  openingVolumeOutlineStream: (
-    projectId: string,
-    coreSettings: string,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:volumeOutline', { projectId, coreSettings, requestId })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
-  openingFirstChaptersStream: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    fromChapter: number,
-    count: number,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:firstChapters', {
-        projectId,
-        coreSettings,
-        volumeOutline,
-        fromChapter,
-        count,
-        requestId
-      })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
-  persistOpening: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    chaptersMarkdown?: string,
-    fromChapter?: number
-  ) =>
-    ipcRenderer.invoke('opening:persist', {
-      projectId,
-      coreSettings,
-      volumeOutline,
-      chaptersMd: chaptersMarkdown,
-      fromChapter
-    }),
-  generateRhythm: (
-    projectId: string,
-    volumeOutline: string
-  ): Promise<{ ok: boolean; html?: string; error?: string }> =>
-    ipcRenderer.invoke('opening:generateRhythm', { projectId, volumeOutline }),
-  continueCoreSettingsStream: (
-    projectId: string,
-    brainDump: string,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:continueCoreSettings', { projectId, brainDump, partial, requestId })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
-  continueVolumeOutlineStream: (
-    projectId: string,
-    coreSettings: string,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:continueVolumeOutline', { projectId, coreSettings, partial, requestId })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
-  continueFirstChaptersStream: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    fromChapter: number,
-    count: number,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => {
-    const requestId = crypto.randomUUID()
-    const handler = (
-      _e: unknown,
-      payload: { requestId: string; token: string; done: boolean }
-    ) => {
-      if (payload.requestId === requestId) onToken(payload.token, payload.done)
-    }
-    ipcRenderer.on('opening:token', handler as never)
-    return ipcRenderer
-      .invoke('opening:continueFirstChapters', {
-        projectId,
-        coreSettings,
-        volumeOutline,
-        fromChapter,
-        count,
-        partial,
-        requestId
-      })
-      .finally(() => ipcRenderer.removeListener('opening:token', handler as never))
-  },
   onProjectFilesChanged: (
     cb: (e: { projectId: string; kind: 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' }) => void
   ) => {

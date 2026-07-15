@@ -1,6 +1,5 @@
 /**
- * 节奏图谱 HTML 构建纯函数（供 generateRhythmHtml 与 persistOpening 复用）。
- * 从 opening-service.ts 提取，避免 service 文件过长。
+ * 节奏图谱 HTML 构建纯函数。
  */
 
 import { RHYTHM_HTML_TEMPLATE } from './skill-prompts/opening/rhythm-html-template'

@@ -97,8 +97,24 @@ function utf8CompleteLength(buf: Buffer): number {
  *
  * 不需串行化：--ephemeral 模式每次 exec 创建独立 session，并发安全。
  */
+/** 认证失败后重试前的等待时间（让 codex 刷新登录态） */
+const AUTH_RETRY_DELAY_MS = 1500
+
 export function runCodex(prompt: string, opts: CodexOptions = {}): Promise<CodexResult> {
-  return runCodexOnce(prompt, opts)
+  let retried = false
+  const exec = (): Promise<CodexResult> =>
+    runCodexOnce(prompt, opts).catch((err) => {
+      // 认证失败多为登录态的暂时性失效，等一下再跑一次，避免直接把错误抛给用户。
+      // 认证失败时不会输出 agent_message，不会产生重复 token。
+      if (!retried && err && /CODEX_AUTH_EXPIRED/.test(err.message)) {
+        retried = true
+        return new Promise((resolve) =>
+          setTimeout(resolve, AUTH_RETRY_DELAY_MS)
+        ).then(() => runCodexOnce(prompt, opts))
+      }
+      throw err
+    })
+  return exec()
 }
 
 async function runCodexOnce(
@@ -211,12 +227,13 @@ async function runCodexOnce(
               hint:
                 /tls|handshake|ssl|certificate|eof/i.test(msg) ? 'TLS/SSL 握手失败，通常是网络代理问题或 OpenAI 服务器连接不稳定' :
                 /reconnect|disconnected|network/i.test(msg) ? '网络连接中断，请检查网络稳定性或代理设置' :
-                /auth|login|credential/i.test(msg) ? '认证失败，请运行 codex login 重新登录' :
+                /auth|login|credential/i.test(msg) ? '认证失败（登录态暂时失效），runCodex 会自动重试一次' :
                 '检查网络连接或 CLI 版本'
             })
           }
           // codex 靠本机 ChatGPT 登录态，通常自动保持有效。认证失败多为暂时性，
           // 用独立错误码 CODEX_AUTH_EXPIRED 与 HTTP API Key 失效区分，前端提示"稍后重试"。
+          // runCodex 层会自动重试一次（等 1.5s 让登录态恢复），此处仅在重试仍失败时抛出。
           if (/auth|login|credential|401|403/i.test(msg)) {
             reject(new Error('CODEX_AUTH_EXPIRED'))
           } else if (/rate|quota|limit|429/i.test(msg)) {

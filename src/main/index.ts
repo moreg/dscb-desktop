@@ -24,6 +24,7 @@ import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
 import { registerMemoryIpc } from './ipc/memory'
+import { registerTrackingIpc } from './ipc/tracking'
 import { registerLlmIpc } from './ipc/llm'
 import { registerOutlineIpc } from './ipc/outline'
 import { registerWriteIpc } from './ipc/write'
@@ -37,9 +38,8 @@ import { registerDeslopIpc } from './ipc/deslop'
 import { registerDeslopRulesIpc } from './ipc/deslop-rules'
 import { registerCoverIpc } from './ipc/cover'
 import { registerScanIpc } from './ipc/scan'
-import { registerOpeningIpc } from './ipc/opening'
 import { ScanService } from './data/scan/scan-service'
-import { OpeningService } from './data/opening-service'
+import { ChapterNameService } from './data/chapter-name-service'
 import { ProjectFileWatcher } from './data/project-file-watcher'
 
 let mainWindow: BrowserWindow | null = null
@@ -93,16 +93,21 @@ app.whenReady().then(async () => {
   registerLibraryIpc(projectService)
   registerProjectsIpc(projectService, fileWatcher)
   const chapterService = new ChapterService(projectService)
-  registerChaptersIpc(projectService, chapterService)
   registerSettingsIpc(settings, defaultProjectsRoot)
   registerUsageIpc(usageRepo, settings)
   const memoryService = new MemoryService(projectService)
   const memoryEntityService = new MemoryEntityService(projectService)
-  registerMemoryIpc(memoryService, memoryEntityService)
+  registerMemoryIpc(memoryService, memoryEntityService, projectService)
+  registerTrackingIpc(projectService)
   const secretFile = join(userData, 'config', 'providers.enc')
   const secret = new SecretStore(secretFile)
   const llmService = new LlmService(secret, usageRepo)
   registerLlmIpc(secret, llmService)
+
+  // 章名命名服务（依赖 LlmService，必须在 llmService 实例化后构造）
+  const chapterNameService = new ChapterNameService(llmService)
+  registerChaptersIpc(projectService, chapterService, chapterNameService)
+
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
 
@@ -115,7 +120,11 @@ app.whenReady().then(async () => {
   // 对标解析层（项目级 对标/ → 全局 teardown-library/ 回退链），供写作召回
   const benchmarkResolver = new BenchmarkResolver(teardownRepo)
 
-  // 构造函数参数顺序：(projectService, llm, flow?, reviewFlow?, chapterService?, settings?, benchmarkResolver?)
+  // 去 AI 味润色（story-deslop）-- 确定性检测 + LLM 改写
+  // 提前实例化，供 WriteService.humanizeSegment 走 deslop pipeline（单条改写与编辑器共用 7 Gate 方法论）
+  const deslopService = new DeslopService(llmService)
+
+  // 构造函数参数顺序：(projectService, llm, flow?, reviewFlow?, chapterService?, settings?, benchmarkResolver?, deslopService?)
   // flow/reviewFlow 传 undefined 走默认值（内部 new WriteFlowService(llm)/new ReviewFlowService(llm)）。
   const writeService = new WriteService(
     projectService,
@@ -124,7 +133,8 @@ app.whenReady().then(async () => {
     undefined,
     chapterService,
     settings,
-    benchmarkResolver
+    benchmarkResolver,
+    deslopService
   )
   registerWriteIpc(writeService)
   const diagnosticsService = new DiagnosticsService(projectService)
@@ -138,8 +148,6 @@ app.whenReady().then(async () => {
   )
   registerStyleIpc(styleProfileService, projectService)
 
-  // 去 AI 味润色（story-deslop）—— 确定性检测 + LLM 改写
-  const deslopService = new DeslopService(llmService)
   registerDeslopIpc(deslopService, projectService, styleProfileService, settings)
   // 去 AI 味规则可配置化（设置页展示/编辑/AI 改写，保存后影响扫描与改写）
   registerDeslopRulesIpc(settings, llmService)
@@ -152,10 +160,6 @@ app.whenReady().then(async () => {
   // 扫榜（story-long-scan / story-short-scan）—— 采集 + 选题决策
   const scanService = new ScanService(userData, llmService)
   registerScanIpc(scanService)
-
-  // 开书（story-long-write Phase 1-3）—— 脑洞 → 核心设定 + 卷级大纲 + 细纲
-  const openingService = new OpeningService(projectService, llmService, benchmarkResolver, deslopService)
-  registerOpeningIpc(openingService)
 
   if (!process.env['ELECTRON_RENDERER_URL']) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {

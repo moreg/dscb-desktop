@@ -4,7 +4,7 @@ import { readText, parseDoc } from './md-parser'
 
 /**
  * 写作前的设定上下文（来自 `设定/` 目录）。
- * 这些文件由 opening-service 在开书时创建，记录题材定位、世界观、势力、规则等强约束素材。
+ * 这些文件记录题材定位、世界观、势力、规则等强约束素材。
  * 用于让续写 LLM 知晓核心梗、金手指规则、势力格局、自创机制等。
  */
 export interface SettingsContext {

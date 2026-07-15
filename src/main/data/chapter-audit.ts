@@ -224,6 +224,7 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
   pushPatternViolations(content, voice, violations)
   pushRuleViolations(content, voice, violations)
   pushWordCountViolation(content, effectiveMin, effectiveMax, violations)
+  pushProhibitionViolations(content, violations)
 
   // 「正文审核」技能新增的算法检查（M2）。每项读 checks[id] !== false 决定是否跳过。
   if (rules) {
@@ -1087,4 +1088,165 @@ export function pruneHumanizeMap<V>(
     if (activeKeys.has(k)) next[k] = v
   }
   return next
+}
+
+/**
+ * 增强的 3 条写作禁制质检规则。
+ * 1. 禁制 1：禁止对工具人/背景板路人进行外貌、衣着、小动作描写。
+ * 2. 禁制 2：禁止对话中夹杂长神态/多动作描写，动作应单独成行，同一人对话需一口气说完。
+ * 3. 禁制 3：严格执行“事件-反应-结果”闭环，拒绝纯氛围/纯环境与心理抒发。
+ */
+function pushProhibitionViolations(content: string, out: AuditViolation[]): void {
+  // --- 禁制 1：工具人/背景板路人描写 ---
+  const PROHIBITION_1_PATTERNS = [
+    {
+      pattern: /(老者|老头|老妇|妇人|壮汉|大汉|汉子|青年|少年|少女|小厮|伙计|掌柜|店小二|小二|差役|侍卫|守卫|门卫|路人|旁人|百姓|兵丁|士兵|将士|仆人|丫鬟|侍女|客官|商贩|小贩|摊主)[^。！\n]{0,15}?(身穿|身着|穿着|一身|头戴|戴着|披着|裹着|衣着|装扮)[^。！\n]{1,10}/,
+      message: '违反禁制 1：禁止对工具人/背景板路人进行衣着描写',
+      suggestion: '删除衣着描写，让读者自然脑补，工具人只写功能性动作'
+    },
+    {
+      pattern: /(老者|老头|老妇|妇人|壮汉|大汉|汉子|青年|少年|少女|小厮|伙计|掌柜|店小二|小二|差役|侍卫|守卫|门卫|路人|旁人|百姓|兵丁|士兵|将士|仆人|丫鬟|侍女|客官|商贩|小贩|摊主)[^。！\n]{0,15}?([花白黑粗稀]的?(胡须|胡子|发|鬓角|胡|须)|胡须|胡子|鬓角)[^。！\n]{0,10}?(有|多|少|长|短|发白|泛白|白了|花白)/,
+      message: '违反禁制 1：禁止对工具人/背景板路人进行外貌/胡须/白发描写',
+      suggestion: '删除外貌描写，工具人只写功能性动作'
+    },
+    {
+      pattern: /(老者|老头|老妇|妇人|壮汉|大汉|汉子|青年|少年|少女|小厮|伙计|掌柜|店小二|小二|差役|侍卫|守卫|门卫|路人|旁人|百姓|兵丁|士兵|将士|仆人|丫鬟|侍女|客官|商贩|小贩|摊主)[^。！\n]{0,15}?([摸捋]了?[摸捋]?(胡子|胡须)|抽了?口?烟|吸了?口?烟|歪了?歪?头|摸了?摸?下巴)/,
+      message: '违反禁制 1：禁止对工具人/背景板路人进行细微小动作描写',
+      suggestion: '删除小动作描写，路人只写功能性动作（如“他递过文书”）'
+    },
+    {
+      pattern: /帽子(歪了|歪戴|戴歪|有些歪)/,
+      message: '违反禁制 1：命中工具人小动作套路“帽子歪了”',
+      suggestion: '删除该与剧情推进无关的动作描写'
+    }
+  ]
+
+  for (const item of PROHIBITION_1_PATTERNS) {
+    const re = new RegExp(item.pattern.source, 'g')
+    const matches = content.matchAll(re)
+    let count = 0
+    for (const m of matches) {
+      if (count >= 3) break
+      if (m.index === undefined) continue
+      out.push({
+        category: 'toxic',
+        severity: 'warn',
+        message: item.message,
+        snippet: extractContext(content, m.index, m[0].length),
+        offset: m.index,
+        ruleId: 'prohibition-1-bystander-detail',
+        suggestion: item.suggestion
+      })
+      count++
+    }
+  }
+
+  // --- 禁制 2：对话神态动作排版/长神态 ---
+  const paragraphs = splitParagraphs(content)
+  for (const para of paragraphs) {
+    const idx = content.indexOf(para)
+    if (idx < 0) continue
+
+    // 检查是否包含任何引号
+    if (!para.includes('"') && !para.includes('「') && !para.includes('“') && !para.includes('”') && !para.includes('『') && !para.includes('』')) {
+      continue
+    }
+
+    // 取得所有引号对
+    const quoteRegex = /(".*?"|“.*?”|「.*?」|『.*?』)/g
+    const parts = para.split(quoteRegex)
+    if (parts.length <= 1) continue
+
+    const before = parts[0] ? parts[0].trim() : ''
+    const after = parts[parts.length - 1] ? parts[parts.length - 1].trim() : ''
+
+    // 检查夹在多个引号对中间的文本
+    let hasMiddleText = false
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (i % 2 === 0 && parts[i].trim().length > 0) {
+        hasMiddleText = true
+        break
+      }
+    }
+
+    if (hasMiddleText) {
+      out.push({
+        category: 'dialogue',
+        severity: 'warn',
+        message: '违反禁制 2：对话行内夹杂动作/旁白打断（同一人的对话需一口气说完）',
+        snippet: truncate(para, 80),
+        offset: idx,
+        ruleId: 'prohibition-2-dialogue-layout',
+        suggestion: '删除中间穿插的动作，或者将动作提到对话前、对话后独立成行'
+      })
+    }
+
+    if (after.length > 0) {
+      const cleanAfter = after.replace(/^[。！？，；、…]+/, '').trim()
+      if (cleanAfter.length > 0) {
+        out.push({
+          category: 'dialogue',
+          severity: 'warn',
+          message: '违反禁制 2：动作描写跟在同一段台词后面挤在同一行',
+          snippet: truncate(para, 80),
+          offset: idx,
+          ruleId: 'prohibition-2-dialogue-layout',
+          suggestion: '将台词后的动作/神态描写移动到台词前单独成行，或在台词后另起一段'
+        })
+      }
+    }
+
+    if (before.length > 0) {
+      const cleanBefore = before.replace(/[：:\s]+$/, '').trim()
+      const hasMultipleActions = cleanBefore.includes('，') || cleanBefore.includes('；') || cleanBefore.includes('、')
+      const longPre = cleanBefore.length > 8
+      const hasTabooWords = /(捋|摸|闪过|精光|沉沉|缓缓|沉吟|皱眉|叹气|叹了口)/.test(cleanBefore)
+
+      if (cleanBefore.length > 0 && (hasMultipleActions || longPre || hasTabooWords)) {
+        out.push({
+          category: 'dialogue',
+          severity: 'warn',
+          message: '违反禁制 2：对话前存在长神态/多动作铺垫（路人/说话要直奔主题，动作应独立成行）',
+          snippet: truncate(before, 60),
+          offset: idx,
+          ruleId: 'prohibition-2-dialogue-layout',
+          suggestion: '将长神态/小动作描写提到前面单独成行，对话前只保留简短的“某某说：”或“某某问：”'
+        })
+      }
+    }
+  }
+
+  // --- 禁制 3：事件-反应-结果 闭环 ---
+  const PROHIBITION_3_PATTERNS = [
+    {
+      pattern: /(天空|天色|夜色|月色|月光|微风|冷风|山风|晚霞|暮色|残阳|云雾|落叶|空气|氛围|气氛|四周)[^。！\n]{0,30}?(渐|呼啸|掠过|弥漫|笼罩|格外|十分|安静|沉闷|如墨|微凉)[^。！\n]{0,30}?[。！]\s{0,10}(他|她|我)[^。！\n]{0,20}?(站在|看着|望着|凝视|眺望|环顾|打量|靠在)[^。！\n]{0,20}?(心中|心底|思绪|感慨|情绪|感叹|回忆|思念|叹息|茫然|复杂|一股)/,
+      message: '违反禁制 3：拒绝纯氛围/纯环境描写，每个描写单元都必须形成“事件-反应-结果”闭环',
+      suggestion: '增加具体的突发事件与人物反应（例如“他听到身后脚步声，猛然转身”），避免纯抒情/纯感慨'
+    },
+    {
+      pattern: /(夜色如墨|微风不燥|月光如水|清风徐来|微风吹过|微风拂过)[^。！\n]{0,20}?[。！]\s{0,10}(他|她|我)[^。！\n]{0,20}?(陷入|思索|回忆|叹息|发呆|感慨)/,
+      message: '违反禁制 3：命中纯环境渲染与纯心理活动套路（无事件/无结果闭环）',
+      suggestion: '删除纯氛围描写，或改为具体的“事件-反应-结果”闭环结构'
+    }
+  ]
+
+  for (const item of PROHIBITION_3_PATTERNS) {
+    const re = new RegExp(item.pattern.source, 'g')
+    const matches = content.matchAll(re)
+    let count = 0
+    for (const m of matches) {
+      if (count >= 3) break
+      if (m.index === undefined) continue
+      out.push({
+        category: 'quality',
+        severity: 'warn',
+        message: item.message,
+        snippet: extractContext(content, m.index, m[0].length),
+        offset: m.index,
+        ruleId: 'prohibition-3-atmosphere-loop',
+        suggestion: item.suggestion
+      })
+      count++
+    }
+  }
 }

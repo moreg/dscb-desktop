@@ -190,6 +190,7 @@ describe('WriteService', () => {
           chapterNumber: ch,
           newCharacters: [],
           newLocations: [],
+        newItems: [],
           newForeshadowings: [],
           newPlotPoints: [],
           characterStateChanges: [],

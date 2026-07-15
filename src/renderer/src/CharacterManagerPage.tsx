@@ -207,37 +207,44 @@ export default function CharacterManagerPage({ projectId, onOpenChapter }: Props
                             <span key={t} className="chip">{t}</span>
                           ))}
                         </div>
-                        {c.rawFields && Object.keys(c.rawFields).length > 0 ? (
-                          <div className="char-full" style={{ marginTop: 6 }}>
-                            <MarkdownView
-                              sections={[{ title: '', body: rawFieldsToMarkdown(c.rawFields) }]}
-                            />
-                          </div>
-                        ) : (
-                          <>
-                            <div className="char-meta">
-                              {c.identity ? (
-                                <span>
-                                  <span className="label">身份</span>
-                                  <span className="val"> · {c.identity}</span>
-                                </span>
+                        {(() => {
+                          // v4：合并显示 first-class + customFields（不再互斥）
+                          const cf = c.customFields ?? c.rawFields
+                          return (
+                            <>
+                              {(c.identity || c.personality || c.abilities) ? (
+                                <div className="char-meta">
+                                  {c.identity ? (
+                                    <span>
+                                      <span className="label">身份</span>
+                                      <span className="val"> · {c.identity}</span>
+                                    </span>
+                                  ) : null}
+                                  {c.personality ? (
+                                    <span>
+                                      <span className="label">性格</span>
+                                      <span className="val"> · {c.personality}</span>
+                                    </span>
+                                  ) : null}
+                                  {c.abilities ? (
+                                    <span>
+                                      <span className="label">能力</span>
+                                      <span className="val"> · {c.abilities}</span>
+                                    </span>
+                                  ) : null}
+                                </div>
                               ) : null}
-                              {c.personality ? (
-                                <span>
-                                  <span className="label">性格</span>
-                                  <span className="val"> · {c.personality}</span>
-                                </span>
+                              {c.synopsis ? <p className="char-body">{c.synopsis}</p> : null}
+                              {cf && Object.keys(cf).length > 0 ? (
+                                <div className="char-full" style={{ marginTop: 6 }}>
+                                  <MarkdownView
+                                    sections={[{ title: '', body: rawFieldsToMarkdown(cf) }]}
+                                  />
+                                </div>
                               ) : null}
-                              {c.abilities ? (
-                                <span>
-                                  <span className="label">能力</span>
-                                  <span className="val"> · {c.abilities}</span>
-                                </span>
-                              ) : null}
-                            </div>
-                            {c.synopsis ? <p className="char-body">{c.synopsis}</p> : null}
-                          </>
-                        )}
+                            </>
+                          )
+                        })()}
                         {appears.length > 0 ? (
                           <div className="outline-tags" style={{ marginTop: 8 }}>
                             <span className="outline-tag">出场</span>

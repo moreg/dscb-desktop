@@ -29,35 +29,29 @@ describe('格式体检 DiagnosticsService', () => {
     expect(report).toEqual([])
   })
 
-  it('角色卡有字段但无角色块 → 告警', async () => {
-    mkdirSync(join(tmp, '记忆系统'), { recursive: true })
-    // 有 - **字段** 但角色不在 主角/核心配角/核心反派 分类下
-    writeFileSync(
-      join(tmp, '记忆系统', '角色卡.md'),
-      '# 角色卡\n\n## 人物\n\n### 苏铭\n- **姓名**：苏铭\n- **身份**：测试\n',
-      'utf-8'
-    )
+  it('角色目录无文件时不告警（新建项目正常）', async () => {
+    mkdirSync(join(tmp, '设定', '角色'), { recursive: true })
+    // 空目录：CharacterRepo 返回 0，但无文件含字段 -> 不告警
     const report = await serviceFor(tmp).report('x')
-    const charWarn = report.find((d) => d.file.includes('角色卡'))
-    expect(charWarn).toBeDefined()
-    expect(charWarn!.message).toContain('0 个角色')
+    const charWarn = report.find((d) => d.file.includes('设定/角色'))
+    expect(charWarn).toBeUndefined()
   })
 
-  it('伏笔表头缺关键词 → 告警', async () => {
-    mkdirSync(join(tmp, '记忆系统'), { recursive: true })
+  it('伏笔表头缺关键词 -> 告警', async () => {
+    mkdirSync(join(tmp, '追踪'), { recursive: true })
     writeFileSync(
-      join(tmp, '记忆系统', '伏笔追踪.md'),
+      join(tmp, '追踪', '伏笔.md'),
       '# 伏笔追踪\n\n| 编号 | 描述 | 何时 |\n|---|---|---|\n| F1 | 婚戒 | 开头 |\n| F2 | 反噬 | 中段 |\n',
       'utf-8'
     )
     const report = await serviceFor(tmp).report('x')
-    const fbWarn = report.find((d) => d.file.includes('伏笔追踪'))
+    const fbWarn = report.find((d) => d.file.includes('伏笔.md'))
     expect(fbWarn).toBeDefined()
     expect(fbWarn!.message).toContain('0 条')
     expect(fbWarn!.hint).toContain('编号')
   })
 
-  it('rhythmData 块存在但 entry 格式错 → 告警', async () => {
+  it('rhythmData 块存在但 entry 格式错 -> 告警', async () => {
     mkdirSync(join(tmp, '图解'), { recursive: true })
     writeFileSync(
       join(tmp, '图解', '节奏图谱.html'),
@@ -71,9 +65,10 @@ describe('格式体检 DiagnosticsService', () => {
   })
 
   it('空骨架（app 新建项目）不误报', async () => {
-    mkdirSync(join(tmp, '记忆系统'), { recursive: true })
-    writeFileSync(join(tmp, '记忆系统', '角色卡.md'), '# 角色卡\n', 'utf-8')
-    writeFileSync(join(tmp, '记忆系统', '伏笔追踪.md'), '# 伏笔追踪\n', 'utf-8')
+    mkdirSync(join(tmp, '设定', '角色'), { recursive: true })
+    mkdirSync(join(tmp, '追踪'), { recursive: true })
+    writeFileSync(join(tmp, '设定', '角色', '空.md'), '# 空\n', 'utf-8')
+    writeFileSync(join(tmp, '追踪', '伏笔.md'), '# 伏笔追踪\n', 'utf-8')
     const report = await serviceFor(tmp).report('x')
     expect(report).toEqual([])
   })

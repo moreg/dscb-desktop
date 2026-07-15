@@ -111,6 +111,7 @@ export class WriteFlowService {
       `输出要求：严格 JSON，字段：`,
       `- newCharacters: [{ name, role, identity, personality }]（本章首次登场的新角色）`,
       `- newLocations: [{ name, category, notes }]（本章首次出现的新地点）`,
+      `- newItems: [{ name, category, notes }]（本章首次出现的新道具/物品，如法宝、兵器、灵物、信物）`,
       `- newForeshadowings: [{ content, expectedCollect?, note? }]（本章新埋设的伏笔）`,
       `- newPlotPoints: [{ title, event, coolPoint? }]（本章核心情节）`,
       `- characterStateChanges: [{ name, field, oldValue, newValue }]（既有角色的状态变化，field 如"伤势/情绪/位置/关系"）`,

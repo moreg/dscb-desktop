@@ -135,8 +135,13 @@ export function deleteH2Section(text: string, title: string): string {
   return next.join('\n')
 }
 
-/** 在首个表格末尾追加一行（按表头列数补齐） */
-export function appendTableRow(text: string, cells: string[]): string {
+/**
+ * 在首个表格末尾追加一行（按表头列数补齐）。
+ * 若文件尚无表格：
+ * - 传入 `headers` 时新建表头 + 分隔行 + 数据行；
+ * - 未传 headers 时原样返回（调用方应保证骨架有表，或传 headers）。
+ */
+export function appendTableRow(text: string, cells: string[], headers?: string[]): string {
   const lines = text.split(/\r?\n/)
   let tableStart = -1
   for (let i = 0; i < lines.length; i++) {
@@ -145,7 +150,17 @@ export function appendTableRow(text: string, cells: string[]): string {
       break
     }
   }
-  if (tableStart < 0) return text
+  if (tableStart < 0) {
+    if (!headers || headers.length === 0) return text
+    const colCount = headers.length
+    const padded = [...cells]
+    while (padded.length < colCount) padded.push('')
+    const headerRow = `| ${headers.join(' | ')} |`
+    const sepRow = `| ${headers.map(() => '---').join(' | ')} |`
+    const dataRow = `| ${padded.slice(0, colCount).join(' | ')} |`
+    const trimmed = text.replace(/\s+$/, '')
+    return `${trimmed}\n\n${headerRow}\n${sepRow}\n${dataRow}\n`
+  }
   let tableEnd = tableStart
   for (let i = tableStart; i < lines.length; i++) {
     if (lines[i].trim().startsWith('|')) tableEnd = i

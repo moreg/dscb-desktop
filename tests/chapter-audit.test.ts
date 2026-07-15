@@ -379,3 +379,54 @@ describe('pruneHumanizeMap (P5-C 选择性清理)', () => {
     expect(next[violationKey(v1)]).toBe(result)
   })
 })
+
+describe('chapter-audit (Prohibitions 1, 2, 3)', () => {
+  it('Prohibition 1: flags bystander clothing/appearance/small actions', () => {
+    const content1 = makeValidContent('"我不会让你——"') + '\n\n那老者身穿一身灰色长袍。'
+    const report1 = auditChapter(content1)
+    const hit1 = report1.violations.find((v) => v.ruleId === 'prohibition-1-bystander-detail')
+    expect(hit1).toBeDefined()
+    expect(hit1?.message).toContain('衣着描写')
+
+    const content2 = makeValidContent('"我不会让你——"') + '\n\n那大汉捋了捋胡子。'
+    const report2 = auditChapter(content2)
+    const hit2 = report2.violations.find((v) => v.ruleId === 'prohibition-1-bystander-detail')
+    expect(hit2).toBeDefined()
+    expect(hit2?.message).toContain('小动作描写')
+
+    const content3 = makeValidContent('"我不会让你——"') + '\n\n帽子歪了。'
+    const report3 = auditChapter(content3)
+    const hit3 = report3.violations.find((v) => v.ruleId === 'prohibition-1-bystander-detail')
+    expect(hit3).toBeDefined()
+    expect(hit3?.message).toContain('帽子歪了')
+  })
+
+  it('Prohibition 2: flags incorrect dialogue layouts and long preambles', () => {
+    const content1 = makeValidContent('"我不会让你——"') + '\n\n"其实也不是什么大事"他搓了搓手，"就是……"'
+    const report1 = auditChapter(content1)
+    const hit1 = report1.violations.find((v) => v.ruleId === 'prohibition-2-dialogue-layout')
+    expect(hit1).toBeDefined()
+
+    const content2 = makeValidContent('"我不会让你——"') + '\n\n"这..."他叹了口气。'
+    const report2 = auditChapter(content2)
+    const hit2 = report2.violations.find((v) => v.ruleId === 'prohibition-2-dialogue-layout')
+    expect(hit2).toBeDefined()
+
+    const content3 = makeValidContent('"我不会让你——"') + '\n\n老者捋了捋花白的胡须，眼中闪过一丝精光，沉吟片刻，才缓缓开口道："年轻人，请三思。"'
+    const report3 = auditChapter(content3)
+    const hit3 = report3.violations.find((v) => {
+      return v.ruleId === 'prohibition-2-dialogue-layout' && v.message.includes('长神态/多动作铺垫')
+    })
+    expect(hit3).toBeDefined()
+    expect(hit3?.message).toContain('长神态/多动作铺垫')
+  })
+
+  it('Prohibition 3: flags pure environmental descriptions and mood statements', () => {
+    const content = makeValidContent('"我不会让你——"') + '\n\n天色渐暗，晚霞如血，山风呼啸而过。\n\n他站在崖边，看着远方的群山，心中涌起一股豪情。'
+    const report = auditChapter(content)
+    const hit = report.violations.find((v) => v.ruleId === 'prohibition-3-atmosphere-loop')
+    expect(hit).toBeDefined()
+    expect(hit?.message).toContain('事件-反应-结果')
+  })
+})
+

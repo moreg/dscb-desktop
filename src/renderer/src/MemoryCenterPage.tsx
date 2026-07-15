@@ -22,7 +22,8 @@ const ENTITIES: EntityMeta[] = [
   { type: 'location', label: '地点', desc: '城池 · 山川 · 门派 · 场所', icon: '🏯', hint: '标注所属势力与首次登场' },
   { type: 'worldview', label: '世界观', desc: '体系 · 势力 · 规则 · 设定', icon: '☯', hint: '功法体系 / 修炼境界' },
   { type: 'timeline', label: '时间线', desc: '按章铺陈的关键事件', icon: '⌛', hint: '关联到具体章节号' },
-  { type: 'plot_point', label: '剧情点', desc: '故事弧 · 转折 · 高潮', icon: '✦', hint: '与人物/伏笔联动' }
+  { type: 'plot_point', label: '剧情点', desc: '故事弧 · 转折 · 高潮', icon: '✦', hint: '与人物/伏笔联动' },
+  { type: 'item', label: '道具', desc: '法宝 · 兵器 · 灵物 · 信物', icon: '🗡️', hint: '标注持有者与来历' }
 ]
 
 export default function MemoryCenterPage({
@@ -37,8 +38,14 @@ export default function MemoryCenterPage({
   const [foreshadowingCount, setForeshadowingCount] = useState(0)
   const [pendingForeshadowing, setPendingForeshadowing] = useState(0)
   const [relationshipCount, setRelationshipCount] = useState(0)
+  const [syncStatus, setSyncStatus] = useState<
+    | { kind: 'idle' }
+    | { kind: 'running' }
+    | { kind: 'done'; added: number; updated: number }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' })
 
-  useEffect(() => {
+  const refresh = () => {
     void window.api.listCharacters(projectId).then((c: Character[]) => setCharacterCount(c.length))
     void window.api.listForeshadowings(projectId).then((f: Foreshadowing[]) => {
       setForeshadowingCount(f.length)
@@ -52,13 +59,53 @@ export default function MemoryCenterPage({
     ).then((entries) => {
       setCounts(Object.fromEntries(entries))
     })
+  }
+
+  useEffect(() => {
+    refresh()
   }, [projectId])
+
+  const onSync = async () => {
+    setSyncStatus({ kind: 'running' })
+    try {
+      const report = await window.api.syncMemoryIndex(projectId)
+      setSyncStatus({ kind: 'done', added: report.added, updated: report.updated })
+      refresh()
+      // 3 秒后自动消失
+      setTimeout(() => setSyncStatus((s) => (s.kind === 'done' ? { kind: 'idle' } : s)), 3000)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setSyncStatus({ kind: 'error', message })
+    }
+  }
 
   return (
     <div>
       <div className="page-head">
-        <h1>记忆中心</h1>
-        <p className="desc">人物 · 伏笔 · 关系 · 世界设定一览</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h1>记忆中心</h1>
+            <p className="desc">人物 · 伏笔 · 关系 · 世界设定一览</p>
+          </div>
+          <div>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={onSync}
+              disabled={syncStatus.kind === 'running'}
+              title="从 设定/ + 追踪/ + 细纲/ 增量同步到 记忆/"
+            >
+              {syncStatus.kind === 'running' ? '同步中…' : '🔄 刷新记忆索引'}
+            </button>
+            {syncStatus.kind === 'done' ? (
+              <span style={{ marginLeft: 8, color: 'var(--success, #5a8c5a)' }}>
+                ✓ 同步完成：新增 {syncStatus.added}，更新 {syncStatus.updated}
+              </span>
+            ) : null}
+            {syncStatus.kind === 'error' ? (
+              <span style={{ marginLeft: 8, color: 'var(--warning)' }}>⚠ {syncStatus.message}</span>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <div className="card-grid">

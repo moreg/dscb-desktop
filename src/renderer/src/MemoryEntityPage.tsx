@@ -7,9 +7,9 @@ import type {
   ChapterMeta
 } from '../../shared/types'
 
-/** 实体展示用 body：地点从 rawFields 重建（含关联事件/角色/状态），世界观直接用 notes（整节正文） */
+/** 实体展示用 body：地点/道具从 rawFields 重建（含关联事件/角色/状态），世界观直接用 notes */
 function displayBody(e: MemoryEntity, type: MemoryEntityType): string {
-  if (type === 'location') return rawFieldsToMarkdown(e.rawFields) || e.notes || ''
+  if (type === 'location' || type === 'item') return rawFieldsToMarkdown(e.rawFields) || e.notes || ''
   return e.notes || ''
 }
 
@@ -107,6 +107,14 @@ const CONFIG: Record<MemoryEntityType, TypeConfig> = {
         </div>
       )
     }
+  },
+  item: {
+    fields: [
+      { key: 'name', label: '名称 *' },
+      { key: 'category', label: '类型', placeholder: '法宝 / 兵器 / 灵物 / 信物' },
+      { key: 'notes', label: '描述', multi: true }
+    ],
+    emptyHint: '尚无道具。'
   }
 }
 
@@ -146,7 +154,7 @@ export default function MemoryEntityPage({ projectId, type, label, onOpenChapter
     return m
   }, [chapters])
   const chapterTitle = (n: number) => chapterByNumber.get(n)?.title ?? `第 ${n} 章`
-  const useMarkdown = type === 'location' || type === 'worldview'
+  const useMarkdown = type === 'location' || type === 'worldview' || type === 'item'
   const ctx = { chapterTitle, onOpenChapter: onOpenChapter ?? (() => {}) }
 
   return (
@@ -187,6 +195,17 @@ export default function MemoryEntityPage({ projectId, type, label, onOpenChapter
                   ) : null}
                   {extra}
                   <div style={{ marginLeft: 'auto' }} className="btn-group">
+                    {e.sources && e.sources[0] ? (
+                      <button
+                        className="btn btn-sm btn-ghost"
+                        onClick={() =>
+                          window.api.openMemorySource(projectId, e.sources![0].path)
+                        }
+                        title={`在系统资源管理器中打开 ${e.sources[0].path}`}
+                      >
+                        📂 源文件
+                      </button>
+                    ) : null}
                     <button
                       className="btn btn-sm"
                       onClick={() =>

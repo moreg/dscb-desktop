@@ -1,6 +1,6 @@
 /**
- * 开书落盘相关的纯函数：Markdown 解析、中文数字转换、路径校验。
- * 从 opening-service.ts 提取，便于单元测试与复用。
+ * Markdown 解析、中文数字转换、路径校验等纯函数。
+ * 供细纲生成、设定落盘等流程复用。
  */
 
 export interface ParsedChapter {

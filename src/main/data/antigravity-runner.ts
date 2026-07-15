@@ -120,11 +120,27 @@ let agyChain: Promise<unknown> = Promise.resolve()
  * 提示用户精简设定/细纲/角色卡内容。
  * 完成后返回完整文本与估算用量（agy 不返回 token 数，按 1 字 ≈ 1.5 token 估算）。
  */
+/** 认证失败后重试前的等待时间（让 agy 用 refresh token 刷新 access token） */
+const AUTH_RETRY_DELAY_MS = 1500
+
 export function runAntigravity(
   prompt: string,
   opts: AntigravityOptions = {}
 ): Promise<AntigravityResult> {
-  const exec = () => runAntigravityOnce(prompt, opts)
+  let retried = false
+  const exec = (): Promise<AntigravityResult> =>
+    runAntigravityOnce(prompt, opts).catch((err) => {
+      // 认证失败多为 access token 刚过期的暂时性失效，agy 会用 refresh token 自动刷新。
+      // 第一次失败时等一下再跑一次（刷新通常在秒级完成），避免直接把错误抛给用户。
+      // 认证失败时 stdout 为空，不会重复喂 token。
+      if (!retried && err && /AGY_AUTH_EXPIRED/.test(err.message)) {
+        retried = true
+        return new Promise((resolve) =>
+          setTimeout(resolve, AUTH_RETRY_DELAY_MS)
+        ).then(() => runAntigravityOnce(prompt, opts))
+      }
+      throw err
+    })
   // 串行化：前一个 agy 调用完成（或失败）后才跑下一个
   const next = agyChain.then(exec, exec) // 即使前一个失败也继续
   agyChain = next.catch(() => {}) // 锁链不因业务错误断裂
@@ -278,7 +294,8 @@ async function runAntigravityOnce(
               })
             }
             // agy 靠本机 Google OAuth，access token 过期会自动用 refresh token 刷新，
-            // 通常无需手动重新登录。此处认证失败多为刷新瞬间的暂时性失效，重试即可恢复。
+            // 通常无需手动重新登录。此处认证失败多为刷新瞬间的暂时性失效。
+            // runAntigravity 层会自动重试一次（等 1.5s 让 token 刷新），此处仅在重试仍失败时抛出。
             // 用独立错误码 AGY_AUTH_EXPIRED 与 HTTP API Key 失效（LLM_AUTH_FAILED）区分，
             // 前端据此给出"稍后重试"而非"检查 API Key"的提示。
             reject(new Error('AGY_AUTH_EXPIRED'))

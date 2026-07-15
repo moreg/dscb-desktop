@@ -282,11 +282,11 @@ export class OutlineService {
 
     // 1. 读取核心设定
     const coreSettings = await readText(join(dir, '设定', '核心设定.md'))
-    if (!coreSettings) throw new Error('核心设定文件不存在，请先创建并进行开书向导流程')
+    if (!coreSettings) throw new Error('核心设定文件不存在，请先在「设定/核心设定.md」中创建')
 
     // 2. 读取卷级大纲
     const volumeOutline = await readText(join(dir, '大纲', '大纲.md'))
-    if (!volumeOutline) throw new Error('大纲文件不存在，请先创建并进行开书向导流程')
+    if (!volumeOutline) throw new Error('大纲文件不存在，请先在「大纲/大纲.md」中创建')
 
     // 3. 获取每章目标字数
     const meta = await this.projectService.getProjectData(projectId)
@@ -313,7 +313,7 @@ export class OutlineService {
     })
 
     // 6. 解析生成的细纲文本
-    const { splitByChapterMarker } = await import('./opening-service')
+    const { splitByChapterMarker } = await import('./opening-markdown')
     const chapters = splitByChapterMarker(md)
 
     // 容错：如果只生成 1 章且未识别到分隔符，则全文作为一个章节

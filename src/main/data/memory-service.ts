@@ -1,4 +1,5 @@
-import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
+import { CharacterRepo } from './memory/character-repo'
+import { RelationshipRepo } from './memory/relationship-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import type { ProjectService } from './project-service'
 import type {
@@ -14,12 +15,14 @@ import type {
   UpdateRelationshipInput
 } from '../../shared/types'
 
-const NOT_IMPLEMENTED = '该操作需 Phase 2/3（读写 记忆系统/*.md）支持，当前为只读阶段。'
+const NOT_IMPLEMENTED = '该操作需 Phase 3 支持，当前为只读阶段。'
 
 /**
- * 记忆服务。Phase 1：
- * - 角色读取从 记忆系统/角色卡.md（CharacterCardMdRepo）就绪。
- * - 伏笔 / 关系 / 历史 / 所有 mutation 留 Phase 2/3。
+ * 记忆服务（v4）：
+ * - 角色 → CharacterRepo（记忆/人物/*.md，fallback 设定/角色/*.md）
+ * - 关系 → RelationshipRepo（记忆/关系/*.md，fallback 设定/关系.md）
+ * - 伏笔 → ForeshadowingMdRepo（PR3 再切换为单一真相；目前维持旧实现）
+ * - 历史 → 永远空（已废弃接口）
  */
 export class MemoryService {
   constructor(private readonly projectService: ProjectService) {}
@@ -27,7 +30,7 @@ export class MemoryService {
   // ===== 角色 =====
   async listCharacters(projectId: string): Promise<Character[]> {
     const dir = await this.projectService.resolveDir(projectId)
-    return new CharacterCardMdRepo(dir).list()
+    return new CharacterRepo(dir).list()
   }
 
   async getCharacter(projectId: string, id: string): Promise<Character | null> {
@@ -37,7 +40,7 @@ export class MemoryService {
 
   async createCharacter(projectId: string, input: CreateCharacterInput): Promise<Character> {
     const dir = await this.projectService.resolveDir(projectId)
-    return new CharacterCardMdRepo(dir).create(input)
+    return new CharacterRepo(dir).create(input)
   }
 
   async updateCharacter(
@@ -46,27 +49,23 @@ export class MemoryService {
     patch: UpdateCharacterInput
   ): Promise<Character> {
     const dir = await this.projectService.resolveDir(projectId)
-    const repo = new CharacterCardMdRepo(dir)
-    const existing = (await repo.list()).find((c) => c.id === id)
-    if (!existing) throw new Error(`角色不存在：${id}`)
-    const updated = await repo.update(existing.name, patch)
-    return updated ?? existing
+    const repo = new CharacterRepo(dir)
+    const updated = await repo.update(id, patch)
+    if (!updated) throw new Error(`角色不存在：${id}`)
+    return updated
   }
 
   async deleteCharacter(projectId: string, id: string): Promise<void> {
     const dir = await this.projectService.resolveDir(projectId)
-    const repo = new CharacterCardMdRepo(dir)
-    const existing = (await repo.list()).find((c) => c.id === id)
-    if (!existing) return
-    await repo.delete(existing.name)
+    await new CharacterRepo(dir).delete(id)
   }
 
-  // ===== 历史 =====
+  // ===== 历史（废弃） =====
   async listHistory(_projectId: string): Promise<HistoryEntry[]> {
     return []
   }
 
-  // ===== 伏笔（Phase 2 读 / Phase 3b 写：伏笔追踪.md） =====
+  // ===== 伏笔（PR3 再切换为单一真相；当前维持旧实现保持兼容） =====
   async listForeshadowings(projectId: string): Promise<Foreshadowing[]> {
     const dir = await this.projectService.resolveDir(projectId)
     return new ForeshadowingMdRepo(dir).list()
@@ -115,25 +114,28 @@ export class MemoryService {
     return f
   }
 
-  // ===== 关系（Phase 4：从 角色卡.md 关系变更日志读取） =====
+  // ===== 关系 =====
   async listRelationships(projectId: string): Promise<Relationship[]> {
     const dir = await this.projectService.resolveDir(projectId)
-    return new CharacterCardMdRepo(dir).listRelationships()
+    return new RelationshipRepo(dir).list()
   }
   async createRelationship(
-    _projectId: string,
-    _input: CreateRelationshipInput
+    projectId: string,
+    input: CreateRelationshipInput
   ): Promise<Relationship> {
-    throw new Error(NOT_IMPLEMENTED)
+    const dir = await this.projectService.resolveDir(projectId)
+    return new RelationshipRepo(dir, new CharacterRepo(dir)).create(input)
   }
   async updateRelationship(
-    _projectId: string,
-    _id: string,
-    _patch: UpdateRelationshipInput
-  ): Promise<Relationship> {
-    throw new Error(NOT_IMPLEMENTED)
+    projectId: string,
+    id: string,
+    patch: UpdateRelationshipInput
+  ): Promise<Relationship | null> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new RelationshipRepo(dir, new CharacterRepo(dir)).update(id, patch)
   }
-  async deleteRelationship(_projectId: string, _id: string): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED)
+  async deleteRelationship(projectId: string, id: string): Promise<void> {
+    const dir = await this.projectService.resolveDir(projectId)
+    await new RelationshipRepo(dir, new CharacterRepo(dir)).delete(id)
   }
 }

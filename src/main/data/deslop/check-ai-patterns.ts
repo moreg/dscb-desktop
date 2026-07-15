@@ -12,7 +12,7 @@
  */
 
 import type { DeslopFinding, DeslopGate, DeslopSeverity } from '../../../shared/types'
-import { TOXIC_PATTERNS, FLATTENED_LEVEL1, PARALLELISM_PATTERNS } from './banned-words'
+import { TOXIC_PATTERNS, FLATTENED_LEVEL1, PARALLELISM_PATTERNS, SUBLIMATION_PATTERNS, PSYCH_TELL_PATTERNS } from './banned-words'
 
 const STOP_CHARS = new Set(['。', '！', '？', '!', '?', '\n'])
 const SOFT_SEPARATORS = new Set(['，', ',', '、', '；', ';', '：', ':'])
@@ -63,6 +63,15 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
 
   // 5. Gate B 排比
   findings.push(...scanParallelism(proseLines))
+
+  // 6. Gate F 结尾升华（章末段落降级 blocking）
+  findings.push(...scanSublimation(proseLines))
+
+  // 7. Gate C 心理描写外化（告诉而非展示）
+  findings.push(...scanPsychTell(proseLines))
+
+  // 8. Gate E 对话标签单一化
+  findings.push(...scanDialogueTags(proseLines))
 
   findings.sort((a, b) => a.line - b.line || a.column - b.column)
   return findings
@@ -417,6 +426,132 @@ function scanParallelism(proseLines: ProseLine[]): DeslopFinding[] {
       }
     }
   }
+  return findings
+}
+
+/* =========================================================
+   Gate F：结尾升华句式
+   ========================================================= */
+
+/**
+ * 扫描升华句式（"他终于明白""这一刻，""这就是X的意义"等）。
+ * 章末段落（最后 2 行）命中降级为 blocking--升华句在结尾最有害。
+ */
+function scanSublimation(proseLines: ProseLine[]): DeslopFinding[] {
+  if (proseLines.length === 0) return []
+  const findings: DeslopFinding[] = []
+  // 章末 = 最后 2 个非空正文行
+  const lastLineNo = proseLines[proseLines.length - 1].lineNo
+  const secondLastLineNo = proseLines.length > 1 ? proseLines[proseLines.length - 2].lineNo : lastLineNo
+
+  for (const { text, lineNo } of proseLines) {
+    for (const re of SUBLIMATION_PATTERNS) {
+      const globalRe = new RegExp(re.source, 'g')
+      let m: RegExpExecArray | null
+      while ((m = globalRe.exec(text)) !== null) {
+        const isEnding = lineNo >= secondLastLineNo
+        findings.push({
+          line: lineNo,
+          column: m.index + 1,
+          type: 'sublimation',
+          severity: isEnding ? 'blocking' : 'advisory',
+          gate: 'F',
+          message: isEnding
+            ? '章末升华句：删掉总结/预告，改用具体钩子物件/事件收束。'
+            : '升华句式：删掉作者总结，让读者自己体会。',
+          excerpt: compact(m[0])
+        })
+      }
+    }
+  }
+  return findings
+}
+
+/* =========================================================
+   Gate C：心理描写外化（告诉而非展示）
+   ========================================================= */
+
+/**
+ * 扫描"告诉而非展示"的心理描写（"他感到愤怒""她觉得自己很累""他心想"）。
+ * 只报直接贴情绪标签的写法；"心中一凛"这类已带身体反应的由 Gate A 扫描。
+ */
+function scanPsychTell(proseLines: ProseLine[]): DeslopFinding[] {
+  const findings: DeslopFinding[] = []
+  for (const { text, lineNo } of proseLines) {
+    for (const re of PSYCH_TELL_PATTERNS) {
+      const globalRe = new RegExp(re.source, 'g')
+      let m: RegExpExecArray | null
+      while ((m = globalRe.exec(text)) !== null) {
+        findings.push({
+          line: lineNo,
+          column: m.index + 1,
+          type: 'psych-tell',
+          severity: 'advisory',
+          gate: 'C',
+          message: '心理描写直接贴标签（告诉而非展示）：用动作/身体反应/可见反应代替（如"攥紧拳头""呼吸压低"）。',
+          excerpt: compact(m[0])
+        })
+      }
+    }
+  }
+  return findings
+}
+
+/* =========================================================
+   Gate E：对话标签单一化
+   ========================================================= */
+
+// 对话标签"他说道/她问道/他笑道"等（代词 + 动词 + 道）
+// 只匹配明确的对话标签词，避免误匹配"这道题""他说了话"等非标签用法
+const DIALOGUE_TAG_RE = /[他她](说道|问道|喊道|笑道|答道|骂道|低声道|轻声道|淡淡道|冷冷道|平静道)/
+
+/**
+ * 扫描对话标签单一化：连续 3+ 个对话行都用"X道/说道/问道"类标签。
+ * 命中后整组报一条 finding，指向第一个单调标签所在行。
+ */
+function scanDialogueTags(proseLines: ProseLine[]): DeslopFinding[] {
+  const findings: DeslopFinding[] = []
+  let runStart: { lineNo: number; column: number; excerpt: string } | null = null
+  let runLen = 0
+
+  const flush = (): void => {
+    if (runLen >= 3 && runStart) {
+      findings.push({
+        line: runStart.lineNo,
+        column: runStart.column,
+        type: 'dialogue-tag-monotone',
+        severity: 'advisory',
+        gate: 'E',
+        message: `对话标签单一化：连续 ${runLen} 个对话行都用"X道"类标签；改用动作替代标签、省略标签，或区分角色语气。`,
+        excerpt: runStart.excerpt
+      })
+    }
+    runStart = null
+    runLen = 0
+  }
+
+  for (const { text, lineNo } of proseLines) {
+    const trimmed = text.trim()
+    if (!trimmed) {
+      flush()
+      continue
+    }
+    // 只看含引号的对话行
+    if (!/[""「」''']/.test(trimmed)) {
+      flush()
+      continue
+    }
+    const m = DIALOGUE_TAG_RE.exec(trimmed)
+    if (m) {
+      if (runLen === 0) {
+        runStart = { lineNo, column: m.index + 1, excerpt: compact(m[0]) }
+      }
+      runLen += 1
+    } else {
+      flush()
+    }
+  }
+  flush()
   return findings
 }
 

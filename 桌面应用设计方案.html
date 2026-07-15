@@ -368,49 +368,40 @@
 
       <div class="tree-card">
         <div class="th">📚 项目文件夹 <span class="pill">自包含</span></div>
-<pre class="tree"><span class="d-dir">我的第一部小说/</span>
+<pre class="tree"><span class="d-dir">我的第一部小说/</span>   <span class="d-cmt"># v4 Markdown 单一真相源</span>
 ├─ <span class="d-json">project.json</span>          <span class="d-cmt"># 项目元信息</span>
-├─ <span class="d-dir">chapters/</span>
-│  ├─ <span class="d-md">001.md</span>             <span class="d-cmt"># 正文(人可读)</span>
-│  ├─ <span class="d-json">001.meta.json</span>     <span class="d-cmt"># 状态/字数/伏笔</span>
-│  └─ <span class="d-json">001.versions.json</span> <span class="d-cmt"># 版本历史</span>
-├─ <span class="d-dir">outlines/</span>
-│  ├─ <span class="d-json">main.json</span>          <span class="d-cmt"># 总纲</span>
-│  └─ <span class="d-json">detailed.json</span>     <span class="d-cmt"># 细纲</span>
-├─ <span class="d-dir">memory/</span>
-│  ├─ <span class="d-json">characters.json</span>
-│  ├─ <span class="d-json">relationships.json</span>
-│  ├─ <span class="d-json">foreshadowings.json</span>
-│  ├─ <span class="d-json">timeline.json</span>
-│  ├─ <span class="d-json">plot_points.json</span>
-│  └─ <span class="d-jsonl">history.jsonl</span>     <span class="d-cmt"># 审计(追加)</span>
-├─ <span class="d-dir">styles/</span>
-│  └─ <span class="d-json">default.json</span>
-└─ <span class="d-json">index.json</span>            <span class="d-cmt"># 目录索引</span></pre>
+├─ <span class="d-dir">大纲/</span> <span class="d-md">大纲.md</span>         <span class="d-cmt"># 主线 / 卷 / 节奏表</span>
+├─ <span class="d-dir">细纲/</span> <span class="d-md">第01卷.md</span>       <span class="d-cmt"># 按卷细纲</span>
+├─ <span class="d-dir">设定/</span>                 <span class="d-cmt"># 核心设定 / 角色 / 世界观</span>
+├─ <span class="d-dir">正文/</span>
+│  └─ <span class="d-md">第001章 标题.md</span>  <span class="d-cmt"># 正文(人可读)</span>
+├─ <span class="d-dir">追踪/</span>                 <span class="d-cmt"># 伏笔 / 时间线 / 状态表</span>
+│  └─ <span class="d-md">伏笔.md</span>            <span class="d-cmt"># 伏笔唯一真相源</span>
+├─ <span class="d-dir">记忆/</span>                 <span class="d-cmt"># 人物/地点/关系/剧情点…</span>
+│  ├─ <span class="d-dir">人物/</span> <span class="d-md">&lt;名&gt;.md</span>
+│  └─ <span class="d-dir">关系/</span> <span class="d-md">&lt;A&gt;__&lt;B&gt;.md</span>
+├─ <span class="d-dir">图解/</span> <span class="d-md">节奏图谱.html</span>
+└─ <span class="d-dir">对标/</span> · <span class="d-dir">资料/</span></pre>
       </div>
     </div>
 
     <div class="grid-2" style="margin-top:18px">
-      <div class="tree-card"><div class="th">📝 章节正文 <span class="pill">001.md</span></div>
-        <pre class="tree" style="font-size:12.2px">第一章 觉醒
-
-清晨的钟声划破浓雾，林远从
+      <div class="tree-card"><div class="th">📝 章节正文 <span class="pill">第001章 觉醒.md</span></div>
+        <pre class="tree" style="font-size:12.2px">清晨的钟声划破浓雾，林远从
 打坐中睁开双眼。丹田内那枚
 沉寂三年的金色符文，此刻竟
 微微震颤起来……</pre>
         <div style="padding:0 18px 14px"><span class="badge add">人可读</span> <span class="badge keep">可外部编辑</span> <span class="badge keep">Git 友好</span></div>
       </div>
-      <div class="tree-card"><div class="th">🧩 章节元数据 <span class="pill">001.meta.json</span></div>
-        <pre class="tree" style="font-size:12.2px">{
-  "schemaVersion": 1,
-  "chapterNumber": 1,
-  "title": "觉醒",
-  "wordCount": 2120,
-  "status": "draft",
-  "synopsis": "林远觉醒金符文",
-  "hook": "符文为何此刻异动？",
-  "foreshadowingIds": ["f-01"]
-}</pre>
+      <div class="tree-card"><div class="th">🧩 人物卡示例 <span class="pill">记忆/人物/林远.md</span></div>
+        <pre class="tree" style="font-size:12.2px"># 林远
+
+## 基本信息
+- **身份**：剑修
+- **角色定位**：主角
+
+## 性格
+- **显性性格**：隐忍、护短</pre>
       </div>
     </div>
   </section>
@@ -420,31 +411,30 @@
     <div class="sec-head">
       <span class="sec-num">04</span>
       <h2>SQLite 表 → 本地文件映射</h2>
-      <p class="sec-desc">核心 MVP 涉及 13 张表。列表型数据用 JSON <code>items</code> 数组，正文用 Markdown，审计日志用 JSONL 追加写。</p>
+      <p class="sec-desc">v4 以 Markdown 为业务真相源（人物/关系/伏笔/大纲等）；仅 <code>project.json</code> 等少量元数据为 JSON。下列对照原 SQLite 领域 → 当前落地路径。</p>
     </div>
 
     <div class="table-wrap">
       <table>
-        <thead><tr><th style="width:30%">SQLite 表</th><th style="width:42%">落地位置</th><th style="width:28%">格式</th></tr></thead>
+        <thead><tr><th style="width:30%">领域</th><th style="width:42%">落地位置（v4）</th><th style="width:28%">格式</th></tr></thead>
         <tbody>
-          <tr><td><code>projects</code></td><td><code>{project}/project.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>chapters</code></td><td><code>chapters/NNN.md</code> + <code>NNN.meta.json</code></td><td><span class="fmt md">Markdown</span> + <span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>chapter_versions</code></td><td><code>chapters/NNN.versions.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>writing_styles</code></td><td><code>styles/{name}.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>characters</code></td><td><code>memory/characters.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>character_relationships</code></td><td><code>memory/relationships.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>locations</code></td><td><code>memory/locations.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>foreshadowings</code></td><td><code>memory/foreshadowings.json</code> <span style="color:var(--muted);font-size:12px">（保留 chain_id / parent_id 链）</span></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>timeline_events</code></td><td><code>memory/timeline.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>plot_points</code></td><td><code>memory/plot_points.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>story_bibles</code> / <code>golden_fingers</code> / <code>worldviews</code></td><td>合并为 <code>memory/worldview.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>outline_rules</code> / <code>generated_outlines</code> / <code>detailed_outlines</code></td><td><code>outlines/*.json</code></td><td><span class="fmt json">JSON</span></td></tr>
-          <tr><td><code>memory_history</code></td><td><code>memory/history.jsonl</code></td><td><span class="fmt jsonl">JSONL</span></td></tr>
-          <tr><td><code>generation_tasks</code></td><td><span style="color:var(--muted)">不持久化 · 运行时内存</span></td><td><span class="fmt mem">—</span></td></tr>
+          <tr><td>项目</td><td><code>{project}/project.json</code></td><td><span class="fmt json">JSON</span></td></tr>
+          <tr><td>章节正文</td><td><code>正文/第NNN章 标题.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>章节版本</td><td><span style="color:var(--muted)">暂未开放（IPC stub）</span></td><td><span class="fmt mem">—</span></td></tr>
+          <tr><td>总纲 / 卷纲</td><td><code>大纲/大纲.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>细纲</td><td><code>细纲/第NN卷.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>人物</td><td><code>记忆/人物/&lt;名&gt;.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>人物关系</td><td><code>记忆/关系/&lt;A&gt;__&lt;B&gt;.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>地点 / 世界观 / 道具</td><td><code>记忆/{地点,世界观,道具}/</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>伏笔</td><td><code>追踪/伏笔.md</code>（唯一真相源）</td><td><span class="fmt md">Markdown 表</span></td></tr>
+          <tr><td>时间线</td><td><code>追踪/时间线.md</code></td><td><span class="fmt md">Markdown 表</span></td></tr>
+          <tr><td>剧情点</td><td><code>记忆/剧情点/第NNN章 标题.md</code></td><td><span class="fmt md">Markdown</span></td></tr>
+          <tr><td>节奏图谱</td><td><code>图解/节奏图谱.html</code></td><td><span class="fmt md">HTML</span></td></tr>
+          <tr><td>生成任务</td><td><span style="color:var(--muted)">不持久化 · 运行时内存</span></td><td><span class="fmt mem">—</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">所有 JSON 统一带 <code>schemaVersion</code> 与 <code>updatedAt</code> 字段。列表型用 <code>items</code> 数组；单例型（project/index）直接顶层平铺业务字段。</p>
+    <p class="note"><code>project.json</code> 带 <code>schemaVersion</code> 与 <code>updatedAt</code>。实体文件名经 sanitize；格式契约见 <code>docs/md-format-spec.md</code>。旧 <code>memory/*.json</code> / <code>chapters/</code> / <code>记忆系统/</code> 已废弃。</p>
   </section>
 
   <!-- ========== 5. 数据访问层 ========== -->
@@ -535,12 +525,12 @@
       <table>
         <thead><tr><th style="width:24%">输入</th><th>来源</th></tr></thead>
         <tbody>
-          <tr><td>本章细纲</td><td><code>outlines/detailed.json</code> — 情绪点 / 爽点 / 钩子 / 角色状态 / 剧情概要</td></tr>
-          <tr><td>出场人物档案</td><td><code>memory/characters.json</code>（按本章角色状态过滤）</td></tr>
-          <tr><td>伏笔任务</td><td><code>memory/foreshadowings.json</code>（pending 且本章需 plant / collect）</td></tr>
-          <tr><td>写作风格</td><td><code>styles/*.json</code>（is_active 风格 features）</td></tr>
-          <tr><td>前文衔接</td><td>前 1-3 章 <code>*.meta.json</code> 的 synopsis（摘要链，控上下文窗口）</td></tr>
-          <tr><td>世界观约束</td><td><code>memory/worldview.json</code>（相关设定）</td></tr>
+          <tr><td>本章细纲</td><td><code>细纲/第NN卷.md</code> — 情绪 / 爽点 / 钩子 / 角色出场 / 剧情概要</td></tr>
+          <tr><td>出场人物档案</td><td><code>记忆/人物/*.md</code> 或 <code>设定/角色/</code>（按本章登场过滤）</td></tr>
+          <tr><td>伏笔任务</td><td><code>追踪/伏笔.md</code>（pending / planted 且本章相关）</td></tr>
+          <tr><td>角色状态 / 上下文</td><td><code>追踪/角色状态.md</code>、<code>追踪/上下文.md</code></td></tr>
+          <tr><td>写作风格</td><td>项目 StyleProfile / 设置中的风格路由</td></tr>
+          <tr><td>世界观 / 设定</td><td><code>设定/</code>、<code>记忆/世界观/</code></td></tr>
         </tbody>
       </table>
     </div>
@@ -554,9 +544,9 @@
       <div class="farrow">›</div>
       <div class="step"><div class="n">3</div><div class="t">流式生成</div><div class="d">SSE token 实时写入</div></div>
       <div class="farrow">›</div>
-      <div class="step"><div class="n">4</div><div class="t">存 ai 版本</div><div class="d">chapter_versions</div></div>
+      <div class="step"><div class="n">4</div><div class="t">保存正文</div><div class="d">正文/第NNN章…</div></div>
       <div class="farrow">›</div>
-      <div class="step"><div class="n">5</div><div class="t">人工编辑</div><div class="d">存 manual 版本</div></div>
+      <div class="step"><div class="n">5</div><div class="t">人工编辑</div><div class="d">去 AI 味 / 润色</div></div>
       <div class="farrow">›</div>
       <div class="step verified"><div class="n">6</div><div class="t">去味润色</div><div class="d">deslop → reviewed</div></div>
     </div>
@@ -636,7 +626,7 @@
       <div class="tl-item"><div class="ph">PHASE 01</div><h4>脚手架搭建</h4><p>Electron + 复用原前端工程 + preload IPC 骨架 + TypeScript 配置。</p></div>
       <div class="tl-item"><div class="ph">PHASE 02</div><h4>文件层 + 项目库</h4><p>FileRepository 基类（原子写 / 乐观锁 / Schema 校验）+ ProjectLibrary 索引管理。</p></div>
       <div class="tl-item"><div class="ph">PHASE 03</div><h4>章节闭环 ⭐</h4><p>章节读写 + 编辑器打通——验证「存本地文件」核心目标。</p></div>
-      <div class="tl-item"><div class="ph">PHASE 04</div><h4>记忆系统</h4><p>8 个 Repository（人物/关系/地点/伏笔/时间线/剧情点/世界观/风格）+ 记忆审计。</p></div>
+      <div class="tl-item"><div class="ph">PHASE 04+</div><h4>记忆系统 v4</h4><p>Markdown 实体（人物/关系/地点/剧情点…）+ <code>追踪/</code> 表 + v3→v4 迁移；非 JSON collection。</p></div>
       <div class="tl-item"><div class="ph">PHASE 05</div><h4>LLM 基础设施</h4><p>provider 工厂 + AES 密钥加密 + SSE 流式通道。</p></div>
       <div class="tl-item"><div class="ph">PHASE 06</div><h4>正文写作 ⭐</h4><p>上下文组装 + 流式生成 + 去味润色 + 版本对比（核心创作闭环）。</p></div>
       <div class="tl-item"><div class="ph">PHASE 07</div><h4>大纲生成</h4><p>总纲 / 细纲 CRUD + AI 批量生成（情绪点 / 爽点 / 钩子）。</p></div>

@@ -15,8 +15,8 @@ describe('gatesForLevel 分级 → Gate 范围', () => {
   it('轻度只过 Gate A + B', () => {
     expect(gatesForLevel('mild')).toEqual(['A', 'B'])
   })
-  it('中度过 A + B + C + D + G', () => {
-    expect(gatesForLevel('moderate')).toEqual(['A', 'B', 'C', 'D', 'G'])
+  it('中度过 A + B + C + D', () => {
+    expect(gatesForLevel('moderate')).toEqual(['A', 'B', 'C', 'D'])
   })
   it('重度全 Gate', () => {
     expect(gatesForLevel('severe')).toEqual(['A', 'B', 'C', 'D', 'E', 'F', 'G'])

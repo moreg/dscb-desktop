@@ -1,5 +1,5 @@
 import type { SecretStore } from './secret-store'
-import type { ProviderConfig, FeatureCategory } from '../../shared/types'
+import type { ProviderConfig, FeatureCategory, PingResult } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
 import { runCodex, probeCodex } from './codex-runner'
@@ -66,6 +66,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   cast: 'opening',
   relationship: 'opening',
   styleExtract: 'opening',
+  // ChapterEditor 正文区 AI 起名：章名风格与大纲一致，复用 opening 路由
+  'chapter-name': 'opening',
   // 辅助提取
   endingState: 'auxiliary',
   memoryExtract: 'auxiliary',
@@ -73,7 +75,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   batchMemory: 'auxiliary',
   batchFigure: 'auxiliary',
   teardown: 'auxiliary',
-  scan: 'auxiliary'
+  scan: 'auxiliary',
+  ask: 'ask'
 }
 
 /**
@@ -150,10 +153,30 @@ export class LlmService {
     return cfg.providers.find((x) => x.id === cfg.activeId) ?? null
   }
 
-  /** 轻量连通测试：发送 1 token 的请求，成功即返回模型名 */
-  async ping(): Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }> {
-    const p = await this.resolveProvider()
+  /**
+   * 轻量连通测试：发送 1 token 的请求，成功即返回模型名。
+   * @param providerId 可选；传入时精确测试该 provider（不影响 active），
+   *   用于设置页「每张 provider 卡片独立测试」场景。
+   *   不传则保持原有行为：走 feature 路由 + activeId 解析（向后兼容全局测试按钮）。
+   */
+  async ping(providerId?: string): Promise<PingResult> {
+    let p: ProviderConfig | null = null
+    if (providerId) {
+      const cfg = await this.secret.read()
+      p = cfg.providers.find((x) => x.id === providerId) ?? null
+    } else {
+      p = await this.resolveProvider()
+    }
     if (!p) return { ok: false, error: 'NO_KEY' }
+    return this.pingOne(p)
+  }
+
+  /**
+   * 针对单个 provider 的连通探测。被 ping() 复用。
+   * 协议分支：antigravity → 本机 agy CLI；codex → 本机 codex CLI；
+   * openai/anthropic → HTTP 1 token 请求。
+   */
+  private async pingOne(p: ProviderConfig): Promise<PingResult> {
     const proto = protocolOf(p)
     // antigravity 协议：走本机 agy CLI，无需 apiKey
     if (proto === 'antigravity') {

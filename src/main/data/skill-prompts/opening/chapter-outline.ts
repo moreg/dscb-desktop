@@ -1,11 +1,9 @@
 /**
- * 开书 Phase 3（下）：首批细纲 prompt（源自 story-long-write Phase 3 细纲）。
+ * 细纲生成 prompt（源自 story-long-write Phase 3 细纲）。
  * 依据核心设定与大纲，生成首批细纲章节内容。
  */
 
 import { TOMATO_CHAPTER_NAME_SPEC, STUCK_FLOW_HINT } from './shared-specs'
-
-export const FIRST_CHAPTERS_BATCH = 10
 
 export function buildChapterOutlinePrompt(
   coreSettings: string,

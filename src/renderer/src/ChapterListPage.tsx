@@ -10,7 +10,6 @@ import type {
   TeardownEntry
 } from '../../shared/types'
 import { dedupeForbiddenViolations } from './audit-dedupe'
-import OpeningDialog from './OpeningDialog'
 
 interface Props {
   projectId: string
@@ -62,7 +61,6 @@ export default function ChapterListPage({
   const [showNew, setShowNew] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
   const [showBenchmark, setShowBenchmark] = useState(false)
-  const [showOpening, setShowOpening] = useState(false)
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
   const [page, setPage] = useState(1)
@@ -154,13 +152,6 @@ export default function ChapterListPage({
             </p>
           </div>
           <div className="page-head-actions">
-            <button
-              className="btn btn-primary"
-              onClick={() => setShowOpening(true)}
-              title="输入脑洞，AI 生成核心设定/卷级大纲/前 10 章细纲"
-            >
-              🚀 开书
-            </button>
             <button
               className="btn btn-ghost"
               onClick={() => setShowBenchmark(true)}
@@ -352,17 +343,6 @@ export default function ChapterListPage({
           onSaved={async () => {
             setProjectData(await window.api.getProject(projectId))
             setShowBenchmark(false)
-          }}
-        />
-      ) : null}
-
-      {showOpening ? (
-        <OpeningDialog
-          projectId={projectId}
-          onClose={() => setShowOpening(false)}
-          onCompleted={() => {
-            setShowOpening(false)
-            refresh()
           }}
         />
       ) : null}

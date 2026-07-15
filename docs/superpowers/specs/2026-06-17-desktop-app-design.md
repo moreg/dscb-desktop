@@ -1,8 +1,10 @@
 # ai-writer 桌面应用设计（本地文件存储方案）
 
-- 日期：2026-06-17
+- 日期：2026-06-17（初稿）
+- **现状同步**：2026-07-15 — 数据布局升级为 **v4 Markdown 单一真相源**（见 §5.3）；开书向导已移除；章节版本暂未开放
 - 来源项目：`E:\trea\ai-writer`（Python FastAPI + React + SQLite）
-- 交付物：本设计的可视化 HTML 展示页
+- 交付物：本设计的可视化 HTML 展示页（`桌面应用设计方案.html`）
+- 用户向数据说明：根目录 `README.md` · 格式契约：`docs/md-format-spec.md`
 
 ---
 
@@ -29,9 +31,9 @@
 | 项目管理 | 新建/打开/列表，项目可放任意本地路径 |
 | 总纲 | CRUD + AI 生成 |
 | 细纲 | 批量生成，含情绪点/爽点/钩子/角色状态 |
-| 章节编辑 | 正文编辑、版本历史、状态流转 |
-| 记忆系统 | 人物、关系、地点、伏笔、时间线、剧情点、世界观、金手指、故事圣经 |
-| 正文写作 | AI 辅助章节生成：上下文组装、流式生成、去味润色、版本对比（详见 §9） |
+| 章节编辑 | 正文编辑、状态流转（版本历史 UI 暂隐藏） |
+| 记忆系统 | 人物、关系、地点、伏笔、时间线、剧情点、世界观、道具（Markdown） |
+| 正文写作 | AI 辅助章节生成：上下文组装、流式生成、去味润色（详见 §9） |
 | 写作风格 | 风格配置 CRUD |
 
 **明确砍掉：** 番茄榜单抓取与分析、工作流引擎、Agent 配置管理、题材公式库（可保留为静态资源，不入库）。
@@ -112,59 +114,62 @@
 }
 ```
 
-### 5.3 项目目录结构
+### 5.3 项目目录结构（v4 · 当前）
 
 ```
 我的第一部小说/
-├─ project.json                      项目元信息（name/genre/状态/目标章数/单章字数）
-├─ chapters/
-│  ├─ 001.md                         正文（人可读，可用外部编辑器打开）
-│  ├─ 001.meta.json                  元数据：标题/字数/状态/概要/钩子/伏笔引用
-│  ├─ 001.versions.json              版本历史（ai/manual/reviewed）
-│  ├─ 002.md
-│  └─ 002.meta.json
-├─ outlines/
-│  ├─ main.json                      总纲（含分卷数）
-│  └─ detailed.json                  细纲（情绪点/爽点/钩子/角色状态）
-├─ memory/
-│  ├─ characters.json                人物（name/role/identity/personality/tags）
-│  ├─ relationships.json             人物关系（a/b/type/strength/变化史）
-│  ├─ locations.json                 地点
-│  ├─ foreshadowings.json            伏笔（含 chain_id/parent_id 链）
-│  ├─ timeline.json                  时间线事件
-│  ├─ plot_points.json               剧情点（arc/章节区间/转折点）
-│  ├─ worldview.json                 世界观（合并 story_bibles/golden_fingers/worldviews）
-│  └─ history.jsonl                  记忆审计日志（追加写）
-├─ styles/
-│  └─ default.json                   写作风格配置
-└─ index.json                        目录索引 + schemaVersion + updatedAt
+├─ project.json                 项目元信息（schemaVersion / name / genre / 目标章数…）
+├─ 大纲/
+│  └─ 大纲.md                   主线、卷结构、逐章节奏表
+├─ 细纲/
+│  └─ 第01卷.md                 按卷细纲
+├─ 设定/
+│  ├─ 核心设定.md               细纲 AI 生成依赖
+│  ├─ 题材定位.md
+│  ├─ 关系.md                   关系变更日志表（fallback）
+│  ├─ 角色/                     角色设定（记忆人物 fallback）
+│  └─ 世界观/                   背景 / 力量体系 / 金手指…
+├─ 正文/
+│  └─ 第001章 标题.md           正文（兼容 第001章_标题.md / 001.md）
+├─ 追踪/                        写作过程状态表
+│  ├─ 伏笔.md                   伏笔唯一真相源
+│  ├─ 时间线.md / 角色状态.md / 上下文.md / 问题记录.md
+│  └─ 索引.md
+├─ 记忆/                        app 维护的实体 Markdown
+│  ├─ 人物/ · 地点/ · 世界观/ · 关系/ · 剧情点/ · 道具/ …
+│  └─ 索引.md
+├─ 图解/
+│  └─ 节奏图谱.html
+├─ 对标/                        拆文库挂载
+└─ 资料/
 ```
 
-### 5.4 SQLite 表 → 文件映射（核心 MVP 13 张表）
+> **历史路径（已废弃）**：`chapters/`、`memory/*.json`、`outlines/*.json`、`记忆系统/`。老项目可调 `memory:migrateV3ToV4`。
 
-| SQLite 表 | 落地方式 | 格式 |
+### 5.4 领域 → 文件映射（v4）
+
+| 领域 | 落地位置 | 格式 |
 |---|---|---|
-| `projects` | `{project}/project.json` | JSON |
-| `chapters` | `chapters/NNN.md` + `NNN.meta.json` | MD + JSON |
-| `chapter_versions` | `chapters/NNN.versions.json` | JSON |
-| `writing_styles` | `styles/{name}.json` | JSON |
-| `characters` | `memory/characters.json` | JSON |
-| `character_relationships` | `memory/relationships.json` | JSON |
-| `locations` | `memory/locations.json` | JSON |
-| `foreshadowings` | `memory/foreshadowings.json` | JSON |
-| `timeline_events` | `memory/timeline.json` | JSON |
-| `plot_points` | `memory/plot_points.json` | JSON |
-| `story_bibles` / `golden_fingers` / `worldviews` | 合并 `memory/worldview.json` | JSON |
-| `outline_rules` / `generated_outlines` / `detailed_outlines` | `outlines/*.json` | JSON |
-| `memory_history` | `memory/history.jsonl` | JSONL（追加） |
-| `generation_tasks` | 不持久化（运行时内存） | — |
+| 项目元信息 | `project.json` | JSON |
+| 章节正文 | `正文/第NNN章 标题.md` | Markdown |
+| 章节版本 | （暂未实现 / IPC stub） | — |
+| 总纲 / 卷纲 | `大纲/大纲.md` | Markdown |
+| 细纲 | `细纲/第NN卷.md` | Markdown |
+| 人物 | `记忆/人物/<名>.md` | Markdown |
+| 关系 | `记忆/关系/<A>__<B>.md` | Markdown |
+| 地点 / 世界观 / 道具 | `记忆/{地点,世界观,道具}/` | Markdown |
+| 伏笔 | `追踪/伏笔.md` | Markdown 表 |
+| 时间线 | `追踪/时间线.md` | Markdown 表 |
+| 剧情点 | `记忆/剧情点/第NNN章 <标题>.md` | Markdown |
+| 节奏图谱 | `图解/节奏图谱.html` | HTML + JS |
+| 生成任务 | 不持久化 | — |
 
 ### 5.5 文件格式约定
 
-- **JSON 文件**：统一带 `schemaVersion` 与 `updatedAt` 字段。列表型（characters/timeline 等）用 `items` 数组承载业务数据；单例型（project.json/index.json）直接在顶层平铺业务字段（不套 `items`）。
-- **章节 Markdown**：纯正文，不嵌 frontmatter（元数据全部放 `.meta.json`，避免解析负担和正文被污染）。
-- **乐观锁**：每个 JSON 信封带 `updatedAt`，写入前比对，冲突则提示"文件已被外部修改"。
-- **schemaVersion**：未来格式升级时按版本迁移。
+- **project.json**：带 `schemaVersion` 与 `updatedAt`。
+- **业务实体**：优先 Markdown（GFM 标题 / 管道表 / `- **字段**：值`）；契约见 `docs/md-format-spec.md`。
+- **文件名**：用户/LLM 输入经 `sanitizeForFileName` 后再拼路径；显示名写在 H1。
+- **迁移**：`src/main/data/memory/migration-v3-to-v4.ts` 将 `记忆系统/` + `chapters/` 转为 v4 结构。
 
 ## 6. 数据访问层（Repository Pattern）
 
@@ -227,28 +232,28 @@ const unsub = window.api.llm.generateStream(prompt, { onToken })
 
 | 输入 | 来源 |
 |---|---|
-| 本章细纲 | `outlines/detailed.json`（情绪点 / 爽点 / 钩子 / 角色状态 / 剧情概要） |
-| 出场人物档案 | `memory/characters.json`（按本章角色状态过滤） |
-| 伏笔任务 | `memory/foreshadowings.json`（status=pending 且本章需 plant/collect） |
-| 写作风格 | `styles/*.json`（is_active 风格的 features） |
-| 前文衔接 | 前 1-3 章 `*.meta.json` 的 synopsis（摘要链，控制上下文窗口） |
-| 世界观约束 | `memory/worldview.json`（相关设定） |
+| 本章细纲 | `细纲/第NN卷.md`（情绪 / 爽点 / 钩子 / 角色出场 / 剧情概要） |
+| 出场人物档案 | `记忆/人物/*.md` 或 `设定/角色/`（按本章登场过滤） |
+| 伏笔任务 | `追踪/伏笔.md`（pending / planted 且本章相关） |
+| 角色状态 / 上下文 | `追踪/角色状态.md`、`追踪/上下文.md` |
+| 写作风格 | 项目风格配置 / StyleProfile |
+| 前文衔接 | 前章正文或摘要链 |
+| 世界观 / 设定 | `设定/`、`记忆/世界观/` |
 
 ### 9.2 生成流程
 
-1. 编辑器点「生成本章」→ 主进程按 9.1 组装上下文
-2. 选 provider + 风格 + 目标字数 → 流式生成（SSE token 经 IPC 推送，实时写入编辑器）
-3. 用户可随时打断 / 局部重写
-4. 生成完成自动存为 ai 版本（`chapter_versions` source=ai）
-5. 人工编辑 → 存 manual 版本
+1. 编辑器点「生成本章」→ 主进程按 9.1 组装上下文  
+2. 选 provider + 风格 + 目标字数 → 流式生成（token 经 IPC 推送）  
+3. 用户可打断 / 局部重写 / 去 AI 味  
+4. 保存写入 `正文/第NNN章 标题.md`  
 
 ### 9.3 去味润色（deslop）
 
-移植原 `deslop.py`：检测 AI 味句式 / 毒点 / 逻辑问题 / 节奏拖沓，输出问题清单 + 润色后文本；采纳后存 reviewed 版本并保留 `diff_summary`。
+`DeslopService`：扫描 AI 味句式 / 毒点等，输出问题清单 + 改写；规则可在设置中分节编辑。
 
 ### 9.4 版本管理
 
-章节版本三类 source：`ai` / `manual` / `reviewed`，支持任意两版 diff 对比与回滚，落地 `chapters/NNN.versions.json`。
+**暂未开放**。原设计中的 `chapters/NNN.versions.json` 与三类 source（ai/manual/reviewed）未在 v4 落地；IPC 为 stub，编辑器 UI 已隐藏。后续若重做，应挂在 `正文/` 旁或独立版本目录，避免回退到已删除的 `chapters/`。
 
 ## 10. 前端改造（最小化）
 
@@ -294,11 +299,11 @@ const unsub = window.api.llm.generateStream(prompt, { onToken })
 1. **脚手架**：Electron + 复用原前端工程 + preload IPC 骨架 + TypeScript。
 2. **文件层**：FileRepository 基类（原子写/乐观锁/Schema）+ ProjectLibrary。
 3. **章节读写闭环**：章节读写 + 编辑器打通（验证「存本地文件」核心）。
-4. **记忆系统**：8 个 Repository + 记忆审计。
-5. **LLM 基础设施**：provider 工厂 + 密钥加密 + 流式通道。
-6. **正文写作** ⭐：上下文组装 + 流式生成 + 去味润色 + 版本对比（核心创作闭环）。
-7. **大纲生成**：总纲/细纲 + AI 批量生成。
-8. **打包**：electron-builder 出 win/mac 安装包。
+4. **记忆系统**：Markdown 实体 repo（人物/关系/地点…）+ 追踪表 + v3→v4 迁移。
+5. **LLM 基础设施**：多 provider + 密钥加密 + 流式通道。
+6. **正文写作** ⭐：上下文组装 + 流式生成 + 去味润色（核心创作闭环）。
+7. **大纲 / 细纲**：`大纲/` `细纲/` Markdown + AI 区间生成（开书向导已移除）。
+8. **打包**：electron-builder 出 Windows 安装包（macOS 可选后续）。
 
 ## 15. 风险与对策
 

@@ -9,7 +9,7 @@ import { ChapterService } from './chapter-service'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { ProseRepo } from './skill-format/prose-repo'
-import { CharacterCardMdRepo } from './skill-format/character-card-md-repo'
+import { CharacterRepo } from './memory/character-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { StyleProfileRepository } from './style-profile-repository'
 import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
@@ -26,6 +26,7 @@ import { TrackingMdRepo, type TrackingContext } from './skill-format/tracking-md
 import { SettingsMdRepo, type SettingsContext } from './skill-format/settings-md-repo'
 import { readText, parseDoc } from './skill-format/md-parser'
 import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
+import { DeslopService } from './deslop/deslop-service'
 import type {
   AuditReport,
   AuditViolation,
@@ -132,7 +133,9 @@ export class WriteService {
     private readonly reviewFlow: ReviewFlowService = new ReviewFlowService(llm),
     private readonly chapterService: ChapterService = new ChapterService(projectService),
     private readonly settings?: SettingsRepository,
-    private readonly benchmarkResolver?: import('./teardown/benchmark-resolver').BenchmarkResolver
+    private readonly benchmarkResolver?: import('./teardown/benchmark-resolver').BenchmarkResolver,
+    /** 去 AI 味服务（供 humanizeSegment 走 deslop pipeline）；缺省时按旧路径降级 */
+    private readonly deslopService?: DeslopService
   ) {}
 
   async buildChapterPrompt(
@@ -416,7 +419,7 @@ export class WriteService {
     // 预加载角色卡 / 细纲（用于语义对照）
     if (dir) {
       try {
-        const cards = await new CharacterCardMdRepo(dir).list()
+        const cards = await new CharacterRepo(dir).list()
         if (cards.length > 0) {
           characterCards = cards
             .map((c) => `- ${c.name}${c.role ? `（${c.role}）` : ''}：${c.personality ?? ''}`.trim())
@@ -450,9 +453,12 @@ export class WriteService {
   }
 
   /**
-   * AI 改写命中段：把质检命中的原文片段（带上下文）发给 LLM，
-   * 让它按 humanizer 技能改写，返回结构化 { rewritten, reason }。
-   * 失败兜底返回空对象。
+   * AI 改写命中段：把质检命中的原文片段发给去 AI 味 pipeline 改写，
+   * 返回结构化 { rewritten, reason }。失败兜底返回空对象。
+   *
+   * 优先走 DeslopService.deslop（mild 级别，7 Gate 方法论），
+   * 让单条改写与编辑器「去 AI 味」按钮行为一致。
+   * deslopService 未注入时降级走旧 humanizer 路径（buildHumanizerPrompt）。
    */
   async humanizeSegment(
     projectId: string,
@@ -461,14 +467,36 @@ export class WriteService {
     chapterNumber?: number
   ): Promise<{ rewritten: string; reason: string }> {
     if (!snippet.trim()) return { rewritten: '', reason: '原文片段为空' }
+
     let genre: string | undefined
     try {
       const project = await this.projectService.getProjectData(projectId)
       genre = project.genre
     } catch (err) {
       console.warn('[humanizeSegment] Failed to get project genre:', err)
-      // skip
     }
+
+    // 优先走 deslop pipeline（与编辑器「去 AI 味」按钮共用同一套 7 Gate 方法论）
+    if (this.deslopService) {
+      try {
+        const styleContext = genre ? { genre } : undefined
+        const result = await this.deslopService.deslop(snippet, {
+          levelOverride: 'mild',
+          styleContext,
+          meta: { projectId, chapterNumber }
+        })
+        // deslop 扫描到了问题并改写了 -> 返回改写结果
+        if (result.changeSummary.length > 0) {
+          return { rewritten: result.rewritten, reason: result.changeSummary.join('；') }
+        }
+        // deslop 没扫描到问题（snippet 可能不含 deslop 检测器命中的词）
+        // -> 降级走旧路径，用 violationType 驱动改写（质检说有问题但 deslop 扫描器没覆盖到）
+      } catch (err) {
+        return { rewritten: '', reason: `LLM 调用失败：${(err as Error).message}` }
+      }
+    }
+
+    // 降级：旧 humanizer 路径（deslopService 未注入，或 deslop 未扫描到问题时）
     const system = buildHumanizerPrompt(genre, violationType, snippet)
     const user = '请按 system 中的规则改写上面那段话。直接输出【改写后】+【改动说明】。'
     try {
@@ -526,7 +554,7 @@ export class WriteService {
     opts: GenerateOptions = {}
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
-    // 取正文：优先 md 仓储，回退 ChapterRepository
+    // 取正文：优先 ProseRepo，回退 ChapterService
     let content = ''
     try {
       const md = await new ProseRepo(dir).read(chapterNumber)
@@ -547,7 +575,7 @@ export class WriteService {
     // 取已知人物名
     let knownCharacters: string[] = []
     try {
-      const list = await new CharacterCardMdRepo(dir).list()
+      const list = await new CharacterRepo(dir).list()
       if (list.length > 0) knownCharacters = list.map((c) => c.name)
     } catch (err) {
       console.warn('[extractMemoryStream] Failed to list character cards:', err)
@@ -594,6 +622,15 @@ export class WriteService {
   ): Promise<number> {
     const dir = await this.projectService.resolveDir(projectId)
     return new MemoryWriter(dir).applyNewLocations(locs)
+  }
+
+  /** 用户确认后：应用新增道具 */
+  async applyNewItems(
+    projectId: string,
+    items: MemoryExtraction['newItems']
+  ): Promise<number> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new MemoryWriter(dir).applyNewItems(items)
   }
 
   /** 用户确认后：应用新增伏笔 */
@@ -818,7 +855,7 @@ export class WriteService {
       // skip：无细纲
     }
     try {
-      const list = await new CharacterCardMdRepo(dir).list()
+      const list = await new CharacterRepo(dir).list()
       if (list.length > 0) knownCharacters = list.map((c) => c.name)
       else knownCharacters = (await new CharacterRepository(dir).list()).map((c) => c.name)
     } catch (err) {
@@ -862,6 +899,7 @@ export class WriteService {
       chapterNumber,
       newCharacters: [],
       newLocations: [],
+      newItems: [],
       newForeshadowings: [],
       newPlotPoints: [],
       characterStateChanges: [],
@@ -1096,6 +1134,51 @@ export class WriteService {
   }
 
   /**
+   * 「追问」：基于本章正文 + 设定（细纲/人物/伏笔/上一章结尾）回答用户的写作疑问，
+   * 不修改正文。支持多轮（history 累积），feature 复用 review 路由（分析类任务）。
+   */
+  async answerChapterQuestionStream(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    question: string,
+    history: { role: 'user' | 'assistant'; text: string }[] = [],
+    opts: GenerateOptions = {}
+  ): Promise<string> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const project = await this.projectService.getProjectData(projectId)
+    const ctx = await this.loadChapterContext(dir, chapterNumber)
+    const style = await this.loadStyleProfile(
+      dir,
+      project.defaultStyleProfileId ?? null
+    )
+    const overrides = this.settings
+      ? (await this.settings.get()).chapterRuleOverrides ?? {}
+      : {}
+    const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const user = renderAskQuestionPrompt({
+      projectName: project.name,
+      genre: project.genre,
+      chapterNumber,
+      content,
+      question,
+      history,
+      chapterRequirements: ctx.detail?.writingRequirements?.trim(),
+      chapterDetail: ctx.detail,
+      prevTail: ctx.prevTail,
+      characters: ctx.characters,
+      foreshadowings: ctx.foreshadowings
+    })
+    return this.llm.generateStream(user, {
+      ...opts,
+      systemPrompt: system,
+      maxTokens: 4096,
+      meta: { feature: 'ask', projectId, chapterNumber }
+    })
+  }
+
+  /**
    * 识别本章出场人物：返回 JSON 数组，每项 { name, reason, quote? }
    * name 是人物原文中的称呼（可能不是人物库中的规范名）
    */
@@ -1324,7 +1407,7 @@ export class WriteService {
     // 角色卡：先 md，回退 JSON
     let characters: Character[] = []
     try {
-      const list = await new CharacterCardMdRepo(dir).list()
+      const list = await new CharacterRepo(dir).list()
       if (list.length > 0) characters = list
     } catch (err) {
       console.warn('[loadChapterContext] Failed to load character cards:', err)
@@ -1480,6 +1563,23 @@ interface AdjustRenderInput {
   instruction: string
   /** 本章已生成的待调整正文。 */
   content: string
+  chapterRequirements?: string
+  chapterDetail?: ChapterDetail
+  prevTail: string
+  characters: Character[]
+  foreshadowings: Foreshadowing[]
+}
+
+interface AskQuestionRenderInput {
+  projectName: string
+  genre?: string
+  chapterNumber: number
+  /** 本章当前正文（问答只读，不修改）。 */
+  content: string
+  /** 用户本轮提出的问题。 */
+  question: string
+  /** 多轮对话历史（不含本轮）。 */
+  history: { role: 'user' | 'assistant'; text: string }[]
   chapterRequirements?: string
   chapterDetail?: ChapterDetail
   prevTail: string
@@ -1759,6 +1859,87 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
     .join('\n')
 }
 
+/**
+ * 渲染「追问」的 user prompt。
+ *
+ * 与「追问调整正文」不同：本方法只让 AI 回答用户关于本章写作的疑问，
+ * 不输出修订稿、不重写正文。上下文（细纲/人物/伏笔/上一章结尾）作为作答依据。
+ */
+function renderAskQuestionPrompt(input: AskQuestionRenderInput): string {
+  const trimmedContent =
+    input.content.length > 30_000
+      ? input.content.slice(0, 30_000) + '\n\n（后文因长度限制省略）'
+      : input.content
+  const charactersSection =
+    input.characters.length > 0
+      ? `## 主要人物参考\n${input.characters
+          .slice(0, 20)
+          .map((c) => `- ${c.name}${c.role ? `：${c.role}` : ''}${c.personality ? `，${c.personality}` : ''}`)
+          .join('\n')}`
+      : ''
+  const foreshadowingsSection =
+    input.foreshadowings.length > 0
+      ? `## 相关伏笔参考\n${input.foreshadowings
+          .slice(0, 20)
+          .map((f) => `- ${f.content}`)
+          .join('\n')}`
+      : ''
+  // 多轮对话历史（不含本轮）：user/assistant 交替，便于 LLM 把握上下文
+  const historySection =
+    input.history.length > 0
+      ? [
+          '## 前几轮对话（用于理解追问上下文，正文以上面提供的为准）',
+          ...input.history.map(
+            (m) => `${m.role === 'user' ? '用户' : '助手'}：${m.text}`
+          ),
+          ''
+        ].join('\n')
+      : ''
+
+  return [
+    `## 任务：就第 ${input.chapterNumber} 章正文回答用户的写作疑问`,
+    '',
+    '你已读完下方这一章正文及相关设定（细纲、人物、伏笔、上一章结尾）。',
+    '用户会针对本章的写法提问，请以「本书写作助手兼资深编辑」的身份作答。',
+    '',
+    '## 作答要求',
+    '1. **只回答问题，不要重写正文，不要输出修订稿或成品文本。**',
+    '2. 回答要具体、落到正文原文：必要时逐字引用本章原句作为佐证（用「」或引文格式标注），',
+    '   让用户能一眼定位到是哪一段、哪一句。',
+    '3. 先给结论，再给依据；若用户的判断有道理就明确认可，若不成立也直说并解释为什么。',
+    '4. 可以涉及：人物动机/性格一致性、剧情逻辑/伏笔回收、节奏与张力、视角与文风、',
+    '   细纲对照、与上一章衔接、AI 味/套路表达等。按问题类型挑重点，不必面面俱到。',
+    '5. 若问题本身（如「为什么这样写」）是在问设计意图，结合细纲、爽点、伏笔、节奏图谱等设定作答；',
+    '   设定里没有的，合理推断并说明「这是基于正文表现的分析，非设定明文」。',
+    '6. 不要泛泛而谈、不要套话、不要打分；可以用分点说明，但每点都要有正文依据。',
+    '7. 正文以「下方提供的第 N 章正文」为准，不要臆造正文中没有的情节。',
+    '',
+    '## 小说信息',
+    `- 书名：${input.projectName}`,
+    `- 题材：${input.genre ?? '未指定'}`,
+    '',
+    input.chapterRequirements
+      ? `## 本章长期写作要求\n${renderRequirementChecklist(input.chapterRequirements)}`
+      : '',
+    input.chapterDetail
+      ? `## 本章细纲\n${renderChapterDetail(input.chapterDetail, '细纲')}`
+      : '',
+    input.prevTail ? `## 上一章结尾参考\n${input.prevTail}` : '',
+    charactersSection,
+    foreshadowingsSection,
+    historySection,
+    `------ 第 ${input.chapterNumber} 章正文（仅作答依据，请勿修改） ------`,
+    trimmedContent,
+    '',
+    '## 用户本轮提问',
+    input.question.trim(),
+    '',
+    '请基于上述正文与设定回答：'
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 function renderRequirementChecklist(text: string): string {
   const normalized = text
     .split(/\r?\n/)
@@ -1817,9 +1998,11 @@ function renderCharacterDetail(c: Character): string {
   if (c.personality) lines.push(`- 性格：${c.personality}`)
   if (c.abilities) lines.push(`- 能力：${c.abilities}`)
   if (c.synopsis) lines.push(`- 简介：${c.synopsis}`)
-  if (c.rawFields) {
+  // v4：CharacterRepo 填 customFields（旧 CharacterCardMdRepo 填 rawFields），两者结构相同
+  const extra = c.rawFields ?? c.customFields
+  if (extra) {
     const skipKeys = new Set(['身份', '性格', '能力', '简介', '姓名', '角色', '类型'])
-    for (const [k, v] of Object.entries(c.rawFields)) {
+    for (const [k, v] of Object.entries(extra)) {
       if (skipKeys.has(k)) continue
       const text = Array.isArray(v) ? v.join('；') : v
       if (text) lines.push(`- ${k}：${text}`)

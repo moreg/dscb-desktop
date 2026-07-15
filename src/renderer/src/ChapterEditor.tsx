@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type {
   AuditReport,
   ChapterContent,
-  ChapterVersion,
-  ChapterSource,
   ChapterStatus,
   Character,
   Foreshadowing,
@@ -105,12 +103,6 @@ function friendlyLlmError(err: string | undefined): string {
   return err
 }
 
-const SOURCE_LABEL: Record<ChapterSource, string> = {
-  manual: '手写',
-  ai: 'AI',
-  reviewed: '润色'
-}
-
 interface CastSuggestion {
   name: string
   reason: string
@@ -200,15 +192,11 @@ export default function ChapterEditor({
   const [baseLineHeight, setBaseLineHeight] = useState(32)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [versions, setVersions] = useState<ChapterVersion[]>([])
-  const [showVersions, setShowVersions] = useState(false)
-  const [savingVersion, setSavingVersion] = useState(false)
-  const [viewing, setViewing] = useState<ChapterVersion | null>(null)
+
   const [generating, setGenerating] = useState(false)
   const [characters, setCharacters] = useState<Character[]>([])
   const [showCast, setShowCast] = useState(false)
   const [savingCast, setSavingCast] = useState(false)
-  const [showVersionDialog, setShowVersionDialog] = useState(false)
   const [foreshadowings, setForeshadowings] = useState<Foreshadowing[]>([])
   const [locations, setLocations] = useState<MemoryEntity[]>([])
   const [showPreview, setShowPreview] = useState(false)
@@ -302,13 +290,31 @@ export default function ChapterEditor({
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
   const [adjusting, setAdjusting] = useState(false)
+  // 正文追问（chat）：基于本章正文回答写作疑问，不修改正文
+  const [showAskDialog, setShowAskDialog] = useState(false)
+  const [askQuestion, setAskQuestion] = useState('')
+  const [askMessages, setAskMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
+  const [asking, setAsking] = useState(false)
   const [deslopScanReport, setDeslopScanReport] = useState<DeslopScanReport | null>(null)
   const [deslopScanning, setDeslopScanning] = useState(false)
   const [deslopRunning, setDeslopRunning] = useState(false)
   const [deslopLog, setDeslopLog] = useState('')
   const [deslopResult, setDeslopResult] = useState<DeslopResult | null>(null)
+  const [deslopDiffFull, setDeslopDiffFull] = useState(false)
+  const [deslopCollapsedGates, setDeslopCollapsedGates] = useState<Set<string>>(new Set())
   const [tempContextInput, setTempContextInput] = useState('')
   const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
+
+  // 章名命名 / 手动改名（ChapterEditor 正文区 P39）
+  const [titleEditing, setTitleEditing] = useState(false)
+  const [titleDraftInput, setTitleDraftInput] = useState('')
+  /** AI 命名候选标题（空字符串 = 未生成 / 已取消） */
+  const [nameCandidate, setNameCandidate] = useState<{
+    title: string
+    reason: string
+  } | null>(null)
+  const [namingLoading, setNamingLoading] = useState(false)
+  const [savingTitle, setSavingTitle] = useState(false)
   const [alertInfo, setAlertInfo] = useState<{ message: string } | null>(null)
   const [previewCard, setPreviewCard] = useState<{
     kind: 'char' | 'foreshadow' | 'location'
@@ -533,6 +539,7 @@ export default function ChapterEditor({
   const reviewRef = useRef(0)
   const castRef = useRef(0)
   const genRef = useRef(0)
+  const askRef = useRef(0)
 
 function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characterId'>[] {
   // LLM 可能输出 ```json ... ``` 或多余文本；尝试提取首个 JSON 数组
@@ -554,9 +561,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 }
 
-  const refreshVersions = () => {
-    void window.api.listChapterVersions(projectId, chapterNumber).then(setVersions)
-  }
   const refreshCharacters = () => {
     void window.api.listCharacters(projectId).then(setCharacters)
   }
@@ -593,6 +597,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setRewriteHistory([])
     setRedoStack([])
     setLastSavedAt(null) // P11-A：切章时重置"上次保存"指示
+    // 切章时清空追问对话历史（追问是针对本章的，跨章不再相关）
+    ++askRef.current
+    setAsking(false)
+    setAskMessages([])
+    setAskQuestion('')
+    setShowAskDialog(false)
     // P9-A：从 localStorage 加载该章的持久化改写历史（如果存在）
     const storage = getLocalStorage()
     const persisted = loadState(storage, projectId, chapterNumber)
@@ -614,7 +624,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         setAllChapters(sorted)
       }
     })
-    refreshVersions()
     refreshCharacters()
     refreshMemory()
     refreshChapterOutline()
@@ -978,23 +987,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
   saveRef.current = save // P19-A：让 saveAndClearDraft 在保存后清掉 draft
 
-  const saveAsVersion = async () => setShowVersionDialog(true)
-
-  const submitVersion = async (source: ChapterSource, note: string) => {
-    setSavingVersion(true)
-    setShowVersionDialog(false)
-    try {
-      await window.api.createChapterVersion(projectId, chapterNumber, {
-        source,
-        content: draft,
-        note: note.trim() || undefined
-      })
-      refreshVersions()
-    } finally {
-      setSavingVersion(false)
-    }
-  }
-
   const aiGenerate = async (tempContextVal?: string) => {
     if (!(await window.api.hasLlmKey())) {
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
@@ -1065,7 +1057,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
       // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
       void runPostGenerateAudit(myGen, finalDraft)
-      void runPostGenerateReview(myGen, finalDraft)
     } catch {
       if (genRef.current === myGen) setGenerating(false)
     }
@@ -1134,11 +1125,95 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setFlowPanelOpen(true)
       setFlowSyncTrigger((t) => t + 1)
       void runPostGenerateAudit(myGen, revised)
-      void runPostGenerateReview(myGen, revised)
     } catch {
       if (genRef.current === myGen) {
         setAdjusting(false)
         setDraft(sourceDraft)
+      }
+    }
+  }
+
+  /**
+   * 正文追问：把用户问题连同历史一起发给后端，流式追加到最新一条 assistant 消息。
+   * 不修改正文。失败时回滚刚压入的用户消息并提示错误。
+   */
+  const submitAskQuestion = async () => {
+    const question = askQuestion.trim()
+    if (!question) return
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法追问' })
+      return
+    }
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 -> 模型服务」中配置 provider' })
+      return
+    }
+    if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
+      const proceed = window.confirm(
+        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续追问？\n\n（提示：可在 设置 -> 用量与费用 关闭"exceeded 时弹确认"）`
+      )
+      if (!proceed) return
+    }
+
+    // 压入本轮用户消息 + 占位 assistant 消息；history 不含本轮
+    const userMsg = { role: 'user' as const, text: question }
+    const prevMessages = askMessages
+    // history 裁剪：IPC 层 zod 限制单条 text ≤ 20000、数组 ≤ 40。
+    // 多轮后 assistant 长回答会累积膨胀，超限会校验失败且回滚后仍含超长消息（死循环）。
+    // 这里对超长单条做尾部截断（保留结论），并只取最近 20 条，保证不超限。
+    const HISTORY_TEXT_LIMIT = 18_000
+    const HISTORY_MAX_TURNS = 20
+    const historyForApi = prevMessages
+      .slice(-HISTORY_MAX_TURNS)
+      .map((m) => ({
+        role: m.role,
+        text:
+          m.text.length > HISTORY_TEXT_LIMIT
+            ? m.text.slice(0, HISTORY_TEXT_LIMIT) + '\n…（前文已截断）'
+            : m.text
+      }))
+    setAskMessages((m) => [...m, userMsg, { role: 'assistant', text: '' }])
+    setAskQuestion('')
+    setAsking(true)
+
+    const myAsk = ++askRef.current
+    let assistantText = ''
+    try {
+      const result = await window.api.answerChapterQuestionStream(
+        projectId,
+        chapterNumber,
+        draft,
+        question,
+        historyForApi,
+        (token, done) => {
+          if (askRef.current !== myAsk) return
+          if (token) {
+            assistantText += token
+            setAskMessages((m) => {
+              // 替换最后一条 assistant 占位
+              const next = m.slice()
+              next[next.length - 1] = { role: 'assistant', text: assistantText }
+              return next
+            })
+          }
+          if (done) {
+            setAsking(false)
+            refreshUsage()
+          }
+        }
+      )
+      if (askRef.current !== myAsk) return
+      if (!result.ok) {
+        setAsking(false)
+        setAlertInfo({ message: friendlyLlmError(result.error) })
+        // 移除本轮占位（用户消息 + 空 assistant）
+        setAskMessages((m) => m.slice(0, prevMessages.length))
+      }
+    } catch (err) {
+      if (askRef.current === myAsk) {
+        setAsking(false)
+        setAlertInfo({ message: friendlyLlmError((err as Error).message) })
+        setAskMessages((m) => m.slice(0, prevMessages.length))
       }
     }
   }
@@ -1154,35 +1229,23 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
-  /** 续写后的自动审稿：流式填充 reviewText；失败降级为错误提示；中途切走则丢弃结果。 */
-  const runPostGenerateReview = async (myGen: number, finalDraft: string) => {
-    if (!(await window.api.hasLlmKey())) return
-    setReviewing(true)
-    setReviewText('')
-    const myReview = ++reviewRef.current
-    try {
-      const r = await window.api.reviewChapterStream(
-        projectId,
-        chapterNumber,
-        finalDraft,
-        (token, done) => {
-          if (reviewRef.current !== myReview) return
-          if (token) setReviewText((t) => t + token)
-          if (done) {
-            setReviewing(false)
-            refreshUsage() // P10-A：审稿完成更新今日用量
-          }
-        }
-      )
-      if (reviewRef.current !== myReview) return
-      if (!r.ok) {
-        setReviewing(false)
-        setReviewText((t) => t + '\n\n⚠ ' + friendlyLlmError(r.error))
-      }
-    } catch {
-      if (reviewRef.current === myReview) setReviewing(false)
+
+
+  /** 扫描报告按 Gate 分组（A-G），每组内取前 20 条 */
+  const deslopFindingsByGate = useMemo(() => {
+    if (!deslopScanReport) return null
+    const groups: Record<string, typeof deslopScanReport.findings> = {}
+    for (const f of deslopScanReport.findings) {
+      const list = groups[f.gate] ?? []
+      list.push(f)
+      groups[f.gate] = list
     }
-  }
+    const ordered: { gate: string; items: typeof deslopScanReport.findings }[] = []
+    for (const g of ['A', 'B', 'C', 'D', 'E', 'F', 'G']) {
+      if (groups[g]?.length) ordered.push({ gate: g, items: groups[g] })
+    }
+    return ordered
+  }, [deslopScanReport])
 
   /** 去 AI 味：扫描（确定性，不调 LLM）→ 弹报告 */
   const startDeslopScan = async (): Promise<void> => {
@@ -1290,22 +1353,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     } finally {
       setSavingCast(false)
     }
-  }
-
-  const rollback = async (v: ChapterVersion) => {
-    if (!window.confirm(`回滚到版本 ${v.versionNumber}（${SOURCE_LABEL[v.source]}）？当前正文将被覆盖。`))
-      return
-    const meta = await window.api.rollbackChapter(projectId, chapterNumber, v.versionNumber)
-    setDraft(v.content)
-    setData({ meta, content: v.content })
-    setDirty(false)
-    setViewing(null)
-  }
-
-  const removeVersion = async (v: ChapterVersion) => {
-    if (!window.confirm(`删除版本 ${v.versionNumber}？`)) return
-    await window.api.deleteChapterVersion(projectId, chapterNumber, v.versionNumber)
-    refreshVersions()
   }
 
   const appearing = data?.meta.appearingCharacters ?? []
@@ -1714,6 +1761,111 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   const foreshadowingReminderCount =
     visiblePlant.length + visibleReinforce.length + visibleCollect.length
 
+  /**
+   * 章名手动改名 / AI 起名（ChapterEditor 正文区）
+   * - 手动：进入编辑态后，Enter 提交（标题空白时拒绝），Esc 取消。
+   *   提交走 window.api.updateChapterMeta({ title }) → 持久化（rhythm + 大纲 + 细纲）。
+   * - AI：基于当前未保存的 draft（编辑器里的内容）调 chapters:suggestName，
+   *   候选标题展示在输入框下方，由用户确认（替换 input 内容）→ 再走手动改名流程。
+   *   取消候选 / 切换候选 / 重新编辑都会清掉候选状态。
+   * - 保存成功后：刷新 data.meta.title、allChapters 中对应章的 title（章节导航同步）。
+   */
+  const startTitleEdit = () => {
+    if (!data) return
+    setTitleDraftInput(data.meta.title)
+    setNameCandidate(null)
+    setTitleEditing(true)
+  }
+  const cancelTitleEdit = () => {
+    setTitleEditing(false)
+    setTitleDraftInput('')
+    setNameCandidate(null)
+  }
+  const submitTitleEdit = async () => {
+    if (!data) return
+    const trimmed = titleDraftInput.trim()
+    if (!trimmed) {
+      setAlertInfo({ message: '章名不能为空' })
+      return
+    }
+    if (trimmed === data.meta.title) {
+      // 无变更：仅退出编辑态
+      setTitleEditing(false)
+      setTitleDraftInput('')
+      setNameCandidate(null)
+      return
+    }
+    setSavingTitle(true)
+    try {
+      const meta = await window.api.updateChapterMeta(projectId, data.meta.chapterNumber, {
+        title: trimmed
+      })
+      // 1) 更新当前章节 meta（标题 + 其他字段）
+      setData({ ...data, meta })
+      // 2) 同步章节导航列表中该章的标题
+      setAllChapters((prev) =>
+        prev.map((c) =>
+          c.chapterNumber === meta.chapterNumber ? { ...c, title: meta.title } : c
+        )
+      )
+      // 3) 退出编辑态
+      setTitleEditing(false)
+      setTitleDraftInput('')
+      setNameCandidate(null)
+    } catch (err) {
+      setAlertInfo({ message: `保存章名失败：${(err as Error)?.message || err}` })
+    } finally {
+      setSavingTitle(false)
+    }
+  }
+  const onTitleInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void submitTitleEdit()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      cancelTitleEdit()
+    }
+  }
+  const requestAiName = async () => {
+    if (!data) return
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
+      return
+    }
+    setNamingLoading(true)
+    try {
+      const res = await window.api.suggestChapterName(
+        projectId,
+        data.meta.chapterNumber,
+        data.meta.title,
+        draft,
+        projectData?.genre
+      )
+      if (!res.ok) {
+        setAlertInfo({
+          message: `AI 起名失败：${friendlyLlmError(res.error || '未知错误')}`
+        })
+        return
+      }
+      // 不直接覆盖 input：让用户在 input 里看到候选，按 Enter 才会持久化
+      setNameCandidate({ title: res.title, reason: res.reason })
+      setTitleDraftInput(res.title)
+      if (!titleEditing) setTitleEditing(true)
+    } finally {
+      setNamingLoading(false)
+    }
+  }
+  const acceptCandidate = () => {
+    // 候选标题已填到 input 框，按 Enter 触发保存（不直接写盘）
+    if (titleDraftInput.trim()) {
+      void submitTitleEdit()
+    }
+  }
+  const rejectCandidate = () => {
+    setNameCandidate(null)
+  }
+
   if (!data) return <p className="empty">展卷中…</p>
 
   const STATUS_FULL: Record<ChapterStatus, string> = {
@@ -1766,11 +1918,89 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 )
               )
             })()}
-            <div>
-              <h1 style={{ display: 'inline', fontSize: 17, fontWeight: 700 }}>第 {data.meta.chapterNumber} 章 · {data.meta.title}</h1>
+            <div className="editor-title-wrap">
+              {titleEditing ? (
+                <div className="editor-title-edit">
+                  <span className="editor-title-prefix">第 {data.meta.chapterNumber} 章 ·</span>
+                  <input
+                    autoFocus
+                    className="editor-title-input"
+                    type="text"
+                    value={titleDraftInput}
+                    onChange={(e) => setTitleDraftInput(e.target.value)}
+                    onKeyDown={onTitleInputKey}
+                    disabled={savingTitle}
+                    placeholder="给本章起个名字…"
+                    maxLength={50}
+                    spellCheck={false}
+                  />
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => void submitTitleEdit()}
+                    disabled={savingTitle || !titleDraftInput.trim()}
+                    title="保存章名（Enter）"
+                  >
+                    {savingTitle ? '保存中…' : '保存'}
+                  </button>
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={cancelTitleEdit}
+                    disabled={savingTitle}
+                    title="取消（Esc）"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <h1
+                  className="editor-title-display"
+                  style={{ display: 'inline', fontSize: 17, fontWeight: 700, margin: 0 }}
+                >
+                  第 {data.meta.chapterNumber} 章 · {data.meta.title}
+                  <button
+                    className="editor-title-action"
+                    onClick={startTitleEdit}
+                    title="手动修改章名"
+                  >
+                    ✏️
+                  </button>
+                  <button
+                    className="editor-title-action"
+                    onClick={() => void requestAiName()}
+                    disabled={namingLoading}
+                    title="基于当前正文让 AI 起个章名（候选需确认才会保存）"
+                  >
+                    {namingLoading ? '生成中…' : '✨'}
+                  </button>
+                </h1>
+              )}
+              {nameCandidate && titleEditing ? (
+                <div className="editor-title-candidate" role="status">
+                  <span className="editor-title-candidate-label">AI 候选</span>
+                  <span className="editor-title-candidate-title">{nameCandidate.title}</span>
+                  {nameCandidate.reason ? (
+                    <span className="editor-title-candidate-reason">— {nameCandidate.reason}</span>
+                  ) : null}
+                  <span className="editor-title-candidate-actions">
+                    <button
+                      className="btn btn-sm btn-primary"
+                      onClick={acceptCandidate}
+                      title="用此候选作为新章名"
+                    >
+                      采用
+                    </button>
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      onClick={rejectCandidate}
+                      title="不用此候选（继续手动编辑）"
+                    >
+                      不用
+                    </button>
+                  </span>
+                </div>
+              ) : null}
               <p className="desc" style={{ marginTop: 2 }}>
-                <span className="num">{data.meta.wordCount.toLocaleString()}</span> 字 ·{' '}
-                <span className="num">{versions.length}</span> 版
+                <span className="num">{data.meta.wordCount.toLocaleString()}</span> 字
               </p>
             </div>
           </div>
@@ -1868,6 +2098,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </button>
         <button
           className="btn btn-sm"
+          onClick={() => setShowAskDialog(true)}
+          disabled={asking || generating}
+          title="就当前正文向 AI 提问，如「为什么这样写」「人物动机合理吗」，只回答不改正文"
+        >
+          {asking ? '追问中…' : '💬 追问'}
+        </button>
+        <button
+          className="btn btn-sm"
           onClick={() => void startDeslopScan()}
           disabled={deslopScanning || deslopRunning || !draft.trim()}
           title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
@@ -1917,19 +2155,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           </button>
           {toolbarMoreOpen ? (
             <div className="toolbar-more-menu">
-              <button
-                className="toolbar-more-item"
-                onClick={() => { saveAsVersion(); setToolbarMoreOpen(false) }}
-                disabled={savingVersion}
-              >
-                存版本
-              </button>
-              <button
-                className="toolbar-more-item"
-                onClick={() => { setShowVersions((s) => !s); setToolbarMoreOpen(false) }}
-              >
-                {showVersions ? '收起版本' : `版本 (${versions.length})`}
-              </button>
+              {/* 章节版本功能暂未开放（IPC stub），UI 隐藏避免误触 */}
               <button
                 className="toolbar-more-item"
                 onClick={() => { reAudit(); setToolbarMoreOpen(false) }}
@@ -2141,8 +2367,6 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           chapterNumber={chapterNumber}
           draft={draft}
           auditReport={autoAudit}
-          reviewText={reviewText}
-          reviewing={reviewing}
           onClose={() => {
             setFlowPanelOpen(false)
             setFlowSyncTrigger(0)
@@ -2662,80 +2886,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
       <AnalysisPanel text={draft} />
 
-      {showVersions ? (
-        <div className="editor-panel">
-          <div className="ep-head">
-            <div className="ep-title">
-              版本历史
-              <span className="count">{versions.length}</span>
-            </div>
-          </div>
-          {versions.length === 0 ? (
-            <p className="empty">尚无版本，点「存版本」留存。</p>
-          ) : (
-            <ul className="bare">
-              {[...versions].reverse().map((v) => (
-                <li
-                  key={v.versionNumber}
-                  className="row"
-                  style={{ borderBottom: '1px solid var(--line-soft)', paddingBottom: 8, paddingTop: 4 }}
-                >
-                  <div>
-                    <strong>#{v.versionNumber}</strong>{' '}
-                    <span className={`chip ${sourceChipClass(v.source)}`}>
-                      {SOURCE_LABEL[v.source]}
-                    </span>{' '}
-                    <span className="meta">
-                      {v.wordCount} 字 · {v.createdAt.replace('T', ' ').slice(0, 16)}
-                    </span>
-                    {v.note ? <div className="muted">{v.note}</div> : null}
-                  </div>
-                  <div className="btn-group">
-                    <button className="btn btn-sm" onClick={() => setViewing(v)}>
-                      查看
-                    </button>
-                    <button className="btn btn-sm" onClick={() => rollback(v)}>
-                      回滚
-                    </button>
-                    <button className="btn btn-sm btn-danger" onClick={() => removeVersion(v)}>
-                      删除
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ) : null}
-
         </div>
       </div>
-
-      {viewing ? (
-        <div className="dialog-overlay" onClick={() => setViewing(null)}>
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>
-              版本 #{viewing.versionNumber} · {SOURCE_LABEL[viewing.source]} · {viewing.wordCount} 字
-            </h3>
-            <pre className="body">{viewing.content}</pre>
-            <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
-              <button className="btn btn-ghost" onClick={() => setViewing(null)}>
-                关闭
-              </button>
-              <button className="btn btn-primary" onClick={() => rollback(viewing)}>
-                回滚到此版
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {showVersionDialog ? (
-        <VersionDialog
-          onClose={() => setShowVersionDialog(false)}
-          onSubmit={submitVersion}
-        />
-      ) : null}
 
       {deslopScanReport || deslopRunning || deslopResult ? (
         <div
@@ -2764,18 +2916,46 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   <p className="empty">未检测到 AI 写作痕迹，正文很自然。</p>
                 ) : (
                   <div style={{ maxHeight: 280, overflow: 'auto', fontSize: 12, marginBottom: 12 }}>
-                    {deslopScanReport.findings.slice(0, 40).map((f, i) => (
-                      <div key={i} className="diag-item" style={{ padding: '4px 0' }}>
-                        <span style={{ color: f.severity === 'blocking' ? '#dc2626' : '#d97706', fontWeight: 600 }}>
-                          [{f.gate}] {f.severity}
-                        </span>
-                        <span className="diag-msg" style={{ marginLeft: 8 }}>第{f.line}行 {f.excerpt}</span>
-                        <div className="diag-hint">{f.message}</div>
-                      </div>
-                    ))}
-                    {deslopScanReport.findings.length > 40 ? (
-                      <p className="meta">…还有 {deslopScanReport.findings.length - 40} 处</p>
-                    ) : null}
+                    {deslopFindingsByGate?.map(({ gate, items }) => {
+                      const collapsed = deslopCollapsedGates.has(gate)
+                      const blockingN = items.filter((f) => f.severity === 'blocking').length
+                      return (
+                        <div key={gate} style={{ marginBottom: 6 }}>
+                          <div
+                            style={{ cursor: 'pointer', padding: '4px 0', fontWeight: 600, userSelect: 'none' }}
+                            onClick={() => {
+                              setDeslopCollapsedGates((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(gate)) next.delete(gate)
+                                else next.add(gate)
+                                return next
+                              })
+                            }}
+                          >
+                            {collapsed ? '▶' : '▼'} Gate {gate}
+                            <span style={{ marginLeft: 8, fontWeight: 400, color: 'var(--ink-2, #666)' }}>
+                              {items.length} 处{blockingN > 0 ? `（含 ${blockingN} 处 blocking）` : ''}
+                            </span>
+                          </div>
+                          {collapsed ? null : (
+                            <div style={{ marginLeft: 12 }}>
+                              {items.slice(0, 20).map((f, i) => (
+                                <div key={i} className="diag-item" style={{ padding: '4px 0' }}>
+                                  <span style={{ color: f.severity === 'blocking' ? '#dc2626' : '#d97706', fontWeight: 600 }}>
+                                    {f.severity}
+                                  </span>
+                                  <span className="diag-msg" style={{ marginLeft: 8 }}>第{f.line}行 {f.excerpt}</span>
+                                  <div className="diag-hint">{f.message}</div>
+                                </div>
+                              ))}
+                              {items.length > 20 ? (
+                                <p className="meta">…还有 {items.length - 20} 处</p>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
@@ -2799,31 +2979,68 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
             {/* 润色进度 */}
             {deslopRunning && deslopLog ? (
-              <pre style={{ background: 'var(--bg-code, #1e1e2e)', color: 'var(--fg-code, #cdd6f4)', padding: 12, borderRadius: 8, maxHeight: 320, overflow: 'auto', fontSize: 12, whiteSpace: 'pre-wrap', margin: '8px 0' }}>
-                {deslopLog}
+              <pre
+                style={{
+                  background: 'var(--bg-code, #1e1e2e)',
+                  color: 'var(--fg-code, #cdd6f4)',
+                  padding: 12,
+                  borderRadius: 8,
+                  maxHeight: 320,
+                  overflow: 'auto',
+                  fontSize: 12,
+                  whiteSpace: 'pre-wrap',
+                  margin: '8px 0'
+                }}
+              >
+                {deslopLog.split('\n').map((line, i) => {
+                  const isPass = /Pass \d+\/\d+/.test(line)
+                  const isPhase = /Phase [0-9]/.test(line)
+                  if (isPass) {
+                    return (
+                      <span key={i} style={{ color: '#a6e3a1', fontWeight: 700 }}>
+                        {line}{'\n'}
+                      </span>
+                    )
+                  }
+                  if (isPhase) {
+                    return (
+                      <span key={i} style={{ color: '#89b4fa', fontWeight: 600 }}>
+                        {line}{'\n'}
+                      </span>
+                    )
+                  }
+                  return <span key={i}>{line}{'\n'}</span>
+                })}
               </pre>
             ) : null}
 
             {/* 润色结果 diff 预览 */}
             {deslopResult ? (
               <div>
-                <div className="row" style={{ gap: 12, marginBottom: 8 }}>
-                  <span className="filter-chip">{deslopResult.beforeWords} → {deslopResult.afterWords} 字</span>
+                <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+                  <span className="filter-chip">{deslopResult.beforeWords} {'->'} {deslopResult.afterWords} 字</span>
                   <span className="filter-chip">删除 {(deslopResult.deleteRatio * 100).toFixed(1)}%</span>
                   <span className="filter-chip">剩余问题 {deslopResult.remainingFindings.length}</span>
                   <span className="filter-chip">Gate {deslopResult.processedGates.join('')}</span>
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    style={{ marginLeft: 'auto', fontSize: 11 }}
+                    onClick={() => setDeslopDiffFull((v) => !v)}
+                  >
+                    {deslopDiffFull ? '只看前 600 字' : '看全文'}
+                  </button>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <div>
-                    <strong style={{ fontSize: 12 }}>改写前（前 600 字）</strong>
-                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                      {draft.slice(0, 600)}
+                    <strong style={{ fontSize: 12 }}>改写前{deslopDiffFull ? '' : '（前 600 字）'}</strong>
+                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: deslopDiffFull ? 400 : 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                      {deslopDiffFull ? draft : draft.slice(0, 600)}
                     </pre>
                   </div>
                   <div>
-                    <strong style={{ fontSize: 12 }}>改写后（前 600 字）</strong>
-                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                      {deslopResult.rewritten.slice(0, 600)}
+                    <strong style={{ fontSize: 12 }}>改写后{deslopDiffFull ? '' : '（前 600 字）'}</strong>
+                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: deslopDiffFull ? 400 : 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                      {deslopDiffFull ? deslopResult.rewritten : deslopResult.rewritten.slice(0, 600)}
                     </pre>
                   </div>
                 </div>
@@ -2895,12 +3112,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
       {showAdjustDialog ? (
         <div className="dialog-overlay" onClick={() => setShowAdjustDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
-          <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 480, background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 16, boxShadow: 'var(--shadow-lg)' }}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 780, maxWidth: '95vw', background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 28, boxShadow: 'var(--shadow-lg)' }}>
             <header>
-              <strong>追问调整正文</strong>
+              <strong style={{ fontSize: 16.5 }}>追问调整正文</strong>
             </header>
-            <div className="dialog-body" style={{ marginTop: 8 }}>
-              <p style={{ fontSize: 12.5, color: 'var(--ink-2)', margin: 0 }}>
+            <div className="dialog-body" style={{ marginTop: 12 }}>
+              <p style={{ fontSize: 14, color: 'var(--ink-2)', margin: 0, lineHeight: 1.5 }}>
                 写下这次想怎么改，AI 会基于当前编辑器里的正文生成一版完整修订稿，先替换草稿，不会自动保存。
               </p>
               <textarea
@@ -2908,18 +3125,18 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 placeholder="例如：把高潮前的铺垫压短一点；加强女主的反击，不要只靠旁白解释；结尾改成一句对话钩子。"
                 value={adjustInstruction}
                 onChange={(e) => setAdjustInstruction(e.target.value)}
-                style={{ width: '100%', minHeight: 110, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
+                style={{ width: '100%', minHeight: 240, marginTop: 14, fontSize: 14, padding: 12, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
               />
             </div>
-            <footer style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <footer style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
               <button
-                className="btn btn-ghost btn-sm"
+                className="btn btn-ghost"
                 onClick={() => setShowAdjustDialog(false)}
               >
                 取消
               </button>
               <button
-                className="btn btn-primary btn-sm"
+                className="btn btn-primary"
                 onClick={() => void adjustChapter()}
                 disabled={adjusting || !adjustInstruction.trim()}
               >
@@ -2928,6 +3145,22 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             </footer>
           </div>
         </div>
+      ) : null}
+
+      {showAskDialog ? (
+        <AskChatDialog
+          messages={askMessages}
+          asking={asking}
+          question={askQuestion}
+          onQuestionChange={setAskQuestion}
+          onSubmit={() => void submitAskQuestion()}
+          onClose={() => setShowAskDialog(false)}
+          onClear={() => {
+            ++askRef.current
+            setAsking(false)
+            setAskMessages([])
+          }}
+        />
       ) : null}
 
       {showContinueDialog ? (
@@ -3284,58 +3517,301 @@ function AnalysisPanel({ text }: { text: string }) {
   )
 }
 
-function VersionDialog({
-  onClose,
-  onSubmit
-}: {
+/* =========================================================
+   正文追问 聊天对话框
+   ========================================================= */
+
+interface AskMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+interface AskChatDialogProps {
+  messages: AskMessage[]
+  asking: boolean
+  question: string
+  onQuestionChange: (v: string) => void
+  onSubmit: () => void
   onClose: () => void
-  onSubmit: (source: ChapterSource, note: string) => Promise<void>
-}) {
-  const [source, setSource] = useState<ChapterSource>('manual')
-  const [note, setNote] = useState('')
+  onClear: () => void
+}
+
+/**
+ * 把 AI 作答文本渲染为简易 markdown（标题/列表/加粗/段落）。
+ * 与 renderMarkdownPreview 不同：面向分析文本，不做正文首行缩进。
+ */
+function renderAnswerText(text: string): React.ReactNode {
+  if (!text.trim()) return null
+  const lines = text.split(/\r?\n/)
+  const out: React.ReactNode[] = []
+  let listBuffer: string[] = []
+  const flushList = (key: string) => {
+    if (listBuffer.length === 0) return
+    out.push(
+      <ul key={key} style={{ margin: '4px 0 8px 0', paddingLeft: 20 }}>
+        {listBuffer.map((li, i) => (
+          <li key={i} style={{ margin: '2px 0' }}>{renderInline(li)}</li>
+        ))}
+      </ul>
+    )
+    listBuffer = []
+  }
+  // 内联加粗 + 行内代码
+  function renderInline(s: string): React.ReactNode {
+    const parts: React.ReactNode[] = []
+    const regex = /\*\*(.+?)\*\*|`([^`]+)`/g
+    let lastIdx = 0
+    let m: RegExpExecArray | null
+    let k = 0
+    while ((m = regex.exec(s)) !== null) {
+      if (m.index > lastIdx) parts.push(s.slice(lastIdx, m.index))
+      if (m[1] !== undefined) parts.push(<strong key={k++}>{m[1]}</strong>)
+      else if (m[2] !== undefined) parts.push(<code key={k++} style={{ background: 'var(--surface)', padding: '0 3px', borderRadius: 3, fontSize: 12 }}>{m[2]}</code>)
+      lastIdx = regex.lastIndex
+    }
+    if (lastIdx < s.length) parts.push(s.slice(lastIdx))
+    return parts.length > 0 ? parts : s
+  }
+  lines.forEach((raw, i) => {
+    const line = raw
+    const trimmed = line.trim()
+    if (trimmed.startsWith('### ')) {
+      flushList(`l-${i}`)
+      out.push(<h4 key={i} style={{ margin: '14px 0 8px 0', fontSize: 14.5, fontWeight: 700 }}>{renderInline(trimmed.slice(4))}</h4>)
+    } else if (trimmed.startsWith('## ')) {
+      flushList(`l-${i}`)
+      out.push(<h3 key={i} style={{ margin: '16px 0 8px 0', fontSize: 15.5, fontWeight: 700 }}>{renderInline(trimmed.slice(3))}</h3>)
+    } else if (trimmed.startsWith('# ')) {
+      flushList(`l-${i}`)
+      out.push(<h2 key={i} style={{ margin: '18px 0 10px 0', fontSize: 16.5, fontWeight: 700 }}>{renderInline(trimmed.slice(2))}</h2>)
+    } else if (trimmed === '---' || trimmed === '***' || trimmed === '___') {
+      flushList(`l-${i}`)
+      out.push(<hr key={i} style={{ border: 'none', borderTop: '1px solid var(--line)', margin: '10px 0' }} />)
+    } else if (/^[-•*]\s+/.test(trimmed)) {
+      listBuffer.push(trimmed.replace(/^[-•*]\s+/, ''))
+    } else if (/^\d+[.、)]\s+/.test(trimmed)) {
+      // 数字列表按段落处理（简单合并为有序感）
+      flushList(`l-${i}`)
+      out.push(<p key={i} style={{ margin: '0 0 8px 0', lineHeight: 1.7 }}>{renderInline(trimmed)}</p>)
+    } else if (trimmed === '') {
+      flushList(`l-${i}`)
+      // 空行：跳过（段落间距由 margin 提供）
+    } else {
+      flushList(`l-${i}`)
+      out.push(<p key={i} style={{ margin: '0 0 8px 0', lineHeight: 1.7 }}>{renderInline(trimmed)}</p>)
+    }
+  })
+  flushList('l-end')
+  return out
+}
+
+function AskChatDialog({
+  messages,
+  asking,
+  question,
+  onQuestionChange,
+  onSubmit,
+  onClose,
+  onClear
+}: AskChatDialogProps) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // 新消息 / 流式追加时滚动到底部
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages])
+
+  // 对话框挂载时自动聚焦输入框
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter 发送，Ctrl/Cmd/Shift+Enter 换行
+    if (e.key === 'Enter') {
+      if (e.ctrlKey || e.metaKey || e.shiftKey) {
+        // 如果是 Ctrl/Cmd+Enter，手动插入换行符以确保在所有平台都换行
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault()
+          const textarea = e.currentTarget
+          const start = textarea.selectionStart
+          const end = textarea.selectionEnd
+          const value = textarea.value
+          const newValue = value.substring(0, start) + '\n' + value.substring(end)
+          onQuestionChange(newValue)
+          requestAnimationFrame(() => {
+            if (textarea) {
+              textarea.selectionStart = textarea.selectionEnd = start + 1
+            }
+          })
+        }
+      } else {
+        e.preventDefault()
+        if (!asking && question.trim()) onSubmit()
+      }
+    }
+  }
+
+  const canSubmit = !asking && question.trim().length > 0
+
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>保存为版本</h3>
-        <div className="field">
-          <label>来源</label>
+    <div
+      className="dialog-overlay"
+      onClick={() => {
+        if (!asking) onClose()
+      }}
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 10000
+      }}
+    >
+      <div
+        className="dialog-card"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 1000,
+          maxWidth: '96vw',
+          height: 760,
+          maxHeight: '94vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--r-md)',
+          boxShadow: 'var(--shadow-lg)'
+        }}
+      >
+        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
+          <strong style={{ fontSize: 16.5 }}>💬 正文追问</strong>
           <div style={{ display: 'flex', gap: 6 }}>
-            {(['manual', 'ai', 'reviewed'] as ChapterSource[]).map((s) => (
-              <span
-                key={s}
-                className={`filter-chip ${source === s ? 'active' : ''}`}
-                onClick={() => setSource(s)}
+            {messages.length > 0 && !asking ? (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={onClear}
+                title="清空对话历史，重新开始追问"
               >
-                {SOURCE_LABEL[s]}
-              </span>
-            ))}
+                清空对话
+              </button>
+            ) : null}
+            <button className="btn btn-ghost btn-sm" onClick={onClose} disabled={asking}>
+              关闭
+            </button>
           </div>
+        </header>
+
+        <div
+          ref={scrollRef}
+          style={{
+            flex: 1,
+            overflow: 'auto',
+            padding: '20px 24px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 20
+          }}
+        >
+          {messages.length === 0 ? (
+            <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--ink-3)', fontSize: 14, maxWidth: 520 }}>
+              <p style={{ margin: '0 0 12px 0' }}>就当前正文向 AI 提问，它已读过本章正文与细纲、人物、伏笔等设定。</p>
+              <p style={{ margin: 0, opacity: 0.85 }}>例如：「为什么要这样写」「这段人物动机合理吗」「伏笔埋够了吗」「节奏是不是太拖」。</p>
+              <p style={{ margin: '12px 0 0 0', opacity: 0.7 }}>只回答，不改正文。支持多轮追问。</p>
+            </div>
+          ) : null}
+
+          {messages.map((m, idx) => {
+            const isUser = m.role === 'user'
+            const isStreaming = asking && !isUser && idx === messages.length - 1
+            return (
+              <div
+                key={idx}
+                style={{
+                  display: 'flex',
+                  justifyContent: isUser ? 'flex-end' : 'flex-start'
+                }}
+              >
+                <div
+                  style={{
+                    maxWidth: '80%',
+                    padding: '12px 16px',
+                    borderRadius: 12,
+                    background: isUser ? 'var(--accent)' : 'var(--surface)',
+                    color: isUser ? '#fff' : 'var(--ink)',
+                    border: isUser ? 'none' : '1px solid var(--line)',
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                    wordBreak: 'break-word',
+                    whiteSpace: 'pre-wrap'
+                  }}
+                >
+                  {isUser ? (
+                    m.text
+                  ) : (
+                    <>
+                      {m.text ? renderAnswerText(m.text) : null}
+                      {isStreaming ? (
+                        <span style={{ opacity: 0.6 }}>
+                          {m.text ? '' : '思考中…'}
+                          <span className="ask-cursor">▋</span>
+                        </span>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </div>
-        <div className="field">
-          <label>备注（可留空）</label>
+
+        <footer
+          style={{
+            borderTop: '1px solid var(--line)',
+            padding: '16px 24px',
+            display: 'flex',
+            gap: 12,
+            alignItems: 'flex-end'
+          }}
+        >
           <textarea
+            ref={inputRef}
             className="textarea"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            rows={2}
-            placeholder="如：第一稿 / 重大修订 / AI 续写后润色"
+            placeholder="写下你的问题，Enter 发送，Ctrl+Enter 换行…"
+            value={question}
+            onChange={(e) => onQuestionChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={asking}
+            style={{
+              flex: 1,
+              minHeight: 80,
+              maxHeight: 240,
+              resize: 'none',
+              fontSize: 14,
+              padding: '12px 14px',
+              borderRadius: 'var(--r-sm)',
+              background: 'var(--surface)',
+              border: '1px solid var(--line)',
+              color: 'var(--ink)'
+            }}
           />
-        </div>
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button className="btn btn-ghost" onClick={onClose}>
-            取消
+          <button
+            className="btn btn-primary"
+            onClick={onSubmit}
+            disabled={!canSubmit}
+            title="Enter 发送，Ctrl+Enter 换行"
+          >
+            {asking ? '回答中…' : '提问'}
           </button>
-          <button className="btn btn-primary" onClick={() => onSubmit(source, note)}>
-            保存
-          </button>
-        </div>
+        </footer>
       </div>
     </div>
   )
-}
-
-function sourceChipClass(s: ChapterSource): string {
-  if (s === 'ai') return 'chip-accent'
-  if (s === 'reviewed') return 'chip-success'
-  return ''
 }

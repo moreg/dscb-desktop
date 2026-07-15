@@ -38,7 +38,8 @@ const providersConfigSchema = z.object({
       review: featureRoutingEntrySchema.optional(),
       humanize: featureRoutingEntrySchema.optional(),
       opening: featureRoutingEntrySchema.optional(),
-      auxiliary: featureRoutingEntrySchema.optional()
+      auxiliary: featureRoutingEntrySchema.optional(),
+      ask: featureRoutingEntrySchema.optional()
     })
     .optional()
 })

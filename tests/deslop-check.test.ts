@@ -125,6 +125,112 @@ describe('check-ai-patterns: Gate A 句式与禁用词', () => {
   })
 })
 
+describe('check-ai-patterns: Gate F 结尾升华', () => {
+  it('检测"他终于明白"', () => {
+    const text = '他终于明白了真相。'
+    const findings = scanAiPatterns(text)
+    const sub = findings.filter((f) => f.type === 'sublimation')
+    expect(sub.length).toBeGreaterThanOrEqual(1)
+    expect(sub[0].gate).toBe('F')
+  })
+
+  it('检测"这一刻，"', () => {
+    const text = '这一刻，她下定了决心。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'sublimation')).toBe(true)
+  })
+
+  it('检测"这就是X的意义"', () => {
+    const text = '这就是成长的代价。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'sublimation')).toBe(true)
+  })
+
+  it('章末段落升华降级 blocking', () => {
+    const text = '他往前走。\n他终于明白了一切。'
+    const findings = scanAiPatterns(text)
+    const sub = findings.filter((f) => f.type === 'sublimation')
+    expect(sub.length).toBeGreaterThanOrEqual(1)
+    // 章末（最后 2 行）的升华应为 blocking
+    expect(sub.some((f) => f.severity === 'blocking')).toBe(true)
+  })
+
+  it('非结尾升华是 advisory', () => {
+    const text = '他终于明白了一切。\n这是另一段话。\n他又往前走了一步。'
+    const findings = scanAiPatterns(text)
+    const sub = findings.filter((f) => f.type === 'sublimation')
+    expect(sub.length).toBeGreaterThanOrEqual(1)
+    expect(sub[0].severity).toBe('advisory')
+  })
+})
+
+describe('check-ai-patterns: Gate C 心理描写外化', () => {
+  it('检测"他感到愤怒"', () => {
+    const text = '他感到愤怒，握紧了拳头。'
+    const findings = scanAiPatterns(text)
+    const psych = findings.filter((f) => f.type === 'psych-tell')
+    expect(psych.length).toBeGreaterThanOrEqual(1)
+    expect(psych[0].gate).toBe('C')
+  })
+
+  it('检测"她觉得自己很累"', () => {
+    const text = '她觉得自己很累。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'psych-tell')).toBe(true)
+  })
+
+  it('检测"他心想，"', () => {
+    const text = '他心想，这事没那么简单。'
+    const findings = scanAiPatterns(text)
+    expect(findings.some((f) => f.type === 'psych-tell')).toBe(true)
+  })
+
+  it('不误报"心中一凛"（已带身体反应，归 Gate A）', () => {
+    const text = '她心中一凛，退后半步。'
+    const findings = scanAiPatterns(text)
+    // 心中一凛 是 Gate A 的 banned-word，不应产生 psych-tell
+    expect(findings.some((f) => f.type === 'psych-tell')).toBe(false)
+  })
+})
+
+describe('check-ai-patterns: Gate E 对话标签单一化', () => {
+  it('连续 3+ 对话行用"X道"标签命中', () => {
+    const text = [
+      '「你来。」他说道。',
+      '「我不去。」她说道。',
+      '「必须去。」他说道。'
+    ].join('\n')
+    const findings = scanAiPatterns(text)
+    const mono = findings.filter((f) => f.type === 'dialogue-tag-monotone')
+    expect(mono.length).toBeGreaterThanOrEqual(1)
+    expect(mono[0].gate).toBe('E')
+  })
+
+  it('连续 2 个不触发（阈值 3）', () => {
+    const text = [
+      '「你来。」他说道。',
+      '「我不去。」她说道。',
+      '他沉默了很久。'
+    ].join('\n')
+    const findings = scanAiPatterns(text)
+    const mono = findings.filter((f) => f.type === 'dialogue-tag-monotone')
+    expect(mono).toHaveLength(0)
+  })
+
+  it('非对话行打断计数', () => {
+    const text = [
+      '「你来。」他说道。',
+      '「我不去。」她说道。',
+      '夜色渐深，风停了。',
+      '「必须去。」他说道。'
+    ].join('\n')
+    const findings = scanAiPatterns(text)
+    // 2 + 1 = 不连续，不触发
+    const mono = findings.filter((f) => f.type === 'dialogue-tag-monotone')
+    expect(mono).toHaveLength(0)
+  })
+})
+
 describe('check-degeneration: 复读检测', () => {
   it('紧邻整行重复（可见字数 ≥8）', () => {
     const text = '他慢慢地走向了那扇门。\n他慢慢地走向了那扇门。\n然后推开了它。'

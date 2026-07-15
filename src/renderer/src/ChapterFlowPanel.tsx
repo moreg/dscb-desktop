@@ -16,15 +16,6 @@ import {
   parseOutlineDiffJson,
   parseRhythmEvaluationJson
 } from '../../shared/parsers'
-import {
-  parseSuggestions,
-  isRewritable,
-  applyCandidate,
-  buildReviewKey,
-  parseReviewIndex,
-  computeSuggestionPositions,
-  type ReviewSuggestion
-} from '../../shared/review-suggestions'
 import type { RewriteEntry } from '../../main/data/rewrite-history'
 import ChapterAuditPanel from './ChapterAuditPanel'
 
@@ -33,8 +24,6 @@ interface Props {
   chapterNumber: number
   draft: string
   auditReport: AuditReport | null
-  reviewText: string
-  reviewing: boolean
   onClose: () => void
   /** AI 改写命中段后，把 snippet 替换为 rewritten（P6-B：第三参 violationKey 用于 per-violation 撤销）。
    *  返回是否真正应用成功（见 ChapterAuditPanel.onApplyRewrite 契约）。 */
@@ -86,8 +75,6 @@ export default function ChapterFlowPanel(props: Props) {
     chapterNumber,
     draft,
     auditReport,
-    reviewing,
-    reviewText,
     onClose,
     onApplyRewrite,
     onApplyRewriteBatch,
@@ -103,125 +90,8 @@ export default function ChapterFlowPanel(props: Props) {
     onCompleteMemory,
     onCompleteRhythm,
     onCompleteFigure,
-    syncAllTrigger,
-    onFocusQuote
+    syncAllTrigger
   } = props
-
-  // 解析流式 review 文本为结构化卡片（原句 / 改写 / 理由）
-  const reviewSuggestions = useMemo(
-    () => (reviewText ? parseSuggestions(reviewText) : []),
-    [reviewText]
-  )
-
-  // 从 rewriteHistory 反推已应用的建议索引（与 ChapterEditor 旧实现一致）
-  const appliedReviewIndexes = useMemo(() => {
-    const set = new Set<number>()
-    for (const e of rewriteHistory ?? []) {
-      if (!e.violationKey) continue
-      const idx = parseReviewIndex(e.violationKey)
-      if (idx != null) set.add(idx)
-    }
-    return set
-  }, [rewriteHistory])
-
-  // 同 quote 多条建议依次匹配 draft 中的下一处
-  const suggestionPositions = useMemo(
-    () => computeSuggestionPositions(reviewSuggestions, draft, appliedReviewIndexes),
-    [reviewSuggestions, draft, appliedReviewIndexes]
-  )
-
-  const handleApplyReviewSuggestion = (
-    quote: string,
-    candidate: string,
-    index: number
-  ): boolean => {
-    if (!quote || !onApplyRewrite) return false
-    const check = isRewritable(candidate, quote)
-    if (!check.ok) return false
-    const pos = suggestionPositions[index] ?? -1
-    if (pos === -1) return false
-    return onApplyRewrite(quote, candidate, buildReviewKey(index, pos))
-  }
-
-  const handleApplyAllReviewSuggestions = (): number => {
-    // 优先用批量通道：ChapterEditor 本地构造 nextDraft，避免同步循环 setDraft
-    // 只会保留最后一次的 closure-staleness 问题；并避免连发 N 次 reAudit。
-    if (onApplyRewriteBatch) {
-      const finalList = [...reviewSuggestions]
-        .map((s, i) => {
-          const candidate = applyCandidate(s)
-          return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
-        })
-        .filter(
-          (item) =>
-            !!item.s.quote &&
-            item.pos !== -1 &&
-            !!item.candidate &&
-            isRewritable(item.candidate, item.s.quote).ok
-        )
-        .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
-      let lastEnd = -1
-      for (let i = 0; i < finalList.length; i++) {
-        const item = finalList[i]
-        if (item.pos < lastEnd) {
-          finalList.splice(i, 1)
-          i--
-          continue
-        }
-        lastEnd = item.pos + item.s.quote.length
-      }
-      // 倒序传给 ChapterEditor：让那边在本地 nextDraft 上 indexOf 也不会因为前序替换错位
-      finalList.sort((a, b) => b.pos - a.pos)
-      const edits = finalList.map((item) => ({
-        snippet: item.s.quote,
-        rewritten: item.candidate as string,
-        violationKey: buildReviewKey(item.originalIndex, item.pos)
-      }))
-      return onApplyRewriteBatch(edits)
-    }
-
-    // 兼容性回退：单条通道（旧用法），保留原本 N 次 onApplyRewrite 行为。
-    if (!onApplyRewrite) return 0
-    const finalList = [...reviewSuggestions]
-      .map((s, i) => {
-        const candidate = applyCandidate(s)
-        return { s, candidate, originalIndex: i, pos: suggestionPositions[i] ?? -1 }
-      })
-      .filter(
-        (item) =>
-          !!item.s.quote &&
-          item.pos !== -1 &&
-          !!item.candidate &&
-          isRewritable(item.candidate, item.s.quote).ok
-      )
-      .sort((a, b) => a.pos - b.pos || b.s.quote.length - a.s.quote.length)
-    let lastEnd = -1
-    for (let i = 0; i < finalList.length; i++) {
-      const item = finalList[i]
-      if (item.pos < lastEnd) {
-        finalList.splice(i, 1)
-        i--
-        continue
-      }
-      lastEnd = item.pos + item.s.quote.length
-    }
-    finalList.sort((a, b) => b.pos - a.pos)
-    let appliedCount = 0
-    for (const item of finalList) {
-      const ok = onApplyRewrite(
-        item.s.quote,
-        item.candidate as string,
-        buildReviewKey(item.originalIndex, item.pos)
-      )
-      if (ok) appliedCount++
-    }
-    return appliedCount
-  }
-
-  const handleFocusReviewQuote = (quote: string) => {
-    if (!quote || !onFocusQuote) return
-    onFocusQuote(quote)
-  }
 
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
@@ -235,6 +105,7 @@ export default function ChapterFlowPanel(props: Props) {
   const [memoryResult, setMemoryResult] = useState<MemoryApplyResult | null>(null)
   const [newCharResult, setNewCharResult] = useState<number | null>(null)
   const [newLocResult, setNewLocResult] = useState<number | null>(null)
+  const [newItemResult, setNewItemResult] = useState<number | null>(null)
   const [newForeshadowingResult, setNewForeshadowingResult] = useState<number | null>(null)
 
   // 节奏评估状态
@@ -369,6 +240,7 @@ export default function ChapterFlowPanel(props: Props) {
     setMemoryResult(null)
     setNewCharResult(null)
     setNewLocResult(null)
+    setNewItemResult(null)
     setNewForeshadowingResult(null)
     let buffer = ''
     try {
@@ -421,6 +293,16 @@ export default function ChapterFlowPanel(props: Props) {
     try {
       const n = await window.api.applyNewLocations(projectId, memoryExtraction.newLocations)
       setNewLocResult(n)
+    } catch (e) {
+      setMemoryError((e as Error).message)
+    }
+  }
+
+  const applyItems = async () => {
+    if (!memoryExtraction?.newItems.length) return
+    try {
+      const n = await window.api.applyNewItems(projectId, memoryExtraction.newItems)
+      setNewItemResult(n)
     } catch (e) {
       setMemoryError((e as Error).message)
     }
@@ -546,6 +428,7 @@ export default function ChapterFlowPanel(props: Props) {
   /**
    * 一键同步：依次触发四个同步操作，每个操作独立 try/catch 确保互不影响。
    * 注意：这只是启动生成流程，应用操作（如 applyMemory）仍需用户确认。
+   * 四个操作完成后刷新记忆索引，让 记忆/ 派生视图与 追踪/ 文件保持一致。
    */
   const runAllSync = async () => {
     if (!draft.trim()) return
@@ -556,6 +439,12 @@ export default function ChapterFlowPanel(props: Props) {
       runRhythmEvaluate(),
       runFigureGenerate()
     ])
+    // 四个操作完成后刷新记忆索引（追踪/时间线 + 追踪/伏笔 -> 记忆/ 派生视图）
+    try {
+      await window.api.syncMemoryIndex(projectId)
+    } catch (err) {
+      console.warn('[runAllSync] syncMemoryIndex failed:', err)
+    }
   }
 
   /**
@@ -602,493 +491,365 @@ export default function ChapterFlowPanel(props: Props) {
         </div>
       </div>
 
-      {auditReport ? (
-        <div style={{ marginTop: 8 }}>
-          <ChapterAuditPanel
-            projectId={projectId}
-            chapterNumber={chapterNumber}
-            draft={draft}
-            report={auditReport}
-            loading={false}
-            mode="soft"
-            onRunAgain={onRunAudit}
-            onJumpToOffset={onJumpToOffset}
-            onApplyRewrite={onApplyRewrite}
-            onUndoRewrite={onUndoRewrite}
-            onUndoRewriteAt={onUndoRewriteAt}
-            onUndoRewriteByKey={onUndoRewriteByKey}
-            onRedoRewrite={onRedoRewrite}
-            redoStackCount={redoStackCount}
-            rewriteHistory={rewriteHistory}
-            reviewReport={reviewReport}
-            reportLoading={reportLoading}
-            reportError={reportError}
-            onGenerateReport={generateReport}
-          />
-        </div>
-      ) : null}
+      <div className="ep-body">
+        {auditReport ? (
+          <div style={{ marginTop: 8 }}>
+            <ChapterAuditPanel
+              projectId={projectId}
+              chapterNumber={chapterNumber}
+              draft={draft}
+              report={auditReport}
+              loading={false}
+              mode="soft"
+              onRunAgain={onRunAudit}
+              onJumpToOffset={onJumpToOffset}
+              onApplyRewrite={onApplyRewrite}
+              onUndoRewrite={onUndoRewrite}
+              onUndoRewriteAt={onUndoRewriteAt}
+              onUndoRewriteByKey={onUndoRewriteByKey}
+              onRedoRewrite={onRedoRewrite}
+              redoStackCount={redoStackCount}
+              rewriteHistory={rewriteHistory}
+              reviewReport={reviewReport}
+              reportLoading={reportLoading}
+              reportError={reportError}
+              onGenerateReport={generateReport}
+            />
+          </div>
+        ) : null}
 
-      <div style={{ marginTop: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-          <strong style={{ fontSize: 13 }}>AI 审稿建议</strong>
-          {reviewSuggestions.length > 0 && !reviewing && (onApplyRewriteBatch || onApplyRewrite) ? (
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
+          <div className="row" style={{ alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>细纲对照（5 种差异分类）</strong>
             <button
               className="btn btn-sm"
-              onClick={() => {
-                handleApplyAllReviewSuggestions()
-              }}
-              title="按位置倒序应用所有可自动替换的改写建议"
+              onClick={runOutlineCheck}
+              disabled={outlineChecking}
+              style={{ marginLeft: 'auto' }}
             >
-              应用全部
+              {outlineChecking ? '对照中…' : outlineDiff ? '重新对照' : '✦ 开始对照'}
             </button>
+          </div>
+          {outlineError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              {outlineError}
+            </p>
+          ) : null}
+          {outlineDiff ? (
+            outlineDiff.passed ? (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+                ✓ 无 P0/P1 差异，可放心保存。
+              </p>
+            ) : (
+              <div style={{ marginTop: 8 }}>
+                <p className="meta" style={{ fontSize: 12, marginBottom: 6 }}>
+                  共 {outlineDiff.diffs.length} 项差异（按优先级排序，仅报告 + 建议，由你决策处理）
+                </p>
+                <ul className="bare" style={{ display: 'grid', gap: 8 }}>
+                  {sortedDiffs.map((d, i) => (
+                    <li
+                      key={i}
+                      style={{
+                        border: '1px solid var(--line-soft)',
+                        borderRadius: 'var(--r-sm)',
+                        padding: 8,
+                        fontSize: 12.5
+                      }}
+                    >
+                      <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
+                        <span
+                          className={`chip ${d.priority === 'P0' ? 'chip-danger' : d.priority === 'P1' ? 'chip-warning' : ''}`}
+                        >
+                          {d.priority}
+                        </span>
+                        <strong>{d.typeLabel}</strong>
+                        <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
+                          类型 {d.type}
+                        </span>
+                      </div>
+                      {d.outline ? (
+                        <div className="meta" style={{ marginBottom: 2 }}>
+                          <strong>细纲</strong>：{d.outline}
+                        </div>
+                      ) : null}
+                      {d.actual ? (
+                        <div className="meta" style={{ marginBottom: 2 }}>
+                          <strong>正文</strong>：{d.actual}
+                        </div>
+                      ) : null}
+                      {d.suggestion ? (
+                        <div style={{ marginTop: 4 }}>
+                          <span className="muted">建议</span>：{d.suggestion}
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )
           ) : null}
         </div>
-        {reviewing && reviewSuggestions.length === 0 ? (
-          <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-            审稿中…
-          </p>
-        ) : reviewSuggestions.length === 0 && !reviewText ? (
-          <p className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-            暂无审稿结果（续写完成后会自动生成）。
-          </p>
-        ) : reviewSuggestions.length === 0 ? (
-          <pre
-            className="body"
-            style={{ whiteSpace: 'pre-wrap', marginTop: 4, fontSize: 12.5, maxHeight: 240, overflow: 'auto' }}
-          >
-            {reviewText}
-          </pre>
-        ) : (
-          <div className="review-suggestion-list">
-            {reviewSuggestions.map((s, i) => {
-              const candidate = applyCandidate(s)
-              const rewritable = !!candidate && isRewritable(candidate, s.quote).ok
-              const copyText = [candidate, s.why].filter(Boolean).join('\n\n')
-              const applied = appliedReviewIndexes.has(i)
-              return (
-                <div
-                  key={i}
-                  className={`review-suggestion ${applied ? 'review-suggestion-applied' : ''}`}
-                  onClick={() => handleFocusReviewQuote(s.quote)}
-                  style={{ cursor: s.quote ? 'pointer' : 'default' }}
-                >
-                  {s.quote ? <div className="quote">「{s.quote}」</div> : null}
-                  {s.rewrite ? (
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>改写 · {s.rewrite}</div>
-                  ) : s.advice ? (
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>说明 · {s.advice}</div>
-                  ) : null}
-                  {s.why ? <div className="why">理由 · {s.why}</div> : null}
-                  {(rewritable || copyText) && (
-                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
-                      {applied ? (
-                        <span
-                          className="audit-applied-badge"
-                          title="已应用到正文。撤销请用编辑器顶部「↶ 撤销」。"
-                        >
-                          ✓ 已应用
-                        </span>
-                      ) : rewritable && s.quote ? (
-                        <button
-                          className="btn btn-primary btn-sm"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleApplyReviewSuggestion(s.quote, candidate!, i)
-                          }}
-                        >
-                          应用
-                        </button>
-                      ) : (
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          title="无法自动应用，复制说明后手动修改"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void navigator.clipboard.writeText(copyText).catch(() => {})
-                          }}
-                        >
-                          复制说明
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-            {reviewing ? (
-              <div className="review-streaming muted" style={{ fontSize: 12 }}>
-                ▍ 还在收尾…
-              </div>
-            ) : null}
-          </div>
-        )}
-      </div>
 
-      <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
-        <div className="row" style={{ alignItems: 'baseline' }}>
-          <strong style={{ fontSize: 13 }}>细纲对照（5 种差异分类）</strong>
-          <button
-            className="btn btn-sm"
-            onClick={runOutlineCheck}
-            disabled={outlineChecking}
-            style={{ marginLeft: 'auto' }}
-          >
-            {outlineChecking ? '对照中…' : outlineDiff ? '重新对照' : '✦ 开始对照'}
-          </button>
-        </div>
-        {outlineError ? (
-          <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
-            {outlineError}
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
+          <div className="row" style={{ alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>记忆提取（混合回写策略）</strong>
+            <button
+              className="btn btn-sm"
+              onClick={runMemoryExtract}
+              disabled={memoryExtracting}
+              style={{ marginLeft: 'auto' }}
+            >
+              {memoryExtracting ? '提取中…' : memoryExtraction ? '重新提取' : '✦ 提取记忆'}
+            </button>
+          </div>
+          <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+            自动应用：状态变化 / 情节追加 / 伏笔回收；需确认：新增角色 / 地点 / 道具 / 伏笔。
           </p>
-        ) : null}
-        {outlineDiff ? (
-          outlineDiff.passed ? (
-            <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-              ✓ 无 P0/P1 差异，可放心保存。
+          {memoryError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              {memoryError}
             </p>
-          ) : (
+          ) : null}
+          {memoryExtraction ? (
             <div style={{ marginTop: 8 }}>
-              <p className="meta" style={{ fontSize: 12, marginBottom: 6 }}>
-                共 {outlineDiff.diffs.length} 项差异（按优先级排序，仅报告 + 建议，由你决策处理）
-              </p>
-              <ul className="bare" style={{ display: 'grid', gap: 8 }}>
-                {sortedDiffs.map((d, i) => (
-                  <li
-                    key={i}
-                    style={{
-                      border: '1px solid var(--line-soft)',
-                      borderRadius: 'var(--r-sm)',
-                      padding: 8,
-                      fontSize: 12.5
-                    }}
+              {/* 自动应用部分 */}
+              <div
+                style={{
+                  border: '1px solid var(--line-soft)',
+                  borderRadius: 'var(--r-sm)',
+                  padding: 8,
+                  marginBottom: 8
+                }}
+              >
+                <div className="row" style={{ alignItems: 'baseline' }}>
+                  <strong style={{ fontSize: 12.5 }}>自动应用部分</strong>
+                  <button
+                    className="btn btn-sm"
+                    onClick={applyAutomatic}
+                    disabled={memoryApplying || !hasAutoItems || !!memoryResult}
+                    style={{ marginLeft: 'auto' }}
                   >
-                    <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
-                      <span
-                        className={`chip ${d.priority === 'P0' ? 'chip-danger' : d.priority === 'P1' ? 'chip-warning' : ''}`}
-                      >
-                        {d.priority}
+                    {memoryApplying ? '应用中…' : memoryResult ? '已应用' : '应用自动部分'}
+                  </button>
+                </div>
+                <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
+                  <li>
+                    角色状态变化：{memoryExtraction.characterStateChanges.length} 项
+                    {memoryExtraction.characterStateChanges.length > 0 ? (
+                      <span className="muted">
+                        {' '}
+                       （
+                        {memoryExtraction.characterStateChanges
+                          .map((c) => `${c.name}.${c.field}→${c.newValue}`)
+                          .join('；')}
+                        ）
                       </span>
-                      <strong>{d.typeLabel}</strong>
-                      <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
-                        类型 {d.type}
-                      </span>
-                    </div>
-                    {d.outline ? (
-                      <div className="meta" style={{ marginBottom: 2 }}>
-                        <strong>细纲</strong>：{d.outline}
-                      </div>
-                    ) : null}
-                    {d.actual ? (
-                      <div className="meta" style={{ marginBottom: 2 }}>
-                        <strong>正文</strong>：{d.actual}
-                      </div>
-                    ) : null}
-                    {d.suggestion ? (
-                      <div style={{ marginTop: 4 }}>
-                        <span className="muted">建议</span>：{d.suggestion}
-                      </div>
                     ) : null}
                   </li>
-                ))}
-              </ul>
-            </div>
-          )
-        ) : null}
-      </div>
-
-      <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
-        <div className="row" style={{ alignItems: 'baseline' }}>
-          <strong style={{ fontSize: 13 }}>记忆提取（混合回写策略）</strong>
-          <button
-            className="btn btn-sm"
-            onClick={runMemoryExtract}
-            disabled={memoryExtracting}
-            style={{ marginLeft: 'auto' }}
-          >
-            {memoryExtracting ? '提取中…' : memoryExtraction ? '重新提取' : '✦ 提取记忆'}
-          </button>
-        </div>
-        <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-          自动应用：状态变化 / 情节追加 / 伏笔回收；需确认：新增角色 / 地点 / 伏笔。
-        </p>
-        {memoryError ? (
-          <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
-            {memoryError}
-          </p>
-        ) : null}
-        {memoryExtraction ? (
-          <div style={{ marginTop: 8 }}>
-            {/* 自动应用部分 */}
-            <div
-              style={{
-                border: '1px solid var(--line-soft)',
-                borderRadius: 'var(--r-sm)',
-                padding: 8,
-                marginBottom: 8
-              }}
-            >
-              <div className="row" style={{ alignItems: 'baseline' }}>
-                <strong style={{ fontSize: 12.5 }}>自动应用部分</strong>
-                <button
-                  className="btn btn-sm"
-                  onClick={applyAutomatic}
-                  disabled={memoryApplying || !hasAutoItems || !!memoryResult}
-                  style={{ marginLeft: 'auto' }}
-                >
-                  {memoryApplying ? '应用中…' : memoryResult ? '已应用' : '应用自动部分'}
-                </button>
+                  <li>
+                    情节追加：{memoryExtraction.newPlotPoints.length} 项
+                    {memoryExtraction.newPlotPoints.length > 0 ? (
+                      <span className="muted">
+                        {' '}
+                       （{memoryExtraction.newPlotPoints.map((p) => p.title).join('、')}）
+                      </span>
+                    ) : null}
+                  </li>
+                  <li>
+                    伏笔回收：{memoryExtraction.collectedForeshadowings.length} 项
+                    {memoryExtraction.collectedForeshadowings.length > 0 ? (
+                      <span className="muted">
+                        {' '}
+                        （{memoryExtraction.collectedForeshadowings.map((f) => f.content).join('；')}）
+                      </span>
+                    ) : null}
+                  </li>
+                </ul>
+                {memoryResult ? (
+                  <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                    ✓ 已应用：状态 {memoryResult.applied.stateChanges} · 情节{' '}
+                    {memoryResult.applied.plotPoints} · 伏笔 {memoryResult.applied.collected}
+                    {memoryResult.errors.length > 0 ? (
+                      <span className="err">（{memoryResult.errors.length} 项失败）</span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
-              <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
-                <li>
-                  角色状态变化：{memoryExtraction.characterStateChanges.length} 项
-                  {memoryExtraction.characterStateChanges.length > 0 ? (
-                    <span className="muted">
-                      {' '}
-                     （
-                      {memoryExtraction.characterStateChanges
-                        .map((c) => `${c.name}.${c.field}→${c.newValue}`)
-                        .join('；')}
-                      ）
-                    </span>
-                  ) : null}
-                </li>
-                <li>
-                  情节追加：{memoryExtraction.newPlotPoints.length} 项
-                  {memoryExtraction.newPlotPoints.length > 0 ? (
-                    <span className="muted">
-                      {' '}
-                     （{memoryExtraction.newPlotPoints.map((p) => p.title).join('、')}）
-                    </span>
-                  ) : null}
-                </li>
-                <li>
-                  伏笔回收：{memoryExtraction.collectedForeshadowings.length} 项
-                  {memoryExtraction.collectedForeshadowings.length > 0 ? (
-                    <span className="muted">
-                      {' '}
-                      （{memoryExtraction.collectedForeshadowings.map((f) => f.content).join('；')}）
-                    </span>
-                  ) : null}
-                </li>
-              </ul>
-              {memoryResult ? (
-                <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
-                  ✓ 已应用：状态 {memoryResult.applied.stateChanges} · 情节{' '}
-                  {memoryResult.applied.plotPoints} · 伏笔 {memoryResult.applied.collected}
-                  {memoryResult.errors.length > 0 ? (
-                    <span className="err">（{memoryResult.errors.length} 项失败）</span>
-                  ) : null}
+
+              {/* 新增角色（需确认） */}
+              {memoryExtraction.newCharacters.length > 0 ? (
+                <div
+                  style={{
+                    border: '1px solid var(--line-soft)',
+                    borderRadius: 'var(--r-sm)',
+                    padding: 8,
+                    marginBottom: 8
+                  }}
+                >
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 12.5 }}>
+                      新增角色（{memoryExtraction.newCharacters.length}）
+                    </strong>
+                    <button
+                      className="btn btn-sm"
+                      onClick={applyChars}
+                      disabled={newCharResult !== null}
+                      style={{ marginLeft: 'auto' }}
+                    >
+                      {newCharResult !== null ? `已应用 ${newCharResult}` : '确认应用'}
+                    </button>
+                  </div>
+                  <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
+                    {memoryExtraction.newCharacters.map((c, i) => (
+                      <li key={i}>
+                        <strong>{c.name}</strong>
+                        <span className="muted">
+                          {' '}
+                          · {c.role} · {c.identity} · {c.personality}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/* 新增地点（需确认） */}
+              {memoryExtraction.newLocations.length > 0 ? (
+                <div
+                  style={{
+                    border: '1px solid var(--line-soft)',
+                    borderRadius: 'var(--r-sm)',
+                    padding: 8,
+                    marginBottom: 8
+                  }}
+                >
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 12.5 }}>
+                      新增地点（{memoryExtraction.newLocations.length}）
+                    </strong>
+                    <button
+                      className="btn btn-sm"
+                      onClick={applyLocs}
+                      disabled={newLocResult !== null}
+                      style={{ marginLeft: 'auto' }}
+                    >
+                      {newLocResult !== null ? `已应用 ${newLocResult}` : '确认应用'}
+                    </button>
+                  </div>
+                  <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
+                    {memoryExtraction.newLocations.map((l, i) => (
+                      <li key={i}>
+                        <strong>{l.name}</strong>
+                        <span className="muted">
+                          {' '}
+                          · {l.category} · {l.notes}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/* 新增道具（需确认） */}
+              {memoryExtraction.newItems.length > 0 ? (
+                <div
+                  style={{
+                    border: '1px solid var(--line-soft)',
+                    borderRadius: 'var(--r-sm)',
+                    padding: 8,
+                    marginBottom: 8
+                  }}
+                >
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 12.5 }}>
+                      新增道具（{memoryExtraction.newItems.length}）
+                    </strong>
+                    <button
+                      className="btn btn-sm"
+                      onClick={applyItems}
+                      disabled={newItemResult !== null}
+                      style={{ marginLeft: 'auto' }}
+                    >
+                      {newItemResult !== null ? `已应用 ${newItemResult}` : '确认应用'}
+                    </button>
+                  </div>
+                  <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
+                    {memoryExtraction.newItems.map((it) => (
+                      <li key={it.name}>
+                        <strong>{it.name}</strong>
+                        <span className="muted">
+                          {' '}
+                          · {it.category} · {it.notes}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/* 新增伏笔（需确认） */}
+              {memoryExtraction.newForeshadowings.length > 0 ? (
+                <div
+                  style={{
+                    border: '1px solid var(--line-soft)',
+                    borderRadius: 'var(--r-sm)',
+                    padding: 8
+                  }}
+                >
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 12.5 }}>
+                      新增伏笔（{memoryExtraction.newForeshadowings.length}）
+                    </strong>
+                    <button
+                      className="btn btn-sm"
+                      onClick={applyForeshadowings}
+                      disabled={newForeshadowingResult !== null}
+                      style={{ marginLeft: 'auto' }}
+                    >
+                      {newForeshadowingResult !== null
+                        ? `已应用 ${newForeshadowingResult}`
+                        : '确认应用'}
+                    </button>
+                  </div>
+                  <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
+                    {memoryExtraction.newForeshadowings.map((f, i) => (
+                      <li key={i}>
+                        <strong>{f.content}</strong>
+                        <span className="muted">
+                          {' '}
+                          · 预计第 {f.expectedCollect ?? '?'} 章回收
+                          {f.note ? ` · ${f.note}` : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               ) : null}
             </div>
-
-            {/* 新增角色（需确认） */}
-            {memoryExtraction.newCharacters.length > 0 ? (
-              <div
-                style={{
-                  border: '1px solid var(--line-soft)',
-                  borderRadius: 'var(--r-sm)',
-                  padding: 8,
-                  marginBottom: 8
-                }}
-              >
-                <div className="row" style={{ alignItems: 'baseline' }}>
-                  <strong style={{ fontSize: 12.5 }}>
-                    新增角色（{memoryExtraction.newCharacters.length}）
-                  </strong>
-                  <button
-                    className="btn btn-sm"
-                    onClick={applyChars}
-                    disabled={newCharResult !== null}
-                    style={{ marginLeft: 'auto' }}
-                  >
-                    {newCharResult !== null ? `已应用 ${newCharResult}` : '确认应用'}
-                  </button>
-                </div>
-                <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
-                  {memoryExtraction.newCharacters.map((c, i) => (
-                    <li key={i}>
-                      <strong>{c.name}</strong>
-                      <span className="muted">
-                        {' '}
-                        · {c.role} · {c.identity} · {c.personality}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-
-            {/* 新增地点（需确认） */}
-            {memoryExtraction.newLocations.length > 0 ? (
-              <div
-                style={{
-                  border: '1px solid var(--line-soft)',
-                  borderRadius: 'var(--r-sm)',
-                  padding: 8,
-                  marginBottom: 8
-                }}
-              >
-                <div className="row" style={{ alignItems: 'baseline' }}>
-                  <strong style={{ fontSize: 12.5 }}>
-                    新增地点（{memoryExtraction.newLocations.length}）
-                  </strong>
-                  <button
-                    className="btn btn-sm"
-                    onClick={applyLocs}
-                    disabled={newLocResult !== null}
-                    style={{ marginLeft: 'auto' }}
-                  >
-                    {newLocResult !== null ? `已应用 ${newLocResult}` : '确认应用'}
-                  </button>
-                </div>
-                <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
-                  {memoryExtraction.newLocations.map((l, i) => (
-                    <li key={i}>
-                      <strong>{l.name}</strong>
-                      <span className="muted">
-                        {' '}
-                        · {l.category} · {l.notes}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-
-            {/* 新增伏笔（需确认） */}
-            {memoryExtraction.newForeshadowings.length > 0 ? (
-              <div
-                style={{
-                  border: '1px solid var(--line-soft)',
-                  borderRadius: 'var(--r-sm)',
-                  padding: 8
-                }}
-              >
-                <div className="row" style={{ alignItems: 'baseline' }}>
-                  <strong style={{ fontSize: 12.5 }}>
-                    新增伏笔（{memoryExtraction.newForeshadowings.length}）
-                  </strong>
-                  <button
-                    className="btn btn-sm"
-                    onClick={applyForeshadowings}
-                    disabled={newForeshadowingResult !== null}
-                    style={{ marginLeft: 'auto' }}
-                  >
-                    {newForeshadowingResult !== null
-                      ? `已应用 ${newForeshadowingResult}`
-                      : '确认应用'}
-                  </button>
-                </div>
-                <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
-                  {memoryExtraction.newForeshadowings.map((f, i) => (
-                    <li key={i}>
-                      <strong>{f.content}</strong>
-                      <span className="muted">
-                        {' '}
-                        · 预计第 {f.expectedCollect ?? '?'} 章回收
-                        {f.note ? ` · ${f.note}` : ''}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-
-      <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
-        <div className="row" style={{ alignItems: 'baseline' }}>
-          <strong style={{ fontSize: 13 }}>节奏图谱回填</strong>
-          <button
-            className="btn btn-sm"
-            onClick={runRhythmEvaluate}
-            disabled={rhythmEvaluating}
-            style={{ marginLeft: 'auto' }}
-          >
-            {rhythmEvaluating ? '评估中…' : rhythmEvaluation ? '重新评估' : '✦ 评估节奏'}
-          </button>
+          ) : null}
         </div>
-        <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-          LLM 评估实际情绪值；差异 ≤1 自动回写，否则需你确认。
-        </p>
-        {rhythmError ? (
-          <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
-            {rhythmError}
-          </p>
-        ) : null}
-        {rhythmEvaluation ? (
-          <div
-            style={{
-              marginTop: 8,
-              border: '1px solid var(--line-soft)',
-              borderRadius: 'var(--r-sm)',
-              padding: 8,
-              fontSize: 12.5
-            }}
-          >
-            <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
-              <span>预期 {rhythmEvaluation.expectedEmotion}</span>
-              <span style={{ margin: '0 6' }}>→</span>
-              <strong>实际 {rhythmEvaluation.actualEmotion}</strong>
-              <span
-                className={`chip ${rhythmEvaluation.diff > 1 ? 'chip-warning' : ''}`}
-                style={{ marginLeft: 8 }}
-              >
-                差异 {rhythmEvaluation.diff}
-              </span>
-              <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
-                {rhythmEvaluation.autoApply ? '✓ 自动回写' : '⚠ 需确认'}
-              </span>
-            </div>
-            {rhythmEvaluation.reason ? (
-              <div className="muted" style={{ fontSize: 12 }}>
-                依据：{rhythmEvaluation.reason}
-              </div>
-            ) : null}
-            {!rhythmEvaluation.autoApply && !rhythmResult ? (
-              <button
-                className="btn btn-sm"
-                onClick={() => applyRhythm(rhythmEvaluation)}
-                disabled={rhythmApplying}
-                style={{ marginTop: 6 }}
-              >
-                {rhythmApplying ? '回写中…' : '确认回写'}
-              </button>
-            ) : null}
-            {rhythmResult ? (
-              <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
-                ✓ 已回写：{rhythmResult.previousEmotion} → {rhythmResult.newEmotion}
-                {rhythmResult.actualized ? ' · actualized=true' : ''}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
 
-      <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
-        <div className="row" style={{ alignItems: 'baseline' }}>
-          <strong style={{ fontSize: 13 }}>Mermaid 图解生成</strong>
-          <button
-            className="btn btn-sm"
-            onClick={runFigureGenerate}
-            disabled={figureGenerating}
-            style={{ marginLeft: 'auto' }}
-          >
-            {figureGenerating ? '生成中…' : figureDraft ? '重新生成' : '✦ 生成图解'}
-          </button>
-        </div>
-        <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-          关键转折点（战斗/势力/突破/关系/剧情/伏笔回收）自动生成 Mermaid 图解。
-        </p>
-        {figureError ? (
-          <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
-            {figureError}
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
+          <div className="row" style={{ alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>节奏图谱回填</strong>
+            <button
+              className="btn btn-sm"
+              onClick={runRhythmEvaluate}
+              disabled={rhythmEvaluating}
+              style={{ marginLeft: 'auto' }}
+            >
+              {rhythmEvaluating ? '评估中…' : rhythmEvaluation ? '重新评估' : '✦ 评估节奏'}
+            </button>
+          </div>
+          <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+            LLM 评估实际情绪值；差异 ≤1 自动回写，否则需你确认。
           </p>
-        ) : null}
-        {figureDraft ? (
-          figureDraft.shouldGenerate ? (
+          {rhythmError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              {rhythmError}
+            </p>
+          ) : null}
+          {rhythmEvaluation ? (
             <div
               style={{
                 marginTop: 8,
@@ -1099,53 +860,124 @@ export default function ChapterFlowPanel(props: Props) {
               }}
             >
               <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
-                <span className="chip">{figureDraft.type}</span>
-                <strong>{figureDraft.topic}</strong>
+                <span>预期 {rhythmEvaluation.expectedEmotion}</span>
+                <span style={{ margin: '0 6' }}>→</span>
+                <strong>实际 {rhythmEvaluation.actualEmotion}</strong>
+                <span
+                  className={`chip ${rhythmEvaluation.diff > 1 ? 'chip-warning' : ''}`}
+                  style={{ marginLeft: 8 }}
+                >
+                  差异 {rhythmEvaluation.diff}
+                </span>
                 <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
-                  {figureDraft.fileName}
+                  {rhythmEvaluation.autoApply ? '✓ 自动回写' : '⚠ 需确认'}
                 </span>
               </div>
-              {figureDraft.reason ? (
-                <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-                  触发理由：{figureDraft.reason}
+              {rhythmEvaluation.reason ? (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  依据：{rhythmEvaluation.reason}
                 </div>
               ) : null}
-              <pre
-                className="body"
-                style={{
-                  whiteSpace: 'pre-wrap',
-                  fontSize: 11.5,
-                  maxHeight: 160,
-                  overflow: 'auto',
-                  background: 'var(--bg-soft, #f6f8fa)',
-                  padding: 6,
-                  borderRadius: 'var(--r-sm)'
-                }}
-              >
-                {figureDraft.html}
-              </pre>
-              {figureSaved ? (
-                <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
-                  ✓ 已保存到 图解/{figureSaved}
-                </div>
-              ) : (
+              {!rhythmEvaluation.autoApply && !rhythmResult ? (
                 <button
                   className="btn btn-sm"
-                  onClick={saveFigureDraft}
-                  disabled={figureSaving}
+                  onClick={() => applyRhythm(rhythmEvaluation)}
+                  disabled={rhythmApplying}
                   style={{ marginTop: 6 }}
                 >
-                  {figureSaving ? '保存中…' : '保存到 图解/'}
+                  {rhythmApplying ? '回写中…' : '确认回写'}
                 </button>
-              )}
+              ) : null}
+              {rhythmResult ? (
+                <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                  ✓ 已回写：{rhythmResult.previousEmotion} → {rhythmResult.newEmotion}
+                  {rhythmResult.actualized ? ' · actualized=true' : ''}
+                </div>
+              ) : null}
             </div>
-          ) : (
-            <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-              本章非关键转折点，跳过图解生成。
-              {figureDraft.reason ? `（${figureDraft.reason}）` : ''}
+          ) : null}
+        </div>
+
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
+          <div className="row" style={{ alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>Mermaid 图解生成</strong>
+            <button
+              className="btn btn-sm"
+              onClick={runFigureGenerate}
+              disabled={figureGenerating}
+              style={{ marginLeft: 'auto' }}
+            >
+              {figureGenerating ? '生成中…' : figureDraft ? '重新生成' : '✦ 生成图解'}
+            </button>
+          </div>
+          <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+            关键转折点（战斗/势力/突破/关系/剧情/伏笔回收）自动生成 Mermaid 图解。
+          </p>
+          {figureError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              {figureError}
             </p>
-          )
-        ) : null}
+          ) : null}
+          {figureDraft ? (
+            figureDraft.shouldGenerate ? (
+              <div
+                style={{
+                  marginTop: 8,
+                  border: '1px solid var(--line-soft)',
+                  borderRadius: 'var(--r-sm)',
+                  padding: 8,
+                  fontSize: 12.5
+                }}
+              >
+                <div className="row" style={{ alignItems: 'baseline', marginBottom: 4 }}>
+                  <span className="chip">{figureDraft.type}</span>
+                  <strong>{figureDraft.topic}</strong>
+                  <span className="meta" style={{ marginLeft: 'auto', fontSize: 11 }}>
+                    {figureDraft.fileName}
+                  </span>
+                </div>
+                {figureDraft.reason ? (
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    触发理由：{figureDraft.reason}
+                  </div>
+                ) : null}
+                <pre
+                  className="body"
+                  style={{
+                    whiteSpace: 'pre-wrap',
+                    fontSize: 11.5,
+                    maxHeight: 160,
+                    overflow: 'auto',
+                    background: 'var(--bg-soft, #f6f8fa)',
+                    padding: 6,
+                    borderRadius: 'var(--r-sm)'
+                  }}
+                >
+                  {figureDraft.html}
+                </pre>
+                {figureSaved ? (
+                  <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                    ✓ 已保存到 图解/{figureSaved}
+                  </div>
+                ) : (
+                  <button
+                    className="btn btn-sm"
+                    onClick={saveFigureDraft}
+                    disabled={figureSaving}
+                    style={{ marginTop: 6 }}
+                  >
+                    {figureSaving ? '保存中…' : '保存到 图解/'}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+                本章非关键转折点，跳过图解生成。
+                {figureDraft.reason ? `（${figureDraft.reason}）` : ''}
+              </p>
+            )
+          ) : null}
+        </div>
       </div>
     </div>
   )

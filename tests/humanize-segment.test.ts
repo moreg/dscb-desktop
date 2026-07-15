@@ -5,6 +5,7 @@ import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { WriteService, parseHumanizerOutput } from '../src/main/data/write-service'
+import { DeslopService } from '../src/main/data/deslop/deslop-service'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 
@@ -259,5 +260,61 @@ describe('WriteService.humanizeSegment (batch integration)', () => {
     ]
     expect(opts.meta?.feature).toBe('humanize')
     expect(opts.meta?.projectId).toBe(projectId)
+  })
+})
+
+describe('WriteService.humanizeSegment (deslop pipeline 路径)', () => {
+  let root: string
+  let projectId: string
+  let ps: ProjectService
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'aw-hzd-'))
+    const library = new LibraryRepository(path.join(root, 'library.json'))
+    ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
+    projectId = (await ps.create({ name: '青云志', genre: '古风' })).id
+  })
+
+  it('注入 deslopService 后走 deslop pipeline（mild 级别）', async () => {
+    // 用会命中 deslop 扫描器的 snippet（"仿佛"是 Gate A 禁用词）
+    const llmReply = `【改写后】
+他没接话，转身走了。
+
+【改动说明】
+- 第1行｜原句：仿佛 -> 改后：删 ｜理由：书面比喻破坏口语语感`
+    const llm = mockLlm(llmReply)
+    const deslopService = new DeslopService(llm)
+    // 注入 deslopService 作为第 8 个构造参数
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, deslopService)
+    const result = await service.humanizeSegment(
+      projectId,
+      '他仿佛在想着什么，什么都没说。',
+      '仿佛（书面比喻腔）'
+    )
+    // 走 deslop pipeline 后返回 rewritten
+    expect(result.rewritten).toBe('他没接话，转身走了。')
+    // reason 来自 changeSummary
+    expect(result.reason).toContain('仿佛')
+  })
+
+  it('deslop pipeline 失败时返回错误 reason', async () => {
+    const llm = {
+      generateStream: vi.fn().mockRejectedValue(new Error('网络超时'))
+    } as unknown as LlmService
+    const deslopService = new DeslopService(llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, deslopService)
+    // "仿佛" 命中 Gate A，触发 deslop 改写 -> LLM 失败
+    const result = await service.humanizeSegment(projectId, '他仿佛在想什么。', '仿佛')
+    expect(result.rewritten).toBe('')
+    expect(result.reason).toContain('网络超时')
+  })
+
+  it('空 snippet 仍返回空结果（走 deslop 路径前拦截）', async () => {
+    const llm = mockLlm('ignored')
+    const deslopService = new DeslopService(llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, deslopService)
+    const result = await service.humanizeSegment(projectId, '   ', 'something')
+    expect(result.rewritten).toBe('')
+    expect(result.reason).toContain('空')
   })
 })

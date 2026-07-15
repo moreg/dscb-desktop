@@ -42,21 +42,16 @@ describe('ChapterService outline merge', () => {
       'utf-8'
     )
 
-    // 章节进度笔记：chapter 1 有旧备注 + 字数
-    await mkdir(path.join(dir, '记忆系统'), { recursive: true })
+    // 角色文件：苏九（主角）、老吴（核心配角）-- v4 写到 设定/角色/<name>.md
+    await mkdir(path.join(dir, '设定', '角色'), { recursive: true })
     await writeFile(
-      path.join(dir, '记忆系统', '章节进度.md'),
-      '# 章节进度\n\n## 第 1 卷\n\n' +
-        '| 章节 | 标题 | 状态 | 字数 | 备注 |\n' +
-        '| --- | --- | --- | --- | --- |\n' +
-        '| 第 1 章 | 旧标题 | 草稿 | 1000 | 旧备注 |\n',
+      path.join(dir, '设定', '角色', '苏九.md'),
+      '# 苏九\n\n## 基本信息\n\n- **身份**：少年\n- **阵营**：主角\n',
       'utf-8'
     )
-
-    // 角色卡：苏九（主角）、老吴（核心配角）
     await writeFile(
-      path.join(dir, '记忆系统', '角色卡.md'),
-      '# 角色卡\n\n## 主角\n\n### 苏九（男主）\n- **身份**：少年\n\n## 核心配角\n\n### 老吴\n- **身份**：掌柜\n',
+      path.join(dir, '设定', '角色', '老吴.md'),
+      '# 老吴\n\n## 基本信息\n\n- **身份**：掌柜\n- **阵营**：核心配角\n',
       'utf-8'
     )
   })
@@ -111,16 +106,16 @@ describe('ChapterService outline merge', () => {
     const list = await service.listChapters(projectId)
     const ch1 = list.find((c) => c.chapterNumber === 1)!
 
-    // 细纲核心事件覆盖章节进度笔记的「旧备注」
+    // 细纲核心事件作为 synopsis
     expect(ch1.synopsis).toBe('苏九破窗逃出')
   })
 
-  it('listChapters 无细纲时 synopsis 回退章节进度笔记', async () => {
+  it('listChapters 无细纲时 synopsis 为 undefined（v4 删除了章节进度回退）', async () => {
     // 不创建细纲文件
     const service = new ChapterService(ps)
     const list = await service.listChapters(projectId)
     const ch1 = list.find((c) => c.chapterNumber === 1)!
-    expect(ch1.synopsis).toBe('旧备注')
+    expect(ch1.synopsis).toBeUndefined()
   })
 
   it('listChapters appearingCharacters 把细纲角色名映射成角色卡 id', async () => {
@@ -144,11 +139,11 @@ describe('ChapterService outline merge', () => {
     // 苏九、老吴 能匹配角色卡 → 转成 id；路人甲无角色卡 → 跳过
     expect(ch1.appearingCharacters).toBeDefined()
     expect(ch1.appearingCharacters!.length).toBe(2)
-    // id 是由姓名确定性 hash 生成的，这里只验证 id 非空且与角色卡一致
-    const { CharacterCardMdRepo } = await import(
-      '../src/main/data/skill-format/character-card-md-repo'
+    // id 是由姓名确定性 hash 生成的，这里只验证 id 非空且与 CharacterRepo 一致
+    const { CharacterRepo } = await import(
+      '../src/main/data/memory/character-repo'
     )
-    const chars = await new CharacterCardMdRepo(dir).list()
+    const chars = await new CharacterRepo(dir).list()
     const suId = chars.find((c) => c.name === '苏九')!.id
     const wuId = chars.find((c) => c.name === '老吴')!.id
     expect(ch1.appearingCharacters).toContain(suId)
@@ -224,9 +219,7 @@ describe('ChapterService outline merge', () => {
   })
 
   it('listChapters 进度表无字数时回退正文实时统计（修复第一章字数为 0）', async () => {
-    // 场景：第一章已写正文，但 skill 包未回填「记忆系统/章节进度.md」的字数列
-    // （或该列为空/非数字 → ChapterProgressMdRepo 解析为 undefined）。
-    // 期望：listChapters 回退到正文实时 countWords，字数不为 0，与编辑器一致。
+    // 场景：第一章已写正文，v4 字数直接从正文实时 countWords 统计
     const proseDir = path.join(dir, '正文')
     await mkdir(proseDir, { recursive: true })
     // 节奏图谱里第一章标题是「旧标题」，ProseRepo 会按「第NNN章 *.md」匹配
@@ -236,21 +229,11 @@ describe('ChapterService outline merge', () => {
       'utf-8'
     )
 
-    // 章节进度表第一章字数列留空（模拟 skill 包未回填）
-    await writeFile(
-      path.join(dir, '记忆系统', '章节进度.md'),
-      '# 章节进度\n\n## 第 1 卷\n\n' +
-        '| 章节 | 标题 | 状态 | 字数 | 备注 |\n' +
-        '| --- | --- | --- | --- | --- |\n' +
-        '| 第 1 章 | 旧标题 | 草稿 |  | 待回填 |\n',
-      'utf-8'
-    )
-
     const service = new ChapterService(ps)
     const list = await service.listChapters(projectId)
     const ch1 = list.find((c) => c.chapterNumber === 1)!
 
-    // 字数应来自正文实时统计，而非进度表的空值兜底为 0
+    // 字数来自正文实时统计
     expect(ch1.wordCount).toBeGreaterThan(0)
     const { meta } = await service.getChapter(projectId, 1)
     expect(ch1.wordCount).toBe(meta.wordCount)

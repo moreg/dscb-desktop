@@ -9,6 +9,7 @@ import CharacterManagerPage from './CharacterManagerPage'
 import MemoryCenterPage from './MemoryCenterPage'
 import MemoryEntityPage from './MemoryEntityPage'
 import ForeshadowingBoard from './ForeshadowingBoard'
+import TrackingPage from './TrackingPage'
 import RelationshipPage from './RelationshipPage'
 import SettingsPage from './SettingsPage'
 import OutlinePage from './OutlinePage'
@@ -32,6 +33,7 @@ type View =
   | { kind: 'memoryCenter'; projectId: string }
   | { kind: 'memoryEntity'; projectId: string; entityType: MemoryEntityType }
   | { kind: 'foreshadowingBoard'; projectId: string }
+  | { kind: 'tracking'; projectId: string }
   | { kind: 'relationships'; projectId: string }
   | { kind: 'outline'; projectId: string }
   | { kind: 'rhythm'; projectId: string }
@@ -44,7 +46,8 @@ const ENTITY_LABELS: Record<MemoryEntityType, string> = {
   location: '地点',
   worldview: '世界观',
   timeline: '时间线',
-  plot_point: '剧情点'
+  plot_point: '剧情点',
+  item: '物品'
 }
 
 function applyTheme(mode: ThemeMode): void {
@@ -84,6 +87,7 @@ function isNavActive(view: View, kind: string, projectId: string | null): boolea
   if (kind === 'relationships') return view.kind === 'relationships'
   if (kind === 'memoryCenter') return view.kind === 'memoryCenter'
   if (kind === 'foreshadowingBoard') return view.kind === 'foreshadowingBoard'
+  if (kind === 'tracking') return view.kind === 'tracking'
   if (kind.startsWith('entity:')) {
     const type = kind.split(':')[1] as MemoryEntityType
     return view.kind === 'memoryEntity' && view.entityType === type
@@ -149,7 +153,9 @@ export default function App() {
           ? 'rhythm-wide'
           : view.kind === 'foreshadowingBoard'
             ? 'foreshadowing-wide'
-            : ''
+            : view.kind === 'tracking'
+              ? 'tracking-wide'
+              : ''
   }`
 
   return (
@@ -257,6 +263,13 @@ export default function App() {
               >
                 <span className="icon">🧠</span>
                 记忆中心
+              </button>
+              <button
+                className={`nav-item ${isNavActive(view, 'tracking', currentProjectId) ? 'active' : ''}`}
+                onClick={() => setView({ kind: 'tracking', projectId: currentProjectId })}
+              >
+                <span className="icon">🧭</span>
+                追踪
               </button>
               <button
                 className={`nav-item ${isNavActive(view, 'foreshadowingBoard', currentProjectId) ? 'active' : ''}`}
@@ -388,6 +401,14 @@ export default function App() {
                 label={ENTITY_LABELS[view.entityType]}
                 onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
                 onOpenChapter={(n) => setView({ kind: 'editor', projectId: view.projectId, chapterNumber: n })}
+              />
+            </ErrorBoundary>
+          ) : view.kind === 'tracking' ? (
+            <ErrorBoundary>
+              <TrackingPage
+                projectId={view.projectId}
+                onBack={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
+                onOpenForeshadowings={() => setView({ kind: 'foreshadowingBoard', projectId: view.projectId })}
               />
             </ErrorBoundary>
           ) : view.kind === 'foreshadowingBoard' ? (

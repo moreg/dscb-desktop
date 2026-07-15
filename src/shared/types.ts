@@ -26,6 +26,18 @@ export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 /** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
 export type ProviderProtocol = 'openai' | 'anthropic' | 'antigravity' | 'codex'
 
+/**
+ * 连通测试统一返回结构：
+ * - ok=true 时 model / providerLabel 可选填充
+ * - ok=false 时 error 为机器可读错误码（NO_KEY / LLM_AUTH_FAILED / AGY_NOT_FOUND 等）
+ */
+export interface PingResult {
+  ok: boolean
+  error?: string
+  model?: string
+  providerLabel?: string
+}
+
 export interface ProviderConfig {
   id: string
   /** 展示名（用户可改），例如「主力 / 备用 / DeepSeek」 */
@@ -65,7 +77,7 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
 }
 
 /** 功能大类：用于按任务类型路由到不同 provider/模型 */
-export type FeatureCategory = 'chapter' | 'review' | 'humanize' | 'opening' | 'auxiliary'
+export type FeatureCategory = 'chapter' | 'review' | 'humanize' | 'opening' | 'auxiliary' | 'ask'
 
 /** 单个功能大类的路由配置：指向某个 provider，可选覆盖模型名 */
 export interface FeatureRoutingEntry {
@@ -245,6 +257,28 @@ export interface UpdateChapterMetaInput {
   appearingCharacters?: string[]
 }
 
+/** ChapterEditor 正文区 AI 章名命名入参 */
+export interface SuggestChapterNameInput {
+  projectId: string
+  chapterNumber: number
+  currentTitle: string
+  /** 当前未保存的草稿正文（编辑器里 dirty=true 的那份） */
+  draft: string
+  /** 项目体裁，可选（影响 system prompt 语感） */
+  genre?: string
+}
+
+/** ChapterEditor 正文区 AI 章名命名结果。ok=false 时 error 含机器可读错误码 */
+export interface SuggestChapterNameResult {
+  ok: boolean
+  /** 净化后的候选章名（ok=true 时有效，12-50 字） */
+  title: string
+  /** LLM 给出的简短理由（可能为空字符串） */
+  reason: string
+  /** ok=false 时含错误码（如 LLM_NOT_CONFIGURED / PARSE_FAILED / SERVICE_UNAVAILABLE） */
+  error?: string
+}
+
 /** 一条可编辑的续写规则小节（renderer 视图：标题 + 内置默认正文） */
 export interface ChapterRuleSectionView {
   key: string
@@ -412,6 +446,14 @@ export interface RendererApi {
     byStatus: Record<'unknown' | 'outline' | 'drafted' | 'finished', number>
   } | null>
   updateChapterMeta: (projectId: string, n: number, patch: UpdateChapterMetaInput) => Promise<ChapterMeta>
+  /** ChapterEditor 正文区 AI 章名命名（基于当前未保存草稿；候选需确认才落盘） */
+  suggestChapterName: (
+    projectId: string,
+    chapterNumber: number,
+    currentTitle: string,
+    draft: string,
+    genre?: string
+  ) => Promise<SuggestChapterNameResult>
   deleteChapter: (projectId: string, n: number) => Promise<void>
   listCharacters: (projectId: string) => Promise<Character[]>
   getCharacter: (projectId: string, id: string) => Promise<Character | null>
@@ -463,9 +505,48 @@ export interface RendererApi {
     patch: UpdateRelationshipInput
   ) => Promise<Relationship>
   deleteRelationship: (projectId: string, id: string) => Promise<void>
+  /** v4：增量同步 设定/ + 追踪/ + 细纲/ → 记忆/ */
+  syncMemoryIndex: (projectId: string) => Promise<{
+    added: number
+    updated: number
+    removed: number
+    conflicts: number
+    errors: Array<{ source: string; message: string }>
+    startedAt: string
+    finishedAt: string
+  }>
+  /** 读取 追踪/ 目录的聚合展示数据（角色状态/时间线/进度/问题/伏笔统计） */
+  readTracking: (projectId: string) => Promise<TrackingView | null>
+  /** v4：获取实体完整 Markdown（用于详情面板） */
+  getMemoryDetail: (
+    projectId: string,
+    type: string,
+    id: string
+  ) => Promise<{ markdown: string; sources: Array<{ path: string }> } | null>
+  /** v4：在系统资源管理器中打开源文件 */
+  openMemorySource: (projectId: string, relativePath: string) => Promise<{ ok: boolean }>
+  /** v4：老项目 v3 → v4 一次性迁移（dryRun=true 只预览） */
+  migrateV3ToV4: (
+    projectId: string,
+    options?: { dryRun?: boolean }
+  ) => Promise<{
+    dryRun: boolean
+    skipped: boolean
+    wouldConvert: number
+    converted: number
+    removedDirs: string[]
+    errors: Array<{ file: string; message: string }>
+  }>
   configureLlm: (apiKey: string) => Promise<boolean>
   hasLlmKey: () => Promise<boolean>
-  pingLlm: () => Promise<{ ok: boolean; error?: string; model?: string; providerLabel?: string }>
+  /**
+   * ping 通道统一返回结构：
+   * - ok=true 时 model / providerLabel 可选填充
+   * - ok=false 时 error 为机器可读错误码（NO_KEY / LLM_AUTH_FAILED / AGY_NOT_FOUND 等）
+   */
+  pingLlm: () => Promise<PingResult>
+  /** 指定 providerId 的连通测试，用于卡片级独立验证 */
+  pingProvider: (id: string) => Promise<PingResult>
   /** 列出 agy CLI 可用模型（供 antigravity provider 的模型下拉选择） */
   listAntigravityModels: () => Promise<string[]>
   /** 列出 codex CLI 可用模型（读 config.toml，供 codex provider 的模型选择） */
@@ -531,6 +612,14 @@ export interface RendererApi {
     content: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
+  answerChapterQuestionStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    question: string,
+    history: { role: 'user' | 'assistant'; text: string }[],
+    onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
   detectCastStream: (
     projectId: string,
     chapterNumber: number,
@@ -564,6 +653,11 @@ export interface RendererApi {
   applyNewLocations: (
     projectId: string,
     locs: MemoryExtraction['newLocations']
+  ) => Promise<number>
+  /** 用户确认后：应用新增道具 */
+  applyNewItems: (
+    projectId: string,
+    items: MemoryExtraction['newItems']
   ) => Promise<number>
   /** 用户确认后：应用新增伏笔 */
   applyNewForeshadowings: (
@@ -750,60 +844,6 @@ export interface RendererApi {
   ) => Promise<{ ok: true }>
   /** 删除扫榜报告 */
   deleteScanReport: (fileName: string) => Promise<void>
-  /* ---- 开书（story-long-write Phase 1-3）---- */
-  /** Step 1：脑洞 → 核心设定表（流式） */
-  openingCoreSettingsStream: (
-    projectId: string,
-    brainDump: string,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
-  /** Step 2：核心设定 → 卷级大纲（流式） */
-  openingVolumeOutlineStream: (
-    projectId: string,
-    coreSettings: string,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
-  /** Step 3：核心设定 + 卷级大纲 → 前 N 章细纲（流式） */
-  openingFirstChaptersStream: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    fromChapter: number,
-    count: number,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
-  /** Step 4：落盘核心设定 + 卷级大纲 + 细纲 */
-  persistOpening: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    chaptersMarkdown?: string,
-    fromChapter?: number
-  ) => Promise<{ settingsFile: string; outlineFile: string; chapterFiles: string[] }>
-  /** 手动续写：从已有内容断点继续生成核心设定 */
-  continueCoreSettingsStream: (
-    projectId: string,
-    brainDump: string,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
-  /** 手动续写：从已有内容断点继续生成卷级大纲 */
-  continueVolumeOutlineStream: (
-    projectId: string,
-    coreSettings: string,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
-  /** 手动续写：从已有内容断点继续生成前 N 章细纲 */
-  continueFirstChaptersStream: (
-    projectId: string,
-    coreSettings: string,
-    volumeOutline: string,
-    fromChapter: number,
-    count: number,
-    partial: string,
-    onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string; markdown?: string }>
 }
 
 export interface Character {
@@ -820,6 +860,10 @@ export interface Character {
    * 值为 string 或 string[]（多行子列表）。
    */
   rawFields?: Record<string, string | string[]>
+  /** v4：用户自定义键值对（自由扩展，UI 始终渲染，与 first-class 合并显示，不再互斥）。 */
+  customFields?: Record<string, string | string[]>
+  /** v4：源文件路径 + mtime，用于同步决策与"源已更新未同步"徽章。 */
+  sources?: Array<{ path: string; mtime: string }>
   createdAt: string
   updatedAt: string
 }
@@ -842,6 +886,8 @@ export interface UpdateCharacterInput {
   abilities?: string
   tags?: string[]
   synopsis?: string
+  /** v4：自定义字段补丁（与现有 customFields 浅合并，未列出的 key 保留原值） */
+  customFields?: Record<string, string | string[]>
 }
 
 export type MemoryAction = 'create' | 'update' | 'delete'
@@ -871,15 +917,79 @@ export interface CreateChapterVersionInput {
   note?: string
 }
 
-export type MemoryEntityType = 'location' | 'worldview' | 'timeline' | 'plot_point'
+export type MemoryEntityType = 'location' | 'worldview' | 'timeline' | 'plot_point' | 'item'
+
+/**
+ * 追踪视图（来自 `追踪/` 目录的聚合展示数据）。
+ * 对应后端 TrackingMdRepo.read() 的结果 + 伏笔统计，供 TrackingPage 渲染。
+ */
+export interface TrackingView {
+  /** 角色状态快照（来自 追踪/角色状态.md 的「当前状态」表） */
+  characterStates: TrackingCharacterState[]
+  /** 状态变更记录（来自「状态变更记录」表，全部，不按章号过滤） */
+  stateChanges: TrackingStateChange[]
+  /** 时间线表格原文（来自 追踪/时间线.md，保留表格行供前端解析展示） */
+  timeline: string
+  /** 日更进度（来自 追踪/上下文.md，全量返回供追踪页展示） */
+  recentProgress: TrackingProgressEntry[]
+  /** 待处理问题（来自 追踪/问题记录.md，只含未关闭的） */
+  openIssues: TrackingIssue[]
+  /** 全部问题（含已修正，用于问题记录展示） */
+  allIssues: TrackingIssue[]
+  /** 伏笔统计 */
+  foreshadowingSummary: {
+    total: number
+    pending: number
+    planted: number
+    collected: number
+    missed: number
+  }
+}
+
+export interface TrackingCharacterState {
+  name: string
+  power: string
+  stance: string
+  goal: string
+  items: string
+  relations: string
+  updateChapter: number
+}
+
+export interface TrackingStateChange {
+  chapter: number
+  name: string
+  change: string
+}
+
+export interface TrackingProgressEntry {
+  date: string
+  chapter: string
+  summary: string
+  nextGoal: string
+  blocker: string
+}
+
+export interface TrackingIssue {
+  date: string
+  problem: string
+  analysis: string
+  fix: string
+  status: string
+}
 
 export interface MemoryEntity {
   id: string
+  type?: MemoryEntityType
   name: string
   category?: string
   notes?: string
   /** 原始 .md 解析出的全部字段（超出 name/category/notes 的，如 关联事件/关联角色/当前状态 等） */
   rawFields?: Record<string, string | string[]>
+  /** v4：用户自定义键值对（自由扩展，UI 始终渲染） */
+  customFields?: Record<string, string | string[]>
+  /** v4：源文件路径 + mtime */
+  sources?: Array<{ path: string; mtime: string }>
   createdAt: string
   updatedAt: string
 }
@@ -929,6 +1039,8 @@ export interface Relationship {
   relationType: string
   description?: string
   strength?: number
+  /** v4：源文件路径 + mtime */
+  sources?: Array<{ path: string; mtime: string }>
   createdAt: string
   updatedAt: string
 }
@@ -936,6 +1048,9 @@ export interface Relationship {
 export interface CreateRelationshipInput {
   characterAId: string
   characterBId: string
+  /** v4 友好字段：可直接传名字，由 repo 哈希成 id（与 aId/bId 二选一） */
+  characterAName?: string
+  characterBName?: string
   relationType: string
   description?: string
   strength?: number
@@ -1464,6 +1579,8 @@ export interface MemoryExtraction {
   newCharacters: { name: string; role: string; identity: string; personality: string }[]
   /** 新增地点（需确认） */
   newLocations: { name: string; category: string; notes: string }[]
+  /** 新增道具（需确认） */
+  newItems: { name: string; category: string; notes: string }[]
   /** 新增伏笔（需确认） */
   newForeshadowings: { content: string; expectedCollect?: number; note?: string }[]
   /** 新增情节（自动追加到核心情节.md） */
@@ -1479,6 +1596,7 @@ export interface MemoryApplyResult {
   applied: {
     characters: number
     locations: number
+    items: number
     foreshadowings: number
     plotPoints: number
     stateChanges: number

@@ -10,36 +10,27 @@ import type {
 } from '../../../shared/types'
 
 /**
- * 读取伏笔追踪。真相源（双路径）：
- * 1. `追踪/伏笔.md`（opening-service 创建路径，多 H2 节多表格，表头一致）
- * 2. `记忆系统/伏笔追踪.md`（回退路径，老项目 / app 自身写入路径）
- *
+ * 读取伏笔追踪。v4 单一真相源：`追踪/伏笔.md`。
  * 解析大表（伏笔编号|内容|类型|埋设|预计回收|实际回收|状态）→ Foreshadowing[]。
  * v3.2 状态文本（未回收/强化/部分回收/已回收/续篇）映射到 app 的 4 态枚举。
  *
- * 注意：写入仍固定到 `记忆系统/伏笔追踪.md`（保持与 opening-service 创建路径一致，
- * 避免 追踪/伏笔.md 与 记忆系统/伏笔追踪.md 双写分裂）。
+ * 历史说明：v3 时期此 repo 同时读 `追踪/伏笔.md`（opening-service 路径）+ `记忆系统/伏笔追踪.md`（app 写入路径），
+ * 导致两个文件内容分裂——一次 mutation 之后 `追踪/伏笔.md` 永远 stale。v4 改为单一真相：
+ * 所有读写都走 `追踪/伏笔.md`。
  */
 export class ForeshadowingMdRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<Foreshadowing[]> {
-    // 优先读 追踪/伏笔.md（opening-service 创建路径，更全）
-    const trackingText = await readText(join(this.projectDir, '追踪', '伏笔.md'))
-    if (trackingText) {
-      const items = parseForeshadowingTable(trackingText)
-      if (items.length > 0) return items
-    }
-    // 回退：记忆系统/伏笔追踪.md（老项目 / app 写入路径）
-    const memoryText = await readText(join(this.projectDir, '记忆系统', '伏笔追踪.md'))
-    if (!memoryText) return []
-    return parseForeshadowingTable(memoryText)
+    const text = await readText(join(this.projectDir, '追踪', '伏笔.md'))
+    if (!text) return []
+    return parseForeshadowingTable(text)
   }
 
-  // ===== Phase 3b 写入（表行增删改） =====
+  // ===== 写入（表行增删改）=====
 
   private async file(): Promise<{ path: string; text: string }> {
-    const path = join(this.projectDir, '记忆系统', '伏笔追踪.md')
+    const path = join(this.projectDir, '追踪', '伏笔.md')
     return { path, text: await readText(path) }
   }
 
@@ -61,7 +52,20 @@ export class ForeshadowingMdRepo {
       '未回收',
       '未回收'
     ]
-    await writeTextAtomic(path, appendTableRow(text, row))
+    const FORESHADOWING_HEADERS = [
+      '伏笔编号',
+      '伏笔内容',
+      '伏笔类型',
+      '埋设章节',
+      '预计回收章节',
+      '实际回收章节',
+      '状态'
+    ]
+    const next = appendTableRow(text, row, FORESHADOWING_HEADERS)
+    if (next === text) {
+      throw new Error('无法写入伏笔表：文件中无表格且无法创建表头')
+    }
+    await writeTextAtomic(path, next)
     const now = new Date().toISOString()
     return {
       id,

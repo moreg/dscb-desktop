@@ -204,6 +204,64 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /** 正文追问：基于本章正文 + 设定流式回答用户的写作疑问，不修改正文 */
+  ipcMain.handle(
+    'write:answerChapterQuestion',
+    async (
+      e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        content: string
+        question: string
+        history: { role: 'user' | 'assistant'; text: string }[]
+        requestId: string
+      }
+    ) => {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            chapterNumber: chapterNumberSchema,
+            content: chapterContentSchema,
+            question: z.string().min(1).max(10_000),
+            history: z
+              .array(
+                z.object({
+                  role: z.enum(['user', 'assistant']),
+                  text: z.string().max(20_000)
+                })
+              )
+              .max(40)
+              .default([]),
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
+        await service.answerChapterQuestionStream(
+          validated.projectId,
+          validated.chapterNumber,
+          validated.content,
+          validated.question,
+          validated.history,
+          {
+            onToken: (token) =>
+              win?.webContents.send('llm:token', {
+                requestId: validated.requestId,
+                token,
+                done: false
+              })
+          }
+        )
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
   ipcMain.handle(
     'write:detectCast',
     async (e, payload: { projectId: string; chapterNumber: number; requestId: string }) => {
@@ -330,6 +388,16 @@ export function registerWriteIpc(service: WriteService): void {
       payload: { projectId: string; locs: MemoryExtraction['newLocations'] }
     ) => {
       return service.applyNewLocations(payload.projectId, payload.locs)
+    }
+  )
+
+  safeHandle(
+    'write:applyNewItems',
+    async (
+      _e,
+      payload: { projectId: string; items: MemoryExtraction['newItems'] }
+    ) => {
+      return service.applyNewItems(payload.projectId, payload.items)
     }
   )
 

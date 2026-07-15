@@ -1,6 +1,7 @@
 import { safeHandle } from './safe-handle'
 import { ProjectService } from '../data/project-service'
 import { ChapterService } from '../data/chapter-service'
+import { ChapterNameService } from '../data/chapter-name-service'
 import { promises as fs } from 'fs'
 import path from 'path'
 import {
@@ -10,7 +11,6 @@ import {
 } from '../data/draft'
 import { summarizeProjectWords } from '../data/word-estimate'
 import { RhythmHtmlRepo } from '../data/skill-format/rhythm-html-repo'
-import { ChapterProgressMdRepo } from '../data/skill-format/chapter-progress-md-repo'
 import type {
   CreateChapterInput,
   UpdateChapterMetaInput,
@@ -28,7 +28,8 @@ const NOT_IMPLEMENTED = '该操作需 Phase 3（编辑回写 .md）支持，当�
 
 export function registerChaptersIpc(
   service: ProjectService,
-  chapters: ChapterService
+  chapters: ChapterService,
+  nameService?: ChapterNameService
 ): void {
   safeHandle('chapters:list', async (_e, id: string) => {
     const projectId = validateInput(projectIdSchema, id)
@@ -152,19 +153,12 @@ export function registerChaptersIpc(
     }
   )
 
-  // P19-E：字数汇总（基于 rhythmData + 章节进度笔记，纯计算不读正文大文件）
+  // P19-E：字数汇总（基于 rhythmData，纯计算不读正文大文件）
   safeHandle('chapters:wordSummary', async (_e, projectId: string) => {
     const validatedProjectId = validateInput(projectIdSchema, projectId)
     const dir = await service.resolveDir(validatedProjectId)
     const rhythmEntries = (await new RhythmHtmlRepo(dir).read()) ?? []
-    const progressMap = await new ChapterProgressMdRepo(dir).read()
-    const progressNotes = [...progressMap.values()]
-      .filter((p) => typeof p.wordCount === 'number')
-      .map((p) => ({
-        chapterNumber: p.chapter,
-        wordCount: p.wordCount as number
-      }))
-    return summarizeProjectWords(rhythmEntries, progressNotes)
+    return summarizeProjectWords(rhythmEntries, [])
   })
 
   // 结构 mutation 涉及 rhythmData + 大纲表 + 细纲 + 章节进度 + 核心情节多处增删，
@@ -180,6 +174,46 @@ export function registerChaptersIpc(
   safeHandle('chapters:delete', async () => {
     throw new Error(NOT_IMPLEMENTED)
   })
+
+  /**
+   * AI 章名命名（ChapterEditor 正文区）：基于当前未保存草稿生成候选章名。
+   * - 只生成候选，绝不直接写盘（候选需用户在前端确认后再走 chapters:updateMeta）。
+   * - 失败时返回 ok=false + error 机器可读码（LLM_NOT_CONFIGURED / PARSE_FAILED 等）。
+   */
+  safeHandle(
+    'chapters:suggestName',
+    async (
+      _e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        currentTitle: string
+        draft: string
+        genre?: string
+      }
+    ) => {
+      if (!nameService) {
+        return { ok: false, title: '', reason: '', error: 'SERVICE_UNAVAILABLE' }
+      }
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          currentTitle: z.string().max(200),
+          draft: z.string().max(200_000),
+          genre: z.string().max(50).optional()
+        }),
+        payload
+      )
+      return nameService.suggest({
+        projectId: validated.projectId,
+        chapterNumber: validated.chapterNumber,
+        currentTitle: validated.currentTitle,
+        draft: validated.draft,
+        genre: validated.genre
+      })
+    }
+  )
 
   // 章节版本：v3.2 无此概念，Phase 4+ 作为 app 独占扩展重做
   safeHandle('chapters:listVersions', async () => [])

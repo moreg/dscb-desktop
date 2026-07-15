@@ -1,7 +1,9 @@
 import type { ProjectService } from './project-service'
-import { LocationMdRepo } from './skill-format/location-md-repo'
-import { WorldviewMdRepo } from './skill-format/worldview-md-repo'
-import { CorePlotMdRepo } from './skill-format/core-plot-md-repo'
+import { LocationRepo } from './memory/location-repo'
+import { WorldviewRepo } from './memory/worldview-repo'
+import { TimelineRepo } from './memory/timeline-repo'
+import { PlotPointRepo } from './memory/plot-point-repo'
+import { ItemRepo } from './memory/item-repo'
 import type {
   MemoryEntity,
   MemoryEntityType,
@@ -9,15 +11,15 @@ import type {
   UpdateMemoryEntityInput
 } from '../../shared/types'
 
-const NOT_IMPLEMENTED = '该操作需 Phase 3（回写 记忆系统/*.md）支持，当前为只读阶段。'
+const NOT_IMPLEMENTED = '该操作需 Phase 3 支持，当前为只读阶段。'
 
 /**
- * 记忆实体服务。Phase 2 读取就绪：
- * - location → 记忆系统/地点档案.md
- * - worldview → 记忆系统/世界观设定.md
- * - plot_point → 记忆系统/核心情节.md（每章映射为一个剧情点实体）
- * - timeline → 无 v3.2 源，返回空（技能不产出该文件）
- * mutation 留 Phase 3。
+ * 记忆实体服务（v4）。所有 5 个类型都从 记忆/<type>/*.md 读，fallback 到 v3 源。
+ * - location -> 记忆/地点/*.md（fallback 设定/世界观/地理.md）
+ * - worldview -> 记忆/世界观/*.md（fallback 设定/世界观/*.md）
+ * - timeline -> 追踪/时间线.md 对照表
+ * - plot_point -> 记忆/剧情点/*.md（fallback 细纲/细纲_第NNN章_*.md）
+ * - item -> 记忆/道具/*.md
  */
 export class MemoryEntityService {
   constructor(private readonly projectService: ProjectService) {}
@@ -26,13 +28,15 @@ export class MemoryEntityService {
     const dir = await this.projectService.resolveDir(projectId)
     switch (type) {
       case 'location':
-        return new LocationMdRepo(dir).list()
+        return new LocationRepo(dir).list()
       case 'worldview':
-        return new WorldviewMdRepo(dir).list()
-      case 'plot_point':
-        return new CorePlotMdRepo(dir).list()
+        return new WorldviewRepo(dir).list()
       case 'timeline':
-        return []
+        return new TimelineRepo(dir).list()
+      case 'plot_point':
+        return new PlotPointRepo(dir).list()
+      case 'item':
+        return new ItemRepo(dir).list()
       default:
         return []
     }
@@ -42,9 +46,11 @@ export class MemoryEntityService {
     const dir = await this.projectService.resolveDir(projectId)
     switch (type) {
       case 'location':
-        return new LocationMdRepo(dir).create(input)
+        return new LocationRepo(dir).create(input)
       case 'worldview':
-        return new WorldviewMdRepo(dir).create(input)
+        return new WorldviewRepo(dir).create(input)
+      case 'item':
+        return new ItemRepo(dir).create(input)
       default:
         throw new Error(NOT_IMPLEMENTED)
     }
@@ -58,16 +64,22 @@ export class MemoryEntityService {
   ): Promise<MemoryEntity> {
     const dir = await this.projectService.resolveDir(projectId)
     if (type === 'location') {
-      const repo = new LocationMdRepo(dir)
+      const repo = new LocationRepo(dir)
       const existing = (await repo.list()).find((e) => e.id === id)
       if (!existing) throw new Error(`地点不存在：${id}`)
-      return (await repo.update(existing.name, patch)) ?? existing
+      return (await repo.update(id, patch)) ?? existing
     }
     if (type === 'worldview') {
-      const repo = new WorldviewMdRepo(dir)
+      const repo = new WorldviewRepo(dir)
       const existing = (await repo.list()).find((e) => e.id === id)
       if (!existing) throw new Error(`世界观条目不存在：${id}`)
-      return (await repo.update(existing.name, patch)) ?? existing
+      return (await repo.update(id, patch)) ?? existing
+    }
+    if (type === 'item') {
+      const repo = new ItemRepo(dir)
+      const existing = (await repo.list()).find((e) => e.id === id)
+      if (!existing) throw new Error(`道具不存在：${id}`)
+      return (await repo.update(id, patch)) ?? existing
     }
     throw new Error(NOT_IMPLEMENTED)
   }
@@ -75,15 +87,21 @@ export class MemoryEntityService {
   async delete(projectId: string, type: MemoryEntityType, id: string): Promise<void> {
     const dir = await this.projectService.resolveDir(projectId)
     if (type === 'location') {
-      const repo = new LocationMdRepo(dir)
+      const repo = new LocationRepo(dir)
       const existing = (await repo.list()).find((e) => e.id === id)
-      if (existing) await repo.delete(existing.name)
+      if (existing) await repo.delete(id)
       return
     }
     if (type === 'worldview') {
-      const repo = new WorldviewMdRepo(dir)
+      const repo = new WorldviewRepo(dir)
       const existing = (await repo.list()).find((e) => e.id === id)
-      if (existing) await repo.delete(existing.name)
+      if (existing) await repo.delete(id)
+      return
+    }
+    if (type === 'item') {
+      const repo = new ItemRepo(dir)
+      const existing = (await repo.list()).find((e) => e.id === id)
+      if (existing) await repo.delete(id)
       return
     }
     throw new Error(NOT_IMPLEMENTED)

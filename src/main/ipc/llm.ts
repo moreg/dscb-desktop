@@ -180,7 +180,7 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   safeHandle('llm:setFeatureRouting', async (_e, raw: unknown) => {
     if (!raw || typeof raw !== 'object') throw new Error('PROVIDER_INVALID: routing required')
     const incoming = raw as Record<string, unknown>
-    const validCategories = new Set(['chapter', 'review', 'humanize', 'opening', 'auxiliary'])
+    const validCategories = new Set(['chapter', 'review', 'humanize', 'opening', 'auxiliary', 'ask'])
     const cfg = await secret.read()
     const ids = new Set(cfg.providers.map((p) => p.id))
     const cleaned: Record<string, { providerId: string; model?: string }> = {}
@@ -212,9 +212,17 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     return Boolean(p.apiKey)
   })
 
-  // 联通测试
+  // 联通测试（默认对 active provider，可选传 providerId 指定单卡测试）
   safeHandle('llm:ping', async () => {
     return service.ping()
+  })
+
+  // 联通测试（指定 providerId，用于设置页每张 provider 卡片的独立测试）
+  safeHandle('llm:pingProvider', async (_e, id: unknown) => {
+    if (typeof id !== 'string' || id.trim() === '') {
+      throw new Error('PROVIDER_INVALID: id required')
+    }
+    return service.ping(id.trim())
   })
 
   // 列出 agy 可用模型（供前端做模型下拉选择）

@@ -27,6 +27,51 @@ interface Props {
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
+/**
+ * ping 通道错误码 → 中文文案。
+ * 被全局「测试当前连通」按钮和 ProviderRow 卡片级「测试」按钮共用，
+ * 错误码定义见 src/main/data/llm-service.ts 的 pingOne() 各分支。
+ */
+const PING_ERROR_MAP: Record<string, string> = {
+  NO_KEY: '尚未配置 API Key',
+  LLM_NOT_CONFIGURED: '尚未配置 provider',
+  LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
+  AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+  CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+  LLM_RATE_LIMIT: '请求过于频繁',
+  LLM_TIMEOUT: '连通测试超时',
+  LLM_REQUEST_FAILED: '请求失败',
+  NETWORK_ERROR: '网络错误',
+  AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
+  AGY_SPAWN_FAILED: 'agy CLI 启动失败',
+  'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络',
+  CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
+  CODEX_MODEL_ERROR: 'codex 模型配置有误',
+  // codex 网络错误
+  'tls handshake': 'TLS 握手失败，请检查网络代理设置',
+  'stream disconnected': '连接中断，请检查网络稳定性',
+  Reconnecting: '正在重连，请检查网络'
+}
+
+/**
+ * 把后端 ping 失败时的机器可读错误码翻译成中文展示文案。
+ * 匹配优先级：精确 → 包含（处理动态错误）→ AGY_ERROR/CODEX_ERROR 前缀 → 原文。
+ */
+function formatPingError(err: string): string {
+  // 精确匹配优先
+  const exact = PING_ERROR_MAP[err]
+  if (exact) return exact
+  const lowerErr = err.toLowerCase()
+  // 再尝试 key 包含匹配（处理 Agent execution terminated 这类动态错误）
+  for (const [key, val] of Object.entries(PING_ERROR_MAP)) {
+    if (lowerErr.includes(key.toLowerCase())) return val
+  }
+  // 最后做 AGY_ERROR/CODEX_ERROR 前缀匹配，截断到 80 字避免布局溢出
+  if (err.startsWith('AGY_ERROR: ')) return `agy 出错：${err.slice(11).slice(0, 80)}`
+  if (err.startsWith('CODEX_ERROR: ')) return `codex 出错：${err.slice(13).slice(0, 80)}`
+  return err || '未知错误'
+}
+
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
@@ -326,46 +371,7 @@ export default function SettingsPage(_: Props) {
           text: `✓ 连通 · ${r.providerLabel ?? ''} · 模型 ${r.model ?? 'unknown'}`
         })
       } else {
-        const map: Record<string, string> = {
-          NO_KEY: '尚未配置 API Key',
-          LLM_NOT_CONFIGURED: '尚未配置 provider',
-          LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
-          AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
-          CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
-          LLM_RATE_LIMIT: '请求过于频繁',
-          LLM_TIMEOUT: '连通测试超时',
-          LLM_REQUEST_FAILED: '请求失败',
-          NETWORK_ERROR: '网络错误',
-          AGY_NOT_FOUND: '未检测到 agy CLI，请先安装并运行 agy 登录',
-          AGY_SPAWN_FAILED: 'agy CLI 启动失败',
-          'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络',
-          CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装并运行 codex login',
-          CODEX_MODEL_ERROR: 'codex 模型配置有误',
-          // codex 网络错误
-          'tls handshake': 'TLS 握手失败，请检查网络代理设置',
-          'stream disconnected': '连接中断，请检查网络稳定性',
-          'Reconnecting': '正在重连，请检查网络'
-        }
-        const err = r.error ?? ''
-        // 精确匹配优先，再尝试包含匹配（AGY_ERROR: xxx / CODEX_ERROR: xxx）
-        let msg = map[err]
-        if (!msg) {
-          const lowerErr = err.toLowerCase()
-          // 先尝试 key 包含匹配（处理 Agent execution terminated 这类动态错误）
-          for (const [key, val] of Object.entries(map)) {
-            if (lowerErr.includes(key.toLowerCase())) {
-              msg = val
-              break
-            }
-          }
-          // 再尝试前缀匹配
-          if (!msg) {
-            if (err.startsWith('AGY_ERROR: ')) msg = `agy 出错：${err.slice(11).slice(0, 80)}`
-            else if (err.startsWith('CODEX_ERROR: ')) msg = `codex 出错：${err.slice(13).slice(0, 80)}`
-            else msg = err || '未知错误'
-          }
-        }
-        setPingResult({ ok: false, text: '✗ ' + msg })
+        setPingResult({ ok: false, text: '✗ ' + formatPingError(r.error ?? '') })
       }
     } catch {
       setPingResult({ ok: false, text: '✗ 测试失败' })
@@ -1226,7 +1232,7 @@ export default function SettingsPage(_: Props) {
                     去 AI 味规则（分节可编辑）
                   </h3>
                   <p className="muted" style={{ marginTop: 6, fontSize: 12.5 }}>
-                    这些规则会注入「去 AI 味」的扫描与改写。改完点「保存规则」生效——保存后影响正文润色、开书去 AI 等所有 deslop 流程。
+                    这些规则会注入「去 AI 味」的扫描与改写。改完点「保存规则」生效——保存后影响正文润色等所有 deslop 流程。
                     与内置默认完全相同的小节不会存储、仍随内置升级；清空某节等于停用该规则。最毒句式正则、排比正则、心理词是确定性扫描的内核，锁定只读，避免写错正则让扫描崩溃。
                   </p>
                 </div>
@@ -2044,6 +2050,9 @@ function ProviderRow({
     typeof provider.temperature === 'number' ? provider.temperature : null
   )
   const [savedHint, setSavedHint] = useState(false)
+  // 卡片级连通测试：每张卡片独立的 loading + 结果，多卡片可并发不互阻塞
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
   // 防抖定时器：拖动/键盘连续调节时，停止输入 400ms 后才写盘，避免狂发请求
   const tempTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // provider 切换后同步草稿（例如重新拉取列表）
@@ -2106,6 +2115,30 @@ function ProviderRow({
       setTempDraft(
         typeof provider.temperature === 'number' ? provider.temperature : null
       )
+    }
+  }
+
+  /**
+   * 卡片级连通测试：调 llm:pingProvider，命中该 provider（不切换 active）。
+   * 每张卡片独立 loading / 结果，多卡片可并发互不阻塞。
+   */
+  const handleTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const r = await window.api.pingProvider(provider.id)
+      if (r.ok) {
+        setTestResult({
+          ok: true,
+          text: `✓ 连通 · 模型 ${r.model && r.model !== 'default' ? r.model : 'default'}`
+        })
+      } else {
+        setTestResult({ ok: false, text: '✗ ' + formatPingError(r.error ?? '') })
+      }
+    } catch {
+      setTestResult({ ok: false, text: '✗ 测试失败' })
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -2217,11 +2250,39 @@ function ProviderRow({
             )}
           </div>
         </div>
-        <div className="btn-group">
+        <div className="btn-group" style={{ flexShrink: 0 }}>
           {!active ? (
             <button className="btn btn-sm" onClick={onActivate}>启用</button>
           ) : null}
+          {/* 卡片级连通测试：独立 loading，可与其他卡片并发 */}
+          <button
+            className="btn btn-sm"
+            onClick={handleTest}
+            disabled={testing}
+            title="测试该 provider 的连通性（不影响当前 active）"
+          >
+            {testing ? '测试中…' : '测试'}
+          </button>
           <button className="btn btn-sm btn-danger" onClick={onDelete}>删除</button>
+          {/* 测试结果行内显示：超长截断 + title 悬浮查看完整文本 */}
+          {testResult && (
+            <span
+              title={testResult.text}
+              style={{
+                marginLeft: 6,
+                fontSize: 12,
+                color: testResult.ok ? 'var(--success)' : 'var(--vermilion, #e53935)',
+                fontWeight: 500,
+                maxWidth: 220,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                alignSelf: 'center'
+              }}
+            >
+              {testResult.text}
+            </span>
+          )}
         </div>
       </div>
     </li>
@@ -2430,8 +2491,8 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
               }}
             >
               {isAg
-                ? <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成 Google 登录。</>
-                : <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成 ChatGPT 登录。</>
+                ? <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成登录。</>
+                : <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成登录。</>
               }
             </div>
           </div>

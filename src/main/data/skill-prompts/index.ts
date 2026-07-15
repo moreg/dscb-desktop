@@ -117,6 +117,11 @@ function renderBenchmarkRecallMarkdown(r: BenchmarkRecallPrompt): string {
   return lines.join('\n')
 }
 
+/**
+ * 旧的单段人化 prompt（9 条泛则，无 7 Gate 方法论）。
+ * @deprecated 已被 DeslopService.deslop（7 Gate pipeline）取代，仅供 WriteService.humanizeSegment
+ * 降级路径使用。新代码应走 deslop pipeline 而非此函数。
+ */
 export function buildHumanizerPrompt(
   genre: string | undefined,
   violationType: string,

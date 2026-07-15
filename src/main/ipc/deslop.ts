@@ -85,7 +85,8 @@ export function registerDeslopIpc(
           whitelist,
           bannedWords,
           textOverrides,
-          styleContext
+          styleContext,
+          meta: { projectId: validated.projectId }
         })
         win?.webContents.send('deslop:token', {
           requestId: validated.requestId,

@@ -4,7 +4,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { TeardownRepository } from '../src/main/data/teardown/teardown-repository'
 import { isAllowedProductPath, splitByFileMarker } from '../src/main/data/teardown/teardown-service'
-import { isSafeRelPath } from '../src/main/data/opening-service'
+import { isSafeRelPath } from '../src/main/data/opening-markdown'
 
 const TEST_ROOT = join(tmpdir(), `security-test-${Date.now()}`)
 
@@ -114,7 +114,7 @@ describe('TeardownRepository 写路径防穿越（S1 集成）', () => {
   })
 })
 
-describe('isSafeRelPath 开书落盘路径白名单（C1 修复）', () => {
+describe('isSafeRelPath 设定/大纲路径白名单（C1 修复）', () => {
   const allowed = ['设定', '大纲']
 
   it('允许白名单前缀', () => {

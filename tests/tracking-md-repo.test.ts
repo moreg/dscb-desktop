@@ -130,4 +130,81 @@ describe('TrackingMdRepo', () => {
     expect(result!.timeline).toBe('')
     expect(result!.openIssues).toEqual([])
   })
+
+  it('读开书格式时间线（H1 + 裸表，无 H2 对照节）', async () => {
+    // 开书流程产出的格式：# 时间线 + 裸表，无 H2 section
+    const openingTimeline = `**版本**：v1.0（2026-01-01 创建）
+
+# 时间线
+
+| 章节 | 事件名 | 时间跨度 | 涉及角色 | 详细描述 |
+|---|---|---|---|---|
+| 第 1 章 | 开端 | 1 天 | 主角 | 故事开始 |
+| 第 5 章 | 初露锋芒 | - | 林远 | 林远击败赵乾 |
+`
+    await writeFile(path.join(dir, '追踪', '时间线.md'), openingTimeline)
+    const result = await new TrackingMdRepo(dir).read(15)
+    expect(result).not.toBeNull()
+    // 回退到 doc.body，裸表内容应注入 timeline 字段
+    expect(result!.timeline).toContain('开端')
+    expect(result!.timeline).toContain('初露锋芒')
+    expect(result!.timeline).toContain('林远击败赵乾')
+  })
+
+  it('readForDisplay 返回全量数据（不按章号过滤、不截断进度、含全部问题）', async () => {
+    await writeFile(path.join(dir, '追踪', '角色状态.md'), CHARACTER_STATES)
+    await writeFile(path.join(dir, '追踪', '时间线.md'), TIMELINE)
+    await writeFile(path.join(dir, '追踪', '上下文.md'), PROGRESS)
+    await writeFile(path.join(dir, '追踪', '问题记录.md'), ISSUES)
+
+    const result = await new TrackingMdRepo(dir).readForDisplay()
+    expect(result).not.toBeNull()
+
+    // 状态变更：全量（含第 50/100 章），不按章号过滤
+    expect(result!.stateChanges).toHaveLength(4)
+    expect(result!.stateChanges[2].chapter).toBe(50)
+    expect(result!.stateChanges[3].chapter).toBe(100)
+
+    // 进度：全量 3 条（read 也是 3 条，但 readForDisplay 语义上不截断）
+    expect(result!.recentProgress).toHaveLength(3)
+
+    // openIssues：只含待处理/处理中（2 条）
+    expect(result!.openIssues).toHaveLength(2)
+
+    // allIssues：含全部（含已解决，3 条）
+    expect(result!.allIssues).toHaveLength(3)
+    expect(result!.allIssues[2].status).toBe('已解决')
+    expect(result!.allIssues[2].problem).toContain('称呼混乱')
+  })
+
+  it('readForDisplay 在追踪目录不存在时返回 null', async () => {
+    const emptyDir = await mkdtemp(path.join(tmpdir(), 'aw-track-empty2-'))
+    const result = await new TrackingMdRepo(emptyDir).readForDisplay()
+    expect(result).toBeNull()
+  })
+
+  it('列数不齐的表格不崩溃（用户手写 markdown 常见）', async () => {
+    // 角色状态表 7 列，但后面有 3 列的附注行（parseTable 不区分连续块）
+    const malformed = `# 角色状态快照
+
+## 当前状态
+
+| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |
+|------|----------|----------|----------|----------|----------|----------|
+| 苏九 | 暗劲 | 中立 | 苟 | 罗盘 | 无 | 第 10 章 |
+
+> 附注（列数不齐的 pipe 行）：
+| 第150章 | 金句 | 补充 |
+`
+    await writeFile(path.join(dir, '追踪', '角色状态.md'), malformed)
+
+    // 不应抛 undefined.trim() 错误（之前会崩）
+    const result = await new TrackingMdRepo(dir).readForDisplay()
+    expect(result).not.toBeNull()
+    // 正常行应正确解析
+    const su = result!.characterStates.find((c) => c.name === '苏九')
+    expect(su).toBeDefined()
+    expect(su!.power).toBe('暗劲')
+    expect(su!.updateChapter).toBe(10)
+  })
 })
