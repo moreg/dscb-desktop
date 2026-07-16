@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mkdtemp, writeFile, readFile, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
+import {
+  ForeshadowingMdRepo,
+  parseChapterNum
+} from '../src/main/data/skill-format/foreshadowing-md-repo'
 
 const TRACKING_FS = `# 伏笔追踪
 
@@ -113,5 +116,46 @@ describe('ForeshadowingMdRepo (v4 single-source)', () => {
     await repo.collect('FB-001', 50)
     items = await repo.list()
     expect(items[0].actualCollect).toBe(50)
+  })
+
+  it('「卷1/卷2（主题）」不得解析为 expectedCollect=1（误报本章待回收）', async () => {
+    const table = `# 伏笔追踪
+
+| 伏笔编号 | 伏笔内容 | 伏笔类型 | 埋设章节 | 预计回收章节 | 实际回收章节 | 状态 |
+|----------|----------|----------|----------|-------------|-------------|------|
+| FB-140 | 苏九读人反将 | 设定 | 第 11 章 | 卷1/卷2（苏九"苟道"主线） | 未回收 | 已埋设 |
+| FB-141 | 正常章节号 | 设定 | 第 1 章 | 第 6 章 | 未回收 | 已埋设 |
+| FB-142 | 第N/M章 | 设定 | 第 3 章 | 第 30/65 章 | 未回收 | 已埋设 |
+`
+    await writeFile(path.join(root, '追踪', '伏笔.md'), table, 'utf-8')
+    const items = await new ForeshadowingMdRepo(root).list()
+    const fb140 = items.find((f) => f.id === 'FB-140')!
+    const fb141 = items.find((f) => f.id === 'FB-141')!
+    const fb142 = items.find((f) => f.id === 'FB-142')!
+    expect(fb140.expectedCollect).toBeUndefined()
+    expect(fb140.status).toBe('planted')
+    expect(fb141.expectedCollect).toBe(6)
+    expect(fb142.expectedCollect).toBe(30)
+    // 模拟编辑器：第 1 章待回收不应命中卷主题伏笔
+    const dueCh1 = items.filter((f) => f.status === 'planted' && f.expectedCollect === 1)
+    expect(dueCh1).toEqual([])
+  })
+})
+
+describe('parseChapterNum', () => {
+  it('parses 第 N 章 forms and pure numbers', () => {
+    expect(parseChapterNum('第 3 章')).toBe(3)
+    expect(parseChapterNum('第7章（本章破案回收）')).toBe(7)
+    expect(parseChapterNum('第 30/65 章')).toBe(30)
+    expect(parseChapterNum('12')).toBe(12)
+  })
+
+  it('rejects free-text volume labels that contain digits', () => {
+    expect(parseChapterNum('卷1/卷2（苏九"苟道"主线）')).toBeUndefined()
+    expect(parseChapterNum('卷2开端')).toBeUndefined()
+    expect(parseChapterNum('卷 2 收尾阶段')).toBeUndefined()
+    expect(parseChapterNum('未回收')).toBeUndefined()
+    expect(parseChapterNum('续篇')).toBeUndefined()
+    expect(parseChapterNum('')).toBeUndefined()
   })
 })

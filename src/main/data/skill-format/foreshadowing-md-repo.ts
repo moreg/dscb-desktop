@@ -204,11 +204,28 @@ function unmapStatus(s: ForeshadowingStatus): string {
   }
 }
 
-/** 「第 3 章」→ 3；「第 30/65 章」→ 30；「未回收」/「续篇」/「待定」→ undefined */
-function parseChapterNum(text: string): number | undefined {
+/**
+ * 解析章节号字段。
+ * - 「第 3 章」→ 3
+ * - 「第 30/65 章」→ 30（取第一个章节号）
+ * - 「第 7 章（本章破案回收）」→ 7
+ * - 纯数字「12」→ 12
+ * - 「未回收」/「续篇」/「待定」/「卷1/卷2（…）」等非章节表述 → undefined
+ *
+ * 注意：禁止用裸 /(\d+)/ 扫整串——会把「卷1/卷2（苟道主线）」误解析成 expectedCollect=1，
+ * 导致第 1 章编辑器「本章待回收」误报一堆跨卷母题伏笔。
+ */
+export function parseChapterNum(text: string): number | undefined {
   if (!text) return undefined
-  const m = text.match(/(\d+)/)
-  return m ? parseInt(m[1], 10) : undefined
+  const t = text.trim()
+  if (!t) return undefined
+  if (/^(未回收|未定|未埋设|续篇|待定|—|－|-|\/)$/.test(t)) return undefined
+  // 优先匹配「第 N 章」类（允许第 N/M 章、第 N 章（备注））
+  const labeled = t.match(/第\s*(\d+)/)
+  if (labeled) return parseInt(labeled[1], 10)
+  // 仅当整段是纯数字时才采纳，避免「卷1/卷2…」取到 1
+  if (/^\d+$/.test(t)) return parseInt(t, 10)
+  return undefined
 }
 
 function fmtChapter(n: number | undefined, fallback = '未定'): string {
