@@ -648,6 +648,19 @@ export interface RendererApi {
   ) => Promise<{ ok: boolean; error?: string }>
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
+  /**
+   * 续写完成后自动同步：extract → applyMemory → applySettingsPatches(onlyAuto)。
+   * autoMemorySync=false 时返回 null；失败不抛（errors 在结果内）。
+   */
+  syncChapterAfterWrite: (
+    projectId: string,
+    chapterNumber: number,
+    content: string
+  ) => Promise<{
+    memory: MemoryApplyResult
+    settings: SettingsApplyResult
+    extraction: MemoryExtraction
+  } | null>
   /** 记忆自动部分应用前的 diff 预览 */
   previewMemoryApply: (
     projectId: string,
@@ -774,6 +787,9 @@ export interface RendererApi {
   /** 设定随书进化：off | confirm_all | auto_high */
   getSettingsEvolution: () => Promise<SettingsEvolutionMode>
   setSettingsEvolution: (mode: SettingsEvolutionMode) => Promise<SettingsEvolutionMode>
+  /** 续写完成后自动同步记忆与设定（默认 true） */
+  getAutoMemorySync: () => Promise<boolean>
+  setAutoMemorySync: (enabled: boolean) => Promise<boolean>
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
   getCostAlertConfig: () => Promise<CostAlertConfig>
   setCostAlertConfig: (cfg: Partial<CostAlertConfig>) => Promise<CostAlertConfig>

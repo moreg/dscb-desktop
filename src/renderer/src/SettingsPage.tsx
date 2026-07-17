@@ -216,6 +216,8 @@ export default function SettingsPage(_: Props) {
   const [settingsEvolution, setSettingsEvolution] = useState<
     'off' | 'confirm_all' | 'auto_high'
   >('auto_high')
+  /** 续写完成后自动同步记忆与设定 */
+  const [autoMemorySync, setAutoMemorySync] = useState(true)
   const [pricing, setPricing] = useState({ inputRate: 1, outputRate: 3 })
   const [dailyGoal, setDailyGoal] = useState(3000)
 
@@ -335,6 +337,11 @@ export default function SettingsPage(_: Props) {
     void (window.api as { getSettingsEvolution?: () => Promise<'off' | 'confirm_all' | 'auto_high'> })
       .getSettingsEvolution?.()
       .then((m) => m && setSettingsEvolution(m))
+    void (window.api as { getAutoMemorySync?: () => Promise<boolean> })
+      .getAutoMemorySync?.()
+      .then((v) => {
+        if (typeof v === 'boolean') setAutoMemorySync(v)
+      })
   // P17-A：按项目 / 按章节聚合
   const [byProject, setByProject] = useState<ProjectUsage[]>([])
   const [byChapter, setByChapter] = useState<ChapterUsage[]>([])
@@ -898,6 +905,35 @@ export default function SettingsPage(_: Props) {
                   <option value="confirm_all">全部手动确认</option>
                   <option value="off">关闭（不写设定）</option>
                 </select>
+              </div>
+              <div className="field" style={{ marginTop: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={autoMemorySync}
+                    onChange={async (e) => {
+                      const v = e.target.checked
+                      setAutoMemorySync(v)
+                      const api = window.api as {
+                        setAutoMemorySync?: (enabled: boolean) => Promise<boolean>
+                      }
+                      if (api.setAutoMemorySync) {
+                        const next = await api.setAutoMemorySync(v)
+                        setAutoMemorySync(next)
+                        setMsg({
+                          kind: 'ok',
+                          text: next
+                            ? '已开启：续写完成后自动同步记忆与设定'
+                            : '已关闭自动同步（仍可在流程面板手动同步）'
+                        })
+                      }
+                    }}
+                  />
+                  续写完成后自动同步记忆与设定
+                </label>
+                <p className="muted" style={{ fontSize: 11.5, margin: '6px 0 0' }}>
+                  开启后，单章/批量续写成功会后台提取并写入上下文、角色状态、时间线及高置信设定补丁；不会在每次按键或草稿自动保存时触发。
+                </p>
               </div>
               <div className="field" style={{ marginTop: 8 }}>
                 <label>每日字数目标</label>

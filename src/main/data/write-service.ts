@@ -673,6 +673,137 @@ export class WriteService {
     return writer.applyAutomatic(extraction)
   }
 
+  /**
+   * 续写完成后自动同步记忆与设定。
+   * extract → applyMemory（自动部分）→ applySettingsPatches(onlyAuto)。
+   * autoMemorySync=false 时返回 null；失败只记 log/errors，不抛。
+   */
+  async syncChapterAfterWrite(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    opts?: { skipIfDisabled?: boolean }
+  ): Promise<{
+    memory: MemoryApplyResult
+    settings: SettingsApplyResult
+    extraction: MemoryExtraction
+  } | null> {
+    const skipIfDisabled = opts?.skipIfDisabled !== false
+    try {
+      if (skipIfDisabled && !(await this.isAutoMemorySyncEnabled())) {
+        return null
+      }
+    } catch (err) {
+      console.warn('[syncChapterAfterWrite] Failed to read autoMemorySync:', err)
+      // 读设置失败时仍尝试同步（默认开启）
+    }
+
+    const emptyMemory: MemoryApplyResult = {
+      applied: {
+        characters: 0,
+        locations: 0,
+        items: 0,
+        foreshadowings: 0,
+        plotPoints: 0,
+        stateChanges: 0,
+        collected: 0
+      },
+      errors: []
+    }
+    const emptySettings: SettingsApplyResult = {
+      applied: 0,
+      skipped: 0,
+      errors: [],
+      appliedDiffs: []
+    }
+    const emptyExtraction: MemoryExtraction = {
+      chapterNumber,
+      newCharacters: [],
+      newLocations: [],
+      newItems: [],
+      newForeshadowings: [],
+      newPlotPoints: [],
+      characterStateChanges: [],
+      collectedForeshadowings: [],
+      settingsPatches: [],
+      settingsSuggestions: []
+    }
+
+    if (!content?.trim()) {
+      return {
+        memory: { ...emptyMemory, errors: ['正文为空，跳过同步'] },
+        settings: emptySettings,
+        extraction: emptyExtraction
+      }
+    }
+
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+      let knownCharacters: string[] = []
+      try {
+        const list = await new CharacterRepo(dir).list()
+        if (list.length > 0) knownCharacters = list.map((c) => c.name)
+      } catch (err) {
+        console.warn('[syncChapterAfterWrite] Failed to list character cards:', err)
+      }
+      if (knownCharacters.length === 0) {
+        try {
+          knownCharacters = (await new CharacterRepository(dir).list()).map((c) => c.name)
+        } catch (err) {
+          console.warn('[syncChapterAfterWrite] Failed to list characters:', err)
+        }
+      }
+
+      const memRaw = await this.flow.extractMemoryStream(
+        content,
+        chapterNumber,
+        knownCharacters,
+        { meta: { feature: 'autoMemorySync', projectId, chapterNumber } }
+      )
+      const extraction = parseMemoryExtractionJson(memRaw, chapterNumber)
+
+      let memory = emptyMemory
+      try {
+        memory = await this.applyMemory(projectId, extraction)
+      } catch (err) {
+        const msg = (err as Error).message
+        console.warn('[syncChapterAfterWrite] applyMemory failed:', err)
+        memory = { ...emptyMemory, errors: [msg] }
+      }
+
+      let settings = emptySettings
+      try {
+        settings = await this.applySettingsPatches(projectId, extraction, {
+          onlyAuto: true
+        })
+      } catch (err) {
+        const msg = (err as Error).message
+        console.warn('[syncChapterAfterWrite] applySettingsPatches failed:', err)
+        settings = { ...emptySettings, errors: [msg] }
+      }
+
+      return { memory, settings, extraction }
+    } catch (err) {
+      const msg = (err as Error).message
+      console.warn('[syncChapterAfterWrite] failed:', err)
+      return {
+        memory: { ...emptyMemory, errors: [msg] },
+        settings: emptySettings,
+        extraction: emptyExtraction
+      }
+    }
+  }
+
+  private async isAutoMemorySyncEnabled(): Promise<boolean> {
+    if (!this.settings) return true
+    try {
+      const s = await this.settings.get()
+      return s.autoMemorySync !== false
+    } catch {
+      return true
+    }
+  }
+
   /** 记忆自动部分应用前的 diff 预览 */
   async previewMemoryApply(
     projectId: string,
@@ -1054,6 +1185,22 @@ export class WriteService {
     } catch (err) {
       console.warn('[runFullFlowForChapter] Failed to extract memory:', err)
       // skip
+    }
+
+    // 4.5 自动落盘记忆与设定（与单章 syncChapterAfterWrite 一致；受 autoMemorySync 控制）
+    if (await this.isAutoMemorySyncEnabled()) {
+      onProgress('memoryApply')
+      try {
+        await this.applyMemory(projectId, memory)
+      } catch (err) {
+        console.warn('[runFullFlowForChapter] Failed to apply memory:', err)
+      }
+      onProgress('settingsApply')
+      try {
+        await this.applySettingsPatches(projectId, memory, { onlyAuto: true })
+      } catch (err) {
+        console.warn('[runFullFlowForChapter] Failed to apply settings patches:', err)
+      }
     }
 
     // 5. 节奏评估（直接传 content）

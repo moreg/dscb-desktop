@@ -474,17 +474,95 @@ describe('WriteService', () => {
       const steps: string[] = []
       await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
 
+      // autoMemorySync 默认 true → 提取后立即 apply
       expect(steps).toEqual([
         'generating',
         'audit',
         'outlineCheck',
         'memoryExtract',
+        'memoryApply',
+        'settingsApply',
         'rhythmEval',
         'figureGen',
         'done'
       ])
 
       genSpy.mockRestore()
+    })
+
+    it('applies memory and settings after extract when autoMemorySync enabled', async () => {
+      const llm = mockLlm('')
+      const settings = {
+        getProjectsRoot: async (fallback: string) => fallback,
+        get: async () => ({ autoMemorySync: true, settingsEvolution: 'auto_high' })
+      } as unknown as SettingsRepository
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
+
+      const genSpy = vi
+        .spyOn(service, 'generateChapterStream')
+        .mockResolvedValue('正文内容')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const flow = (service as unknown as { flow: any }).flow
+      vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
+      vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(
+        JSON.stringify({
+          newPlotPoints: [{ title: '事件', event: '发生了', coolPoint: '' }],
+          characterStateChanges: [],
+          newCharacters: [],
+          newLocations: [],
+          newItems: [],
+          newForeshadowings: [],
+          collectedForeshadowings: []
+        })
+      )
+      vi.spyOn(flow, 'evaluateRhythmStream').mockResolvedValue('{}')
+      vi.spyOn(flow, 'generateFigureStream').mockResolvedValue('{}')
+
+      const applyMemSpy = vi.spyOn(service, 'applyMemory')
+      const applySetSpy = vi.spyOn(service, 'applySettingsPatches')
+
+      await service.runFullFlowForChapter(projectId, 1, () => {})
+
+      expect(applyMemSpy).toHaveBeenCalledTimes(1)
+      expect(applySetSpy).toHaveBeenCalledWith(
+        projectId,
+        expect.objectContaining({ chapterNumber: 1 }),
+        { onlyAuto: true }
+      )
+
+      genSpy.mockRestore()
+      applyMemSpy.mockRestore()
+      applySetSpy.mockRestore()
+    })
+
+    it('skips memory apply when autoMemorySync is false', async () => {
+      const llm = mockLlm('')
+      const settings = {
+        getProjectsRoot: async (fallback: string) => fallback,
+        get: async () => ({ autoMemorySync: false, settingsEvolution: 'auto_high' })
+      } as unknown as SettingsRepository
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
+
+      const genSpy = vi
+        .spyOn(service, 'generateChapterStream')
+        .mockResolvedValue('正文')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const flow = (service as unknown as { flow: any }).flow
+      vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
+      vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue('{}')
+      vi.spyOn(flow, 'evaluateRhythmStream').mockResolvedValue('{}')
+      vi.spyOn(flow, 'generateFigureStream').mockResolvedValue('{}')
+
+      const applyMemSpy = vi.spyOn(service, 'applyMemory')
+      const steps: string[] = []
+      await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
+
+      expect(applyMemSpy).not.toHaveBeenCalled()
+      expect(steps).not.toContain('memoryApply')
+      expect(steps).toContain('memoryExtract')
+
+      genSpy.mockRestore()
+      applyMemSpy.mockRestore()
     })
 
     it('skips outline check when no detailed outline exists', async () => {

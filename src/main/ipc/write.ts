@@ -372,6 +372,28 @@ export function registerWriteIpc(service: WriteService): void {
   )
 
   safeHandle(
+    'write:syncChapterAfterWrite',
+    async (
+      _e,
+      payload: { projectId: string; chapterNumber: number; content: string }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          content: chapterContentSchema
+        }),
+        payload
+      )
+      return service.syncChapterAfterWrite(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.content
+      )
+    }
+  )
+
+  safeHandle(
     'write:previewMemoryApply',
     async (_e, payload: { projectId: string; extraction: MemoryExtraction }) => {
       return service.previewMemoryApply(payload.projectId, payload.extraction)

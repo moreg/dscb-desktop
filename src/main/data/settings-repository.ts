@@ -83,6 +83,11 @@ export interface AppSettings {
    * 设定随书进化：off 关闭；confirm_all 全部手动确认；auto_high 高置信自动应用（默认）
    */
   settingsEvolution?: 'off' | 'confirm_all' | 'auto_high'
+  /**
+   * 续写完成后自动同步记忆与设定（extract → applyMemory → applySettingsPatches）。
+   * 默认 true；与 settingsEvolution 独立。
+   */
+  autoMemorySync?: boolean
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -118,7 +123,8 @@ const DEFAULTS: AppSettings = {
   costAlert: DEFAULT_COST_ALERT,
   aiHighFreq: DEFAULT_AI_HIGH_FREQ,
   reviewRules: DEFAULT_REVIEW_RULES,
-  settingsEvolution: 'auto_high'
+  settingsEvolution: 'auto_high',
+  autoMemorySync: true
 }
 
 /** 续写规则覆盖白名单：只保留注册表内的 key、字符串值（空串=停用该节，保留） */
@@ -395,6 +401,10 @@ export class SettingsRepository {
     const se = stored.settingsEvolution
     const settingsEvolution =
       se === 'off' || se === 'confirm_all' || se === 'auto_high' ? se : DEFAULTS.settingsEvolution
+    const autoMemorySync =
+      typeof stored.autoMemorySync === 'boolean'
+        ? stored.autoMemorySync
+        : (DEFAULTS.autoMemorySync ?? true)
     return {
       ...DEFAULTS,
       ...stored,
@@ -411,7 +421,8 @@ export class SettingsRepository {
       chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides),
       reviewRules: sanitizeReviewRules(stored.reviewRules),
       deslopRules: sanitizeDeslopRules(stored.deslopRules),
-      settingsEvolution
+      settingsEvolution,
+      autoMemorySync
     }
   }
 

@@ -109,6 +109,19 @@ export function registerSettingsIpc(
     }
   )
 
+  safeHandle('settings:getAutoMemorySync', async (): Promise<boolean> => {
+    const all = await repo.get()
+    return all.autoMemorySync !== false
+  })
+  safeHandle(
+    'settings:setAutoMemorySync',
+    async (_e: IpcMainInvokeEvent, enabled: boolean): Promise<boolean> => {
+      const v = validateInput(z.boolean(), enabled)
+      await repo.update({ autoMemorySync: v })
+      return v
+    }
+  )
+
   // P13-C：用量预警配置
   safeHandle('settings:getCostAlert', async () => {
     return repo.getCostAlert()

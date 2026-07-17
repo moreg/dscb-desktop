@@ -378,6 +378,16 @@ const api = {
   },
   applyMemory: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
+  syncChapterAfterWrite: (
+    projectId: string,
+    chapterNumber: number,
+    content: string
+  ) =>
+    ipcRenderer.invoke('write:syncChapterAfterWrite', {
+      projectId,
+      chapterNumber,
+      content
+    }),
   previewMemoryApply: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:previewMemoryApply', { projectId, extraction }),
   previewSettingsApply: (projectId: string, extraction: MemoryExtraction) =>
@@ -604,6 +614,10 @@ const api = {
     ipcRenderer.invoke('settings:setSettingsEvolution', mode) as Promise<
       'off' | 'confirm_all' | 'auto_high'
     >,
+  getAutoMemorySync: () =>
+    ipcRenderer.invoke('settings:getAutoMemorySync') as Promise<boolean>,
+  setAutoMemorySync: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:setAutoMemorySync', enabled) as Promise<boolean>,
   // P13-C：用量预警配置
   getCostAlertConfig: () => ipcRenderer.invoke('settings:getCostAlert'),
   setCostAlertConfig: (cfg: { enabled?: boolean; warning?: number; exceeded?: number }) =>

@@ -1072,6 +1072,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
       // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
       void runPostGenerateAudit(myGen, finalDraft)
+      // 后台自动同步记忆/设定（受 autoMemorySync 控制）；失败不阻断续写成功
+      {
+        const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
+        const fullContent = initialDraft + (receipt ? stripped : finalDraft)
+        void runPostGenerateMemorySync(myGen, fullContent)
+      }
     } catch {
       if (genRef.current === myGen) {
         setGenerating(false)
@@ -1247,7 +1253,53 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
-
+  /**
+   * 续写成功后后台同步记忆/设定。
+   * autoMemorySync=false 时 API 返回 null；失败只 toast，不弹死框、不改续写成功态。
+   */
+  const runPostGenerateMemorySync = async (myGen: number, fullContent: string) => {
+    try {
+      const api = window.api as {
+        getAutoMemorySync?: () => Promise<boolean>
+        syncChapterAfterWrite?: (
+          projectId: string,
+          chapterNumber: number,
+          content: string
+        ) => Promise<{
+          memory: { errors?: string[] }
+          settings: { errors?: string[] }
+        } | null>
+      }
+      if (!api.syncChapterAfterWrite) return
+      if (api.getAutoMemorySync) {
+        const enabled = await api.getAutoMemorySync()
+        if (!enabled) return
+      }
+      if (genRef.current !== myGen) return
+      setUndoToast({ message: '正在同步记忆…', type: 'info' })
+      const sync = await api.syncChapterAfterWrite(projectId, chapterNumber, fullContent)
+      if (genRef.current !== myGen) return
+      if (sync === null) {
+        setUndoToast(null)
+        return
+      }
+      const errCount =
+        (sync.memory?.errors?.length ?? 0) + (sync.settings?.errors?.length ?? 0)
+      if (errCount > 0) {
+        setUndoToast({
+          message: '记忆同步部分失败（不影响续写）',
+          type: 'warning'
+        })
+      } else {
+        setUndoToast({ message: '已同步记忆与设定', type: 'info' })
+      }
+    } catch (err) {
+      console.warn('[runPostGenerateMemorySync]', err)
+      if (genRef.current === myGen) {
+        setUndoToast({ message: '记忆同步跳过', type: 'warning' })
+      }
+    }
+  }
 
   /** 扫描报告按 Gate 分组（A-G），每组内取前 20 条 */
   const deslopFindingsByGate = useMemo(() => {
