@@ -20,6 +20,7 @@ import { buildReviewReport } from './review-report-builder'
 import { WriteFlowService } from './write-flow-service'
 import { ReviewFlowService } from './review-flow-service'
 import { MemoryWriter } from './memory-writer'
+import { SettingsWriter, patchesFromWorldLocations } from './settings-writer'
 import { FigureHtmlRepo } from './skill-format/figure-html-repo'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
 import { TrackingMdRepo, type TrackingContext } from './skill-format/tracking-md-repo'
@@ -33,6 +34,7 @@ import type {
   BatchProgress,
   ChapterFlowResult,
   ChapterReviewReport,
+  SettingsEvolutionEntry,
   Character,
   ChapterDetail,
   FigureDraft,
@@ -40,6 +42,10 @@ import type {
   MemoryExtraction,
   MemoryApplyPreview,
   MemoryApplyResult,
+  SettingsApplyPreview,
+  SettingsApplyResult,
+  SettingsEvolutionMode,
+  SettingsPatch,
   OutlineDiffReport,
   PrevEndingState,
   ReviewCheckId,
@@ -182,6 +188,7 @@ export class WriteService {
       mainSynopsis: ctx.mainSynopsis,
       volumeOutline: ctx.volumeOutline,
       settings: ctx.settings,
+      settingsEvolution: ctx.settingsEvolution,
       chapterDetail: ctx.detail,
       prevDetail: ctx.prevDetail,
       prevTail: ctx.prevTail,
@@ -675,6 +682,55 @@ export class WriteService {
     return new MemoryWriter(dir).previewAutomatic(extraction)
   }
 
+  /** 设定补丁预览 */
+  async previewSettingsApply(
+    projectId: string,
+    extraction: MemoryExtraction
+  ): Promise<SettingsApplyPreview> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const patches = collectSettingsPatches(extraction)
+    return new SettingsWriter(dir).preview(
+      patches,
+      extraction.settingsSuggestions ?? []
+    )
+  }
+
+  /**
+   * 应用设定补丁。
+   * onlyAuto=true：仅 high 置信；false：应用全部可写补丁。
+   */
+  async applySettingsPatches(
+    projectId: string,
+    extraction: MemoryExtraction,
+    opts: { onlyAuto?: boolean } = {}
+  ): Promise<SettingsApplyResult> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const mode = await this.getSettingsEvolutionMode()
+    if (mode === 'off') {
+      return { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }
+    }
+    // confirm_all：跳过提取后的自动路径（onlyAuto=true），仅用户点「应用设定补丁」时写入
+    if (mode === 'confirm_all' && opts.onlyAuto === true) {
+      return { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }
+    }
+    const patches = collectSettingsPatches(extraction)
+    return new SettingsWriter(dir).applyPatches(extraction.chapterNumber, patches, {
+      onlyAuto: opts.onlyAuto === true
+    })
+  }
+
+  private async getSettingsEvolutionMode(): Promise<SettingsEvolutionMode> {
+    if (!this.settings) return 'auto_high'
+    try {
+      const s = await this.settings.get()
+      const m = (s as { settingsEvolution?: SettingsEvolutionMode }).settingsEvolution
+      if (m === 'off' || m === 'confirm_all' || m === 'auto_high') return m
+    } catch {
+      /* default */
+    }
+    return 'auto_high'
+  }
+
   /** 用户确认后：应用新增角色 */
   async applyNewCharacters(
     projectId: string,
@@ -684,13 +740,21 @@ export class WriteService {
     return new MemoryWriter(dir).applyNewCharacters(chars)
   }
 
-  /** 用户确认后：应用新增地点 */
+  /** 用户确认后：应用新增地点；world 级同时写入设定/世界观/地理 */
   async applyNewLocations(
     projectId: string,
-    locs: MemoryExtraction['newLocations']
+    locs: MemoryExtraction['newLocations'],
+    chapterNumber = 0
   ): Promise<number> {
     const dir = await this.projectService.resolveDir(projectId)
-    return new MemoryWriter(dir).applyNewLocations(locs)
+    const n = await new MemoryWriter(dir).applyNewLocations(locs)
+    const geo = patchesFromWorldLocations(locs)
+    if (geo.length > 0) {
+      await new SettingsWriter(dir).applyPatches(chapterNumber || 1, geo, {
+        onlyAuto: false
+      })
+    }
+    return n
   }
 
   /** 用户确认后：应用新增道具 */
@@ -972,7 +1036,9 @@ export class WriteService {
       newForeshadowings: [],
       newPlotPoints: [],
       characterStateChanges: [],
-      collectedForeshadowings: []
+      collectedForeshadowings: [],
+      settingsPatches: [],
+      settingsSuggestions: []
     }
     try {
       const memRaw = await this.flow.extractMemoryStream(
@@ -1538,10 +1604,19 @@ export class WriteService {
       // skip
     }
 
+    // 近期设定演进（正文已揭晓补丁，优先于旧底稿冲突项）
+    let settingsEvolution: SettingsEvolutionEntry[] = []
+    try {
+      settingsEvolution = await new SettingsWriter(dir).readRecentEvolution(5)
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load settings evolution:', err)
+    }
+
     return {
       mainSynopsis,
       volumeOutline,
       settings,
+      settingsEvolution,
       detail,
       prevDetail,
       prevTail,
@@ -1587,6 +1662,7 @@ interface ChapterContext {
   mainSynopsis: string
   volumeOutline?: VolumeOutline
   settings: SettingsContext | null
+  settingsEvolution: SettingsEvolutionEntry[]
   detail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
@@ -1609,6 +1685,7 @@ interface RenderInput {
   mainSynopsis: string
   volumeOutline?: VolumeOutline
   settings?: SettingsContext | null
+  settingsEvolution?: SettingsEvolutionEntry[]
   chapterDetail?: ChapterDetail
   prevDetail?: ChapterDetail
   prevTail: string
@@ -1684,6 +1761,13 @@ function renderUserPrompt(input: RenderInput): string {
   // 1.1 项目设定（题材定位/世界观/势力/规则文档）
   if (input.settings) {
     parts.push(...renderSettingsSection(input.settings, input.characters))
+  }
+  // 1.1b 近期设定演进（正文已揭晓；与旧底稿冲突时以演进为准）
+  if (input.settingsEvolution && input.settingsEvolution.length > 0) {
+    parts.push('## 近期设定演进（以正文已揭晓为准，优先于旧底稿冲突项）')
+    for (const e of input.settingsEvolution) {
+      parts.push(`- ${e.chapter} · ${e.file}：${e.summary}`)
+    }
   }
 
   // 1.2 卷级定位（卷核心/情绪弧线/爽点节奏/伏笔规划）
@@ -2089,6 +2173,13 @@ function normalizeName(name: string): string {
  * 势力档案按本章出场角色筛选——若本章出场角色能匹配到势力文件名，只注入匹配的；
  * 无匹配则全部注入（兜底），避免遗漏关键势力信息。
  */
+/** 汇总记忆提取中的设定补丁（含 world 级地点） */
+function collectSettingsPatches(extraction: MemoryExtraction): SettingsPatch[] {
+  const fromExtract = extraction.settingsPatches ?? []
+  const fromLocs = patchesFromWorldLocations(extraction.newLocations ?? [])
+  return [...fromExtract, ...fromLocs]
+}
+
 function renderSettingsSection(settings: SettingsContext, characters: Character[]): string[] {
   const parts: string[] = []
   const hasContent =

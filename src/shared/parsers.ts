@@ -65,7 +65,9 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
     newForeshadowings: [],
     newPlotPoints: [],
     characterStateChanges: [],
-    collectedForeshadowings: []
+    collectedForeshadowings: [],
+    settingsPatches: [],
+    settingsSuggestions: []
   }
   try {
     const m = raw.match(/\{[\s\S]*\}/)
@@ -83,6 +85,10 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
         : [],
       collectedForeshadowings: Array.isArray(obj.collectedForeshadowings)
         ? obj.collectedForeshadowings
+        : [],
+      settingsPatches: Array.isArray(obj.settingsPatches) ? obj.settingsPatches : [],
+      settingsSuggestions: Array.isArray(obj.settingsSuggestions)
+        ? obj.settingsSuggestions
         : []
     }
   } catch {

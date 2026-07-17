@@ -212,6 +212,10 @@ export default function SettingsPage(_: Props) {
     exceeded: 30,
     blockOnExceeded: false
   })
+  /** 设定随书进化：off | confirm_all | auto_high */
+  const [settingsEvolution, setSettingsEvolution] = useState<
+    'off' | 'confirm_all' | 'auto_high'
+  >('auto_high')
   const [pricing, setPricing] = useState({ inputRate: 1, outputRate: 3 })
   const [dailyGoal, setDailyGoal] = useState(3000)
 
@@ -327,6 +331,10 @@ export default function SettingsPage(_: Props) {
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
   const refreshUsage = () => void window.api.getUsageSummary().then(setUsage)
   const refreshCostAlert = () => void window.api.getCostAlertConfig().then(setCostAlert)
+  const refreshSettingsEvolution = () =>
+    void (window.api as { getSettingsEvolution?: () => Promise<'off' | 'confirm_all' | 'auto_high'> })
+      .getSettingsEvolution?.()
+      .then((m) => m && setSettingsEvolution(m))
   // P17-A：按项目 / 按章节聚合
   const [byProject, setByProject] = useState<ProjectUsage[]>([])
   const [byChapter, setByChapter] = useState<ChapterUsage[]>([])
@@ -338,6 +346,7 @@ export default function SettingsPage(_: Props) {
     refreshRoot()
     refreshUsage()
     refreshCostAlert()
+    refreshSettingsEvolution()
     refreshAiHighFreq()
     refreshWritingTemplates()
     refreshChapterRules()
@@ -862,6 +871,34 @@ export default function SettingsPage(_: Props) {
           {activeTab === 'writing' && (
             <div className="card" style={{ maxWidth: 600 }}>
               <h3 className="sub">写作节奏</h3>
+              <div className="field" style={{ marginTop: 8 }}>
+                <label>设定随书进化</label>
+                <p className="muted" style={{ fontSize: 11.5, margin: '0 0 6px' }}>
+                  记忆同步时，把正文揭晓的世界观/势力等增量写入「设定/」（不改题材定位）。
+                </p>
+                <select
+                  className="input"
+                  value={settingsEvolution}
+                  onChange={async (e) => {
+                    const v = e.target.value as 'off' | 'confirm_all' | 'auto_high'
+                    setSettingsEvolution(v)
+                    const api = window.api as {
+                      setSettingsEvolution?: (
+                        m: 'off' | 'confirm_all' | 'auto_high'
+                      ) => Promise<'off' | 'confirm_all' | 'auto_high'>
+                    }
+                    if (api.setSettingsEvolution) {
+                      const next = await api.setSettingsEvolution(v)
+                      setSettingsEvolution(next)
+                      setMsg({ kind: 'ok', text: '设定进化策略已保存' })
+                    }
+                  }}
+                >
+                  <option value="auto_high">高置信自动应用（推荐）</option>
+                  <option value="confirm_all">全部手动确认</option>
+                  <option value="off">关闭（不写设定）</option>
+                </select>
+              </div>
               <div className="field" style={{ marginTop: 8 }}>
                 <label>每日字数目标</label>
                 <div className="row" style={{ gap: 8 }}>

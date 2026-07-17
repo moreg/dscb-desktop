@@ -653,6 +653,17 @@ export interface RendererApi {
     projectId: string,
     extraction: MemoryExtraction
   ) => Promise<MemoryApplyPreview>
+  /** 设定补丁预览 */
+  previewSettingsApply: (
+    projectId: string,
+    extraction: MemoryExtraction
+  ) => Promise<SettingsApplyPreview>
+  /** 应用设定补丁；onlyAuto 默认跟随设置 settingsEvolution */
+  applySettingsPatches: (
+    projectId: string,
+    extraction: MemoryExtraction,
+    onlyAuto?: boolean
+  ) => Promise<SettingsApplyResult>
   /** 用户确认后：应用新增角色 */
   applyNewCharacters: (
     projectId: string,
@@ -661,7 +672,8 @@ export interface RendererApi {
   /** 用户确认后：应用新增地点 */
   applyNewLocations: (
     projectId: string,
-    locs: MemoryExtraction['newLocations']
+    locs: MemoryExtraction['newLocations'],
+    chapterNumber?: number
   ) => Promise<number>
   /** 用户确认后：应用新增道具 */
   applyNewItems: (
@@ -1636,8 +1648,14 @@ export interface MemoryExtraction {
     appearance?: string
     abilities?: string
   }[]
-  /** 新增地点（需确认） */
-  newLocations: { name: string; category: string; notes: string }[]
+  /** 新增地点（需确认）；scope=world 时双写设定/世界观/地理 */
+  newLocations: {
+    name: string
+    category: string
+    notes: string
+    /** scene=仅记忆；world=常驻地理，写入设定/世界观/地理.md */
+    scope?: 'scene' | 'world'
+  }[]
   /** 新增道具（需确认） */
   newItems: { name: string; category: string; notes: string }[]
   /** 新增伏笔（需确认） */
@@ -1651,6 +1669,89 @@ export interface MemoryExtraction {
   characterStateChanges: { name: string; field: string; oldValue: string; newValue: string }[]
   /** 伏笔回收（自动更新） */
   collectedForeshadowings: { content: string; chapter: number }[]
+  /**
+   * 设定增量补丁（A 类：只 append，不改底稿）。
+   * 高置信可自动应用；见 settingsEvolution 配置。
+   */
+  settingsPatches?: SettingsPatch[]
+  /** 设定建议（C 类：仅提示手改题材定位等，永不自动写） */
+  settingsSuggestions?: SettingsSuggestion[]
+}
+
+/* ==========================================================
+   设定随书进化（A 类增量补丁）
+   ========================================================== */
+
+/** 设定补丁目标 */
+export type SettingsPatchTarget =
+  | 'worldview'
+  | 'faction'
+  | 'relation'
+  | 'customRule'
+  | 'geography'
+
+/** 设定增量补丁（MVP：仅 append） */
+export interface SettingsPatch {
+  target: SettingsPatchTarget
+  /** 文件名不含扩展名，如「力量体系」「青帮」；geography 固定地理 */
+  fileName: string
+  op: 'append_h2' | 'append_bullet'
+  /** 追加到哪个 H2；空则文件末尾新建 H2 */
+  sectionTitle?: string
+  /** 新 H2 标题或条目标题 */
+  title?: string
+  /** 补丁正文（短） */
+  content: string
+  /** 依据（≤80 字） */
+  reason?: string
+  confidence?: 'high' | 'medium' | 'low'
+}
+
+/** 设定建议（不自动写） */
+export interface SettingsSuggestion {
+  topic: string
+  reason: string
+  suggestedPath: string
+}
+
+/** 设定演进模式：off 关闭；confirm_all 全部确认；auto_high 高置信自动 */
+export type SettingsEvolutionMode = 'off' | 'confirm_all' | 'auto_high'
+
+export interface SettingsApplyDiffItem {
+  target: SettingsPatchTarget
+  fileName: string
+  op: string
+  title: string
+  content: string
+  reason?: string
+  confidence: 'high' | 'medium' | 'low'
+  /** 是否可自动（high 且非禁用目标） */
+  autoEligible: boolean
+  note?: string
+}
+
+export interface SettingsApplyPreview {
+  diffs: SettingsApplyDiffItem[]
+  autoCount: number
+  confirmCount: number
+  suggestionCount: number
+}
+
+export interface SettingsApplyResult {
+  applied: number
+  skipped: number
+  errors: string[]
+  appliedDiffs: SettingsApplyDiffItem[]
+}
+
+/** 近期设定演进（续写注入） */
+export interface SettingsEvolutionEntry {
+  date: string
+  chapter: string
+  kind: string
+  file: string
+  summary: string
+  status: string
 }
 
 /** 记忆自动应用前的 diff 预览项 */

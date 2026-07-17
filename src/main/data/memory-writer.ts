@@ -1,4 +1,5 @@
 import { join, resolve, relative, isAbsolute } from 'path'
+import { promises as fs } from 'fs'
 import { CharacterRepo } from './memory/character-repo'
 import { LocationRepo } from './memory/location-repo'
 import { ItemRepo } from './memory/item-repo'
@@ -183,7 +184,7 @@ export class MemoryWriter {
       }
     }
 
-    // 2.5 时间线
+    // 2.5 时间线（有情节点时写；缺文件会自动建骨架）
     if (extraction.newPlotPoints.length > 0) {
       try {
         await this.appendTimeline(extraction.chapterNumber, extraction.newPlotPoints)
@@ -192,11 +193,27 @@ export class MemoryWriter {
       }
     }
 
-    // 2.6 进度摘要
+    // 2.6 上下文进度：始终写入 追踪/上下文.md（续写会读最近 3 条）
     try {
-      await this.appendProgress(extraction.chapterNumber, extraction.newPlotPoints)
+      await this.appendProgress(
+        extraction.chapterNumber,
+        extraction.newPlotPoints,
+        extraction.characterStateChanges
+      )
     } catch (e) {
       errors.push(`进度摘要追加失败: ${(e as Error).message}`)
+    }
+
+    // 2.7 追踪角色状态表：写入 追踪/角色状态.md（续写读「当前状态/变更记录」）
+    if (extraction.characterStateChanges.length > 0) {
+      try {
+        await this.syncTrackingCharacterStates(
+          extraction.chapterNumber,
+          extraction.characterStateChanges
+        )
+      } catch (e) {
+        errors.push(`追踪角色状态写入失败: ${(e as Error).message}`)
+      }
     }
 
     // 3. 伏笔回收
@@ -393,89 +410,124 @@ export class MemoryWriter {
   }
 
   /**
-   * 追加时间线：把本章剧情点事件追加到 追踪/时间线.md 的对照表末尾。
-   * 表头格式：| 章节 | 事件名 | 时间跨度 | 涉及角色 | 详细描述 |
-   * 同一章只追加一次（检测已有「第 N 章」行则跳过，避免重复）。
+   * 追加时间线：把本章剧情点事件追加到 追踪/时间线.md。
+   * 缺文件时自动建骨架；同章已有行则更新描述。
    */
   private async appendTimeline(
     chapter: number,
     plotPoints: MemoryExtraction['newPlotPoints']
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '时间线.md')
-    const text = await readText(file)
-    if (!text) return // 文件不存在，不创建（追踪/时间线.md 需项目侧先建骨架）
+    await this.ensureTrackingSkeleton('timeline')
+    let text = (await readText(file)) ?? ''
 
-    // 同章已追加过则跳过（避免重复写入）；正则容忍空格变化（用户手改表格格式时不误判）
     const chapterMarker = `第 ${chapter} 章`
-    const chapterSeenRe = new RegExp(`\\|\\s*第\\s*${chapter}\\s*章\\s*\\|`)
-    if (chapterSeenRe.test(text)) return
-
-    // 把所有 plotPoint 的 event 合并为详细描述
     const events = plotPoints.map((p) => p.event).filter(Boolean)
-    const desc = events.join('；')
-    const title = plotPoints[0]?.title ?? `第${chapter}章`
+    const desc = escapeTableCell(events.join('；'))
+    const title = escapeTableCell(plotPoints[0]?.title ?? `第${chapter}章`)
     const row = `| ${chapterMarker} | ${title} | - | - | ${desc} |`
 
-    // 找到表格最后一行，追加在其后
-    const lines = text.split(/\r?\n/)
-    let lastTableRow = -1
-    for (let i = 0; i < lines.length; i++) {
-      if (/^\|.*\|$/.test(lines[i].trim()) && !lines[i].includes('---')) {
-        lastTableRow = i
-      }
-    }
-    if (lastTableRow >= 0) {
-      lines.splice(lastTableRow + 1, 0, row)
-    } else {
-      // 无表格行，追加到文件末尾
-      lines.push(row)
-    }
-    await writeTextAtomic(file, lines.join('\n'))
+    text = upsertTrackingTableRow(text, chapter, row)
+    await writeTextAtomic(file, text)
   }
 
   /**
-   * 追加进度摘要：把本章进度追加到 追踪/上下文.md 的进度表末尾。
-   * 表头格式：| 日期 | 章节 | 进度摘要 | 下一章目标 | 阻塞点 |
-   * 续写时 TrackingMdRepo.parseProgress 取最后 3 条注入 prompt。
-   * 同一章只追加一次（检测已有「第 N 章」行则跳过，避免重复）。
+   * 写入 追踪/上下文.md 进度表（续写会读最近 3 条）。
+   * 缺文件自动建骨架；同章已有行则覆盖摘要（重同步刷新）。
    */
   private async appendProgress(
     chapter: number,
-    plotPoints: MemoryExtraction['newPlotPoints']
+    plotPoints: MemoryExtraction['newPlotPoints'],
+    stateChanges: MemoryExtraction['characterStateChanges'] = []
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '上下文.md')
-    const text = await readText(file)
-    if (!text) return // 文件不存在，不创建（追踪/上下文.md 需项目侧先建骨架）
+    await this.ensureTrackingSkeleton('context')
+    let text = (await readText(file)) ?? ''
 
-    // 同章已追加过则跳过；正则容忍空格变化
     const chapterMarker = `第 ${chapter} 章`
-    const chapterSeenRe = new RegExp(`\\|\\s*第\\s*${chapter}\\s*章\\s*\\|`)
-    if (chapterSeenRe.test(text)) return
-
-    // 拼进度摘要：plotPoint 的 title + event
     const summaryParts = plotPoints.map((p) => {
       const t = p.title?.trim()
       const e = p.event?.trim()
       return t && e ? `${t}：${e}` : t || e || ''
     }).filter(Boolean)
-    const summary = summaryParts.length > 0 ? summaryParts.join('；') : `完成第 ${chapter} 章写作`
+    if (stateChanges.length > 0) {
+      const st = stateChanges
+        .slice(0, 6)
+        .map((c) => `${c.name}.${normalizeStateField(c.field || '状态')}→${c.newValue}`)
+        .join('；')
+      if (st) summaryParts.push(`状态：${st}`)
+    }
+    const summary = escapeTableCell(
+      summaryParts.length > 0 ? summaryParts.join('；') : `完成第 ${chapter} 章写作`
+    )
     const today = new Date().toISOString().slice(0, 10)
     const row = `| ${today} | ${chapterMarker} | ${summary} | - | - |`
 
-    // 找到表格最后一行，追加在其后
-    const lines = text.split(/\r?\n/)
-    let lastTableRow = -1
-    for (let i = 0; i < lines.length; i++) {
-      if (/^\|.*\|$/.test(lines[i].trim()) && !lines[i].includes('---')) {
-        lastTableRow = i
+    text = upsertTrackingTableRow(text, chapter, row)
+    await writeTextAtomic(file, text)
+  }
+
+  /**
+   * 把角色状态变化同步进 追踪/角色状态.md：
+   * - 「当前状态」表 upsert 行
+   * - 「状态变更记录」表追加变更
+   * 续写 loadChapterContext 会读这两处注入 prompt。
+   */
+  private async syncTrackingCharacterStates(
+    chapter: number,
+    changes: MemoryExtraction['characterStateChanges']
+  ): Promise<void> {
+    if (changes.length === 0) return
+    const file = join(this.projectDir, '追踪', '角色状态.md')
+    await this.ensureTrackingSkeleton('characterStates')
+    let text = (await readText(file)) ?? ''
+
+    // 按角色聚合本批 field→value
+    const byName = new Map<string, { field: string; value: string }[]>()
+    for (const c of changes) {
+      const name = c.name?.trim()
+      if (!name) continue
+      const list = byName.get(name) ?? []
+      list.push({
+        field: normalizeStateField((c.field || '状态').trim()),
+        value: String(c.newValue ?? '').trim()
+      })
+      byName.set(name, list)
+    }
+
+    for (const [name, fields] of byName) {
+      text = upsertCharacterStateSnapshot(text, name, chapter, fields)
+      for (const f of fields) {
+        if (!f.value) continue
+        text = appendCharacterStateChangeLog(text, chapter, name, `${f.field}：${f.value}`)
       }
     }
-    if (lastTableRow >= 0) {
-      lines.splice(lastTableRow + 1, 0, row)
-    } else {
-      lines.push(row)
-    }
-    await writeTextAtomic(file, lines.join('\n'))
+
+    await writeTextAtomic(file, text)
+  }
+
+  /** 确保追踪骨架文件存在（与 project-service 开书模板对齐） */
+  private async ensureTrackingSkeleton(
+    kind: 'context' | 'timeline' | 'characterStates'
+  ): Promise<void> {
+    const dir = join(this.projectDir, '追踪')
+    await fs.mkdir(dir, { recursive: true })
+    const file =
+      kind === 'context'
+        ? join(dir, '上下文.md')
+        : kind === 'timeline'
+          ? join(dir, '时间线.md')
+          : join(dir, '角色状态.md')
+    const existing = await readText(file)
+    if (existing && existing.trim()) return
+
+    const body =
+      kind === 'context'
+        ? `# 上下文（日更进度摘要）\n\n| 日期 | 章节 | 进度摘要 | 下一章目标 | 阻塞点 |\n|---|---|---|---|---|\n`
+        : kind === 'timeline'
+          ? `# 时间线\n\n| 章节 | 事件名 | 时间跨度 | 涉及角色 | 详细描述 |\n|---|---|---|---|---|\n`
+          : `# 角色状态快照\n\n## 当前状态\n\n| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |\n|---|---|---|---|---|---|---|\n\n## 状态变更记录\n\n| 章节 | 角色 | 变更内容 |\n|---|---|---|\n`
+    await writeTextAtomic(file, body)
   }
 
   /** 伏笔回收：按内容模糊匹配，更新状态为已回收。返回是否实际应用。 */
@@ -560,4 +612,197 @@ function findCharacterByName(
   const hits = chars.filter((c) => c.name.includes(n) || n.includes(c.name))
   if (hits.length === 1) return { char: hits[0], fuzzy: true }
   return undefined
+}
+
+function escapeTableCell(s: string): string {
+  return s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim()
+}
+
+/**
+ * 在 markdown 表中 upsert 含「第 N 章」的行：已有则替换，否则插到最后一行数据后。
+ */
+function upsertTrackingTableRow(text: string, chapter: number, newRow: string): string {
+  const chapterSeenRe = new RegExp(`\\|\\s*第\\s*${chapter}\\s*章\\s*\\|`)
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    if (chapterSeenRe.test(lines[i])) {
+      lines[i] = newRow
+      return lines.join('\n')
+    }
+  }
+  let lastTableRow = -1
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (/^\|.*\|$/.test(t) && !t.includes('---')) lastTableRow = i
+  }
+  if (lastTableRow >= 0) lines.splice(lastTableRow + 1, 0, newRow)
+  else lines.push(newRow)
+  return lines.join('\n')
+}
+
+/** 字段 → 角色状态表列 */
+function mapFieldToStateColumn(
+  field: string
+): 'power' | 'stance' | 'goal' | 'items' | 'relations' | null {
+  const f = normalizeStateField(field)
+  if (['伤势', '当前状态', '能力', '境界', '金手指', '实力'].includes(f)) return 'power'
+  if (['情绪', '立场'].includes(f)) return 'stance'
+  if (f === '目标') return 'goal'
+  if (['持有物', '物品'].includes(f)) return 'items'
+  if (['关系', '关系网'].includes(f)) return 'relations'
+  return null
+}
+
+/**
+ * upsert 当前状态表中某角色行。
+ * 表头：角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节
+ */
+function upsertCharacterStateSnapshot(
+  text: string,
+  name: string,
+  chapter: number,
+  fields: { field: string; value: string }[]
+): string {
+  const lines = text.split(/\r?\n/)
+  // 找「当前状态」节内表头
+  let headerIdx = -1
+  let inCurrent = false
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s*当前状态/.test(lines[i].trim())) {
+      inCurrent = true
+      continue
+    }
+    if (inCurrent && /^##\s+/.test(lines[i].trim())) break
+    if (
+      (inCurrent || headerIdx < 0) &&
+      /^\|/.test(lines[i].trim()) &&
+      /角色/.test(lines[i]) &&
+      /实力|立场/.test(lines[i])
+    ) {
+      headerIdx = i
+      break
+    }
+  }
+  if (headerIdx < 0) {
+    // 无表则追加整段
+    return (
+      text.trimEnd() +
+      `\n\n## 当前状态\n\n| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |\n|---|---|---|---|---|---|---|\n| ${escapeTableCell(name)} | - | - | - | - | - | 第 ${chapter} 章 |\n`
+    )
+  }
+
+  // 数据行范围：header 后跳过分隔行
+  let dataStart = headerIdx + 1
+  if (dataStart < lines.length && lines[dataStart].includes('---')) dataStart++
+  let dataEnd = dataStart
+  while (dataEnd < lines.length && /^\|/.test(lines[dataEnd].trim()) && !/^##\s+/.test(lines[dataEnd].trim())) {
+    dataEnd++
+  }
+
+  let power = '-'
+  let stance = '-'
+  let goal = '-'
+  let items = '-'
+  let relations = '-'
+  let foundRow = -1
+  const nameRe = new RegExp(`^\\|\\s*${escapeRegExp(name)}\\s*\\|`)
+
+  for (let i = dataStart; i < dataEnd; i++) {
+    if (nameRe.test(lines[i].trim()) || lines[i].includes(`| ${name} |`) || lines[i].includes(`|${name}|`)) {
+      foundRow = i
+      const cells = splitTableRow(lines[i])
+      // cells[0] empty before first |, then 角色, 实力, 立场, 目标, 道具, 关系, 更新章节
+      power = cells[2] || '-'
+      stance = cells[3] || '-'
+      goal = cells[4] || '-'
+      items = cells[5] || '-'
+      relations = cells[6] || '-'
+      break
+    }
+  }
+
+  for (const f of fields) {
+    if (!f.value) continue
+    const col = mapFieldToStateColumn(f.field)
+    if (col === 'power') power = mergeCell(power, f.value)
+    else if (col === 'stance') stance = f.value
+    else if (col === 'goal') goal = f.value
+    else if (col === 'items') items = mergeCell(items, f.value)
+    else if (col === 'relations') relations = mergeCell(relations, f.value)
+    else {
+      // 未映射字段叠到实力列备注
+      power = mergeCell(power, `${f.field}：${f.value}`)
+    }
+  }
+
+  const newRow = `| ${escapeTableCell(name)} | ${escapeTableCell(power)} | ${escapeTableCell(stance)} | ${escapeTableCell(goal)} | ${escapeTableCell(items)} | ${escapeTableCell(relations)} | 第 ${chapter} 章 |`
+  if (foundRow >= 0) lines[foundRow] = newRow
+  else lines.splice(dataEnd, 0, newRow)
+  return lines.join('\n')
+}
+
+/** 追加状态变更记录行（同章同角色同内容不重复） */
+function appendCharacterStateChangeLog(
+  text: string,
+  chapter: number,
+  name: string,
+  change: string
+): string {
+  const lines = text.split(/\r?\n/)
+  let headerIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s*状态变更/.test(lines[i].trim())) {
+      // 找该节下表头
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^##\s+/.test(lines[j].trim())) break
+        if (/^\|/.test(lines[j].trim()) && /章节/.test(lines[j]) && /角色/.test(lines[j])) {
+          headerIdx = j
+          break
+        }
+      }
+      break
+    }
+  }
+  if (headerIdx < 0) {
+    return (
+      text.trimEnd() +
+      `\n\n## 状态变更记录\n\n| 章节 | 角色 | 变更内容 |\n|---|---|---|\n| 第 ${chapter} 章 | ${escapeTableCell(name)} | ${escapeTableCell(change)} |\n`
+    )
+  }
+
+  let dataStart = headerIdx + 1
+  if (dataStart < lines.length && lines[dataStart].includes('---')) dataStart++
+  let dataEnd = dataStart
+  while (dataEnd < lines.length && /^\|/.test(lines[dataEnd].trim()) && !/^##\s+/.test(lines[dataEnd].trim())) {
+    dataEnd++
+  }
+
+  const chapterMarker = `第 ${chapter} 章`
+  const row = `| ${chapterMarker} | ${escapeTableCell(name)} | ${escapeTableCell(change)} |`
+  // 已有完全相同行则跳过
+  for (let i = dataStart; i < dataEnd; i++) {
+    if (lines[i].includes(chapterMarker) && lines[i].includes(name) && lines[i].includes(change)) {
+      return text
+    }
+  }
+  lines.splice(dataEnd, 0, row)
+  return lines.join('\n')
+}
+
+function splitTableRow(line: string): string[] {
+  const t = line.trim()
+  const inner = t.startsWith('|') ? t.slice(1) : t
+  const parts = inner.endsWith('|') ? inner.slice(0, -1) : inner
+  return parts.split('|').map((c) => c.trim())
+}
+
+function mergeCell(prev: string, next: string): string {
+  const p = prev === '-' || !prev ? '' : prev
+  if (!p) return next
+  if (p.includes(next)) return p
+  return `${p}；${next}`
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

@@ -78,10 +78,14 @@ export class TrackingMdRepo {
     // 4 个文件全空 -> 视为追踪目录不存在
     if (!statesText && !timelineText && !progressText && !issuesText) return null
 
+    const rawTimeline = timelineText ? extractTimelineTable(timelineText) : ''
+    // 开书骨架只有表头、无「第 N 章」数据行时视为空，避免续写 prompt 注入空表噪音
+    const timeline = hasTimelineDataRows(rawTimeline) ? rawTimeline : ''
+
     const result: TrackingContext = {
       characterStates: statesText ? parseCharacterStates(statesText) : [],
       stateChanges: statesText ? parseStateChanges(statesText, chapterNumber) : [],
-      timeline: timelineText ? extractTimelineTable(timelineText) : '',
+      timeline,
       recentProgress: progressText ? parseProgress(progressText) : [],
       openIssues: issuesText ? parseIssues(issuesText) : []
     }
@@ -214,6 +218,27 @@ function extractTimelineTable(text: string): string {
   if (doc.body.trim()) return doc.body.trim()
   if (doc.sections.length > 0) return doc.sections[0].body.trim()
   return ''
+}
+
+/** 时间线是否含真实数据行（排除仅表头/分隔行的空骨架） */
+function hasTimelineDataRows(timeline: string): boolean {
+  if (!timeline.trim()) return false
+  // 数据行通常含「第 N 章」或非表头的 |…|
+  if (/第\s*\d+\s*章/.test(timeline)) return true
+  const lines = timeline.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  for (const line of lines) {
+    if (!line.startsWith('|')) {
+      // 非表格正文（如说明句）也算有内容
+      if (!line.startsWith('#') && line.length > 2) return true
+      continue
+    }
+    if (line.includes('---')) continue
+    if (/章节|事件|时间|角色|详细|描述|对照/.test(line) && !/第\s*\d+/.test(line)) continue
+    // 其它表格行视为数据
+    const cells = line.split('|').map((c) => c.trim()).filter(Boolean)
+    if (cells.some((c) => c && c !== '-')) return true
+  }
+  return false
 }
 
 /**

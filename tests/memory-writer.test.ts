@@ -347,7 +347,7 @@ describe('MemoryWriter (v4)', () => {
       expect(raw).toMatch(/\|\s*-\s*\|\s*-\s*\|/)
     })
 
-    it('skips progress append when same chapter already recorded', async () => {
+    it('updates progress row when same chapter is re-synced', async () => {
       mkdirSync(join(dir, '追踪'), { recursive: true })
       const file = join(dir, '追踪', '上下文.md')
       writeFileSync(
@@ -369,15 +369,15 @@ describe('MemoryWriter (v4)', () => {
       await writer.applyAutomatic(extraction)
 
       const raw = readFileSync(file, 'utf-8')
-      // 不应重复追加第 5 章行
+      // 同章只保留一行，摘要刷新为最新
       const ch5Lines = raw.split(/\r?\n/).filter((l) => l.includes('第 5 章'))
       expect(ch5Lines.length).toBe(1)
-      // 仍保留旧摘要
-      expect(raw).toContain('旧摘要')
+      expect(raw).toContain('新事件：xxx')
+      expect(raw).not.toContain('旧摘要')
     })
 
-    it('does not crash when 上下文.md is absent', async () => {
-      // 不 seed 上下文.md
+    it('creates 上下文.md when absent and writes progress', async () => {
+      // 不 seed 上下文.md —— 应自动建骨架并写入
       const extraction: MemoryExtraction = {
         chapterNumber: 3,
         newCharacters: [],
@@ -389,9 +389,45 @@ describe('MemoryWriter (v4)', () => {
         collectedForeshadowings: []
       }
       const result = await writer.applyAutomatic(extraction)
-      // 不应因缺文件报错
       expect(result.errors).toEqual([])
       expect(result.applied.plotPoints).toBe(1)
+      const ctxFile = join(dir, '追踪', '上下文.md')
+      expect(existsSync(ctxFile)).toBe(true)
+      const raw = readFileSync(ctxFile, 'utf-8')
+      expect(raw).toContain('第 3 章')
+      expect(raw).toContain('测试：事件')
+    })
+
+    it('writes character states into 追踪/角色状态.md for next-chapter context', async () => {
+      seedCharacterFile(dir, '林远')
+      const extraction: MemoryExtraction = {
+        chapterNumber: 7,
+        newCharacters: [],
+        newLocations: [],
+        newItems: [],
+        newForeshadowings: [],
+        newPlotPoints: [{ title: '夜战', event: '林远负伤突围' }],
+        characterStateChanges: [
+          { name: '林远', field: '伤势', oldValue: '无', newValue: '重伤' },
+          { name: '林远', field: '情绪', oldValue: '', newValue: '警惕' }
+        ],
+        collectedForeshadowings: []
+      }
+      await writer.applyAutomatic(extraction)
+
+      const stateFile = join(dir, '追踪', '角色状态.md')
+      expect(existsSync(stateFile)).toBe(true)
+      const raw = readFileSync(stateFile, 'utf-8')
+      expect(raw).toContain('林远')
+      expect(raw).toContain('重伤')
+      expect(raw).toContain('警惕')
+      expect(raw).toMatch(/状态变更记录/)
+      expect(raw).toContain('第 7 章')
+
+      // 上下文也应含状态摘要，便于续写读进度
+      const ctx = readFileSync(join(dir, '追踪', '上下文.md'), 'utf-8')
+      expect(ctx).toContain('第 7 章')
+      expect(ctx).toMatch(/伤势|状态/)
     })
   })
 

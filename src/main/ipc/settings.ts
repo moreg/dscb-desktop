@@ -92,6 +92,23 @@ export function registerSettingsIpc(
     }
   )
 
+  safeHandle('settings:getSettingsEvolution', async () => {
+    const all = await repo.get()
+    return all.settingsEvolution ?? 'auto_high'
+  })
+  safeHandle(
+    'settings:setSettingsEvolution',
+    async (
+      _e: IpcMainInvokeEvent,
+      mode: 'off' | 'confirm_all' | 'auto_high'
+    ): Promise<'off' | 'confirm_all' | 'auto_high'> => {
+      const m =
+        mode === 'off' || mode === 'confirm_all' || mode === 'auto_high' ? mode : 'auto_high'
+      await repo.update({ settingsEvolution: m })
+      return m
+    }
+  )
+
   // P13-C：用量预警配置
   safeHandle('settings:getCostAlert', async () => {
     return repo.getCostAlert()

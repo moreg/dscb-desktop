@@ -11,7 +11,9 @@ import type {
   OutlineDiffItem,
   OutlineDiffReport,
   RhythmApplyResult,
-  RhythmEvaluation
+  RhythmEvaluation,
+  SettingsApplyPreview,
+  SettingsApplyResult
 } from '../../shared/types'
 import {
   parseFigureDraftJson,
@@ -127,6 +129,9 @@ export default function ChapterFlowPanel(props: Props) {
   const [memoryResult, setMemoryResult] = useState<MemoryApplyResult | null>(null)
   /** 自动部分 diff 预览（应用前读人物卡当前值） */
   const [memoryPreview, setMemoryPreview] = useState<MemoryApplyPreview | null>(null)
+  const [settingsPreview, setSettingsPreview] = useState<SettingsApplyPreview | null>(null)
+  const [settingsResult, setSettingsResult] = useState<SettingsApplyResult | null>(null)
+  const [settingsApplying, setSettingsApplying] = useState(false)
   const [newCharResult, setNewCharResult] = useState<number | null>(null)
   const [newLocResult, setNewLocResult] = useState<number | null>(null)
   const [newItemResult, setNewItemResult] = useState<number | null>(null)
@@ -380,6 +385,8 @@ export default function ChapterFlowPanel(props: Props) {
     setMemoryError('')
     setMemoryResult(null)
     setMemoryPreview(null)
+    setSettingsPreview(null)
+    setSettingsResult(null)
     setNewCharResult(null)
     setNewLocResult(null)
     setNewItemResult(null)
@@ -415,7 +422,6 @@ export default function ChapterFlowPanel(props: Props) {
           setMemoryApplying(true)
           const result = await window.api.applyMemory(projectId, extraction)
           setMemoryResult(result)
-          // 用应用结果里的 appliedDiffs 覆盖预览（仅已成功项）
           if (result.appliedDiffs?.length) {
             setMemoryPreview({
               diffs: result.appliedDiffs,
@@ -424,10 +430,19 @@ export default function ChapterFlowPanel(props: Props) {
             })
           }
         }
+        // 设定演进：预览 + 高置信自动应用
+        const sPreview = await window.api.previewSettingsApply(projectId, extraction)
+        setSettingsPreview(sPreview)
+        if (sPreview.autoCount > 0) {
+          setSettingsApplying(true)
+          const sResult = await window.api.applySettingsPatches(projectId, extraction, true)
+          setSettingsResult(sResult)
+        }
       } catch (e) {
         setMemoryError((e as Error).message)
       } finally {
         setMemoryApplying(false)
+        setSettingsApplying(false)
       }
     } catch (e) {
       setMemoryError((e as Error).message)
@@ -471,10 +486,29 @@ export default function ChapterFlowPanel(props: Props) {
   const applyLocs = async () => {
     if (!memoryExtraction?.newLocations.length) return
     try {
-      const n = await window.api.applyNewLocations(projectId, memoryExtraction.newLocations)
+      const n = await window.api.applyNewLocations(
+        projectId,
+        memoryExtraction.newLocations,
+        chapterNumber
+      )
       setNewLocResult(n)
     } catch (e) {
       setMemoryError((e as Error).message)
+    }
+  }
+
+  const applySettingsAll = async () => {
+    if (!memoryExtraction) return
+    setSettingsApplying(true)
+    try {
+      const result = await window.api.applySettingsPatches(projectId, memoryExtraction, false)
+      setSettingsResult(result)
+      const preview = await window.api.previewSettingsApply(projectId, memoryExtraction)
+      setSettingsPreview(preview)
+    } catch (e) {
+      setMemoryError((e as Error).message)
+    } finally {
+      setSettingsApplying(false)
     }
   }
 
@@ -1007,6 +1041,113 @@ export default function ChapterFlowPanel(props: Props) {
                   </div>
                 ) : null}
               </div>
+
+              {/* 设定演进 */}
+              {settingsPreview &&
+              (settingsPreview.diffs.length > 0 ||
+                settingsPreview.suggestionCount > 0 ||
+                (memoryExtraction.settingsSuggestions?.length ?? 0) > 0) ? (
+                <div
+                  style={{
+                    border: '1px solid var(--line-soft)',
+                    borderRadius: 'var(--r-sm)',
+                    padding: 8,
+                    marginBottom: 8
+                  }}
+                >
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 12.5 }}>设定演进</strong>
+                    <button
+                      className="btn btn-sm"
+                      onClick={applySettingsAll}
+                      disabled={
+                        settingsApplying ||
+                        settingsPreview.diffs.filter((d) => !d.note).length === 0
+                      }
+                      style={{ marginLeft: 'auto' }}
+                      title="应用全部可写设定补丁（不含题材定位底稿）"
+                    >
+                      {settingsApplying
+                        ? '应用中…'
+                        : settingsResult
+                          ? '重新应用设定'
+                          : '应用设定补丁'}
+                    </button>
+                  </div>
+                  <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+                    增量写入世界观/势力/关系等；题材定位不自动改。高置信已随同步自动写入。
+                  </p>
+                  {settingsPreview.diffs.length > 0 ? (
+                    <ul
+                      className="bare"
+                      style={{
+                        marginTop: 6,
+                        fontSize: 12,
+                        display: 'grid',
+                        gap: 6,
+                        maxHeight: 160,
+                        overflow: 'auto',
+                        padding: '6px 8px',
+                        background: 'var(--surface-2)',
+                        borderRadius: 'var(--r-sm)'
+                      }}
+                    >
+                      {settingsPreview.diffs.map((d, i) => (
+                        <li key={`${d.fileName}-${d.title}-${i}`}>
+                          <span className="muted">
+                            {d.autoEligible ? '自动' : d.note ? '跳过' : '确认'} · {d.target}/
+                            {d.fileName}
+                          </span>
+                          <div>
+                            <strong>{d.title}</strong>
+                            {d.confidence ? (
+                              <span className="muted"> · {d.confidence}</span>
+                            ) : null}
+                          </div>
+                          <div style={{ color: 'var(--ink-2)' }}>{d.content.slice(0, 120)}</div>
+                          {d.reason ? (
+                            <div className="muted" style={{ fontSize: 11 }}>
+                              依据：{d.reason}
+                            </div>
+                          ) : null}
+                          {d.note ? (
+                            <div className="muted" style={{ fontSize: 11 }}>
+                              {d.note}
+                            </div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {memoryExtraction.settingsSuggestions &&
+                  memoryExtraction.settingsSuggestions.length > 0 ? (
+                    <ul className="bare" style={{ marginTop: 6, fontSize: 12 }}>
+                      {memoryExtraction.settingsSuggestions.map((s, i) => (
+                        <li key={`sug-${i}`} className="muted">
+                          建议手改 {s.suggestedPath}：{s.topic}（{s.reason}）
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {settingsResult ? (
+                    <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                      ✓ 设定已应用 {settingsResult.applied} 项
+                      {settingsResult.skipped > 0
+                        ? ` · 跳过 ${settingsResult.skipped}`
+                        : ''}
+                      {settingsResult.errors.length > 0 ? (
+                        <span className="err">
+                          （{settingsResult.errors.length} 项失败）
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : settingsApplying ? (
+                    <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                      正在写入设定补丁…
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               {/* 新增角色（需确认） */}
               {memoryExtraction.newCharacters.length > 0 ? (

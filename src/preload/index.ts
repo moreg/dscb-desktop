@@ -380,14 +380,32 @@ const api = {
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
   previewMemoryApply: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:previewMemoryApply', { projectId, extraction }),
+  previewSettingsApply: (projectId: string, extraction: MemoryExtraction) =>
+    ipcRenderer.invoke('write:previewSettingsApply', { projectId, extraction }),
+  applySettingsPatches: (
+    projectId: string,
+    extraction: MemoryExtraction,
+    onlyAuto?: boolean
+  ) =>
+    ipcRenderer.invoke('write:applySettingsPatches', {
+      projectId,
+      extraction,
+      onlyAuto
+    }),
   applyNewCharacters: (
     projectId: string,
     chars: MemoryExtraction['newCharacters']
   ) => ipcRenderer.invoke('write:applyNewCharacters', { projectId, chars }),
   applyNewLocations: (
     projectId: string,
-    locs: MemoryExtraction['newLocations']
-  ) => ipcRenderer.invoke('write:applyNewLocations', { projectId, locs }),
+    locs: MemoryExtraction['newLocations'],
+    chapterNumber?: number
+  ) =>
+    ipcRenderer.invoke('write:applyNewLocations', {
+      projectId,
+      locs,
+      chapterNumber
+    }),
   applyNewItems: (
     projectId: string,
     items: MemoryExtraction['newItems']
@@ -578,6 +596,14 @@ const api = {
   },
   setWriteAuditConfig: (cfg: { enabled?: boolean; mode?: 'soft' | 'strict' }) =>
     ipcRenderer.invoke('settings:setWriteAudit', cfg),
+  getSettingsEvolution: () =>
+    ipcRenderer.invoke('settings:getSettingsEvolution') as Promise<
+      'off' | 'confirm_all' | 'auto_high'
+    >,
+  setSettingsEvolution: (mode: 'off' | 'confirm_all' | 'auto_high') =>
+    ipcRenderer.invoke('settings:setSettingsEvolution', mode) as Promise<
+      'off' | 'confirm_all' | 'auto_high'
+    >,
   // P13-C：用量预警配置
   getCostAlertConfig: () => ipcRenderer.invoke('settings:getCostAlert'),
   setCostAlertConfig: (cfg: { enabled?: boolean; warning?: number; exceeded?: number }) =>

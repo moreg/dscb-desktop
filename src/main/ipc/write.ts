@@ -379,6 +379,25 @@ export function registerWriteIpc(service: WriteService): void {
   )
 
   safeHandle(
+    'write:previewSettingsApply',
+    async (_e, payload: { projectId: string; extraction: MemoryExtraction }) => {
+      return service.previewSettingsApply(payload.projectId, payload.extraction)
+    }
+  )
+
+  safeHandle(
+    'write:applySettingsPatches',
+    async (
+      _e,
+      payload: { projectId: string; extraction: MemoryExtraction; onlyAuto?: boolean }
+    ) => {
+      return service.applySettingsPatches(payload.projectId, payload.extraction, {
+        onlyAuto: payload.onlyAuto
+      })
+    }
+  )
+
+  safeHandle(
     'write:applyNewCharacters',
     async (
       _e,
@@ -392,9 +411,17 @@ export function registerWriteIpc(service: WriteService): void {
     'write:applyNewLocations',
     async (
       _e,
-      payload: { projectId: string; locs: MemoryExtraction['newLocations'] }
+      payload: {
+        projectId: string
+        locs: MemoryExtraction['newLocations']
+        chapterNumber?: number
+      }
     ) => {
-      return service.applyNewLocations(payload.projectId, payload.locs)
+      return service.applyNewLocations(
+        payload.projectId,
+        payload.locs,
+        payload.chapterNumber
+      )
     }
   )
 
