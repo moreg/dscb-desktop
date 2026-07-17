@@ -344,6 +344,27 @@ export default function ChapterAuditPanel({
     () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings].filter(v => !isIgnored(v))),
     [report, deepReviewFindings, ignoredKeys]
   )
+
+  // offset → 行号映射：一次遍历 draft 预计算，避免每条违例都 substring().split('\n')（O(n²)）
+  const lineOfOffset = useMemo(() => {
+    if (!draft) return null
+    // lineStarts[i] = 第 i+1 行的起始 offset
+    const lineStarts: number[] = [0]
+    for (let i = 0; i < draft.length; i++) {
+      if (draft.charCodeAt(i) === 10 /* \n */) lineStarts.push(i + 1)
+    }
+    return (offset: number): number => {
+      // 二分查找最后一个 lineStarts[i] <= offset
+      let lo = 0
+      let hi = lineStarts.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1
+        if (lineStarts[mid] <= offset) lo = mid
+        else hi = mid - 1
+      }
+      return lo + 1
+    }
+  }, [draft])
   // 展示计数基于去重后的 grouped，与列表实际条数一致；
   // report.counts 仍含前缀重叠的重复命中（如「轰」+「轰然」），不宜直接用于展示。
   const { errorCount, warnCount, infoCount } = useMemo(() => {
@@ -422,7 +443,6 @@ export default function ChapterAuditPanel({
             </span>
             <span className="audit-wordcount">
               字数 <strong>{report.wordCount}</strong>
-              {report.passed.wordCount ? '' : ' ⚠'}
             </span>
             {ignoredKeys.size > 0 && (
               <span
@@ -586,18 +606,15 @@ export default function ChapterAuditPanel({
         >
           {deepReviewRunning ? '审稿中…' : '🔍 AI 深度审稿'}
         </button>
-        {deepReviewFindings.length > 0 && (
-          <button
-            className="btn btn-sm audit-rewrite-btn"
-            onClick={() => setDeepReviewFindings([])}
-            title="清空深度审稿结果"
-          >
-            清空深度结果（{deepReviewFindings.length}）
-          </button>
-        )}
         {onRunAgain && (
-          <button className="btn btn-sm audit-rewrite-btn" onClick={onRunAgain} disabled={loading}>
-            重新质检
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={onRunAgain}
+            disabled={loading}
+            title="重新跑算法质检（章末/禁用词/规则等）"
+            style={{ padding: '2px 7px' }}
+          >
+            ⟳
           </button>
         )}
       </div>
@@ -634,14 +651,23 @@ export default function ChapterAuditPanel({
                     （{items.length}
                     {errInCat > 0 ? `，含 ${errInCat} 处必须修复` : ''}）
                   </span>
+                  {cat === 'llm_review' && deepReviewFindings.length > 0 && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setDeepReviewFindings([])}
+                      title="清空深度审稿结果"
+                      style={{ marginLeft: 'auto', padding: '1px 7px', fontSize: 11 }}
+                    >
+                      清空
+                    </button>
+                  )}
                 </h4>
                 <ul className="audit-list">
                   {items.slice(0, 50).map((v, i) => {
                     const hKey = violationKey(v)
                     const hState = humanizeMap[hKey]
-                    const lineNum = v.offset != null && draft
-                      ? draft.substring(0, v.offset).split('\n').length
-                      : null
+                    const lineNum =
+                      v.offset != null && lineOfOffset ? lineOfOffset(v.offset) : null
                     const canRewrite = Boolean(v.snippet && v.category !== 'word_count')
                     const showActions = v.severity !== 'error' || canRewrite
                     return (
@@ -917,15 +943,11 @@ function ReviewReportSummary({
         </button>
       </div>
 
-      {/* 元信息行：字数判定 / 记忆一致性 / 大纲一致性 / 连贯性 */}
+      {/* 元信息行：字数（仅展示） / 记忆一致性 / 大纲一致性 / 连贯性 */}
       <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.7 }}>
         <span>
-          字数 {report.wordCount.current}/{report.wordCount.minRequired} →{' '}
-          <strong style={{ color: report.wordCount.passing ? 'var(--ok)' : 'var(--warn)' }}>
-            {report.wordCount.passing ? '达标' : '不足'}
-          </strong>
+          字数 <strong style={{ color: 'var(--ink-2)' }}>{report.wordCount.current}</strong>
         </span>
-        {report.wordCount.suggestion ? <span> · {report.wordCount.suggestion}</span> : null}
         <br />
         <span>
           记忆文件{report.memoryConsistency.read ? '✓' : '⚠'}

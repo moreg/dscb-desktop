@@ -38,6 +38,7 @@ import type {
   FigureDraft,
   Foreshadowing,
   MemoryExtraction,
+  MemoryApplyPreview,
   MemoryApplyResult,
   OutlineDiffReport,
   PrevEndingState,
@@ -419,8 +420,7 @@ export class WriteService {
     // 5. 构建报告
     return buildReviewReport(chapterNumber, audit, llmViolations, {
       genre,
-      reviewRules: reviewRules ?? undefined,
-      minWords: reviewRules?.thresholds.minWords
+      reviewRules: reviewRules ?? undefined
     })
   }
 
@@ -664,6 +664,15 @@ export class WriteService {
     const dir = await this.projectService.resolveDir(projectId)
     const writer = new MemoryWriter(dir)
     return writer.applyAutomatic(extraction)
+  }
+
+  /** 记忆自动部分应用前的 diff 预览 */
+  async previewMemoryApply(
+    projectId: string,
+    extraction: MemoryExtraction
+  ): Promise<MemoryApplyPreview> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new MemoryWriter(dir).previewAutomatic(extraction)
   }
 
   /** 用户确认后：应用新增角色 */

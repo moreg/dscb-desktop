@@ -648,6 +648,11 @@ export interface RendererApi {
   ) => Promise<{ ok: boolean; error?: string }>
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
+  /** 记忆自动部分应用前的 diff 预览 */
+  previewMemoryApply: (
+    projectId: string,
+    extraction: MemoryExtraction
+  ) => Promise<MemoryApplyPreview>
   /** 用户确认后：应用新增角色 */
   applyNewCharacters: (
     projectId: string,
@@ -1331,12 +1336,9 @@ export interface ChapterReviewReport {
     violations: AuditViolation[]
     notes: string[]
   }
-  /** 10. 字数统计 */
+  /** 10. 字数统计（仅展示当前字数，不再判定达标/不足） */
   wordCount: {
     current: number
-    passing: boolean
-    minRequired: number
-    suggestion: string | null
   }
   /** 11. 文风匹配 */
   styleMatch: {
@@ -1625,8 +1627,15 @@ export interface OutlineDiffApplyResult {
 /** 记忆提取结果（LLM 从正文提取） */
 export interface MemoryExtraction {
   chapterNumber: number
-  /** 新增角色（需确认） */
-  newCharacters: { name: string; role: string; identity: string; personality: string }[]
+  /** 新增角色（需确认）；appearance/abilities 可选，写入人物卡 */
+  newCharacters: {
+    name: string
+    role: string
+    identity: string
+    personality: string
+    appearance?: string
+    abilities?: string
+  }[]
   /** 新增地点（需确认） */
   newLocations: { name: string; category: string; notes: string }[]
   /** 新增道具（需确认） */
@@ -1635,10 +1644,35 @@ export interface MemoryExtraction {
   newForeshadowings: { content: string; expectedCollect?: number; note?: string }[]
   /** 新增情节（自动追加到核心情节.md） */
   newPlotPoints: { title: string; event: string; coolPoint?: string }[]
-  /** 角色状态变化（自动更新） */
+  /**
+   * 既有角色的状态/设定变化（自动更新）。
+   * field 推荐：伤势/情绪/位置/当前状态/身份/性格/能力/境界/外貌/关系/持有物
+   */
   characterStateChanges: { name: string; field: string; oldValue: string; newValue: string }[]
   /** 伏笔回收（自动更新） */
   collectedForeshadowings: { content: string; chapter: number }[]
+}
+
+/** 记忆自动应用前的 diff 预览项 */
+export interface MemoryApplyDiffItem {
+  kind: 'state' | 'plot' | 'collect'
+  /** 角色名 / 情节标题 / 伏笔内容 */
+  label: string
+  field?: string
+  oldValue: string
+  newValue: string
+  /** 能否应用（角色不存在时 false） */
+  applicable: boolean
+  note?: string
+}
+
+/** 记忆自动应用预览（应用前展示） */
+export interface MemoryApplyPreview {
+  diffs: MemoryApplyDiffItem[]
+  /** 可自动应用的条数 */
+  applicableCount: number
+  /** 需确认的新增条数（角色/地点/道具/伏笔） */
+  confirmCount: number
 }
 
 /** 记忆应用结果 */
@@ -1653,6 +1687,8 @@ export interface MemoryApplyResult {
     collected: number
   }
   errors: string[]
+  /** 实际写入的 diff（便于 UI 展示已应用内容） */
+  appliedDiffs?: MemoryApplyDiffItem[]
 }
 
 /* ==========================================================

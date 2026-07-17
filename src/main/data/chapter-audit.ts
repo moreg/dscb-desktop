@@ -6,7 +6,7 @@
  *    命中"说教/感慨/AI 味抒怀"模板时直接判 error。
  * 2. 禁用词扫描：12 类禁用高频词（字面）+ 「嘴角+弧度」等底层模式（正则）。
  *    题材例外（古风/民国/历史允许"渐渐/此刻/一丝/一抹"等）自动降为 info。
- * 3. 字数：低于下限或超过上限给 warn。
+ * 3. 字数：仅统计 wordCount，不再产出 word_count 提醒（过长/过短均不提示）。
  * 4. zh-humanizer 规则 1-16（算法可检测）：破折号滥用 / 三段式滥用 / Emoji / 聊天语残留 /
  *    空洞结尾 / 过度讨好 / 填充短语 / 假区间表达 / 加粗强调滥用 / 负向并列 / 意义膨胀 / 同义词轮换。
  *
@@ -32,9 +32,15 @@ import type {
 } from '../../shared/types'
 
 export interface AuditOptions {
-  /** 章节目标字数下限（默认 2300，对齐技能合格线） */
+  /**
+   * @deprecated 字数区间提醒已关闭，传入无效。
+   * 章节目标字数下限（历史字段，保留兼容）。
+   */
   minWords?: number
-  /** 章节目标字数上限（默认 3500） */
+  /**
+   * @deprecated 字数区间提醒已关闭，传入无效。
+   * 章节目标字数上限（历史字段，保留兼容）。
+   */
   maxWords?: number
   /** 同一禁用词最多记录的命中次数（默认 3） */
   perWordCap?: number
@@ -51,8 +57,6 @@ export interface AuditOptions {
   reviewRules?: ReviewRulesConfig
 }
 
-const DEFAULT_MIN_WORDS = 2300
-const DEFAULT_MAX_WORDS = 3500
 const DEFAULT_PER_WORD_CAP = 3
 /** 章末抽样：最后 N 个非空段落参与检查 */
 const ENDING_PARA_COUNT = 3
@@ -80,8 +84,9 @@ const ENDING_TABOO_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 const DIALOGUE_PATTERN = /["'""「『][^"'""」』\n]{1,200}["'""」』]/
 
 /**
- * 事件描述启发式：包含"动作/突然/打断/出现/打开/砰/咔"等关键词。
- * 没命中不一定就不是事件，但加上对话检测的 OR 分支足够覆盖正常章末。
+ * 事件描述启发式（关键词 + 动作/悬念句式）。
+ * 旧版关键词过窄：像「越过桌面 / 对准心口 / 却朝着胸口幽幽地转」这类
+ * 典型章末卡点会被误判为「纯心理/纯动作」error。
  */
 const EVENT_KEYWORDS = [
   '突然', '猛地', '骤然', '陡然', '忽然',
@@ -91,8 +96,37 @@ const EVENT_KEYWORDS = [
   '响起', '传来', '炸开', '崩塌',
   '倒下', '跪下', '站起', '转身', '回头',
   '伸手', '抓住', '抬手', '甩出',
-  '断了', '裂开', '爆炸', '坠落'
+  '断了', '裂开', '爆炸', '坠落',
+  // 网文章末常见动作/瞄准/对峙（避免「看着/望着」过宽误放行）
+  '越过', '跨过', '翻过', '掠过',
+  '对准', '瞄准', '指向', '朝着', '对着', '顶住', '抵住',
+  '盯着', '扫过', '瞥见',
+  '拔出', '抽出', '按下', '扣下', '举起', '放下',
+  '刺向', '砍向', '射向', '砸向', '扑向', '冲向',
+  '心口', '胸口', '咽喉', '太阳穴',
+  '刀尖', '枪口', '剑尖', '指针'
 ]
+
+/**
+ * 事件/悬念句式。注意：多字词必须用 (a|b) 非捕获组，不能用 [ab] 字符类
+ * （[慢慢|缓缓] 只会匹配单字 慢/缓 和字面 |，语义错误）。
+ */
+const EVENT_ACTION_PATTERNS: readonly RegExp[] = [
+  /却(?:朝着|向着|对着|朝向).{0,16}/,
+  /对准.{0,16}(?:位置|心口|胸口|咽喉|太阳穴|眉心)/,
+  /[刀枪剑弹箭].{0,8}(?:指|对|顶|抵|架)/,
+  /(?:慢慢|缓缓|幽幽|轻轻|悄然).{0,6}(?:转|动|晃|抬|落|停)/,
+  /最后.{0,12}(?:对准|瞄准|指向|按下|扣下|刺|砍|射)/,
+  /正要.{0,12}(?:时|候)/,
+  /就在这(?:时|一)/,
+  /门(?:被)?(?:忽然|猛地)?.{0,6}(?:开|响|震)/,
+  /[手掌拳脚].{0,6}(?:按|压|推|打|踢|踩)/
+]
+
+function hasEventEnding(text: string): boolean {
+  if (EVENT_KEYWORDS.some((k) => text.includes(k))) return true
+  return EVENT_ACTION_PATTERNS.some((re) => re.test(text))
+}
 
 // ============================================================
 // zh-humanizer 1-16 规则中算法可检测的（其余靠 LLM 改写）
@@ -207,23 +241,18 @@ const RULE_PATTERNS: readonly RuleDef[] = [
 const THREE_PART_LIST = /[一-龥]{2,8}、[一-龥]{2,8}、[一-龥]{2,8}(，|。|；|、)/
 
 export function auditChapter(content: string, opts: AuditOptions = {}): AuditReport {
-  const minWords = opts.minWords ?? DEFAULT_MIN_WORDS
-  const maxWords = opts.maxWords ?? DEFAULT_MAX_WORDS
   const perWordCap = opts.perWordCap ?? DEFAULT_PER_WORD_CAP
   const voice = resolveGenreVoice(opts.genre)
   // 审稿规则：缺省或 enabled=false 时不跑「正文审核」技能的新增检查（向后兼容）。
   const rules = opts.reviewRules?.enabled ? opts.reviewRules : null
   const thresholds = rules?.thresholds ?? DEFAULT_REVIEW_THRESHOLDS
-  // 字数上下限优先用审稿规则配置（M2 接入），覆盖旧硬编码
-  const effectiveMin = rules ? thresholds.minWords : minWords
-  const effectiveMax = rules ? thresholds.maxWords : maxWords
 
   const violations: AuditViolation[] = []
   pushEndingViolations(content, violations)
   pushForbiddenWordViolations(content, perWordCap, voice, violations)
   pushPatternViolations(content, voice, violations)
   pushRuleViolations(content, voice, violations)
-  pushWordCountViolation(content, effectiveMin, effectiveMax, violations)
+  // 字数只写入 report.wordCount，不产出 word_count 违例
   pushProhibitionViolations(content, violations)
 
   // 「正文审核」技能新增的算法检查（M2）。每项读 checks[id] !== false 决定是否跳过。
@@ -290,28 +319,21 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
     }
   }
 
-  // 2. 再判断是否含对话或事件
+  // 2. 再判断是否含对话或事件（事件含关键词 + 动作/悬念句式）
   const hasDialogue = DIALOGUE_PATTERN.test(ending)
-  const hasEvent = EVENT_KEYWORDS.some((k) => ending.includes(k))
+  const hasEvent = hasEventEnding(ending)
   if (!hasDialogue && !hasEvent) {
+    // 仅当真像「睡着了/梦里什么都没有」类空收束才提示；降为 warn，避免把合法卡点标成必须修复
     out.push({
       category: 'ending',
-      severity: 'error',
-      message: '章末未发现对话引号或事件关键词，疑似纯心理/纯动作结尾，违反章末硬性原则',
+      severity: 'warn',
+      message: '章末未检测到对话或明确事件卡点，钩子可能偏弱',
       snippet,
       offset: endingStart,
-      suggestion: '请改为对话结尾（如"我不会让你——"）或事件结尾（如"门被踹开"）'
-    })
-  } else if (!hasDialogue) {
-    // 有事件无对话：低风险（事件结尾本身合规），但提醒可加台词强化
-    out.push({
-      category: 'ending',
-      severity: 'info',
-      message: '章末为事件结尾（无对话）。如能加一句台词制造对话+事件混合，钩子更强',
-      snippet,
-      offset: endingStart
+      suggestion: '可考虑对话留白（如"我不会让你——"）或具体事件/动作卡点收尾'
     })
   }
+  // 有对话或事件即视为合规章末，不再额外 info 打扰
 }
 
 function splitParagraphs(content: string): string[] {
@@ -454,32 +476,6 @@ function pushRuleViolations(
       offset: m.index,
       ruleId: 'rule-6-three-part',
       suggestion: '保留重点，删填充项或换成短句'
-    })
-  }
-}
-
-// ----------------------------------------------------------------------
-// 字数
-// ----------------------------------------------------------------------
-
-function pushWordCountViolation(
-  content: string,
-  minWords: number,
-  maxWords: number,
-  out: AuditViolation[]
-): void {
-  const wc = countWords(content)
-  if (wc < minWords) {
-    out.push({
-      category: 'word_count',
-      severity: 'warn',
-      message: `字数 ${wc} 低于建议下限 ${minWords}（推荐区间 ${minWords}-${maxWords}）`
-    })
-  } else if (wc > maxWords) {
-    out.push({
-      category: 'word_count',
-      severity: 'warn',
-      message: `字数 ${wc} 超过建议上限 ${maxWords}（推荐区间 ${minWords}-${maxWords}）`
     })
   }
 }

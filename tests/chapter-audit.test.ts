@@ -28,11 +28,34 @@ describe('chapter-audit (PR2 baseline)', () => {
     expect(endingErr?.offset).toBeGreaterThanOrEqual(0)
   })
 
-  it('flags missing dialogue and event keywords at ending', () => {
-    const content = makeValidContent('他躺下，睡着了，梦里什么都没有。')
+  it('weak hollow ending is warn (not must-fix error)', () => {
+    // 末三段都无对话/事件，避免 makeValidContent 前几段「盯着」等词污染窗口
+    const content =
+      '白天没什么事。\n\n夜里风很小。\n\n他躺下，睡着了，梦里什么都没有。'
     const report = auditChapter(content)
-    const err = report.violations.find((v) => v.category === 'ending' && v.severity === 'error')
-    expect(err?.message).toContain('章末未发现')
+    const hit = report.violations.find((v) => v.category === 'ending')
+    expect(hit?.severity).toBe('warn')
+    expect(hit?.message).toMatch(/钩子可能偏弱|章末未检测/)
+    // 不再 error 级阻断 passed.ending
+    expect(report.passed.ending).toBe(true)
+  })
+
+  it('accepts action cliffhanger ending without dialogue quotes', () => {
+    // 用户真实章末：瞄准心口 + 罗盘指针却朝胸口转 —— 事件卡点，不应报错
+    const content =
+      '苏九把盒子放在桌上。\n\n越过桌面。\n\n最后对准段老虎心口的位置。\n\n苏九盯着那盒大洋，他怀里的罗盘指针，却朝着段老虎的胸口，幽幽地转。'
+    const report = auditChapter(content)
+    const endingHits = report.violations.filter((v) => v.category === 'ending')
+    expect(endingHits).toEqual([])
+    expect(report.passed.ending).toBe(true)
+  })
+
+  it('event pattern matches multi-char adverbs (not broken character class)', () => {
+    // 仅靠句式：却朝着… / 幽幽地转，无表中关键词也算事件
+    const content =
+      '天色渐暗。\n\n屋里没人说话。\n\n罗盘却朝着那人胸口，幽幽地转。'
+    const report = auditChapter(content)
+    expect(report.violations.filter((v) => v.category === 'ending')).toEqual([])
   })
 
   it('flags forbidden word "似乎"', () => {
@@ -44,11 +67,13 @@ describe('chapter-audit (PR2 baseline)', () => {
     expect(hit?.offset).toBeGreaterThanOrEqual(0)
   })
 
-  it('flags word_count below minWords', () => {
+  it('does not flag word_count (字数区间提醒已关闭)', () => {
     const report = auditChapter('太短了。')
     const wc = report.violations.find((v) => v.category === 'word_count')
-    expect(wc).toBeDefined()
-    expect(wc?.severity).toBe('warn')
+    expect(wc).toBeUndefined()
+    // 仍统计字数供展示
+    expect(report.wordCount).toBeGreaterThan(0)
+    expect(report.passed.wordCount).toBe(true)
   })
 })
 

@@ -378,6 +378,8 @@ const api = {
   },
   applyMemory: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
+  previewMemoryApply: (projectId: string, extraction: MemoryExtraction) =>
+    ipcRenderer.invoke('write:previewMemoryApply', { projectId, extraction }),
   applyNewCharacters: (
     projectId: string,
     chars: MemoryExtraction['newCharacters']

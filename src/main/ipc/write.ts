@@ -372,6 +372,13 @@ export function registerWriteIpc(service: WriteService): void {
   )
 
   safeHandle(
+    'write:previewMemoryApply',
+    async (_e, payload: { projectId: string; extraction: MemoryExtraction }) => {
+      return service.previewMemoryApply(payload.projectId, payload.extraction)
+    }
+  )
+
+  safeHandle(
     'write:applyNewCharacters',
     async (
       _e,

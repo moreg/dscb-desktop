@@ -251,6 +251,7 @@ export default function SettingsPage(_: Props) {
   const [reviewSections, setReviewSections] = useState<ReviewCheckSectionView[]>([])
   const [reviewCfg, setReviewCfg] = useState<ReviewRulesConfig | null>(null)
   // 阈值/词表本地草稿：用户编辑时不立即落盘，点「保存」才写
+  // 注：minWords/maxWords 已随字数检查关闭而停用，不再暴露编辑入口（旧配置值保留在 settings 中）
   const [reviewThresholdDraft, setReviewThresholdDraft] = useState({
     minWords: 2300,
     maxWords: 3500,
@@ -1920,8 +1921,6 @@ export default function SettingsPage(_: Props) {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
                 {(
                   [
-                    ['minWords', '字数下限', 1, 100000],
-                    ['maxWords', '字数上限', 1, 100000],
                     ['maxParagraphLen', '段落长度上限', 1, 10000],
                     ['maxSentenceLen', '句子长度上限', 1, 10000],
                     ['repetitionLen', '重复判定长度', 1, 1000],

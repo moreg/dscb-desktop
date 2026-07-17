@@ -118,6 +118,117 @@ describe('MemoryWriter (v4)', () => {
       expect(result.errors).toEqual([])
     })
 
+    it('maps identity/appearance fields onto character card + 状态轨迹', async () => {
+      seedCharacterFile(dir, '林远')
+      const extraction: MemoryExtraction = {
+        chapterNumber: 6,
+        newCharacters: [],
+        newLocations: [],
+        newItems: [],
+        newForeshadowings: [],
+        newPlotPoints: [],
+        characterStateChanges: [
+          { name: '林远', field: '身份', oldValue: '剑修', newValue: '真传弟子' },
+          { name: '林远', field: '外貌', oldValue: '', newValue: '左眉一道疤' },
+          { name: '林远', field: '关系', oldValue: '', newValue: '与赵乾结仇' }
+        ],
+        collectedForeshadowings: []
+      }
+      const result = await writer.applyAutomatic(extraction)
+      expect(result.applied.stateChanges).toBe(3)
+      expect(result.appliedDiffs?.length).toBe(3)
+
+      const charRepo = new CharacterRepo(dir)
+      const lin = (await charRepo.list()).find((c) => c.name === '林远')
+      expect(lin?.identity).toBe('真传弟子')
+      expect(lin?.customFields?.['外貌']).toBe('左眉一道疤')
+      expect(lin?.customFields?.['关系']).toBe('与赵乾结仇')
+      expect(String(lin?.customFields?.['状态轨迹'])).toContain('身份：真传弟子')
+      expect(String(lin?.customFields?.['状态轨迹'])).toContain('外貌：左眉一道疤')
+    })
+
+    it('previewAutomatic shows old→new from current card', async () => {
+      seedCharacterFile(dir, '林远')
+      // 先写入记忆人物卡，保证主源有当前值
+      const charRepo = new CharacterRepo(dir)
+      const list = await charRepo.list()
+      const lin0 = list.find((c) => c.name === '林远')!
+      await charRepo.update(lin0.id, { identity: '剑修', customFields: { 伤势: '无' } })
+
+      const extraction: MemoryExtraction = {
+        chapterNumber: 2,
+        newCharacters: [],
+        newLocations: [],
+        newItems: [],
+        newForeshadowings: [],
+        newPlotPoints: [{ title: '夜谈', event: '二人密议' }],
+        characterStateChanges: [
+          { name: '林远', field: '伤势', oldValue: '无', newValue: '轻伤' },
+          { name: '幽灵', field: '情绪', oldValue: '', newValue: '冷静' }
+        ],
+        collectedForeshadowings: []
+      }
+      const preview = await writer.previewAutomatic(extraction)
+      expect(preview.applicableCount).toBeGreaterThanOrEqual(2) // 伤势 + 情节；幽灵不可用
+      const injury = preview.diffs.find((d) => d.kind === 'state' && d.field === '伤势')
+      expect(injury?.oldValue).toMatch(/无|（无）/)
+      expect(injury?.newValue).toBe('轻伤')
+      expect(injury?.applicable).toBe(true)
+      const ghost = preview.diffs.find((d) => d.label === '幽灵')
+      expect(ghost?.applicable).toBe(false)
+      expect(preview.confirmCount).toBe(0)
+    })
+
+    it('preview normalizes field aliases and marks missing foreshadowing inapplicable', async () => {
+      seedCharacterFile(dir, '林远')
+      seedForeshadowingFile(dir, FORESHADOWING_FILE)
+      const extraction: MemoryExtraction = {
+        chapterNumber: 3,
+        newCharacters: [],
+        newLocations: [],
+        newItems: [],
+        newForeshadowings: [],
+        newPlotPoints: [],
+        characterStateChanges: [
+          { name: '林远', field: '心情', oldValue: '', newValue: '怒' }
+        ],
+        collectedForeshadowings: [
+          { content: '玉佩来历', chapter: 3 },
+          { content: '根本不存在的伏笔XYZ', chapter: 3 }
+        ]
+      }
+      const preview = await writer.previewAutomatic(extraction)
+      const mood = preview.diffs.find((d) => d.kind === 'state')
+      expect(mood?.field).toBe('情绪') // 心情 → 情绪
+      const okFs = preview.diffs.find((d) => d.kind === 'collect' && d.label.includes('玉佩'))
+      expect(okFs?.applicable).toBe(true)
+      const miss = preview.diffs.find((d) => d.label.includes('XYZ'))
+      expect(miss?.applicable).toBe(false)
+      expect(miss?.note).toMatch(/未找到/)
+    })
+
+    it('fuzzy-matches unique character name substring', async () => {
+      seedCharacterFile(dir, '苏九')
+      const extraction: MemoryExtraction = {
+        chapterNumber: 1,
+        newCharacters: [],
+        newLocations: [],
+        newItems: [],
+        newForeshadowings: [],
+        newPlotPoints: [],
+        characterStateChanges: [
+          { name: '苏九九', field: '伤势', oldValue: '', newValue: '轻伤' }
+        ],
+        collectedForeshadowings: []
+      }
+      // 苏九九 includes 苏九 as substring unique
+      const result = await writer.applyAutomatic(extraction)
+      expect(result.applied.stateChanges).toBe(1)
+      const charRepo = new CharacterRepo(dir)
+      const c = (await charRepo.list()).find((x) => x.name === '苏九')
+      expect(c?.customFields?.['伤势']).toBe('轻伤')
+    })
+
     it('剧情点标题含路径字符时 sanitize 落盘且不逃逸目录', async () => {
       const extraction: MemoryExtraction = {
         chapterNumber: 3,

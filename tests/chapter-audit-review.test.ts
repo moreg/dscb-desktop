@@ -178,16 +178,16 @@ describe('chapter-audit (sensitive 敏感词提醒)', () => {
   })
 })
 
-describe('chapter-audit (字数阈值改为从 reviewRules 读)', () => {
-  it('minWords 来自 reviewRules.thresholds', () => {
-    const short = '他走了。' // 远低于任何阈值
+describe('chapter-audit (字数区间提醒已关闭)', () => {
+  it('即使 minWords 很低也不再产出 word_count 违例', () => {
+    const short = '他走了。'
     const rules = reviewRulesOn({
       thresholds: { ...DEFAULT_REVIEW_THRESHOLDS, minWords: 2000 }
     })
     const report = auditChapter(short, { reviewRules: rules })
     const wc = report.violations.find((v) => v.category === 'word_count')
-    expect(wc).toBeDefined()
-    expect(wc?.message).toContain('2000')
+    expect(wc).toBeUndefined()
+    expect(report.passed.wordCount).toBe(true)
   })
 })
 

@@ -16,10 +16,8 @@ export function buildReviewReport(
   opts: {
     genre?: string
     reviewRules?: ReviewRulesConfig
-    minWords?: number
   } = {}
 ): ChapterReviewReport {
-  const minRequired = opts.minWords ?? opts.reviewRules?.thresholds.minWords ?? 2300
   const allViolations = [...audit.violations, ...llmViolations]
 
   // 按类别分组
@@ -41,14 +39,8 @@ export function buildReviewReport(
   const manuscriptQualityVerdict: '✅' | '⚠️' | '🚨' =
     qualityErrors > 0 ? '🚨' : qualityViolations.length > 0 ? '⚠️' : '✅'
 
-  // 字数统计
+  // 字数：只展示当前字数，不再判定不足/偏多，不写入主要问题/修复优先级
   const current = audit.wordCount
-  const passing = current >= minRequired
-  const wordSuggestion = !passing
-    ? `当前 ${current} 字，不足合格线 ${minRequired} 字。建议：加剧情/加对话/加矛盾冲突/加变数/加细节描写/加伏笔。`
-    : current > (opts.reviewRules?.thresholds.maxWords ?? 3500)
-      ? `当前 ${current} 字，偏多，检查是否有水字数。`
-      : null
 
   // 爽点分析
   const coolPointApplicable = opts.genre?.includes('爽') ?? false
@@ -63,7 +55,6 @@ export function buildReviewReport(
   const mainIssues: string[] = []
   if (toxicPoints.length > 0) mainIssues.push(`毒点 ${toxicPoints.length} 处`)
   if (deAiSuggestions.length > 0) mainIssues.push(`AI 味 ${deAiSuggestions.length} 处`)
-  if (!passing) mainIssues.push(`字数不足（${current}/${minRequired}）`)
   if (hookStrength.length > 0) mainIssues.push('章末钩子偏弱')
   if (quoteConsistency.length > 0) mainIssues.push(`引文一致性 ${quoteConsistency.length} 处`)
 
@@ -73,7 +64,6 @@ export function buildReviewReport(
   if (mustFix.length > 0) fixPriority.push(`🚨 必须修复：${mustFix.length} 处（影响阅读/逻辑错误）`)
   const suggestOptimize = allViolations.filter((v) => v.severity === 'warn')
   if (suggestOptimize.length > 0) fixPriority.push(`💡 建议优化：${suggestOptimize.length} 处`)
-  if (!passing) fixPriority.push(`📝 字数扩充至 ${minRequired} 字以上`)
 
   return {
     chapterNumber,
@@ -111,10 +101,7 @@ export function buildReviewReport(
       notes: coolPointApplicable ? [] : ['非爽文题材，跳过爽点分析']
     },
     wordCount: {
-      current,
-      passing,
-      minRequired,
-      suggestion: wordSuggestion
+      current
     },
     styleMatch: {
       genre: opts.genre ?? null,

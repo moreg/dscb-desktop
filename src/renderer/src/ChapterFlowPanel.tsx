@@ -5,6 +5,7 @@ import type {
   ChapterReviewReport,
   DetailedOutlineItem,
   FigureDraft,
+  MemoryApplyPreview,
   MemoryApplyResult,
   MemoryExtraction,
   OutlineDiffItem,
@@ -124,6 +125,8 @@ export default function ChapterFlowPanel(props: Props) {
   const [memoryError, setMemoryError] = useState('')
   const [memoryApplying, setMemoryApplying] = useState(false)
   const [memoryResult, setMemoryResult] = useState<MemoryApplyResult | null>(null)
+  /** 自动部分 diff 预览（应用前读人物卡当前值） */
+  const [memoryPreview, setMemoryPreview] = useState<MemoryApplyPreview | null>(null)
   const [newCharResult, setNewCharResult] = useState<number | null>(null)
   const [newLocResult, setNewLocResult] = useState<number | null>(null)
   const [newItemResult, setNewItemResult] = useState<number | null>(null)
@@ -376,6 +379,7 @@ export default function ChapterFlowPanel(props: Props) {
     setMemoryExtraction(null)
     setMemoryError('')
     setMemoryResult(null)
+    setMemoryPreview(null)
     setNewCharResult(null)
     setNewLocResult(null)
     setNewItemResult(null)
@@ -395,8 +399,36 @@ export default function ChapterFlowPanel(props: Props) {
         setMemoryExtracting(false)
         return
       }
-      setMemoryExtraction(parseMemoryExtractionJson(buffer, chapterNumber))
+      const extraction = parseMemoryExtractionJson(buffer, chapterNumber)
+      setMemoryExtraction(extraction)
       onCompleteMemory?.()
+
+      // 预览 diff + 自动应用状态/情节/伏笔回收（新增角色等仍需确认）
+      try {
+        const preview = await window.api.previewMemoryApply(projectId, extraction)
+        setMemoryPreview(preview)
+        const hasAuto =
+          extraction.characterStateChanges.length > 0 ||
+          extraction.newPlotPoints.length > 0 ||
+          extraction.collectedForeshadowings.length > 0
+        if (hasAuto && preview.applicableCount > 0) {
+          setMemoryApplying(true)
+          const result = await window.api.applyMemory(projectId, extraction)
+          setMemoryResult(result)
+          // 用应用结果里的 appliedDiffs 覆盖预览（仅已成功项）
+          if (result.appliedDiffs?.length) {
+            setMemoryPreview({
+              diffs: result.appliedDiffs,
+              applicableCount: result.appliedDiffs.length,
+              confirmCount: preview.confirmCount
+            })
+          }
+        }
+      } catch (e) {
+        setMemoryError((e as Error).message)
+      } finally {
+        setMemoryApplying(false)
+      }
     } catch (e) {
       setMemoryError((e as Error).message)
       setMemoryExtracting(false)
@@ -407,8 +439,18 @@ export default function ChapterFlowPanel(props: Props) {
     if (!memoryExtraction) return
     setMemoryApplying(true)
     try {
+      // 再刷一次预览（应用前当前值）
+      const preview = await window.api.previewMemoryApply(projectId, memoryExtraction)
+      setMemoryPreview(preview)
       const result = await window.api.applyMemory(projectId, memoryExtraction)
       setMemoryResult(result)
+      if (result.appliedDiffs?.length) {
+        setMemoryPreview({
+          diffs: result.appliedDiffs,
+          applicableCount: result.appliedDiffs.length,
+          confirmCount: preview.confirmCount
+        })
+      }
     } catch (e) {
       setMemoryError((e as Error).message)
     } finally {
@@ -850,7 +892,8 @@ export default function ChapterFlowPanel(props: Props) {
             </button>
           </div>
           <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-            自动应用：状态变化 / 情节追加 / 伏笔回收；需确认：新增角色 / 地点 / 道具 / 伏笔。
+            提取后自动写入：状态/设定变化 · 情节 · 伏笔回收（可看下方 diff）。需确认：新增角色 /
+            地点 / 道具 / 伏笔。
           </p>
           {memoryError ? (
             <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
@@ -859,7 +902,7 @@ export default function ChapterFlowPanel(props: Props) {
           ) : null}
           {memoryExtraction ? (
             <div style={{ marginTop: 8 }}>
-              {/* 自动应用部分 */}
+              {/* 自动应用部分 + diff 预览 */}
               <div
                 style={{
                   border: '1px solid var(--line-soft)',
@@ -869,49 +912,87 @@ export default function ChapterFlowPanel(props: Props) {
                 }}
               >
                 <div className="row" style={{ alignItems: 'baseline' }}>
-                  <strong style={{ fontSize: 12.5 }}>自动应用部分</strong>
+                  <strong style={{ fontSize: 12.5 }}>
+                    {memoryResult ? '已同步（自动部分）' : '自动部分'}
+                  </strong>
                   <button
                     className="btn btn-sm"
                     onClick={applyAutomatic}
-                    disabled={memoryApplying || !hasAutoItems || !!memoryResult}
+                    disabled={memoryApplying || !hasAutoItems}
                     style={{ marginLeft: 'auto' }}
+                    title={memoryResult ? '再次应用（会再追加状态轨迹）' : '手动应用自动部分'}
                   >
-                    {memoryApplying ? '应用中…' : memoryResult ? '已应用' : '应用自动部分'}
+                    {memoryApplying
+                      ? '应用中…'
+                      : memoryResult
+                        ? '重新应用'
+                        : '应用自动部分'}
                   </button>
                 </div>
                 <ul className="bare" style={{ marginTop: 6, fontSize: 12, display: 'grid', gap: 4 }}>
                   <li>
-                    角色状态变化：{memoryExtraction.characterStateChanges.length} 项
-                    {memoryExtraction.characterStateChanges.length > 0 ? (
-                      <span className="muted">
-                        {' '}
-                       （
-                        {memoryExtraction.characterStateChanges
-                          .map((c) => `${c.name}.${c.field}→${c.newValue}`)
-                          .join('；')}
-                        ）
-                      </span>
-                    ) : null}
+                    角色状态/设定：{memoryExtraction.characterStateChanges.length} 项
                   </li>
-                  <li>
-                    情节追加：{memoryExtraction.newPlotPoints.length} 项
-                    {memoryExtraction.newPlotPoints.length > 0 ? (
-                      <span className="muted">
-                        {' '}
-                       （{memoryExtraction.newPlotPoints.map((p) => p.title).join('、')}）
-                      </span>
-                    ) : null}
-                  </li>
-                  <li>
-                    伏笔回收：{memoryExtraction.collectedForeshadowings.length} 项
-                    {memoryExtraction.collectedForeshadowings.length > 0 ? (
-                      <span className="muted">
-                        {' '}
-                        （{memoryExtraction.collectedForeshadowings.map((f) => f.content).join('；')}）
-                      </span>
-                    ) : null}
-                  </li>
+                  <li>情节追加：{memoryExtraction.newPlotPoints.length} 项</li>
+                  <li>伏笔回收：{memoryExtraction.collectedForeshadowings.length} 项</li>
                 </ul>
+                {memoryPreview && memoryPreview.diffs.length > 0 ? (
+                  <div style={{ marginTop: 8 }}>
+                    <div className="meta" style={{ fontSize: 11.5, marginBottom: 4 }}>
+                      {memoryResult ? '写入 diff' : '预览 diff'}（old → new）
+                      {memoryPreview.confirmCount > 0
+                        ? ` · 另有 ${memoryPreview.confirmCount} 项待确认`
+                        : ''}
+                    </div>
+                    <ul
+                      className="bare"
+                      style={{
+                        fontSize: 12,
+                        display: 'grid',
+                        gap: 6,
+                        maxHeight: 200,
+                        overflow: 'auto',
+                        padding: '6px 8px',
+                        background: 'var(--surface-2)',
+                        borderRadius: 'var(--r-sm)'
+                      }}
+                    >
+                      {memoryPreview.diffs.map((d, i) => (
+                        <li
+                          key={`${d.kind}-${d.label}-${d.field ?? ''}-${i}`}
+                          style={{
+                            opacity: d.applicable ? 1 : 0.55,
+                            lineHeight: 1.45
+                          }}
+                        >
+                          <span className="muted" style={{ marginRight: 6 }}>
+                            {d.kind === 'state'
+                              ? '状态'
+                              : d.kind === 'plot'
+                                ? '情节'
+                                : '伏笔'}
+                          </span>
+                          <strong>{d.label}</strong>
+                          {d.field ? (
+                            <span className="muted"> · {d.field}</span>
+                          ) : null}
+                          <div style={{ marginTop: 2 }}>
+                            <span style={{ color: 'var(--ink-3)' }}>{d.oldValue || '（无）'}</span>
+                            <span className="muted"> → </span>
+                            <span style={{ color: 'var(--ok, #2e7d32)' }}>
+                              {d.newValue || '（空）'}
+                            </span>
+                          </div>
+                          {d.note ? (
+                            <div className="muted" style={{ fontSize: 11 }}>
+                              {d.note}
+                            </div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 {memoryResult ? (
                   <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
                     ✓ 已应用：状态 {memoryResult.applied.stateChanges} · 情节{' '}
@@ -919,6 +1000,10 @@ export default function ChapterFlowPanel(props: Props) {
                     {memoryResult.errors.length > 0 ? (
                       <span className="err">（{memoryResult.errors.length} 项失败）</span>
                     ) : null}
+                  </div>
+                ) : memoryApplying ? (
+                  <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
+                    正在自动写入人物状态/设定…
                   </div>
                 ) : null}
               </div>
