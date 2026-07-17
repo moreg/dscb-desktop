@@ -50,11 +50,11 @@ describe('SettingsWriter', () => {
     expect(log).toContain('力量体系')
   })
 
-  it('refuses 题材定位 and skips in onlyAuto medium confidence', async () => {
+  it('refuses 题材定位 (with or without .md) and skips onlyAuto medium', async () => {
     const patches: SettingsPatch[] = [
       {
         target: 'worldview',
-        fileName: '题材定位',
+        fileName: '题材定位.md',
         op: 'append_h2',
         title: '不应写入',
         content: '坏补丁',
@@ -70,6 +70,7 @@ describe('SettingsWriter', () => {
       }
     ]
     const preview = writer.preview(patches)
+    expect(preview.diffs[0].fileName).toBe('题材定位')
     expect(preview.diffs[0].note).toMatch(/禁止/)
     expect(preview.autoCount).toBe(0)
 
@@ -79,6 +80,31 @@ describe('SettingsWriter', () => {
     const all = await writer.applyPatches(1, patches, { onlyAuto: false })
     expect(all.applied).toBe(1)
     expect(existsSync(join(dir, '设定', '世界观', '背景设定.md'))).toBe(true)
+    // 禁止文件不应被创建为 题材定位.md.md
+    expect(existsSync(join(dir, '设定', '世界观', '题材定位.md'))).toBe(false)
+    expect(existsSync(join(dir, '设定', '世界观', '题材定位.md.md'))).toBe(false)
+  })
+
+  it('writes real chapter number into geography table', async () => {
+    const patches: SettingsPatch[] = [
+      {
+        target: 'geography',
+        fileName: '地理',
+        op: 'append_bullet',
+        title: '法租界',
+        content: '天津常驻',
+        confidence: 'high'
+      }
+    ]
+    await writer.applyPatches(9, patches, { onlyAuto: false })
+    const raw = readFileSync(join(dir, '设定', '世界观', '地理.md'), 'utf-8')
+    expect(raw).toContain('法租界')
+    expect(raw).toContain('第 9 章')
+    expect(raw).not.toContain('第?章')
+    // 幂等：再写一次不重复行
+    await writer.applyPatches(9, patches, { onlyAuto: false })
+    const raw2 = readFileSync(join(dir, '设定', '世界观', '地理.md'), 'utf-8')
+    expect((raw2.match(/法租界/g) || []).length).toBe(1)
   })
 
   it('patchesFromWorldLocations only takes scope=world', () => {

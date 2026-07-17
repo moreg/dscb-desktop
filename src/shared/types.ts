@@ -771,6 +771,9 @@ export interface RendererApi {
   ) => Promise<ChapterReviewReport>
   getWriteAuditConfig: () => Promise<WriteAuditConfig>
   setWriteAuditConfig: (cfg: Partial<WriteAuditConfig>) => Promise<WriteAuditConfig>
+  /** 设定随书进化：off | confirm_all | auto_high */
+  getSettingsEvolution: () => Promise<SettingsEvolutionMode>
+  setSettingsEvolution: (mode: SettingsEvolutionMode) => Promise<SettingsEvolutionMode>
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
   getCostAlertConfig: () => Promise<CostAlertConfig>
   setCostAlertConfig: (cfg: Partial<CostAlertConfig>) => Promise<CostAlertConfig>

@@ -723,7 +723,7 @@ export class WriteService {
     if (!this.settings) return 'auto_high'
     try {
       const s = await this.settings.get()
-      const m = (s as { settingsEvolution?: SettingsEvolutionMode }).settingsEvolution
+      const m = s.settingsEvolution
       if (m === 'off' || m === 'confirm_all' || m === 'auto_high') return m
     } catch {
       /* default */
@@ -740,7 +740,7 @@ export class WriteService {
     return new MemoryWriter(dir).applyNewCharacters(chars)
   }
 
-  /** 用户确认后：应用新增地点；world 级同时写入设定/世界观/地理 */
+  /** 用户确认后：应用新增地点；world 级在设定进化开启时双写地理（尊重 off 开关） */
   async applyNewLocations(
     projectId: string,
     locs: MemoryExtraction['newLocations'],
@@ -750,9 +750,12 @@ export class WriteService {
     const n = await new MemoryWriter(dir).applyNewLocations(locs)
     const geo = patchesFromWorldLocations(locs)
     if (geo.length > 0) {
-      await new SettingsWriter(dir).applyPatches(chapterNumber || 1, geo, {
-        onlyAuto: false
-      })
+      const mode = await this.getSettingsEvolutionMode()
+      if (mode !== 'off') {
+        await new SettingsWriter(dir).applyPatches(chapterNumber || 1, geo, {
+          onlyAuto: false
+        })
+      }
     }
     return n
   }

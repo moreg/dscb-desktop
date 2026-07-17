@@ -85,7 +85,7 @@ export class SettingsWriter {
         continue
       }
       try {
-        const ok = await this.applyOne(p)
+        const ok = await this.applyOne(p, chapterNumber)
         if (ok) {
           applied++
           appliedDiffs.push({ ...d, autoEligible: true })
@@ -129,7 +129,7 @@ export class SettingsWriter {
     return entries.slice(-limit)
   }
 
-  private async applyOne(p: SettingsPatch): Promise<boolean> {
+  private async applyOne(p: SettingsPatch, chapterNumber: number): Promise<boolean> {
     const abs = this.resolvePath(p)
     if (!abs) return false
     await fs.mkdir(dirname(abs), { recursive: true })
@@ -139,24 +139,39 @@ export class SettingsWriter {
       text = defaultSkeleton(p)
     }
 
-    // 幂等：title/content 已存在则跳过
-    const marker = (p.title || '').trim()
-    if (marker && text.includes(marker) && text.includes(p.content.slice(0, 40))) {
+    // 幂等：内容或地理地点名已存在则跳过
+    if (p.content && text.includes(p.content)) {
+      return false
+    }
+    const bulletLine = formatBullet(p.title, p.content).trim()
+    if (bulletLine && text.includes(bulletLine)) {
+      return false
+    }
+    if (
+      (p.target === 'geography' || p.fileName === '地理') &&
+      p.title &&
+      tableHasPlace(text, p.title)
+    ) {
       return false
     }
 
     let next = text
     if (p.target === 'geography' || (p.target === 'worldview' && p.fileName === '地理')) {
+      const chLabel = `第 ${Math.max(1, chapterNumber || 1)} 章`
       next = appendTableRow(
         text,
-        [p.title || p.content.slice(0, 20), p.content, `第?章`],
+        [p.title || p.content.slice(0, 20), p.content, chLabel],
         ['地点', '说明', '出现章节']
       )
     } else if (p.op === 'append_h2') {
       const title = (p.title || p.sectionTitle || '补充设定').trim()
       if (findTitleInText(text, title)) {
-        // 已有同名 H2：在节末加 bullet
-        next = appendBulletToH2(text, title, p.content)
+        // 已有同名 H2：内容已在上面 includes(content) 判过，仍无则补 bullet
+        next = appendBulletToH2(
+          text,
+          title,
+          p.content.startsWith('-') ? p.content : formatBullet(undefined, p.content)
+        )
       } else {
         next = appendH2Section(text, title, p.content)
       }
@@ -245,11 +260,18 @@ function normalizePatch(p: SettingsPatch): SettingsPatch {
   const content = String(p.content ?? '')
     .trim()
     .slice(0, MAX_CONTENT_LEN)
-  let fileName = String(p.fileName ?? '').trim() || '背景设定'
-  if (p.target === 'geography') fileName = '地理'
+  // 去掉 .md / 路径噪音后再判禁写与拼路径
+  let fileName = String(p.fileName ?? '')
+    .trim()
+    .replace(/\.md$/i, '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop() || '背景设定'
+  fileName = sanitizeFileName(fileName) || '背景设定'
+  const target = normalizeTarget(p.target)
+  if (target === 'geography') fileName = '地理'
   const conf = p.confidence === 'high' || p.confidence === 'low' ? p.confidence : 'medium'
   const op = p.op === 'append_h2' ? 'append_h2' : 'append_bullet'
-  const target = normalizeTarget(p.target)
   return {
     target,
     fileName,
@@ -341,6 +363,23 @@ function escapeRe(s: string): string {
 
 function escapeCell(s: string): string {
   return s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim()
+}
+
+/** 地理表是否已有该地点名（避免确认地点 + 设定补丁双写重复） */
+function tableHasPlace(text: string, placeName: string): boolean {
+  const name = placeName.trim()
+  if (!name) return false
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t.startsWith('|') || t.includes('---') || t.includes('地点')) continue
+    const cells = t
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((c) => c.trim())
+    if (cells[0] === name) return true
+  }
+  return false
 }
 
 /** 从 newLocations 生成地理设定补丁 */
