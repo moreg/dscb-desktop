@@ -457,4 +457,66 @@ describe('registerLlmIpc handlers', () => {
     const result = (await handler!(null)) as boolean
     expect(result).toBe(true)
   })
+
+  /* ---- grok 协议（grok CLI 登录）---- */
+
+  it('llm:upsertProvider accepts grok protocol without baseUrl/apiKey', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_grok',
+      label: 'Grok',
+      baseUrl: '',
+      model: 'grok-4.5',
+      apiKey: '',
+      protocol: 'grok'
+    })
+    const cfg = await store.read()
+    const p = cfg.providers[0]
+    expect(p.protocol).toBe('grok')
+    expect(p.apiKey).toBe('')
+    expect(p.model).toBe('grok-4.5')
+    expect(p.baseUrl).toBe('grok://local')
+  })
+
+  it('llm:listProviders reports grok provider as hasKey=true with grok 登录态', async () => {
+    await store.write({
+      activeId: 'p_grok',
+      providers: [
+        {
+          id: 'p_grok',
+          label: 'Grok',
+          baseUrl: 'grok://local',
+          model: 'grok-4.5',
+          apiKey: '',
+          protocol: 'grok'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:listProviders')
+    const out = (await handler!(null)) as {
+      providers: Array<{ hasKey: boolean; keyMasked: string; protocol: string }>
+    }
+    expect(out.providers[0].hasKey).toBe(true)
+    expect(out.providers[0].protocol).toBe('grok')
+    expect(out.providers[0].keyMasked).toBe('grok 登录态')
+  })
+
+  it('llm:hasKey returns true for active grok provider (no apiKey needed)', async () => {
+    await store.write({
+      activeId: 'p_grok',
+      providers: [
+        {
+          id: 'p_grok',
+          label: 'Grok',
+          baseUrl: 'grok://local',
+          model: 'default',
+          apiKey: '',
+          protocol: 'grok'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:hasKey')
+    const result = (await handler!(null)) as boolean
+    expect(result).toBe(true)
+  })
 })

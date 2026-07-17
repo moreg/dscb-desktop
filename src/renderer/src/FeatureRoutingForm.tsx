@@ -10,7 +10,6 @@ const FEATURE_CATEGORIES: { key: FeatureCategory; label: string; hint: string }[
   { key: 'ask', label: '正文追问', hint: '💬 追问 / 只回答不改正文' },
   { key: 'review', label: '审稿质检', hint: '审稿 / 细纲对照 / 节奏评估' },
   { key: 'humanize', label: '去AI味改写', hint: '去AI味 / 改写' },
-  { key: 'opening', label: '开局大纲', hint: '开局 / 大纲 / 登场识别 / 关系推断' },
   { key: 'auxiliary', label: '辅助提取', hint: '记忆 / 图解 / 结尾状态 / 拆书' }
 ]
 

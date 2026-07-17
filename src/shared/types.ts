@@ -24,7 +24,7 @@ export interface CreateProjectInput {
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
-export type ProviderProtocol = 'openai' | 'anthropic' | 'antigravity' | 'codex'
+export type ProviderProtocol = 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok'
 
 /**
  * 连通测试统一返回结构：
@@ -59,6 +59,8 @@ export interface ProviderConfig {
    *   model 为 agy 模型显示名（可空，走 agy 默认）。
    * - 'codex'：调用本机 codex CLI（`codex exec` 子进程），用 ChatGPT 登录态，不走 HTTP。
    *   此时 baseUrl 可空、apiKey 可空、model 为 codex 模型名（可空，走 config.toml 默认）。
+   * - 'grok'：调用本机 grok CLI（`grok --prompt-file` headless），用 `grok login` 登录态，不走 HTTP。
+   *   此时 baseUrl 可空、apiKey 可空、model 为 grok 模型 ID（可空，走 CLI/config 默认）。
    */
   protocol?: ProviderProtocol
   /**
@@ -551,6 +553,8 @@ export interface RendererApi {
   listAntigravityModels: () => Promise<string[]>
   /** 列出 codex CLI 可用模型（读 config.toml，供 codex provider 的模型选择） */
   listCodexModels: () => Promise<string[]>
+  /** 列出 grok CLI 可用模型（`grok models`，供 grok provider 的模型选择） */
+  listGrokModels: () => Promise<string[]>
   listProviders: () => Promise<ListProvidersResult>
   upsertProvider: (p: ProviderConfig) => Promise<ProviderConfig>
   deleteProvider: (id: string) => Promise<void>
@@ -1479,7 +1483,13 @@ export interface UsageRecord {
   feature: string
   projectId?: string
   chapterNumber?: number
+  /** 展示用模型名（CLI 可能为「gpt · codex 默认」） */
   model: string
+  /** 聚合键：配置里的原始 model 字段 */
+  modelId?: string
+  protocol?: string
+  providerId?: string
+  providerLabel?: string
   inputTokens: number
   outputTokens: number
   totalTokens: number

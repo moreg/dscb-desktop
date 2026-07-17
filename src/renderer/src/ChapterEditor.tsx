@@ -65,7 +65,7 @@ interface Props {
 
 /**
  * LLM 错误码 -> 用户可读的中文提示。
- * 覆盖所有协议（openai/anthropic/antigravity/codex）的错误码。
+ * 覆盖所有协议（openai/anthropic/antigravity/codex/grok）的错误码。
  */
 function friendlyLlmError(err: string | undefined): string {
   if (!err) return '生成失败，请重试'
@@ -74,9 +74,13 @@ function friendlyLlmError(err: string | undefined): string {
     LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
     AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
     CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+    GROK_AUTH_EXPIRED: 'Grok 登录态失效，请在终端运行 grok login',
     LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
     LLM_TIMEOUT: '生成超时（内容过长或网络较慢），请重试',
+    LLM_ABORTED: '已取消生成',
     LLM_OUTPUT_TRUNCATED: '输出不完整，可点击重试',
+    LLM_AGENT_META:
+      '模型输出了写作流程说明而非小说正文，已拦截未写入。请直接再点一次「续写」重试',
     LLM_RESPONSE_TOO_LARGE: '生成内容过长，请尝试简化提示词',
     LLM_REQUEST_FAILED: '请求失败，请检查网络连接',
     NETWORK_ERROR: '网络连接失败，请检查网络',
@@ -84,6 +88,8 @@ function friendlyLlmError(err: string | undefined): string {
     AGY_SPAWN_FAILED: 'agy CLI 启动失败，请检查安装',
     CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
     CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名',
+    GROK_NOT_FOUND: '未检测到 grok CLI，请先安装 Grok',
+    GROK_SPAWN_FAILED: 'grok CLI 启动失败，请检查安装',
     // agy 内部 agent 执行失败的通用错误
     'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络连接后重试',
     'exited with code': 'agy 进程异常退出，请重试或检查 CLI 安装',
@@ -97,9 +103,16 @@ function friendlyLlmError(err: string | undefined): string {
   for (const [key, msg] of Object.entries(map)) {
     if (lowerErr.includes(key.toLowerCase())) return msg
   }
-  // AGY_ERROR / CODEX_ERROR 带具体信息
+  // AGY_ERROR / CODEX_ERROR / GROK_ERROR 带具体信息
   if (err.startsWith('AGY_ERROR: ')) return `agy 执行出错：${err.slice(11).slice(0, 100)}`
   if (err.startsWith('CODEX_ERROR: ')) return `codex 执行出错：${err.slice(13).slice(0, 100)}`
+  if (err.startsWith('GROK_ERROR: ')) {
+    const detail = err.slice(12)
+    if (/Couldn't create session|unsatisfied requirements|agent building failed/i.test(detail)) {
+      return 'Grok 会话创建失败，请重启应用后重试；若仍失败请在终端运行 grok login'
+    }
+    return `grok 执行出错：${detail.slice(0, 120)}`
+  }
   return err
 }
 
@@ -1047,6 +1060,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (genRef.current !== myGen) return
       if (!result.ok) {
         setGenerating(false)
+        // 流式过程中可能已写入错误旁白（如 agent 流程说明），失败时回滚到续写前
+        setDraft(initialDraft)
         setAlertInfo({ message: friendlyLlmError(result.error) })
         return
       }
@@ -1058,7 +1073,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
       void runPostGenerateAudit(myGen, finalDraft)
     } catch {
-      if (genRef.current === myGen) setGenerating(false)
+      if (genRef.current === myGen) {
+        setGenerating(false)
+        setDraft(initialDraft)
+      }
     }
   }
 

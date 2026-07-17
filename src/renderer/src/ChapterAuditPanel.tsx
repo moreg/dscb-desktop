@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AuditReport, AuditViolation, ChapterReviewReport, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
 import { dedupeForbiddenViolations } from './audit-dedupe'
@@ -75,6 +75,75 @@ const SEVERITY_CLASS: Record<string, string> = {
   error: 'audit-pill audit-pill-error',
   warn: 'audit-pill audit-pill-warn',
   info: 'audit-pill audit-pill-info'
+}
+
+/** 把改写说明里的简易 markdown 拆成可读段落/列表，避免 ** 与连写正文糊成一团 */
+function formatRewriteReason(reason: string): ReactNode {
+  const text = reason
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+  if (!text) return null
+
+  // 无换行但连写多个 "- **…" 时，先拆开，避免说明糊成一段
+  const normalized = text.replace(/\s+([-*•])\s+(\*\*)/g, '\n$1 $2')
+  // 按行拆：列表项 / 普通段落；行内 **粗体** 去掉星号并加粗
+  const lines = normalized.split('\n').map((l) => l.trim()).filter(Boolean)
+  const blocks: Array<{ type: 'p' | 'li'; text: string }> = []
+  for (const line of lines) {
+    const bullet = line.match(/^[-*•]\s+(.*)$/)
+    if (bullet) {
+      blocks.push({ type: 'li', text: bullet[1] })
+    } else {
+      blocks.push({ type: 'p', text: line.replace(/^\d+\.\s+/, '') })
+    }
+  }
+
+  const renderInline = (s: string, keyPrefix: string) => {
+    // 未闭合的 ** 去掉星号，避免「**说明」糊在正文前
+    const cleaned = s.replace(/\*\*([^*]+)\*\*/g, '\u0001$1\u0001').replace(/\*\*/g, '')
+    const parts = cleaned.split(/(\u0001[^\u0001]+\u0001)/g)
+    return parts.map((part, i) => {
+      const m = part.match(/^\u0001([^\u0001]+)\u0001$/)
+      if (m) {
+        return (
+          <strong key={`${keyPrefix}-${i}`} className="audit-reason-em">
+            {m[1]}
+          </strong>
+        )
+      }
+      return <span key={`${keyPrefix}-${i}`}>{part}</span>
+    })
+  }
+
+  // 按原文顺序输出；连续 li 收成一组 ul
+  const nodes: ReactNode[] = []
+  let i = 0
+  while (i < blocks.length) {
+    if (blocks[i].type === 'p') {
+      nodes.push(
+        <p key={`p-${i}`} className="audit-reason-p">
+          {renderInline(blocks[i].text, `p${i}`)}
+        </p>
+      )
+      i += 1
+      continue
+    }
+    const start = i
+    const items: typeof blocks = []
+    while (i < blocks.length && blocks[i].type === 'li') {
+      items.push(blocks[i])
+      i += 1
+    }
+    nodes.push(
+      <ul key={`ul-${start}`} className="audit-reason-list">
+        {items.map((b, j) => (
+          <li key={`li-${start}-${j}`}>{renderInline(b.text, `li${start}-${j}`)}</li>
+        ))}
+      </ul>
+    )
+  }
+  return <>{nodes}</>
 }
 
 export default function ChapterAuditPanel({
@@ -573,26 +642,21 @@ export default function ChapterAuditPanel({
                     const lineNum = v.offset != null && draft
                       ? draft.substring(0, v.offset).split('\n').length
                       : null
+                    const canRewrite = Boolean(v.snippet && v.category !== 'word_count')
+                    const showActions = v.severity !== 'error' || canRewrite
                     return (
                       <li key={i} className={`audit-item audit-item-${v.severity}`}>
-                        <span className={SEVERITY_CLASS[v.severity]}>
-                          {SEVERITY_LABEL[v.severity] ?? v.severity}
-                        </span>
-                        {lineNum != null && (
-                          <span
-                            className="audit-pill"
-                            style={{
-                              marginLeft: 4,
-                              background: 'var(--surface-2)',
-                              color: 'var(--ink-2)',
-                              borderColor: 'var(--line-soft)',
-                              fontSize: '10.5px'
-                            }}
-                          >
-                            第 {lineNum} 行
+                        <div className="audit-item-head">
+                          <span className={SEVERITY_CLASS[v.severity]}>
+                            {SEVERITY_LABEL[v.severity] ?? v.severity}
                           </span>
-                        )}
-                        <span className="audit-message">{v.message}</span>
+                          {lineNum != null && (
+                            <span className="audit-pill audit-line-pill">
+                              第 {lineNum} 行
+                            </span>
+                          )}
+                          <span className="audit-message">{v.message}</span>
+                        </div>
                         {v.snippet && (
                           <code
                             className="audit-snippet"
@@ -610,31 +674,30 @@ export default function ChapterAuditPanel({
                           </code>
                         )}
                         {v.suggestion && (
-                          <span className="audit-suggestion">→ {v.suggestion}</span>
+                          <div className="audit-suggestion">→ {v.suggestion}</div>
                         )}
-                        {/* 忽略按钮 - error 级别不允许忽略 */}
-                        {v.severity !== 'error' && (
-                          <button
-                            className="btn btn-sm audit-rewrite-btn"
-                            onClick={() => handleIgnoreViolation(hKey)}
-                            title="忽略此提醒（隐藏不再显示）"
-                            style={{ marginLeft: 8, fontSize: '11px', padding: '2px 6px' }}
-                          >
-                            ✕ 忽略
-                          </button>
-                        )}
-                        {/* 改写按钮：仅当有 snippet 且不是章末/字数违例时启用 */}
-                        {v.snippet && v.category !== 'word_count' && (
-                          <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            <button
-                              className="btn btn-sm audit-rewrite-btn-primary"
-                              onClick={() => handleHumanize(v, hKey)}
-                              disabled={hState?.loading}
-                              title="调用 LLM 按 humanizer 技能改写这段"
-                            >
-                              {hState?.loading ? '改写中…' : '✎ AI 改写'}
-                            </button>
-                            {hState?.result && (
+                        {showActions && (
+                          <div className="audit-item-actions">
+                            {v.severity !== 'error' && (
+                              <button
+                                className="btn btn-sm audit-rewrite-btn"
+                                onClick={() => handleIgnoreViolation(hKey)}
+                                title="忽略此提醒（隐藏不再显示）"
+                              >
+                                ✕ 忽略
+                              </button>
+                            )}
+                            {canRewrite && (
+                              <button
+                                className="btn btn-sm audit-rewrite-btn-primary"
+                                onClick={() => handleHumanize(v, hKey)}
+                                disabled={hState?.loading}
+                                title="调用 LLM 按 humanizer 技能改写这段"
+                              >
+                                {hState?.loading ? '改写中…' : '✎ AI 改写'}
+                              </button>
+                            )}
+                            {canRewrite && hState?.result && (
                               <>
                                 <button
                                   className="btn btn-sm audit-rewrite-btn"
@@ -692,7 +755,7 @@ export default function ChapterAuditPanel({
                               </>
                             )}
                             {hState?.error && (
-                              <span className="muted" style={{ fontSize: 12 }}>
+                              <span className="muted audit-item-error-text">
                                 ⚠ {hState.error}
                               </span>
                             )}
@@ -717,7 +780,10 @@ export default function ChapterAuditPanel({
                             </div>
                             {hState.result.reason && (
                               <div className="audit-rewrite-reason">
-                                💡 {hState.result.reason}
+                                <div className="audit-rewrite-reason-label">改写说明</div>
+                                <div className="audit-rewrite-reason-body">
+                                  {formatRewriteReason(hState.result.reason)}
+                                </div>
                               </div>
                             )}
                           </div>
@@ -726,7 +792,7 @@ export default function ChapterAuditPanel({
                     )
                   })}
                   {items.length > 50 && (
-                    <li className="muted">…还有 {items.length - 50} 条同类违规未展示</li>
+                    <li className="muted audit-item-more">…还有 {items.length - 50} 条同类违规未展示</li>
                   )}
                 </ul>
               </section>

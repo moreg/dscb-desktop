@@ -3,6 +3,7 @@ import type { ProviderConfig, FeatureCategory, PingResult } from '../../shared/t
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
 import { runCodex, probeCodex } from './codex-runner'
+import { runGrok, probeGrok } from './grok-runner'
 
 export interface GenerateOptions {
   onToken?: (token: string) => void
@@ -35,9 +36,66 @@ export interface UsageInfo {
   totalTokens: number
 }
 
-function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' | 'antigravity' | 'codex' {
+function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok' {
   return p.protocol ?? 'openai'
 }
+
+/**
+ * 用量记录用的模型展示名。
+ * CLI 协议在配置里常写 model="default"（走 CLI/config 默认），若原样入库则用量页只剩
+ * 看不出通道的 "default"。拼上 provider 标签与协议，便于对照「正文生成」路由。
+ */
+function usageModelLabel(p: ProviderConfig): string {
+  const model = (p.model ?? '').trim() || 'default'
+  const proto = protocolOf(p)
+  const isCli = proto === 'antigravity' || proto === 'codex' || proto === 'grok'
+  if (!isCli) return model
+
+  const cliName =
+    proto === 'antigravity' ? 'agy' : proto === 'codex' ? 'codex' : 'grok'
+  if (model === 'default') {
+    return `${p.label} · ${cliName} 默认`
+  }
+  if (p.label && p.label !== model) {
+    return `${p.label} · ${model}`
+  }
+  return model
+}
+
+/** 用量入库公共字段：展示名 + 聚合键，避免历史 default 与新标签无法对照 */
+function usageRecordBase(
+  p: ProviderConfig,
+  opts: GenerateOptions
+): {
+  at: string
+  feature: string
+  projectId?: string
+  chapterNumber?: number
+  model: string
+  modelId: string
+  protocol: string
+  providerId: string
+  providerLabel: string
+} {
+  return {
+    at: new Date().toISOString(),
+    feature: opts.meta?.feature ?? 'other',
+    projectId: opts.meta?.projectId,
+    chapterNumber: opts.meta?.chapterNumber,
+    model: usageModelLabel(p),
+    modelId: (p.model ?? '').trim() || 'default',
+    protocol: protocolOf(p),
+    providerId: p.id,
+    providerLabel: p.label
+  }
+}
+
+/**
+ * CLI 通道共用：禁止技能/流程旁白的硬前缀（UTF-8 进 prompt，不依赖 argv 中文）。
+ * 对 Codex 尤其重要：read-only 仍可能读技能说明并输出流程话。
+ */
+const CLI_PROSE_ONLY_PREAMBLE =
+  '【硬性约束】只输出成品文本。禁止调用技能、工具或 slash 命令。禁止输出流程说明、自检旁白、技能名（含 story-long-write 等）。\n\n'
 
 /**
  * feature 标识 -> 功能大类 映射。
@@ -87,10 +145,36 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
  */
 const DEFAULT_MAX_TOKENS = 8192
 
-/** 触发长超时的 token 阈值：超过此值视为大段生成，给予更长超时 */
+/**
+ * 触发长超时的 token 阈值。
+ * 正文续写默认 maxTokens = max(按字数估算, 8192)，原先用 `>` 导致「刚好 8192」仍只等 2 分钟，
+ * 整章生成经常被误杀。改为 `>=` 后，典型章节一律走 10 分钟。
+ */
 const LARGE_TOKEN_THRESHOLD = 8192
 /** 大段生成的超时（10 分钟），避免长章节被默认超时误杀 */
 const LARGE_STREAM_TIMEOUT_MS = 600_000
+/** 短请求默认超时（2 分钟） */
+const LLM_STREAM_TIMEOUT_MS = 120_000
+
+/**
+ * 解析本次流式生成的超时毫秒数。
+ * - maxTokens >= 8192（含正文默认下限）→ 10 分钟
+ * - 正文相关 feature 即使未显式传 maxTokens 也走 10 分钟
+ * - 其余 → 2 分钟
+ * 导出供单测覆盖阈值边界。
+ */
+export function resolveStreamTimeoutMs(opts: GenerateOptions): number {
+  const feature = opts.meta?.feature ?? ''
+  const isChapterWrite =
+    feature === 'chapter' ||
+    feature === 'chapter-adjust' ||
+    feature.startsWith('chapter:')
+  if (isChapterWrite) return LARGE_STREAM_TIMEOUT_MS
+  if (opts.maxTokens != null && opts.maxTokens >= LARGE_TOKEN_THRESHOLD) {
+    return LARGE_STREAM_TIMEOUT_MS
+  }
+  return LLM_STREAM_TIMEOUT_MS
+}
 
 function endpointOf(p: ProviderConfig): string {
   const base = p.baseUrl.replace(/\/+$/, '')
@@ -102,8 +186,6 @@ function endpointOf(p: ProviderConfig): string {
   }
   return `${base}/chat/completions`
 }
-
-const LLM_STREAM_TIMEOUT_MS = 120_000
 
 function isRetryableStreamError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
@@ -174,7 +256,7 @@ export class LlmService {
   /**
    * 针对单个 provider 的连通探测。被 ping() 复用。
    * 协议分支：antigravity → 本机 agy CLI；codex → 本机 codex CLI；
-   * openai/anthropic → HTTP 1 token 请求。
+   * grok → 本机 grok CLI；openai/anthropic → HTTP 1 token 请求。
    */
   private async pingOne(p: ProviderConfig): Promise<PingResult> {
     const proto = protocolOf(p)
@@ -209,6 +291,21 @@ export class LlmService {
         return { ok: false, error: (err as Error).message || 'CODEX_ERROR' }
       }
     }
+    // grok 协议：走本机 grok CLI，无需 apiKey（靠 grok login）
+    if (proto === 'grok') {
+      const version = await probeGrok()
+      if (!version) return { ok: false, error: 'GROK_NOT_FOUND' }
+      try {
+        await runGrok('回复一个字：好', {
+          model: p.model && p.model !== 'default' ? p.model : undefined,
+          timeoutSec: 90,
+          signal: AbortSignal.timeout(100_000)
+        })
+        return { ok: true, model: p.model, providerLabel: p.label }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message || 'GROK_ERROR' }
+      }
+    }
     if (!p.apiKey) return { ok: false, error: 'NO_KEY' }
     try {
       const { url, init } = buildPingRequest(p)
@@ -236,6 +333,10 @@ export class LlmService {
     if (proto === 'codex') {
       return this.generateViaCodex(p, prompt, opts)
     }
+    // grok 协议：走本机 grok CLI 子进程，不需 apiKey（靠 grok login）
+    if (proto === 'grok') {
+      return this.generateViaGrok(p, prompt, opts)
+    }
     if (!p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
     const MAX_RETRIES = 2
@@ -250,7 +351,7 @@ export class LlmService {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const timeoutMs = opts.maxTokens && opts.maxTokens > LARGE_TOKEN_THRESHOLD ? LARGE_STREAM_TIMEOUT_MS : LLM_STREAM_TIMEOUT_MS
+        const timeoutMs = resolveStreamTimeoutMs(opts)
         const timeoutSignal = AbortSignal.timeout(timeoutMs)
         const combinedSignal = opts.signal
           ? AbortSignal.any([opts.signal, timeoutSignal])
@@ -285,11 +386,7 @@ export class LlmService {
         if (this.usage && usage) {
           try {
             await this.usage.add({
-              at: new Date().toISOString(),
-              feature: opts.meta?.feature ?? 'other',
-              projectId: opts.meta?.projectId,
-              chapterNumber: opts.meta?.chapterNumber,
-              model: p.model,
+              ...usageRecordBase(p, opts),
               inputTokens: usage.inputTokens,
               outputTokens: usage.outputTokens,
               totalTokens: usage.totalTokens
@@ -301,7 +398,8 @@ export class LlmService {
         return full
       } catch (err) {
         if (isAbortError(err)) {
-          if (opts.signal?.aborted) throw err
+          // 用户取消 vs 超时：combined signal 时优先认用户 signal
+          if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
           throw new Error(hasReceivedTokens ? 'LLM_OUTPUT_TRUNCATED' : 'LLM_TIMEOUT')
         }
         if (!hasReceivedTokens && isRetryableStreamError(err) && attempt < MAX_RETRIES) {
@@ -330,32 +428,26 @@ export class LlmService {
     opts: GenerateOptions
   ): Promise<string> {
     // 合并 system + user：agy -p 单轮，把 system 作为前置指令
-    const merged =
+    const body =
       opts.systemPrompt && opts.systemPrompt.trim()
         ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
         : prompt
+    const merged = CLI_PROSE_ONLY_PREAMBLE + body
 
-    const timeoutMs = opts.maxTokens && opts.maxTokens > 8192 ? 600_000 : LLM_STREAM_TIMEOUT_MS
-    const timeoutSignal = AbortSignal.timeout(timeoutMs)
-    const combinedSignal = opts.signal
-      ? AbortSignal.any([opts.signal, timeoutSignal])
-      : timeoutSignal
-
+    const timeoutMs = resolveStreamTimeoutMs(opts)
+    // 仅传用户 signal；超时由 runner 的 timeoutSec / agy --print-timeout 负责，
+    // 以便区分 LLM_ABORTED 与 LLM_TIMEOUT
     const { full, usage } = await runAntigravity(merged, {
       model: p.model && p.model !== 'default' ? p.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
-      signal: combinedSignal
+      signal: opts.signal
     })
 
     if (this.usage && usage) {
       try {
         await this.usage.add({
-          at: new Date().toISOString(),
-          feature: opts.meta?.feature ?? 'other',
-          projectId: opts.meta?.projectId,
-          chapterNumber: opts.meta?.chapterNumber,
-          model: p.model,
+          ...usageRecordBase(p, opts),
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           totalTokens: usage.totalTokens
@@ -378,38 +470,71 @@ export class LlmService {
     prompt: string,
     opts: GenerateOptions
   ): Promise<string> {
-    const merged =
+    const body =
       opts.systemPrompt && opts.systemPrompt.trim()
         ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
         : prompt
+    // Codex read-only 仍可能读技能说明；前缀硬约束 + write-service assertNovelProse
+    const merged = CLI_PROSE_ONLY_PREAMBLE + body
 
-    const timeoutMs = opts.maxTokens && opts.maxTokens > 8192 ? 600_000 : LLM_STREAM_TIMEOUT_MS
-    const timeoutSignal = AbortSignal.timeout(timeoutMs)
-    const combinedSignal = opts.signal
-      ? AbortSignal.any([opts.signal, timeoutSignal])
-      : timeoutSignal
-
+    const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runCodex(merged, {
       model: p.model && p.model !== 'default' ? p.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
-      signal: combinedSignal
+      signal: opts.signal
     })
 
     if (this.usage && usage) {
       try {
         await this.usage.add({
-          at: new Date().toISOString(),
-          feature: opts.meta?.feature ?? 'other',
-          projectId: opts.meta?.projectId,
-          chapterNumber: opts.meta?.chapterNumber,
-          model: p.model,
+          ...usageRecordBase(p, opts),
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           totalTokens: usage.totalTokens
         })
       } catch (err) {
         console.error('[llm-service] Failed to record codex usage:', err)
+      }
+    }
+    return full
+  }
+
+  /**
+   * grok 协议调用：委托 grok-runner 跑 `grok --prompt-file` headless。
+   * systemPrompt 与 user prompt 合并为单条（CLI 单轮，不支持 system role）。
+   * 用量优先用 streaming-json end 事件的真实 token 数。
+   */
+  private async generateViaGrok(
+    p: ProviderConfig,
+    prompt: string,
+    opts: GenerateOptions
+  ): Promise<string> {
+    const body =
+      opts.systemPrompt && opts.systemPrompt.trim()
+        ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
+        : prompt
+    // grok-runner 也会在 prompt 文件头加约束；此处再叠一层保证与其它 CLI 一致
+    const merged = CLI_PROSE_ONLY_PREAMBLE + body
+
+    const timeoutMs = resolveStreamTimeoutMs(opts)
+    const { full, usage } = await runGrok(merged, {
+      model: p.model && p.model !== 'default' ? p.model : undefined,
+      timeoutSec: Math.ceil(timeoutMs / 1000),
+      onToken: opts.onToken,
+      signal: opts.signal
+    })
+
+    if (this.usage && usage) {
+      try {
+        await this.usage.add({
+          ...usageRecordBase(p, opts),
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens
+        })
+      } catch (err) {
+        console.error('[llm-service] Failed to record grok usage:', err)
       }
     }
     return full

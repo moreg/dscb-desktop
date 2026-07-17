@@ -38,8 +38,10 @@ const PING_ERROR_MAP: Record<string, string> = {
   LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
   AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
   CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+  GROK_AUTH_EXPIRED: 'Grok 登录态失效，请在终端运行 grok login',
   LLM_RATE_LIMIT: '请求过于频繁',
   LLM_TIMEOUT: '连通测试超时',
+  LLM_ABORTED: '已取消',
   LLM_REQUEST_FAILED: '请求失败',
   NETWORK_ERROR: '网络错误',
   AGY_NOT_FOUND: '未检测到 agy CLI，请先安装 Antigravity CLI',
@@ -47,6 +49,8 @@ const PING_ERROR_MAP: Record<string, string> = {
   'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络',
   CODEX_NOT_FOUND: '未检测到 codex CLI，请先安装 Codex CLI',
   CODEX_MODEL_ERROR: 'codex 模型配置有误',
+  GROK_NOT_FOUND: '未检测到 grok CLI，请先安装 Grok（https://x.ai/cli）',
+  GROK_SPAWN_FAILED: 'grok CLI 启动失败',
   // codex 网络错误
   'tls handshake': 'TLS 握手失败，请检查网络代理设置',
   'stream disconnected': '连接中断，请检查网络稳定性',
@@ -66,9 +70,16 @@ function formatPingError(err: string): string {
   for (const [key, val] of Object.entries(PING_ERROR_MAP)) {
     if (lowerErr.includes(key.toLowerCase())) return val
   }
-  // 最后做 AGY_ERROR/CODEX_ERROR 前缀匹配，截断到 80 字避免布局溢出
+  // 最后做 AGY_ERROR/CODEX_ERROR/GROK_ERROR 前缀匹配，截断到 80 字避免布局溢出
   if (err.startsWith('AGY_ERROR: ')) return `agy 出错：${err.slice(11).slice(0, 80)}`
   if (err.startsWith('CODEX_ERROR: ')) return `codex 出错：${err.slice(13).slice(0, 80)}`
+  if (err.startsWith('GROK_ERROR: ')) {
+    const detail = err.slice(12)
+    if (/Couldn't create session|unsatisfied requirements|agent building failed/i.test(detail)) {
+      return 'Grok 会话创建失败，请重启应用后重试；若仍失败请在终端运行 grok login'
+    }
+    return `grok 出错：${detail.slice(0, 120)}`
+  }
   return err || '未知错误'
 }
 
@@ -2130,7 +2141,17 @@ function ProviderRow({
       if (r.ok) {
         setTestResult({
           ok: true,
-          text: `✓ 连通 · 模型 ${r.model && r.model !== 'default' ? r.model : 'default'}`
+          text: `✓ 连通 · 模型 ${
+            r.model && r.model !== 'default'
+              ? r.model
+              : provider.protocol === 'codex'
+                ? 'codex 默认'
+                : provider.protocol === 'grok'
+                  ? 'grok 默认'
+                  : provider.protocol === 'antigravity'
+                    ? 'agy 默认'
+                    : 'default'
+          }`
         })
       } else {
         setTestResult({ ok: false, text: '✗ ' + formatPingError(r.error ?? '') })
@@ -2175,7 +2196,9 @@ function ProviderRow({
                       ? 'var(--vermilion-soft, rgba(229,57,53,0.12))'
                       : provider.protocol === 'codex'
                         ? 'rgba(16,163,127,0.12)'
-                        : 'var(--surface-2)',
+                        : provider.protocol === 'grok'
+                          ? 'rgba(26,26,26,0.1)'
+                          : 'var(--surface-2)',
                 color:
                   provider.protocol === 'anthropic'
                     ? 'var(--inkstone)'
@@ -2183,7 +2206,9 @@ function ProviderRow({
                       ? 'var(--vermilion, #e53935)'
                       : provider.protocol === 'codex'
                         ? '#10a37f'
-                        : 'var(--ink-3)'
+                        : provider.protocol === 'grok'
+                          ? '#1a1a1a'
+                          : 'var(--ink-3)'
               }}
             >
               {provider.protocol === 'anthropic'
@@ -2192,7 +2217,9 @@ function ProviderRow({
                   ? 'Antigravity (agy)'
                   : provider.protocol === 'codex'
                     ? 'Codex CLI'
-                    : 'OpenAI'}
+                    : provider.protocol === 'grok'
+                      ? 'Grok CLI'
+                      : 'OpenAI'}
             </span>
           </div>
           <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
@@ -2200,7 +2227,9 @@ function ProviderRow({
               ? `本机 agy CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'agy 默认模型'}`
               : provider.protocol === 'codex'
                 ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
-                : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`}
+                : provider.protocol === 'grok'
+                  ? `本机 grok CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'grok 默认模型'}`
+                  : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`}
           </div>
           {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
           <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -2303,10 +2332,13 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [agyModelsLoading, setAgyModelsLoading] = useState(false)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexModelsLoading, setCodexModelsLoading] = useState(false)
+  const [grokModels, setGrokModels] = useState<string[]>([])
+  const [grokModelsLoading, setGrokModelsLoading] = useState(false)
 
   const isAg = protocol === 'antigravity'
   const isCodex = protocol === 'codex'
-  const isCli = isAg || isCodex
+  const isGrok = protocol === 'grok'
+  const isCli = isAg || isCodex || isGrok
 
   // 切到 antigravity 时拉取 agy 可用模型列表
   // 注意：loading 状态不能放进依赖数组，否则 setAgyModelsLoading(true) 触发重渲染时
@@ -2350,6 +2382,25 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
   }, [isCodex, codexModels.length])
 
+  // 切到 grok 时拉取 grok models
+  useEffect(() => {
+    if (!isGrok || grokModels.length > 0) return
+    let cancelled = false
+    setGrokModelsLoading(true)
+    window.api
+      .listGrokModels()
+      .then((list) => {
+        if (!cancelled) setGrokModels(list)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setGrokModelsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isGrok, grokModels.length])
+
   const submit = async () => {
     setErr(null)
     if (!label.trim()) return setErr('请填写名称')
@@ -2373,9 +2424,9 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
       await window.api.upsertProvider({
         id: newId(),
         label: label.trim(),
-        baseUrl: isAg ? '' : baseUrl.trim().replace(/\/+$/, ''),
-        model: isAg ? (model.trim() || 'default') : model.trim(),
-        apiKey: isAg ? '' : apiKey.trim(),
+        baseUrl: isCli ? '' : baseUrl.trim().replace(/\/+$/, ''),
+        model: isCli ? model.trim() || 'default' : model.trim(),
+        apiKey: isCli ? '' : apiKey.trim(),
         protocol
       })
       setLabel('')
@@ -2404,9 +2455,13 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
           <div className="field" style={{ flex: 2, marginBottom: 10 }}>
             <label>
               模型
-              {isAg && agyModels.length > 0 ? `（${agyModels.length} 个可选）`
-                : isCodex && codexModels.length > 0 ? `（默认 ${codexModels[0]}）`
-                : '（可选）'}
+              {isAg && agyModels.length > 0
+                ? `（${agyModels.length} 个可选）`
+                : isCodex && codexModels.length > 0
+                  ? `（默认 ${codexModels[0]}）`
+                  : isGrok && grokModels.length > 0
+                    ? `（${grokModels.length} 个可选）`
+                    : '（可选）'}
             </label>
             {isAg && agyModels.length > 0 ? (
               <select
@@ -2416,6 +2471,17 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
               >
                 <option value="">agy 默认模型</option>
                 {agyModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : isGrok && grokModels.length > 0 ? (
+              <select
+                className="select"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              >
+                <option value="">grok 默认模型</option>
+                {grokModels.map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
@@ -2430,14 +2496,20 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                     : '留空用 codex 默认，或填模型名'
                 }
               />
-            ) : (isAg && agyModelsLoading) || (isCodex && codexModelsLoading) ? (
+            ) : (isAg && agyModelsLoading) ||
+              (isCodex && codexModelsLoading) ||
+              (isGrok && grokModelsLoading) ? (
               <input className="input" disabled placeholder="加载模型列表…" />
             ) : (
               <input
                 className="input"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="无法拉取列表，请手动填模型显示名"
+                placeholder={
+                  isGrok
+                    ? '留空用 grok 默认，或填 grok-4.5'
+                    : '无法拉取列表，请手动填模型显示名'
+                }
               />
             )}
           </div>
@@ -2476,6 +2548,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             <option value="anthropic">Anthropic</option>
             <option value="antigravity">Antigravity (agy CLI)</option>
             <option value="codex">Codex (codex CLI)</option>
+            <option value="grok">Grok (grok CLI 登录)</option>
           </select>
         </div>
         {isCli ? (
@@ -2490,10 +2563,13 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                 fontSize: 12
               }}
             >
-              {isAg
-                ? <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成登录。</>
-                : <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成登录。</>
-              }
+              {isAg ? (
+                <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成登录。</>
+              ) : isCodex ? (
+                <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成登录。</>
+              ) : (
+                <>使用本机 grok 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>grok login</code> 完成登录。</>
+              )}
             </div>
           </div>
         ) : (

@@ -7,7 +7,13 @@ export interface UsageRecord {
   feature: string
   projectId?: string
   chapterNumber?: number
+  /** 展示用模型名（CLI 可能为「gpt · codex 默认」） */
   model: string
+  /** 聚合键：配置里的原始 model 字段 */
+  modelId?: string
+  protocol?: string
+  providerId?: string
+  providerLabel?: string
   inputTokens: number
   outputTokens: number
   totalTokens: number

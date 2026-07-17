@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { UsageInfo } from './llm-service'
+import { LLM_ABORTED_ERROR } from './agent-meta-detect'
 
 /**
  * Codex CLI 子进程执行器。
@@ -29,7 +30,7 @@ export interface CodexOptions {
   timeoutSec?: number
   /** 流式 token 回调（按 JSONL item.completed 事件伪流式喂回） */
   onToken?: (token: string) => void
-  /** 中止信号 */
+  /** 中止信号（仅用户取消；超时由 timeoutSec 处理） */
   signal?: AbortSignal
 }
 
@@ -291,15 +292,13 @@ async function runCodexOnce(
       settled = true
       cleanup()
 
-      // abort 场景
-      if (opts.signal?.aborted) {
+      // 超时优先；用户取消用独立错误码，避免提示「生成超时」
+      if (timedOut) {
         reject(new Error('LLM_TIMEOUT'))
         return
       }
-
-      // 超时（timer 触发了 kill）
-      if (timedOut) {
-        reject(new Error('LLM_TIMEOUT'))
+      if (opts.signal?.aborted) {
+        reject(new Error(LLM_ABORTED_ERROR))
         return
       }
 

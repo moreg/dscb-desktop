@@ -262,7 +262,7 @@ describe('runAntigravity', () => {
     await expect(runAntigravity('测试', {})).rejects.toThrow('AGY_NOT_FOUND')
   })
 
-  it('abort signal 触发 kill -> LLM_TIMEOUT', async () => {
+  it('abort signal 触发 kill -> LLM_ABORTED', async () => {
     const controller = new AbortController()
     // 创建一个不会自己 close 的 child，等待 abort
     fakeChildFactory = () => {
@@ -284,7 +284,7 @@ describe('runAntigravity', () => {
     // 立即 abort
     controller.abort()
 
-    await expect(promise).rejects.toThrow('LLM_TIMEOUT')
+    await expect(promise).rejects.toThrow('LLM_ABORTED')
   })
 
   it('串行化：多个调用按顺序执行', async () => {

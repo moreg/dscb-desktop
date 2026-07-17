@@ -18,7 +18,7 @@ const providerConfigSchema = z.object({
   baseUrl: z.string().max(2048),
   model: z.string().max(255),
   apiKey: z.string().max(1000),
-  protocol: z.enum(['openai', 'anthropic', 'antigravity', 'codex']).optional(),
+  protocol: z.enum(['openai', 'anthropic', 'antigravity', 'codex', 'grok']).optional(),
   homepage: z.string().max(2048).optional(),
   temperature: z.number().min(0).max(2).optional()
 })
@@ -158,9 +158,13 @@ export class SecretStore {
     // 验证输入
     const validated = validateInput(providersConfigSchema, config)
 
-    // 额外验证：API 密钥非空（antigravity/codex 协议豁免，靠本机登录态）
+    // 额外验证：API 密钥非空（antigravity/codex/grok 协议豁免，靠本机登录态）
     for (const provider of validated.providers) {
-      if (provider.protocol !== 'antigravity' && provider.protocol !== 'codex') {
+      const isCli =
+        provider.protocol === 'antigravity' ||
+        provider.protocol === 'codex' ||
+        provider.protocol === 'grok'
+      if (!isCli) {
         if (!provider.apiKey || provider.apiKey.trim().length === 0) {
           throw new Error(`Provider ${provider.id} has empty API key`)
         }

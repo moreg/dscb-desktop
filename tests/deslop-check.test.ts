@@ -282,6 +282,13 @@ describe('check-degeneration: 占位符/拒绝语', () => {
     const refuse = findings.filter((f) => f.message.includes('拒绝语'))
     expect(refuse).toHaveLength(0)
   })
+
+  it('检测 Agent 技能流程旁白', () => {
+    const text =
+      '我会调用 story-long-write 技能做衔接校验。技能文件较长，刚才读取被截断了。'
+    const findings = scanDegeneration(text)
+    expect(findings.some((f) => f.type === 'placeholder' && f.message.includes('Agent'))).toBe(true)
+  })
 })
 
 describe('check-degeneration: 工程词泄漏', () => {

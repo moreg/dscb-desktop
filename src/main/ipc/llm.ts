@@ -4,6 +4,7 @@ import { LlmService } from '../data/llm-service'
 import { SecretStore } from '../data/secret-store'
 import { listAntigravityModels } from '../data/antigravity-runner'
 import { listCodexModels } from '../data/codex-runner'
+import { listGrokModels } from '../data/grok-runner'
 import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../../shared/types'
 
 /**
@@ -22,7 +23,7 @@ function maskKey(apiKey: string): string {
 
 function summarize(p: ProviderConfig): ProviderSummary {
   const proto = p.protocol ?? 'openai'
-  const isCli = proto === 'antigravity' || proto === 'codex'
+  const isCli = proto === 'antigravity' || proto === 'codex' || proto === 'grok'
   return {
     id: p.id,
     label: p.label,
@@ -33,11 +34,14 @@ function summarize(p: ProviderConfig): ProviderSummary {
     temperature: p.temperature,
     // CLI 协议靠本机登录态，无需 apiKey，视为已配置
     hasKey: isCli || Boolean(p.apiKey),
-    keyMasked: proto === 'antigravity'
-      ? 'agy 登录态'
-      : proto === 'codex'
-        ? 'codex 登录态'
-        : maskKey(p.apiKey)
+    keyMasked:
+      proto === 'antigravity'
+        ? 'agy 登录态'
+        : proto === 'codex'
+          ? 'codex 登录态'
+          : proto === 'grok'
+            ? 'grok 登录态'
+            : maskKey(p.apiKey)
   }
 }
 
@@ -52,15 +56,16 @@ function sanitizeProvider(input: unknown): ProviderConfig {
   const apiKeyRaw = typeof o.apiKey === 'string' ? o.apiKey : ''
   const homepage = typeof o.homepage === 'string' ? o.homepage.trim() : undefined
   const protocolRaw = o.protocol
-  const protocol: 'openai' | 'anthropic' | 'antigravity' | 'codex' =
+  const protocol: 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok' =
     protocolRaw === 'anthropic' ? 'anthropic'
     : protocolRaw === 'antigravity' ? 'antigravity'
     : protocolRaw === 'codex' ? 'codex'
+    : protocolRaw === 'grok' ? 'grok'
     : 'openai'
   if (!id) throw new Error('PROVIDER_INVALID: missing id')
   if (!label) throw new Error('PROVIDER_INVALID: missing label')
-  // CLI 协议（antigravity/codex）：走本机 CLI，无需 baseUrl/apiKey，model 可空（走默认）
-  if (protocol === 'antigravity' || protocol === 'codex') {
+  // CLI 协议（antigravity/codex/grok）：走本机 CLI，无需 baseUrl/apiKey，model 可空（走默认）
+  if (protocol === 'antigravity' || protocol === 'codex' || protocol === 'grok') {
     let temperature: number | undefined
     if (
       typeof o.temperature === 'number' &&
@@ -69,7 +74,12 @@ function sanitizeProvider(input: unknown): ProviderConfig {
     ) {
       temperature = Math.min(2, Math.max(0, o.temperature))
     }
-    const placeholderUrl = protocol === 'antigravity' ? 'antigravity://local' : 'codex://local'
+    const placeholderUrl =
+      protocol === 'antigravity'
+        ? 'antigravity://local'
+        : protocol === 'codex'
+          ? 'codex://local'
+          : 'grok://local'
     const out: ProviderConfig = {
       id,
       label,
@@ -202,13 +212,13 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   })
 
   // 是否存在任意已配置 key（仅判断 active provider）
-  // CLI 协议（antigravity/codex）靠本机登录态，无需 apiKey，视为已配置
+  // CLI 协议（antigravity/codex/grok）靠本机登录态，无需 apiKey，视为已配置
   safeHandle('llm:hasKey', async (): Promise<boolean> => {
     const cfg = await secret.read()
     if (!cfg.activeId) return false
     const p = cfg.providers.find((x) => x.id === cfg.activeId)
     if (!p) return false
-    if (p.protocol === 'antigravity' || p.protocol === 'codex') return true
+    if (p.protocol === 'antigravity' || p.protocol === 'codex' || p.protocol === 'grok') return true
     return Boolean(p.apiKey)
   })
 
@@ -233,6 +243,11 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   // 列出 codex 可用模型（读 config.toml，供前端做模型选择）
   safeHandle('llm:listCodexModels', async (): Promise<string[]> => {
     return listCodexModels()
+  })
+
+  // 列出 grok 可用模型（`grok models`，供前端做模型选择）
+  safeHandle('llm:listGrokModels', async (): Promise<string[]> => {
+    return listGrokModels()
   })
 
   // 流式生成（保持原协议：onToken + requestId）

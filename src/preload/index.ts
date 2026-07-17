@@ -173,6 +173,8 @@ const api = {
     ipcRenderer.invoke('llm:listAntigravityModels') as Promise<string[]>,
   listCodexModels: () =>
     ipcRenderer.invoke('llm:listCodexModels') as Promise<string[]>,
+  listGrokModels: () =>
+    ipcRenderer.invoke('llm:listGrokModels') as Promise<string[]>,
   listProviders: () => ipcRenderer.invoke('llm:listProviders'),
   upsertProvider: (p: ProviderConfig) => ipcRenderer.invoke('llm:upsertProvider', p),
   deleteProvider: (id: string) => ipcRenderer.invoke('llm:deleteProvider', id),

@@ -265,7 +265,7 @@ describe('runCodex', () => {
     await expect(runCodex('测试', {})).rejects.toThrow('CODEX_NOT_FOUND')
   })
 
-  it('abort signal 触发 kill -> LLM_TIMEOUT', async () => {
+  it('abort signal 触发 kill -> LLM_ABORTED', async () => {
     const controller = new AbortController()
     fakeChildFactory = () => {
       const child = new EventEmitter() as FakeChild
@@ -283,7 +283,7 @@ describe('runCodex', () => {
     const promise = runCodex('测试', { signal: controller.signal })
     controller.abort()
 
-    await expect(promise).rejects.toThrow('LLM_TIMEOUT')
+    await expect(promise).rejects.toThrow('LLM_ABORTED')
   })
 
   it('超时 timer 触发 kill -> LLM_TIMEOUT（即使有部分输出）', async () => {

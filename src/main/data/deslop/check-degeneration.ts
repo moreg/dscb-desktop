@@ -11,6 +11,7 @@
  */
 
 import type { DeslopFinding } from '../../../shared/types'
+import { AGENT_DESLOP_HARD_RES } from '../agent-meta-detect'
 import { compact } from './check-ai-patterns'
 
 const REPEAT_MIN_LEN = 12
@@ -37,7 +38,15 @@ const PLACEHOLDER_PATTERNS: PlaceholderPattern[] = [
     re: /我(无法|不能)(继续(写|创作|生成|下去)|生成(内容|文本|正文)?|创作|续写|完成(这个|本)?(章|篇|创作|请求))/,
     label: '元信息泄漏（生成拒绝语）',
     hard: false
-  }
+  },
+  // Agent CLI 流程旁白：与 agent-meta-detect 同源正则，避免两处漂移
+  ...AGENT_DESLOP_HARD_RES.map((re) => ({
+    re,
+    label: re.source.includes('story-')
+      ? '元信息泄漏（Agent 技能旁白）'
+      : '元信息泄漏（Agent 流程旁白）',
+    hard: true as const
+  }))
 ]
 
 const META_TIER1_RE = /细纲|情节点|卷纲|功能标签|目标情绪|字数目标|章首钩子|章尾钩子/

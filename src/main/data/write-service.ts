@@ -57,6 +57,11 @@ import {
   parseRhythmEvaluationJson
 } from '../../shared/parsers'
 import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
+import {
+  assertNovelProse,
+  isEarlyAgentNarration,
+  LLM_AGENT_META_ERROR
+} from './agent-meta-detect'
 
 export interface ChapterPrompt {
   system: string
@@ -208,12 +213,13 @@ export class WriteService {
       opts.existingText
     )
     const targetWords = prompt.targetWords ?? TARGET_WORDS
-    return this.llm.generateStream(prompt.user, {
+    const full = await this.generateProseStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
     })
+    return full
   }
 
   /**
@@ -273,13 +279,67 @@ export class WriteService {
       instruction,
       styleProfileId
     )
-    return this.llm.generateStream(prompt.user, {
+    const full = await this.generateProseStream(prompt.user, {
       ...opts,
       systemPrompt: prompt.system,
       maxTokens:
         opts.maxTokens ?? tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
       meta: { feature: 'chapter-adjust', projectId, chapterNumber }
     })
+    return full
+  }
+
+  /**
+   * 正文类生成：流式早拦旁白 + 结束后 assertNovelProse。
+   * 命中旁白时 abort 子进程并抛 LLM_AGENT_META，避免把流程说明刷满编辑器。
+   */
+  private async generateProseStream(
+    userPrompt: string,
+    opts: GenerateOptions
+  ): Promise<string> {
+    const controller = new AbortController()
+    const onUserAbort = (): void => {
+      if (!controller.signal.aborted) controller.abort()
+    }
+    if (opts.signal) {
+      if (opts.signal.aborted) onUserAbort()
+      else opts.signal.addEventListener('abort', onUserAbort, { once: true })
+    }
+
+    let accumulated = ''
+    let metaHit = false
+    const userOnToken = opts.onToken
+
+    try {
+      const full = await this.llm.generateStream(userPrompt, {
+        ...opts,
+        signal: controller.signal,
+        onToken: (token) => {
+          if (metaHit) return
+          accumulated += token
+          if (isEarlyAgentNarration(accumulated)) {
+            metaHit = true
+            // 不把旁白 token 继续喂给 UI；已喂出的由前端失败回滚清掉
+            if (!controller.signal.aborted) controller.abort()
+            return
+          }
+          userOnToken?.(token)
+        }
+      })
+      if (metaHit) throw new Error(LLM_AGENT_META_ERROR)
+      assertNovelProse(full)
+      return full
+    } catch (err) {
+      if (metaHit) throw new Error(LLM_AGENT_META_ERROR)
+      // abort 可能被映射成 LLM_ABORTED；若因旁白触发则统一成 META
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'LLM_ABORTED' && isEarlyAgentNarration(accumulated)) {
+        throw new Error(LLM_AGENT_META_ERROR)
+      }
+      throw err
+    } finally {
+      opts.signal?.removeEventListener('abort', onUserAbort)
+    }
   }
 
   /**
@@ -1767,7 +1827,7 @@ function renderUserPrompt(input: RenderInput): string {
     )
   } else {
     parts.push(
-      `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释。`
+      `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
     )
   }
   // 7.1 临时写作要求复述（最高优先级，紧贴输出指令强化注意力）

@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { UsageInfo } from './llm-service'
+import { LLM_ABORTED_ERROR } from './agent-meta-detect'
 
 /**
  * Antigravity CLI (agy) 子进程执行器。
@@ -248,9 +249,9 @@ async function runAntigravityOnce(
           stdoutPending = Buffer.alloc(0)
         }
 
-        // abort 场景
+        // 用户取消（超时由 --print-timeout / 上层 timeoutSec 处理）
         if (opts.signal?.aborted) {
-          reject(new Error('LLM_TIMEOUT'))
+          reject(new Error(LLM_ABORTED_ERROR))
           return
         }
 

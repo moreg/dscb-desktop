@@ -20,6 +20,10 @@ export interface UsageRecord {
   projectId?: string
   chapterNumber?: number
   model: string
+  modelId?: string
+  protocol?: string
+  providerId?: string
+  providerLabel?: string
   inputTokens: number
   outputTokens: number
   totalTokens: number
