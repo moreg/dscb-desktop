@@ -348,24 +348,39 @@ describe('probeCodex', () => {
 })
 
 describe('listCodexModels', () => {
-  it('config.toml 含 model 字段 -> 返回模型名', async () => {
+  it('config.toml 含 model 字段 -> 该模型排在最前，并合并预设', async () => {
     mockedReadFile.mockResolvedValue('model = "gpt-5.5"\nmodel_reasoning_effort = "medium"')
 
     const models = await listCodexModels()
-    expect(models).toEqual(['gpt-5.5'])
+    expect(models[0]).toBe('gpt-5.5')
+    expect(models).toContain('gpt-5.6-sol')
+    expect(models).toContain('gpt-5.4')
+    // 不重复
+    expect(models.filter((m) => m === 'gpt-5.5')).toHaveLength(1)
   })
 
-  it('config.toml 无 model 字段 -> 返回空数组', async () => {
+  it('config.toml 含未知 model -> 仍置顶并附带预设', async () => {
+    mockedReadFile.mockResolvedValue('model = "my-custom-model"\n')
+
+    const models = await listCodexModels()
+    expect(models[0]).toBe('my-custom-model')
+    expect(models).toContain('gpt-5.6-sol')
+  })
+
+  it('config.toml 无 model 字段 -> 仅返回预设列表', async () => {
     mockedReadFile.mockResolvedValue('model_reasoning_effort = "medium"')
 
     const models = await listCodexModels()
-    expect(models).toEqual([])
+    expect(models[0]).toBe('gpt-5.6-sol')
+    expect(models).toContain('gpt-5.5')
+    expect(models.length).toBeGreaterThan(3)
   })
 
-  it('文件不存在 -> 返回空数组', async () => {
+  it('文件不存在 -> 仍返回预设列表', async () => {
     mockedReadFile.mockRejectedValue(new Error('ENOENT'))
 
     const models = await listCodexModels()
-    expect(models).toEqual([])
+    expect(models).toContain('gpt-5.6-sol')
+    expect(models).toContain('gpt-5.5')
   })
 })

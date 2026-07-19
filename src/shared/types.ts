@@ -651,16 +651,30 @@ export interface RendererApi {
   /**
    * 续写完成后自动同步：extract → applyMemory → applySettingsPatches(onlyAuto)。
    * autoMemorySync=false 时返回 null；失败不抛（errors 在结果内）。
+   * opts.force=true 时忽略关闭开关（用户手动「重新同步 / 补跑」）。
    */
   syncChapterAfterWrite: (
     projectId: string,
     chapterNumber: number,
-    content: string
+    content: string,
+    opts?: { force?: boolean }
   ) => Promise<{
     memory: MemoryApplyResult
     settings: SettingsApplyResult
     extraction: MemoryExtraction
   } | null>
+  /**
+   * 撤销一次写后同步的自动写入（best-effort）。
+   * 需传入上次 sync 返回的 extraction + memory/settings 结果。
+   */
+  undoChapterSync: (
+    projectId: string,
+    payload: {
+      extraction: MemoryExtraction
+      memory: MemoryApplyResult
+      settings: SettingsApplyResult
+    }
+  ) => Promise<ChapterSyncUndoResult>
   /** 记忆自动部分应用前的 diff 预览 */
   previewMemoryApply: (
     projectId: string,
@@ -787,9 +801,17 @@ export interface RendererApi {
   /** 设定随书进化：off | confirm_all | auto_high */
   getSettingsEvolution: () => Promise<SettingsEvolutionMode>
   setSettingsEvolution: (mode: SettingsEvolutionMode) => Promise<SettingsEvolutionMode>
-  /** 续写完成后自动同步记忆与设定（默认 true） */
+  /** 续写完成后自动同步记忆与设定（默认 true；派生自 autoPostWritePipeline !== off） */
   getAutoMemorySync: () => Promise<boolean>
   setAutoMemorySync: (enabled: boolean) => Promise<boolean>
+  /**
+   * 续写成功后自动后处理：
+   * off | memory_only（默认）| full（记忆 + 细纲/节奏/图解，记忆不重复 extract）
+   */
+  getAutoPostWritePipeline: () => Promise<'off' | 'memory_only' | 'full'>
+  setAutoPostWritePipeline: (
+    mode: 'off' | 'memory_only' | 'full'
+  ) => Promise<'off' | 'memory_only' | 'full'>
   /** P13-C：用量预警配置（当月 AI 费用阈值） */
   getCostAlertConfig: () => Promise<CostAlertConfig>
   setCostAlertConfig: (cfg: Partial<CostAlertConfig>) => Promise<CostAlertConfig>
@@ -1809,6 +1831,25 @@ export interface MemoryApplyResult {
   errors: string[]
   /** 实际写入的 diff（便于 UI 展示已应用内容） */
   appliedDiffs?: MemoryApplyDiffItem[]
+}
+
+/** 撤销写后同步的结果 */
+export interface ChapterSyncUndoResult {
+  ok: boolean
+  memory: {
+    reverted: {
+      stateChanges: number
+      plotPoints: number
+      collected: number
+      tracking: number
+    }
+    errors: string[]
+  }
+  settings: {
+    reverted: number
+    errors: string[]
+  }
+  message: string
 }
 
 /* ==========================================================

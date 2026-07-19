@@ -36,6 +36,19 @@ describe('DeslopService.deslop 二次清理循环', () => {
     expect(result.rewritten).toBe(cleanNoBlocking)
   })
 
+  it('LLM 漏写【改动说明】时自动 diff 补全 changeSummary', async () => {
+    const cleanNoBlocking = '绝望先一步泄了出来。\n力气像被抽干，他一屁股坐下。'
+    // 只给【改写后】，故意不写【改动说明】——旧逻辑会导致 UI 无改动明细
+    const mock = makeMockLlm([`【改写后】\n${cleanNoBlocking}`])
+    const svc = new DeslopService(mock)
+    const result = await svc.deslop(REAL_TEXT)
+    expect(result.rewritten).toBe(cleanNoBlocking)
+    expect(result.changeSummary.length).toBeGreaterThan(0)
+    expect(result.changeSummary.some((s) => s.includes('原句') || s.includes('改后') || s.includes('自动'))).toBe(
+      true
+    )
+  })
+
   it('第一轮改写后仍剩 blocking 时触发二次清理', async () => {
     // 第一次改写：去掉"不是A而是B"，但引入了新的 blocking"他知道"（he_knows）
     // 第二次清理：把"他知道"也去掉

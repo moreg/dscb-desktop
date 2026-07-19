@@ -30,7 +30,28 @@ import {
   recomputeOutlineDiffPassed
 } from '../../shared/outline-diff-apply'
 import type { RewriteEntry } from '../../main/data/rewrite-history'
+import type { PostWriteSyncPhase } from '../../shared/post-write-sync'
+import { formatSyncErrorHint } from '../../shared/post-write-sync'
 import ChapterAuditPanel from './ChapterAuditPanel'
+
+/** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
+function friendlyFlowError(err: string): string {
+  const e = err.trim()
+  if (!e) return '请求失败'
+  if (e === 'LLM_TIMEOUT' || /aborted due to timeout/i.test(e)) {
+    return '请求超时（正文较长或模型响应慢）。已放宽超时，请重试；若仍失败可换更快模型或缩短本章字数。'
+  }
+  if (e === 'LLM_RATE_LIMIT') return '请求过于频繁，请稍后再试'
+  if (e === 'LLM_AUTH_FAILED' || e === 'NO_KEY' || e === 'LLM_NOT_CONFIGURED') {
+    return '模型未配置或鉴权失败，请到设置检查 API Key / 功能模型分配（审稿质检）'
+  }
+  if (e.startsWith('AGY_ERROR:') || /Agent execution terminated/i.test(e)) {
+    return 'agy 执行出错（超时/限流/网络）。可改用 Kimi 等 HTTP 模型，或检查 agy 登录与网络后重试'
+  }
+  if (e.startsWith('LLM_REQUEST_FAILED')) return `模型请求失败：${e}`
+  if (e === 'LLM_ABORTED') return '已取消'
+  return e
+}
 
 interface Props {
   projectId: string
@@ -74,10 +95,40 @@ interface Props {
   /** 图解生成完成后回调 */
   onCompleteFigure?: () => void
   /**
-   * 一键同步触发器：值变化时自动触发所有同步操作。
-   * 用于从外部（如未同步提醒横幅）触发"一键同步"。
+   * 一键同步触发器：值变化时自动触发同步操作。
+   * 用于 full 后处理或外部「一键同步」。
    */
   syncAllTrigger?: number
+  /**
+   * 外部已完成的自动记忆/设定同步结果。
+   * 注入后展示 extraction/diffs，避免面板再跑一次 extractMemory。
+   */
+  autoSyncSeed?: {
+    extraction: MemoryExtraction
+    memory: MemoryApplyResult
+    settings: SettingsApplyResult
+  } | null
+  /**
+   * 当 syncAllTrigger 触发时跳过记忆提取（记忆已由 syncChapterAfterWrite 完成）。
+   * 用户手动点「一键同步」仍会跑记忆提取。
+   */
+  skipMemoryOnAutoSyncAll?: boolean
+  /** 写后自动同步状态（编辑器状态条同源，面板顶部再显一次） */
+  postWriteSyncBanner?: {
+    phase: PostWriteSyncPhase
+    message: string
+    errors: string[]
+    canUndo?: boolean
+    undoDepth?: number
+    fromPendingQueue?: boolean
+  } | null
+  /** 失败 / 部分失败 / 手动补跑：重新跑记忆与设定同步 */
+  onRetryAutoSync?: () => void
+  /** 撤销最近一次写后自动同步（可多级） */
+  onUndoAutoSync?: () => void
+  /** 忽略失败队列中的本章项 */
+  onDismissPendingSync?: () => void
+  undoAutoSyncLoading?: boolean
 }
 
 /**
@@ -106,7 +157,14 @@ export default function ChapterFlowPanel(props: Props) {
     onCompleteMemory,
     onCompleteRhythm,
     onCompleteFigure,
-    syncAllTrigger
+    syncAllTrigger,
+    autoSyncSeed,
+    skipMemoryOnAutoSyncAll,
+    postWriteSyncBanner,
+    onRetryAutoSync,
+    onUndoAutoSync,
+    onDismissPendingSync,
+    undoAutoSyncLoading
   } = props
 
   const [outlineChecking, setOutlineChecking] = useState(false)
@@ -249,14 +307,14 @@ export default function ChapterFlowPanel(props: Props) {
         }
       )
       if (!r.ok) {
-        setOutlineError(r.error ?? '对照失败')
+        setOutlineError(friendlyFlowError(r.error ?? '对照失败'))
         setOutlineChecking(false)
         return
       }
       setOutlineDiff(parseOutlineDiffJson(buffer, chapterNumber))
       onCompleteOutline?.()
     } catch (e) {
-      setOutlineError((e as Error).message)
+      setOutlineError(friendlyFlowError((e as Error).message || '对照失败'))
       setOutlineChecking(false)
     }
   }
@@ -668,20 +726,21 @@ export default function ChapterFlowPanel(props: Props) {
       memoryExtraction.collectedForeshadowings.length > 0)
 
   /**
-   * 一键同步：依次触发四个同步操作，每个操作独立 try/catch 确保互不影响。
-   * 注意：这只是启动生成流程，应用操作（如 applyMemory）仍需用户确认。
-   * 四个操作完成后刷新记忆索引，让 记忆/ 派生视图与 追踪/ 文件保持一致。
+   * 一键同步：依次触发同步操作，每个操作独立 try/catch。
+   * @param opts.skipMemory 为 true 时不跑记忆 extract（外部已 syncChapterAfterWrite）
    */
-  const runAllSync = async () => {
+  const runAllSync = async (opts?: { skipMemory?: boolean }) => {
     if (!draft.trim()) return
-    // 并发执行四个操作，内部均已处理异常与状态设置
-    await Promise.allSettled([
+    const tasks: Promise<unknown>[] = [
       runOutlineCheck(),
-      runMemoryExtract(),
       runRhythmEvaluate(),
       runFigureGenerate()
-    ])
-    // 四个操作完成后刷新记忆索引（追踪/时间线 + 追踪/伏笔 -> 记忆/ 派生视图）
+    ]
+    if (!opts?.skipMemory) {
+      tasks.push(runMemoryExtract())
+    }
+    await Promise.allSettled(tasks)
+    // 操作完成后刷新记忆索引（追踪/时间线 + 追踪/伏笔 -> 记忆/ 派生视图）
     try {
       await window.api.syncMemoryIndex(projectId)
     } catch (err) {
@@ -690,8 +749,60 @@ export default function ChapterFlowPanel(props: Props) {
   }
 
   /**
-   * 一键同步：当 syncAllTrigger 变化时，依次触发四个同步操作。
-   * 使用 useRef 避免首次渲染时触发。
+   * 外部自动同步结果回填：展示 extraction / 已应用 diffs，避免重复 extract。
+   * 用 seed 对象引用变化识别新一轮同步。
+   * 全失败时仍写入 memoryError，避免面板空白误导用户。
+   */
+  const prevAutoSyncSeed = useRef<typeof autoSyncSeed>(null)
+  useEffect(() => {
+    if (!autoSyncSeed || autoSyncSeed === prevAutoSyncSeed.current) return
+    prevAutoSyncSeed.current = autoSyncSeed
+    setMemoryExtraction(autoSyncSeed.extraction)
+    setMemoryResult(autoSyncSeed.memory)
+    setSettingsResult(autoSyncSeed.settings)
+    setMemoryExtracting(false)
+
+    const allErrors = [
+      ...(autoSyncSeed.memory.errors ?? []),
+      ...(autoSyncSeed.settings.errors ?? [])
+    ].filter(Boolean)
+    const appliedTotal =
+      (autoSyncSeed.memory.applied?.stateChanges ?? 0) +
+      (autoSyncSeed.memory.applied?.plotPoints ?? 0) +
+      (autoSyncSeed.memory.applied?.collected ?? 0) +
+      (autoSyncSeed.settings.applied ?? 0)
+    if (allErrors.length > 0 && appliedTotal === 0) {
+      setMemoryError(allErrors.join('；'))
+    } else {
+      setMemoryError('')
+    }
+
+    if (autoSyncSeed.memory.appliedDiffs?.length) {
+      setMemoryPreview({
+        diffs: autoSyncSeed.memory.appliedDiffs,
+        applicableCount: autoSyncSeed.memory.appliedDiffs.length,
+        confirmCount:
+          (autoSyncSeed.extraction.newCharacters?.length ?? 0) +
+          (autoSyncSeed.extraction.newLocations?.length ?? 0) +
+          (autoSyncSeed.extraction.newItems?.length ?? 0) +
+          (autoSyncSeed.extraction.newForeshadowings?.length ?? 0)
+      })
+    }
+    // 设定：用已应用 diffs 填预览；其余补丁需用户手动「预览/应用」
+    if (autoSyncSeed.settings.appliedDiffs?.length) {
+      setSettingsPreview({
+        diffs: autoSyncSeed.settings.appliedDiffs,
+        autoCount: autoSyncSeed.settings.applied,
+        confirmCount: 0,
+        suggestionCount: autoSyncSeed.extraction.settingsSuggestions?.length ?? 0
+      })
+    }
+    onCompleteMemory?.()
+  }, [autoSyncSeed, onCompleteMemory])
+
+  /**
+   * full 后处理：syncAllTrigger 变化时跑细纲/节奏/图解；
+   * 若 skipMemoryOnAutoSyncAll 则不再 extract 记忆。
    */
   const prevSyncAllTrigger = useRef(0)
   useEffect(() => {
@@ -700,12 +811,12 @@ export default function ChapterFlowPanel(props: Props) {
       syncAllTrigger > 0 &&
       prevSyncAllTrigger.current !== syncAllTrigger
     ) {
-      void runAllSync()
+      void runAllSync({ skipMemory: skipMemoryOnAutoSyncAll === true })
     }
     if (syncAllTrigger !== undefined) {
       prevSyncAllTrigger.current = syncAllTrigger
     }
-    // 只关心 syncAllTrigger 变化，runAllSync 在组件内定义且引用稳定
+    // 只关心 syncAllTrigger 变化
   }, [syncAllTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -719,7 +830,7 @@ export default function ChapterFlowPanel(props: Props) {
         <div className="btn-group">
           <button
             className="btn btn-sm"
-            onClick={() => void runAllSync()}
+            onClick={() => void runAllSync({ skipMemory: false })}
             disabled={
               outlineChecking || memoryExtracting || rhythmEvaluating || figureGenerating
             }
@@ -734,6 +845,72 @@ export default function ChapterFlowPanel(props: Props) {
       </div>
 
       <div className="ep-body">
+        {postWriteSyncBanner && postWriteSyncBanner.phase !== 'idle' ? (
+          <div
+            className={`flow-auto-sync-strip flow-auto-sync-${postWriteSyncBanner.phase}`}
+            role="status"
+          >
+            <div className="flow-auto-sync-text">
+              <strong style={{ fontSize: 12 }}>写后同步</strong>
+              <span style={{ fontSize: 12, marginLeft: 6 }}>{postWriteSyncBanner.message}</span>
+              {postWriteSyncBanner.errors.length > 0 &&
+              postWriteSyncBanner.phase !== 'syncing' ? (
+                <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
+                  {formatSyncErrorHint(postWriteSyncBanner.errors)}
+                </div>
+              ) : null}
+            </div>
+            <div className="btn-group" style={{ flexShrink: 0 }}>
+              {onUndoAutoSync &&
+              postWriteSyncBanner.canUndo &&
+              postWriteSyncBanner.phase !== 'syncing' ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={onUndoAutoSync}
+                  disabled={undoAutoSyncLoading}
+                  title="撤销最近一次自动写入（可多级）"
+                >
+                  {undoAutoSyncLoading
+                    ? '撤销中…'
+                    : (postWriteSyncBanner.undoDepth ?? 0) > 1
+                      ? `撤销 (${postWriteSyncBanner.undoDepth})`
+                      : '撤销同步'}
+                </button>
+              ) : null}
+              {onRetryAutoSync && postWriteSyncBanner.phase !== 'syncing' ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={onRetryAutoSync}
+                  disabled={undoAutoSyncLoading}
+                  title="用续写完成时的正文重新提取并同步"
+                >
+                  {postWriteSyncBanner.fromPendingQueue ||
+                  postWriteSyncBanner.phase === 'failed'
+                    ? '补跑同步'
+                    : postWriteSyncBanner.phase === 'partial'
+                      ? '重新同步'
+                      : '再同步一次'}
+                </button>
+              ) : null}
+              {onDismissPendingSync &&
+              (postWriteSyncBanner.fromPendingQueue ||
+                postWriteSyncBanner.phase === 'failed') &&
+              postWriteSyncBanner.phase !== 'syncing' ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={onDismissPendingSync}
+                  disabled={undoAutoSyncLoading}
+                  title="从待同步队列移除"
+                >
+                  忽略
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {auditReport ? (
           <div style={{ marginTop: 8 }}>
             <ChapterAuditPanel
@@ -916,22 +1093,45 @@ export default function ChapterFlowPanel(props: Props) {
         <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
           <div className="row" style={{ alignItems: 'baseline' }}>
             <strong style={{ fontSize: 13 }}>记忆提取（混合回写策略）</strong>
-            <button
-              className="btn btn-sm"
-              onClick={runMemoryExtract}
-              disabled={memoryExtracting}
-              style={{ marginLeft: 'auto' }}
-            >
-              {memoryExtracting ? '提取中…' : memoryExtraction ? '重新提取' : '✦ 提取记忆'}
-            </button>
+            <div className="btn-group" style={{ marginLeft: 'auto' }}>
+              {onRetryAutoSync &&
+              (postWriteSyncBanner?.phase === 'failed' ||
+                postWriteSyncBanner?.phase === 'partial' ||
+                memoryError) ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={onRetryAutoSync}
+                  disabled={memoryExtracting || postWriteSyncBanner?.phase === 'syncing'}
+                  title="重新跑写后同步（提取 + 自动落盘）"
+                >
+                  补跑同步
+                </button>
+              ) : null}
+              <button
+                className="btn btn-sm"
+                onClick={runMemoryExtract}
+                disabled={memoryExtracting}
+              >
+                {memoryExtracting ? '提取中…' : memoryExtraction ? '重新提取' : '✦ 提取记忆'}
+              </button>
+            </div>
           </div>
           <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
             提取后自动写入：状态/设定变化 · 情节 · 伏笔回收（可看下方 diff）。需确认：新增角色 /
-            地点 / 道具 / 伏笔。
+            地点 / 道具 / 伏笔。续写成功后会自动同步；失败可点「补跑同步」。
           </p>
           {memoryError ? (
             <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
               {memoryError}
+            </p>
+          ) : null}
+          {memoryResult?.errors && memoryResult.errors.length > 0 && !memoryError ? (
+            <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
+              自动写入部分失败：{memoryResult.errors.slice(0, 3).join('；')}
+              {memoryResult.errors.length > 3
+                ? ` 等 ${memoryResult.errors.length} 条`
+                : ''}
             </p>
           ) : null}
           {memoryExtraction ? (

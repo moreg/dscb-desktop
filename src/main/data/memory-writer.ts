@@ -7,6 +7,7 @@ import { PlotPointRepo } from './memory/plot-point-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { appendH3UnderH2, appendH2Section } from './skill-format/md-writer'
 import { writeTextAtomic } from './atomic'
+import { withFileLock } from './file-lock'
 import { readText } from './skill-format/md-parser'
 import { sanitizeForFileName } from './memory/entity-helpers'
 import type {
@@ -250,6 +251,117 @@ export class MemoryWriter {
     }
   }
 
+  /**
+   * 撤销一次 applyAutomatic 的自动写入（best-effort）。
+   * 依据 extraction + appliedDiffs 回滚：角色字段、剧情点文件、时间线/上下文行、
+   * 角色状态变更记录、伏笔回收。不碰用户手动确认的新增角色/地点等。
+   */
+  async revertAutomatic(
+    extraction: MemoryExtraction,
+    appliedDiffs: MemoryApplyDiffItem[] = []
+  ): Promise<{
+    reverted: {
+      stateChanges: number
+      plotPoints: number
+      collected: number
+      tracking: number
+    }
+    errors: string[]
+  }> {
+    const errors: string[] = []
+    let stateChanges = 0
+    let plotPoints = 0
+    let collected = 0
+    let tracking = 0
+    const chapter = extraction.chapterNumber
+
+    // 1. 角色状态：按 appliedDiffs 的 oldValue 恢复
+    const stateDiffs = appliedDiffs.filter((d) => d.kind === 'state')
+    const charRepo = new CharacterRepo(this.projectDir)
+    const chars = await charRepo.list()
+    for (const d of stateDiffs) {
+      try {
+        const match = findCharacterByName(chars, d.label)
+        if (!match) {
+          errors.push(`撤销状态跳过：找不到人物「${d.label}」`)
+          continue
+        }
+        const restoreRaw = (d.oldValue || '').trim()
+        const restore =
+          !restoreRaw || restoreRaw === '（无）' || restoreRaw === '（空）' ? '' : restoreRaw
+        const field = d.field || '当前状态'
+        if (restore) {
+          const ok = await this.updateCharacterState(match.char.name, field, restore, match.char)
+          if (ok) {
+            stateChanges++
+            const refreshed = await charRepo.get(match.char.id)
+            if (refreshed) {
+              const idx = chars.findIndex((c) => c.id === refreshed.id)
+              if (idx >= 0) chars[idx] = refreshed
+            }
+          }
+        } else {
+          // 旧值为空：写占位「-」避免把卡片字段删到非法空；轨迹记撤销
+          const ok = await this.updateCharacterState(match.char.name, field, '-', match.char)
+          if (ok) stateChanges++
+        }
+      } catch (e) {
+        errors.push(`撤销角色状态失败 ${d.label}: ${(e as Error).message}`)
+      }
+    }
+
+    // 2. 删除本批剧情点文件
+    for (const pp of extraction.newPlotPoints) {
+      try {
+        const deleted = await this.deletePlotPointFile(chapter, pp.title)
+        if (deleted) plotPoints++
+      } catch (e) {
+        errors.push(`撤销剧情点失败: ${(e as Error).message}`)
+      }
+    }
+
+    // 3. 追踪表：移除本章时间线 / 上下文行；移除本批状态变更记录
+    try {
+      if (extraction.newPlotPoints.length > 0) {
+        const n = await this.removeTrackingChapterRow('timeline', chapter)
+        tracking += n
+      }
+    } catch (e) {
+      errors.push(`撤销时间线失败: ${(e as Error).message}`)
+    }
+    try {
+      // 上下文几乎总会写入
+      const n = await this.removeTrackingChapterRow('context', chapter)
+      tracking += n
+    } catch (e) {
+      errors.push(`撤销上下文失败: ${(e as Error).message}`)
+    }
+    try {
+      if (extraction.characterStateChanges.length > 0) {
+        const names = extraction.characterStateChanges.map((c) => c.name.trim()).filter(Boolean)
+        const n = await this.removeCharacterStateChangeLogs(chapter, names)
+        tracking += n
+      }
+    } catch (e) {
+      errors.push(`撤销角色状态记录失败: ${(e as Error).message}`)
+    }
+
+    // 4. 伏笔回收回滚
+    for (const cf of extraction.collectedForeshadowings) {
+      try {
+        const ok = await this.uncollectForeshadowing(cf.content)
+        if (ok) collected++
+      } catch (e) {
+        errors.push(`撤销伏笔回收失败 ${cf.content}: ${(e as Error).message}`)
+      }
+    }
+
+    return {
+      reverted: { stateChanges, plotPoints, collected, tracking },
+      errors
+    }
+  }
+
   /** 用户确认后：应用新增角色（写 记忆/人物/<name>.md） */
   async applyNewCharacters(
     chars: MemoryExtraction['newCharacters']
@@ -391,22 +503,24 @@ export class MemoryWriter {
     if (rel.startsWith('..') || isAbsolute(rel)) {
       throw new Error(`剧情点路径越界：${title}`)
     }
-    const text = await readText(file)
-    if (text) return false // 已存在则不覆盖（保留手动编辑）
-    const body = [
-      `# 第${chapter}章 ${title}`,
-      '',
-      '## 描述',
-      '',
-      event,
-      '',
-      '## 字段',
-      '',
-      `- **核心事件**：${event}`,
-      coolPoint ? `- **爽点/打脸**：${coolPoint}` : null
-    ].filter((l): l is string => l !== null).join('\n') + '\n'
-    await writeTextAtomic(file, body)
-    return true
+    return withFileLock(file, async () => {
+      const text = await readText(file)
+      if (text) return false // 已存在则不覆盖（保留手动编辑）
+      const body = [
+        `# 第${chapter}章 ${title}`,
+        '',
+        '## 描述',
+        '',
+        event,
+        '',
+        '## 字段',
+        '',
+        `- **核心事件**：${event}`,
+        coolPoint ? `- **爽点/打脸**：${coolPoint}` : null
+      ].filter((l): l is string => l !== null).join('\n') + '\n'
+      await writeTextAtomic(file, body)
+      return true
+    })
   }
 
   /**
@@ -419,16 +533,18 @@ export class MemoryWriter {
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '时间线.md')
     await this.ensureTrackingSkeleton('timeline')
-    let text = (await readText(file)) ?? ''
+    await withFileLock(file, async () => {
+      let text = (await readText(file)) ?? ''
 
-    const chapterMarker = `第 ${chapter} 章`
-    const events = plotPoints.map((p) => p.event).filter(Boolean)
-    const desc = escapeTableCell(events.join('；'))
-    const title = escapeTableCell(plotPoints[0]?.title ?? `第${chapter}章`)
-    const row = `| ${chapterMarker} | ${title} | - | - | ${desc} |`
+      const chapterMarker = `第 ${chapter} 章`
+      const events = plotPoints.map((p) => p.event).filter(Boolean)
+      const desc = escapeTableCell(events.join('；'))
+      const title = escapeTableCell(plotPoints[0]?.title ?? `第${chapter}章`)
+      const row = `| ${chapterMarker} | ${title} | - | - | ${desc} |`
 
-    text = upsertTrackingTableRow(text, chapter, row)
-    await writeTextAtomic(file, text)
+      text = upsertTrackingTableRow(text, chapter, row)
+      await writeTextAtomic(file, text)
+    })
   }
 
   /**
@@ -442,29 +558,31 @@ export class MemoryWriter {
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '上下文.md')
     await this.ensureTrackingSkeleton('context')
-    let text = (await readText(file)) ?? ''
+    await withFileLock(file, async () => {
+      let text = (await readText(file)) ?? ''
 
-    const chapterMarker = `第 ${chapter} 章`
-    const summaryParts = plotPoints.map((p) => {
-      const t = p.title?.trim()
-      const e = p.event?.trim()
-      return t && e ? `${t}：${e}` : t || e || ''
-    }).filter(Boolean)
-    if (stateChanges.length > 0) {
-      const st = stateChanges
-        .slice(0, 6)
-        .map((c) => `${c.name}.${normalizeStateField(c.field || '状态')}→${c.newValue}`)
-        .join('；')
-      if (st) summaryParts.push(`状态：${st}`)
-    }
-    const summary = escapeTableCell(
-      summaryParts.length > 0 ? summaryParts.join('；') : `完成第 ${chapter} 章写作`
-    )
-    const today = new Date().toISOString().slice(0, 10)
-    const row = `| ${today} | ${chapterMarker} | ${summary} | - | - |`
+      const chapterMarker = `第 ${chapter} 章`
+      const summaryParts = plotPoints.map((p) => {
+        const t = p.title?.trim()
+        const e = p.event?.trim()
+        return t && e ? `${t}：${e}` : t || e || ''
+      }).filter(Boolean)
+      if (stateChanges.length > 0) {
+        const st = stateChanges
+          .slice(0, 6)
+          .map((c) => `${c.name}.${normalizeStateField(c.field || '状态')}→${c.newValue}`)
+          .join('；')
+        if (st) summaryParts.push(`状态：${st}`)
+      }
+      const summary = escapeTableCell(
+        summaryParts.length > 0 ? summaryParts.join('；') : `完成第 ${chapter} 章写作`
+      )
+      const today = new Date().toISOString().slice(0, 10)
+      const row = `| ${today} | ${chapterMarker} | ${summary} | - | - |`
 
-    text = upsertTrackingTableRow(text, chapter, row)
-    await writeTextAtomic(file, text)
+      text = upsertTrackingTableRow(text, chapter, row)
+      await writeTextAtomic(file, text)
+    })
   }
 
   /**
@@ -480,30 +598,32 @@ export class MemoryWriter {
     if (changes.length === 0) return
     const file = join(this.projectDir, '追踪', '角色状态.md')
     await this.ensureTrackingSkeleton('characterStates')
-    let text = (await readText(file)) ?? ''
+    await withFileLock(file, async () => {
+      let text = (await readText(file)) ?? ''
 
-    // 按角色聚合本批 field→value
-    const byName = new Map<string, { field: string; value: string }[]>()
-    for (const c of changes) {
-      const name = c.name?.trim()
-      if (!name) continue
-      const list = byName.get(name) ?? []
-      list.push({
-        field: normalizeStateField((c.field || '状态').trim()),
-        value: String(c.newValue ?? '').trim()
-      })
-      byName.set(name, list)
-    }
-
-    for (const [name, fields] of byName) {
-      text = upsertCharacterStateSnapshot(text, name, chapter, fields)
-      for (const f of fields) {
-        if (!f.value) continue
-        text = appendCharacterStateChangeLog(text, chapter, name, `${f.field}：${f.value}`)
+      // 按角色聚合本批 field→value
+      const byName = new Map<string, { field: string; value: string }[]>()
+      for (const c of changes) {
+        const name = c.name?.trim()
+        if (!name) continue
+        const list = byName.get(name) ?? []
+        list.push({
+          field: normalizeStateField((c.field || '状态').trim()),
+          value: String(c.newValue ?? '').trim()
+        })
+        byName.set(name, list)
       }
-    }
 
-    await writeTextAtomic(file, text)
+      for (const [name, fields] of byName) {
+        text = upsertCharacterStateSnapshot(text, name, chapter, fields)
+        for (const f of fields) {
+          if (!f.value) continue
+          text = appendCharacterStateChangeLog(text, chapter, name, `${f.field}：${f.value}`)
+        }
+      }
+
+      await writeTextAtomic(file, text)
+    })
   }
 
   /** 确保追踪骨架文件存在（与 project-service 开书模板对齐） */
@@ -540,6 +660,104 @@ export class MemoryWriter {
     if (!f) return false
     await repo.collect(f.id, chapter)
     return true
+  }
+
+  private async uncollectForeshadowing(content: string): Promise<boolean> {
+    const repo = new ForeshadowingMdRepo(this.projectDir)
+    const list = await repo.list()
+    const f = list.find(
+      (x) => x.content.includes(content) || content.includes(x.content)
+    )
+    if (!f || f.status !== 'collected') return false
+    await repo.uncollect(f.id)
+    return true
+  }
+
+  private async deletePlotPointFile(chapter: number, title: string): Promise<boolean> {
+    const dir = join(this.projectDir, '记忆', '剧情点')
+    const safeTitle = sanitizeForFileName(title)
+    const fileName = `第${String(chapter).padStart(3, '0')}章 ${safeTitle}.md`
+    const file = resolve(dir, fileName)
+    const rel = relative(dir, file)
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error(`剧情点路径越界：${title}`)
+    }
+    try {
+      await fs.unlink(file)
+      return true
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      if (err.code === 'ENOENT') return false
+      throw e
+    }
+  }
+
+  /** 删除追踪表中含「第 N 章」的行；返回删除行数 */
+  private async removeTrackingChapterRow(
+    kind: 'timeline' | 'context',
+    chapter: number
+  ): Promise<number> {
+    const file =
+      kind === 'timeline'
+        ? join(this.projectDir, '追踪', '时间线.md')
+        : join(this.projectDir, '追踪', '上下文.md')
+    return withFileLock(file, async () => {
+      const text = await readText(file)
+      if (!text) return 0
+      const chapterSeenRe = new RegExp(`\\|\\s*第\\s*${chapter}\\s*章\\s*\\|`)
+      const lines = text.split(/\r?\n/)
+      let removed = 0
+      const next = lines.filter((line) => {
+        if (chapterSeenRe.test(line)) {
+          removed++
+          return false
+        }
+        return true
+      })
+      if (removed > 0) await writeTextAtomic(file, next.join('\n'))
+      return removed
+    })
+  }
+
+  /** 删除「状态变更记录」中本章、指定角色的行 */
+  private async removeCharacterStateChangeLogs(
+    chapter: number,
+    names: string[]
+  ): Promise<number> {
+    if (names.length === 0) return 0
+    const file = join(this.projectDir, '追踪', '角色状态.md')
+    const nameSet = new Set(names)
+    return withFileLock(file, async () => {
+      const text = await readText(file)
+      if (!text) return 0
+      const lines = text.split(/\r?\n/)
+      let inLog = false
+      let removed = 0
+      const next = lines.filter((line) => {
+        if (/^##\s*状态变更/.test(line.trim())) {
+          inLog = true
+          return true
+        }
+        if (inLog && /^##\s+/.test(line.trim())) {
+          inLog = false
+          return true
+        }
+        if (!inLog || !line.trim().startsWith('|') || line.includes('---')) return true
+        if (/章节/.test(line) && /角色/.test(line)) return true
+        const chapterHit = new RegExp(`第\\s*${chapter}\\s*章`).test(line)
+        if (!chapterHit) return true
+        const hitName = [...nameSet].some(
+          (n) => line.includes(`| ${n} |`) || line.includes(`|${n}|`)
+        )
+        if (hitName) {
+          removed++
+          return false
+        }
+        return true
+      })
+      if (removed > 0) await writeTextAtomic(file, next.join('\n'))
+      return removed
+    })
   }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type {
   UsageSummary,
   ListProvidersResult,
@@ -12,8 +12,24 @@ import type {
   ReviewCheckSectionView,
   ReviewRulesConfig,
   ReviewCheckId,
-  AuditCategory
+  AuditCategory,
+  ProjectMeta
 } from '../../shared/types'
+import {
+  loadPendingSyncQueue,
+  savePendingSyncQueue,
+  removePendingSync,
+  upsertPendingSync,
+  loadSyncHistory,
+  saveSyncHistory,
+  pushSyncHistory,
+  receiptHasUndoableWrites,
+  makeSyncId,
+  type PendingSyncItem,
+  type SyncUndoReceipt
+} from '../../shared/post-write-sync-session'
+import { summarizePostWriteSync } from '../../shared/post-write-sync'
+import { getLocalStorage } from '../../main/data/rewrite-persistence'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
   normalizeWritingRequirementLines,
@@ -23,6 +39,10 @@ import FeatureRoutingForm from './FeatureRoutingForm'
 
 interface Props {
   onBack?: () => void
+  /** 进入设置时默认打开的标签（如 syncQueue） */
+  initialTab?: string
+  /** 从待同步队列跳转到对应章节编辑器 */
+  onOpenChapter?: (projectId: string, chapterNumber: number) => void
 }
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -166,14 +186,20 @@ function parseDeslopRulesMd(
   return { overrides, bannedWords }
 }
 
-export default function SettingsPage(_: Props) {
-  const [activeTab, setActiveTab] = useState('appearance')
+export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
+  const [activeTab, setActiveTab] = useState(initialTab || 'appearance')
   const writingTemplateApi = window.api as typeof window.api & {
     getWritingRequirementTemplates?: () => Promise<WritingRequirementTemplate[]>
     setWritingRequirementTemplates?: (
       templates: WritingRequirementTemplate[]
     ) => Promise<WritingRequirementTemplate[]>
   }
+
+  const [pendingSyncList, setPendingSyncList] = useState<PendingSyncItem[]>([])
+  const [pendingProjectNames, setPendingProjectNames] = useState<Record<string, string>>({})
+  const [retryingSyncId, setRetryingSyncId] = useState<string | null>(null)
+  const [retryingAll, setRetryingAll] = useState(false)
+  const retryAllAbortRef = useRef(false)
 
   const TABS = [
     { id: 'appearance', label: '外观' },
@@ -182,11 +208,22 @@ export default function SettingsPage(_: Props) {
     { id: 'usage', label: '用量与费用' },
     { id: 'aiwords', label: 'AI 高频词' },
     { id: 'writing', label: '写作节奏' },
+    {
+      id: 'syncQueue',
+      label:
+        pendingSyncList.length > 0
+          ? `待同步 (${pendingSyncList.length})`
+          : '待同步'
+    },
     { id: 'writingReq', label: '写作要求' },
     { id: 'writingRules', label: '续写规则' },
     { id: 'deslopRules', label: '去AI味规则' },
     { id: 'reviewRules', label: '审稿规则' }
   ] as const
+
+  useEffect(() => {
+    if (initialTab) setActiveTab(initialTab)
+  }, [initialTab])
 
   // list 接口返回的是脱敏的 ProviderSummary（没有 apiKey）
   const [providers, setProviders] = useState<ListProvidersResult>({
@@ -216,8 +253,10 @@ export default function SettingsPage(_: Props) {
   const [settingsEvolution, setSettingsEvolution] = useState<
     'off' | 'confirm_all' | 'auto_high'
   >('auto_high')
-  /** 续写完成后自动同步记忆与设定 */
-  const [autoMemorySync, setAutoMemorySync] = useState(true)
+  /** 续写完成后自动后处理：off | memory_only | full */
+  const [autoPostWritePipeline, setAutoPostWritePipeline] = useState<
+    'off' | 'memory_only' | 'full'
+  >('memory_only')
   const [pricing, setPricing] = useState({ inputRate: 1, outputRate: 3 })
   const [dailyGoal, setDailyGoal] = useState(3000)
 
@@ -333,15 +372,171 @@ export default function SettingsPage(_: Props) {
   const refreshRoot = () => void window.api.getProjectsRoot().then(setProjectsRoot)
   const refreshUsage = () => void window.api.getUsageSummary().then(setUsage)
   const refreshCostAlert = () => void window.api.getCostAlertConfig().then(setCostAlert)
-  const refreshSettingsEvolution = () =>
+  const refreshPendingSync = () => {
+    try {
+      const list = loadPendingSyncQueue(getLocalStorage())
+      setPendingSyncList(list)
+      void window.api.listProjects().then((projects: ProjectMeta[]) => {
+        const map: Record<string, string> = {}
+        for (const p of projects) map[p.id] = p.name
+        for (const it of list) {
+          if (it.projectName) map[it.projectId] = it.projectName
+        }
+        setPendingProjectNames(map)
+      })
+    } catch {
+      setPendingSyncList([])
+    }
+  }
+
+  /**
+   * 设置页内直接补跑：调用 syncChapterAfterWrite(force)，成功则出队并写入可撤销栈。
+   * 失败则更新队列错误信息。
+   */
+  const retryPendingItem = async (
+    it: PendingSyncItem
+  ): Promise<'ok' | 'partial' | 'failed' | 'skipped'> => {
+    const api = window.api as {
+      syncChapterAfterWrite?: (
+        projectId: string,
+        chapterNumber: number,
+        content: string,
+        opts?: { force?: boolean }
+      ) => Promise<{
+        memory: SyncUndoReceipt['memory']
+        settings: SyncUndoReceipt['settings']
+        extraction: SyncUndoReceipt['extraction']
+      } | null>
+    }
+    if (!api.syncChapterAfterWrite) return 'failed'
+    if (!it.content?.trim()) return 'failed'
+
+    const sync = await api.syncChapterAfterWrite(
+      it.projectId,
+      it.chapterNumber,
+      it.content,
+      { force: true }
+    )
+    if (sync === null) return 'skipped'
+
+    const summary = summarizePostWriteSync(sync)
+    const storage = getLocalStorage()
+
+    if (summary.phase === 'failed') {
+      const q = loadPendingSyncQueue(storage)
+      savePendingSyncQueue(
+        storage,
+        upsertPendingSync(q, {
+          ...it,
+          errors: summary.errors.length ? summary.errors : ['同步失败'],
+          attempts: (it.attempts || 0) + 1,
+          at: Date.now()
+        })
+      )
+      return 'failed'
+    }
+
+    // 成功或部分成功：出队
+    savePendingSyncQueue(
+      storage,
+      removePendingSync(loadPendingSyncQueue(storage), { id: it.id })
+    )
+
+    const receipt: SyncUndoReceipt = {
+      extraction: sync.extraction,
+      memory: sync.memory,
+      settings: sync.settings
+    }
+    if (receiptHasUndoableWrites(receipt)) {
+      const prev = loadSyncHistory(storage, it.projectId, it.chapterNumber)
+      const next = pushSyncHistory(prev, {
+        id: makeSyncId('hist'),
+        projectId: it.projectId,
+        chapterNumber: it.chapterNumber,
+        at: Date.now(),
+        message: summary.message,
+        receipt
+      })
+      saveSyncHistory(storage, it.projectId, it.chapterNumber, next)
+    }
+
+    return summary.phase === 'partial' ? 'partial' : 'ok'
+  }
+
+  const onRetryOne = async (it: PendingSyncItem) => {
+    setRetryingSyncId(it.id)
+    try {
+      const result = await retryPendingItem(it)
+      refreshPendingSync()
+      if (result === 'ok') setMsg({ kind: 'ok', text: `第 ${it.chapterNumber} 章补跑成功` })
+      else if (result === 'partial')
+        setMsg({ kind: 'ok', text: `第 ${it.chapterNumber} 章部分同步成功（已出队）` })
+      else if (result === 'skipped')
+        setMsg({ kind: 'err', text: '同步被跳过（可能关闭了自动同步，已用 force 仍返回空）' })
+      else setMsg({ kind: 'err', text: `第 ${it.chapterNumber} 章补跑仍失败，可稍后重试` })
+    } catch (err) {
+      setMsg({
+        kind: 'err',
+        text: `补跑异常：${err instanceof Error ? err.message : String(err)}`
+      })
+      refreshPendingSync()
+    } finally {
+      setRetryingSyncId(null)
+    }
+  }
+
+  const onRetryAll = async () => {
+    const list = [...pendingSyncList]
+    if (list.length === 0) return
+    if (!window.confirm(`确认依次补跑全部 ${list.length} 条？可能消耗较多 token。`)) return
+    setRetryingAll(true)
+    retryAllAbortRef.current = false
+    let ok = 0
+    let fail = 0
+    try {
+      for (const it of list) {
+        if (retryAllAbortRef.current) break
+        setRetryingSyncId(it.id)
+        try {
+          const r = await retryPendingItem(it)
+          if (r === 'ok' || r === 'partial') ok++
+          else fail++
+        } catch {
+          fail++
+        }
+        refreshPendingSync()
+      }
+      setMsg({
+        kind: fail === 0 ? 'ok' : 'err',
+        text: retryAllAbortRef.current
+          ? `已中止：成功 ${ok}，失败 ${fail}`
+          : `补跑完成：成功 ${ok}，失败 ${fail}`
+      })
+    } finally {
+      setRetryingSyncId(null)
+      setRetryingAll(false)
+    }
+  }
+  const refreshSettingsEvolution = () => {
     void (window.api as { getSettingsEvolution?: () => Promise<'off' | 'confirm_all' | 'auto_high'> })
       .getSettingsEvolution?.()
       .then((m) => m && setSettingsEvolution(m))
-    void (window.api as { getAutoMemorySync?: () => Promise<boolean> })
-      .getAutoMemorySync?.()
+    void (window.api as {
+      getAutoPostWritePipeline?: () => Promise<'off' | 'memory_only' | 'full'>
+      getAutoMemorySync?: () => Promise<boolean>
+    })
+      .getAutoPostWritePipeline?.()
       .then((v) => {
-        if (typeof v === 'boolean') setAutoMemorySync(v)
+        if (v === 'off' || v === 'memory_only' || v === 'full') {
+          setAutoPostWritePipeline(v)
+          return
+        }
+        // 旧客户端兜底
+        void (window.api as { getAutoMemorySync?: () => Promise<boolean> })
+          .getAutoMemorySync?.()
+          .then((on) => setAutoPostWritePipeline(on === false ? 'off' : 'memory_only'))
       })
+  }
   // P17-A：按项目 / 按章节聚合
   const [byProject, setByProject] = useState<ProjectUsage[]>([])
   const [byChapter, setByChapter] = useState<ChapterUsage[]>([])
@@ -361,6 +556,7 @@ export default function SettingsPage(_: Props) {
     refreshReviewRules()
     refreshByProject()
     refreshByChapter()
+    refreshPendingSync()
     void window.api.getTheme().then(setTheme)
     void window.api.getPricing().then(setPricing)
     void window.api.getDailyWordGoal().then(setDailyGoal)
@@ -369,6 +565,10 @@ export default function SettingsPage(_: Props) {
       setPomoBreak(cfg.brk)
     })
   }, [])
+
+  useEffect(() => {
+    if (activeTab === 'syncQueue') refreshPendingSync()
+  }, [activeTab])
 
   const applyTheme = (t: ThemeMode) => {
     const root = document.documentElement
@@ -875,6 +1075,174 @@ export default function SettingsPage(_: Props) {
             </div>
           )}
 
+          {activeTab === 'syncQueue' && (
+            <div className="card" style={{ maxWidth: 720 }}>
+              <div className="row" style={{ alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+                <h3 className="sub" style={{ margin: 0 }}>
+                  待同步队列
+                </h3>
+                <div className="btn-group" style={{ marginLeft: 'auto' }}>
+                  {pendingSyncList.length > 0 ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => void onRetryAll()}
+                        disabled={retryingAll || retryingSyncId != null}
+                        title="在设置页依次补跑全部，无需打开章节"
+                      >
+                        {retryingAll ? '补跑中…' : '全部补跑'}
+                      </button>
+                      {retryingAll ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => {
+                            retryAllAbortRef.current = true
+                          }}
+                        >
+                          中止
+                        </button>
+                      ) : null}
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={refreshPendingSync}
+                    disabled={retryingAll}
+                  >
+                    刷新
+                  </button>
+                </div>
+              </div>
+              <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                写后自动同步失败会入队（跨重启保留）。可在此直接「补跑」而不必打开章节；成功会出队并写入可撤销栈。
+              </p>
+              {pendingSyncList.length === 0 ? (
+                <p className="muted" style={{ marginTop: 16 }}>
+                  当前没有待补跑的同步。
+                </p>
+              ) : (
+                <>
+                  <p style={{ fontSize: 13, marginTop: 12 }}>
+                    共 <strong>{pendingSyncList.length}</strong> 条
+                    {retryingSyncId ? (
+                      <span className="muted"> · 正在处理…</span>
+                    ) : null}
+                  </p>
+                  <ul className="bare" style={{ marginTop: 10, display: 'grid', gap: 10 }}>
+                    {pendingSyncList
+                      .slice()
+                      .sort((a, b) => b.at - a.at)
+                      .map((it) => {
+                        const title =
+                          pendingProjectNames[it.projectId] ||
+                          it.projectName ||
+                          it.projectId.slice(0, 8)
+                        const errPreview = (it.errors[0] || '未知错误').slice(0, 80)
+                        const busy = retryingSyncId === it.id || retryingAll
+                        return (
+                          <li
+                            key={it.id}
+                            style={{
+                              border: '1px solid var(--line-soft)',
+                              borderRadius: 8,
+                              padding: '10px 12px',
+                              background: 'var(--surface-2)',
+                              opacity: busy && retryingSyncId !== it.id ? 0.72 : 1
+                            }}
+                          >
+                            <div className="row" style={{ alignItems: 'baseline', gap: 8 }}>
+                              <strong style={{ fontSize: 13.5 }}>
+                                {title} · 第 {it.chapterNumber} 章
+                              </strong>
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                {new Date(it.at).toLocaleString()} · 已尝试 {it.attempts} 次 · 快照{' '}
+                                {it.content.length} 字
+                              </span>
+                            </div>
+                            <div
+                              className="err"
+                              style={{ fontSize: 12, marginTop: 6 }}
+                              title={it.errors.join('\n')}
+                            >
+                              {errPreview}
+                              {it.errors.length > 1 ? ` 等 ${it.errors.length} 条` : ''}
+                            </div>
+                            <div className="btn-group" style={{ marginTop: 8 }}>
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                disabled={busy}
+                                onClick={() => void onRetryOne(it)}
+                                title="用快照正文直接补跑记忆/设定同步"
+                              >
+                                {retryingSyncId === it.id ? '补跑中…' : '补跑'}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                disabled={busy}
+                                onClick={() => {
+                                  if (onOpenChapter) {
+                                    onOpenChapter(it.projectId, it.chapterNumber)
+                                  } else {
+                                    setMsg({
+                                      kind: 'err',
+                                      text: '无法跳转章节，请从项目列表手动打开'
+                                    })
+                                  }
+                                }}
+                              >
+                                打开章节
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                disabled={busy}
+                                onClick={() => {
+                                  try {
+                                    const next = removePendingSync(
+                                      loadPendingSyncQueue(getLocalStorage()),
+                                      { id: it.id }
+                                    )
+                                    savePendingSyncQueue(getLocalStorage(), next)
+                                    setPendingSyncList(next)
+                                    setMsg({ kind: 'ok', text: '已从队列移除' })
+                                  } catch {
+                                    setMsg({ kind: 'err', text: '移除失败' })
+                                  }
+                                }}
+                              >
+                                移除
+                              </button>
+                            </div>
+                          </li>
+                        )
+                      })}
+                  </ul>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    style={{ marginTop: 14 }}
+                    disabled={retryingAll || retryingSyncId != null}
+                    onClick={() => {
+                      if (!window.confirm(`确认清空全部 ${pendingSyncList.length} 条待同步？`)) {
+                        return
+                      }
+                      savePendingSyncQueue(getLocalStorage(), [])
+                      setPendingSyncList([])
+                      setMsg({ kind: 'ok', text: '已清空待同步队列' })
+                    }}
+                  >
+                    清空全部
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
           {activeTab === 'writing' && (
             <div className="card" style={{ maxWidth: 600 }}>
               <h3 className="sub">写作节奏</h3>
@@ -907,32 +1275,39 @@ export default function SettingsPage(_: Props) {
                 </select>
               </div>
               <div className="field" style={{ marginTop: 12 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={autoMemorySync}
-                    onChange={async (e) => {
-                      const v = e.target.checked
-                      setAutoMemorySync(v)
-                      const api = window.api as {
-                        setAutoMemorySync?: (enabled: boolean) => Promise<boolean>
-                      }
-                      if (api.setAutoMemorySync) {
-                        const next = await api.setAutoMemorySync(v)
-                        setAutoMemorySync(next)
-                        setMsg({
-                          kind: 'ok',
-                          text: next
-                            ? '已开启：续写完成后自动同步记忆与设定'
-                            : '已关闭自动同步（仍可在流程面板手动同步）'
-                        })
-                      }
-                    }}
-                  />
-                  续写完成后自动同步记忆与设定
-                </label>
+                <label>续写完成后自动后处理</label>
+                <p className="muted" style={{ fontSize: 11.5, margin: '0 0 6px' }}>
+                  默认仅同步记忆与设定（省 token）。选「完整」会在记忆同步后再跑细纲对照/节奏/图解，且不会重复提取记忆。
+                </p>
+                <select
+                  className="input"
+                  value={autoPostWritePipeline}
+                  onChange={async (e) => {
+                    const v = e.target.value as 'off' | 'memory_only' | 'full'
+                    setAutoPostWritePipeline(v)
+                    const api = window.api as {
+                      setAutoPostWritePipeline?: (
+                        m: 'off' | 'memory_only' | 'full'
+                      ) => Promise<'off' | 'memory_only' | 'full'>
+                    }
+                    if (api.setAutoPostWritePipeline) {
+                      const next = await api.setAutoPostWritePipeline(v)
+                      setAutoPostWritePipeline(next)
+                      const labels = {
+                        off: '已关闭自动后处理（可在流程面板手动同步）',
+                        memory_only: '已设为：仅自动同步记忆与设定',
+                        full: '已设为：记忆同步 + 细纲/节奏/图解'
+                      } as const
+                      setMsg({ kind: 'ok', text: labels[next] })
+                    }
+                  }}
+                >
+                  <option value="memory_only">仅记忆与设定（推荐）</option>
+                  <option value="full">完整（记忆 + 细纲/节奏/图解）</option>
+                  <option value="off">关闭</option>
+                </select>
                 <p className="muted" style={{ fontSize: 11.5, margin: '6px 0 0' }}>
-                  开启后，单章/批量续写成功会后台提取并写入上下文、角色状态、时间线及高置信设定补丁；不会在每次按键或草稿自动保存时触发。
+                  不会在每次按键或草稿自动保存时触发；追问调整成功后也会按同样策略同步。
                 </p>
               </div>
               <div className="field" style={{ marginTop: 8 }}>
@@ -2235,6 +2610,48 @@ function ProviderRow({
     }
   }
 
+  const protocolLabel =
+    provider.protocol === 'anthropic'
+      ? 'Anthropic'
+      : provider.protocol === 'antigravity'
+        ? 'Antigravity (agy)'
+        : provider.protocol === 'codex'
+          ? 'Codex CLI'
+          : provider.protocol === 'grok'
+            ? 'Grok CLI'
+            : 'OpenAI'
+  const protocolChipStyle: CSSProperties = {
+    background:
+      provider.protocol === 'anthropic'
+        ? 'var(--inkstone-soft)'
+        : provider.protocol === 'antigravity'
+          ? 'var(--vermilion-soft, rgba(229,57,53,0.12))'
+          : provider.protocol === 'codex'
+            ? 'rgba(16,163,127,0.12)'
+            : provider.protocol === 'grok'
+              ? 'rgba(26,26,26,0.1)'
+              : 'var(--surface-2)',
+    color:
+      provider.protocol === 'anthropic'
+        ? 'var(--inkstone)'
+        : provider.protocol === 'antigravity'
+          ? 'var(--vermilion, #e53935)'
+          : provider.protocol === 'codex'
+            ? '#10a37f'
+            : provider.protocol === 'grok'
+              ? '#1a1a1a'
+              : 'var(--ink-3)',
+    flexShrink: 0
+  }
+  const metaText =
+    provider.protocol === 'antigravity'
+      ? `本机 agy CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'agy 默认模型'}`
+      : provider.protocol === 'codex'
+        ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
+        : provider.protocol === 'grok'
+          ? `本机 grok CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'grok 默认模型'}`
+          : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`
+
   return (
     <li
       className="card"
@@ -2244,118 +2661,30 @@ function ProviderRow({
         borderColor: active ? 'var(--vermilion)' : undefined
       }}
     >
-      <div className="row" style={{ alignItems: 'flex-start', gap: 12 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-            <strong style={{ fontFamily: 'var(--font-display)', fontSize: 15 }}>
-              {provider.label || '(未命名)'}
-            </strong>
-            {active ? <span className="chip-seal">当前</span> : null}
-            {provider.hasKey ? (
-              <span className="chip chip-success" title="已配置">
-                ✓ {provider.keyMasked || 'Key'}
-              </span>
-            ) : (
-              <span className="chip chip-warning">无 Key</span>
-            )}
-            <span
-              className="chip"
-              style={{
-                background:
-                  provider.protocol === 'anthropic'
-                    ? 'var(--inkstone-soft)'
-                    : provider.protocol === 'antigravity'
-                      ? 'var(--vermilion-soft, rgba(229,57,53,0.12))'
-                      : provider.protocol === 'codex'
-                        ? 'rgba(16,163,127,0.12)'
-                        : provider.protocol === 'grok'
-                          ? 'rgba(26,26,26,0.1)'
-                          : 'var(--surface-2)',
-                color:
-                  provider.protocol === 'anthropic'
-                    ? 'var(--inkstone)'
-                    : provider.protocol === 'antigravity'
-                      ? 'var(--vermilion, #e53935)'
-                      : provider.protocol === 'codex'
-                        ? '#10a37f'
-                        : provider.protocol === 'grok'
-                          ? '#1a1a1a'
-                          : 'var(--ink-3)'
-              }}
-            >
-              {provider.protocol === 'anthropic'
-                ? 'Anthropic'
-                : provider.protocol === 'antigravity'
-                  ? 'Antigravity (agy)'
-                  : provider.protocol === 'codex'
-                    ? 'Codex CLI'
-                    : provider.protocol === 'grok'
-                      ? 'Grok CLI'
-                      : 'OpenAI'}
-            </span>
-          </div>
-          <div className="meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
-            {provider.protocol === 'antigravity'
-              ? `本机 agy CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'agy 默认模型'}`
-              : provider.protocol === 'codex'
-                ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
-                : provider.protocol === 'grok'
-                  ? `本机 grok CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'grok 默认模型'}`
-                  : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`}
-          </div>
-          {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
-          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>模型强度</span>
-            <input
-              type="range"
-              min={0}
-              max={2}
-              step={0.1}
-              value={tempDraft ?? 1}
-              onChange={(e) => persistTemp(Number(e.target.value))}
-              aria-label="模型强度（采样温度）"
-              style={{ width: 160 }}
-            />
-            <span style={{ fontSize: 13, minWidth: 92, fontFamily: 'var(--font-mono)' }}>
-              {tempDraft === null ? '模型默认' : `温度 ${tempDraft.toFixed(1)}`}
-            </span>
-            <button
-              className="btn btn-sm"
-              style={{ padding: '2px 8px', fontSize: 12 }}
-              onClick={resetTemp}
-              disabled={tempDraft === null}
-              title="清除自定义温度，使用模型默认值"
-            >
-              默认
-            </button>
-            <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>
-              {tempDraft === null
-                ? ''
-                : tempDraft <= 0.5
-                  ? '稳定（适合改写/审阅）'
-                  : tempDraft <= 1.0
-                    ? '均衡（适合续写）'
-                    : '发散（更有惊喜，易跑偏）'}
-            </span>
-            {savedHint && (
-              <span
-                style={{
-                  fontSize: 11,
-                  color: 'var(--success)',
-                  fontWeight: 500,
-                  animation: 'fade-in 0.2s ease'
-                }}
-              >
-                ✓ 已保存
-              </span>
-            )}
-          </div>
-        </div>
+      {/* 顶行：标题 + 操作按钮，互不挤占 */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: 12
+        }}
+      >
+        <strong
+          style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 15,
+            lineHeight: 1.35,
+            minWidth: 0,
+            wordBreak: 'break-word'
+          }}
+        >
+          {provider.label || '(未命名)'}
+        </strong>
         <div className="btn-group" style={{ flexShrink: 0 }}>
           {!active ? (
             <button className="btn btn-sm" onClick={onActivate}>启用</button>
           ) : null}
-          {/* 卡片级连通测试：独立 loading，可与其他卡片并发 */}
           <button
             className="btn btn-sm"
             onClick={handleTest}
@@ -2365,27 +2694,107 @@ function ProviderRow({
             {testing ? '测试中…' : '测试'}
           </button>
           <button className="btn btn-sm btn-danger" onClick={onDelete}>删除</button>
-          {/* 测试结果行内显示：超长截断 + title 悬浮查看完整文本 */}
-          {testResult && (
-            <span
-              title={testResult.text}
-              style={{
-                marginLeft: 6,
-                fontSize: 12,
-                color: testResult.ok ? 'var(--success)' : 'var(--vermilion, #e53935)',
-                fontWeight: 500,
-                maxWidth: 220,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                alignSelf: 'center'
-              }}
-            >
-              {testResult.text}
-            </span>
-          )}
         </div>
       </div>
+
+      {/* 状态 chips：可换行，不与按钮抢位 */}
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 6,
+          marginTop: 8
+        }}
+      >
+        {active ? <span className="chip-seal">当前</span> : null}
+        {provider.hasKey ? (
+          <span className="chip chip-success" title="已配置">
+            ✓ {provider.keyMasked || 'Key'}
+          </span>
+        ) : (
+          <span className="chip chip-warning">无 Key</span>
+        )}
+        <span className="chip" style={protocolChipStyle}>
+          {protocolLabel}
+        </span>
+      </div>
+
+      <div className="meta" style={{ marginTop: 8, wordBreak: 'break-all' }}>
+        {metaText}
+      </div>
+
+      {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
+      <div
+        style={{
+          marginTop: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap'
+        }}
+      >
+        <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>模型强度</span>
+        <input
+          type="range"
+          min={0}
+          max={2}
+          step={0.1}
+          value={tempDraft ?? 1}
+          onChange={(e) => persistTemp(Number(e.target.value))}
+          aria-label="模型强度（采样温度）"
+          style={{ width: 160 }}
+        />
+        <span style={{ fontSize: 13, minWidth: 72, fontFamily: 'var(--font-mono)' }}>
+          {tempDraft === null ? '模型默认' : `温度 ${tempDraft.toFixed(1)}`}
+        </span>
+        <button
+          className="btn btn-sm"
+          style={{ padding: '2px 8px', fontSize: 12 }}
+          onClick={resetTemp}
+          disabled={tempDraft === null}
+          title="清除自定义温度，使用模型默认值"
+        >
+          默认
+        </button>
+        <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>
+          {tempDraft === null
+            ? ''
+            : tempDraft <= 0.5
+              ? '稳定（适合改写/审阅）'
+              : tempDraft <= 1.0
+                ? '均衡（适合续写）'
+                : '发散（更有惊喜，易跑偏）'}
+        </span>
+        {savedHint && (
+          <span
+            style={{
+              fontSize: 11,
+              color: 'var(--success)',
+              fontWeight: 500,
+              animation: 'fade-in 0.2s ease'
+            }}
+          >
+            ✓ 已保存
+          </span>
+        )}
+      </div>
+
+      {/* 连通结果单独一行，避免和按钮挤在一起 */}
+      {testResult && (
+        <div
+          title={testResult.text}
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: testResult.ok ? 'var(--success)' : 'var(--vermilion, #e53935)',
+            fontWeight: 500,
+            wordBreak: 'break-word'
+          }}
+        >
+          {testResult.text}
+        </div>
+      )}
     </li>
   )
 }
@@ -2404,6 +2813,9 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [agyModelsLoading, setAgyModelsLoading] = useState(false)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexModelsLoading, setCodexModelsLoading] = useState(false)
+  /** codex / antigravity 选「自定义…」时显示自由输入 */
+  const [codexCustom, setCodexCustom] = useState(false)
+  const [agyCustom, setAgyCustom] = useState(false)
   const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokModelsLoading, setGrokModelsLoading] = useState(false)
 
@@ -2411,6 +2823,20 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const isCodex = protocol === 'codex'
   const isGrok = protocol === 'grok'
   const isCli = isAg || isCodex || isGrok
+
+  /** Codex 模型 slug → 展示名（与 main CODEX_MODEL_LABELS 对齐） */
+  const codexModelLabel = (slug: string): string => {
+    const map: Record<string, string> = {
+      'gpt-5.6-sol': 'GPT-5.6 Sol',
+      'gpt-5.6-terra': 'GPT-5.6 Terra',
+      'gpt-5.6-luna': 'GPT-5.6 Luna',
+      'gpt-5.5': 'GPT-5.5',
+      'gpt-5.4': 'GPT-5.4',
+      'gpt-5.4-mini': 'GPT-5.4 Mini',
+      'gpt-5.2': 'GPT-5.2'
+    }
+    return map[slug] ? `${map[slug]}（${slug}）` : slug
+  }
 
   // 切到 antigravity 时拉取 agy 可用模型列表
   // 注意：loading 状态不能放进依赖数组，否则 setAgyModelsLoading(true) 触发重渲染时
@@ -2473,9 +2899,21 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
   }, [isGrok, grokModels.length])
 
+  /** 按协议给出可读默认名称（名称可改；CLI 留空保存时也会用这个） */
+  const defaultLabelFor = (p: ProviderProtocol, modelName?: string): string => {
+    const m = (modelName || '').trim()
+    if (p === 'codex') return m && m !== 'default' ? `Codex · ${m}` : 'Codex'
+    if (p === 'antigravity') return m && m !== 'default' ? `Google · ${m}` : 'Google (agy)'
+    if (p === 'grok') return m && m !== 'default' ? `Grok · ${m}` : 'Grok'
+    if (p === 'anthropic') return m ? `Anthropic · ${m}` : 'Anthropic'
+    return m ? `OpenAI · ${m}` : 'OpenAI 兼容'
+  }
+
   const submit = async () => {
     setErr(null)
-    if (!label.trim()) return setErr('请填写名称')
+    // CLI 允许名称留空：自动用协议 + 模型生成
+    const resolvedLabel = label.trim() || (isCli ? defaultLabelFor(protocol, model) : '')
+    if (!resolvedLabel) return setErr('请填写名称')
     // CLI 协议（antigravity/codex）：无需 baseUrl/apiKey，model 可空（走默认）
     if (!isCli) {
       // 严格 URL 校验：必须能 new URL() 解析且协议是 http(s)
@@ -2495,7 +2933,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     try {
       await window.api.upsertProvider({
         id: newId(),
-        label: label.trim(),
+        label: resolvedLabel,
         baseUrl: isCli ? '' : baseUrl.trim().replace(/\/+$/, ''),
         model: isCli ? model.trim() || 'default' : model.trim(),
         apiKey: isCli ? '' : apiKey.trim(),
@@ -2503,6 +2941,9 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
       })
       setLabel('')
       setApiKey('')
+      setModel('')
+      setCodexCustom(false)
+      setAgyCustom(false)
       onCreated()
     } catch (e) {
       setErr((e as Error).message || '保存失败')
@@ -2511,110 +2952,50 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
   }
 
+  const modelCountHint =
+    isAg && agyModels.length > 0
+      ? `（${agyModels.length} 个可选）`
+      : isCodex && codexModels.length > 0
+        ? `（${codexModels.length} 个可选）`
+        : isGrok && grokModels.length > 0
+          ? `（${grokModels.length} 个可选）`
+          : isCli
+            ? '（可选）'
+            : ''
+
   return (
     <div style={{ marginTop: 6 }}>
-      <div className="row" style={{ gap: 8 }}>
-        <div className="field" style={{ flex: 1, marginBottom: 10 }}>
-          <label>名称</label>
-          <input
-            className="input"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="主力 / 备用 / DeepSeek"
-          />
-        </div>
-        {isCli ? (
-          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
-            <label>
-              模型
-              {isAg && agyModels.length > 0
-                ? `（${agyModels.length} 个可选）`
-                : isCodex && codexModels.length > 0
-                  ? `（默认 ${codexModels[0]}）`
-                  : isGrok && grokModels.length > 0
-                    ? `（${grokModels.length} 个可选）`
-                    : '（可选）'}
-            </label>
-            {isAg && agyModels.length > 0 ? (
-              <select
-                className="select"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                <option value="">agy 默认模型</option>
-                {agyModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            ) : isGrok && grokModels.length > 0 ? (
-              <select
-                className="select"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                <option value="">grok 默认模型</option>
-                {grokModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            ) : isCodex ? (
-              <input
-                className="input"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder={
-                  codexModels.length > 0
-                    ? `留空用 ${codexModels[0]}，或填其他模型名`
-                    : '留空用 codex 默认，或填模型名'
-                }
-              />
-            ) : (isAg && agyModelsLoading) ||
-              (isCodex && codexModelsLoading) ||
-              (isGrok && grokModelsLoading) ? (
-              <input className="input" disabled placeholder="加载模型列表…" />
-            ) : (
-              <input
-                className="input"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder={
-                  isGrok
-                    ? '留空用 grok 默认，或填 grok-4.5'
-                    : '无法拉取列表，请手动填模型显示名'
-                }
-              />
-            )}
-          </div>
-        ) : (
-          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
-            <label>Base URL</label>
-            <input
-              className="input"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.openai.com/v1"
-            />
-          </div>
-        )}
-      </div>
-      <div className="row" style={{ gap: 8 }}>
-        {isCli ? null : (
-          <div className="field" style={{ flex: 1, marginBottom: 10 }}>
-            <label>模型</label>
-            <input
-              className="input"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="例如 gpt-4o-mini / deepseek-chat"
-            />
-          </div>
-        )}
-        <div className="field" style={{ flex: 1, marginBottom: 10 }}>
-          <label>协议</label>
+      {/* 协议优先：先选协议再填名称/模型，避免和模型挤在一行导致点不中 */}
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+        <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
+          <label htmlFor="np-protocol">协议</label>
           <select
+            id="np-protocol"
             className="select"
             value={protocol}
-            onChange={(e) => setProtocol(e.target.value as ProviderProtocol)}
+            onChange={(e) => {
+              const next = e.target.value as ProviderProtocol
+              setProtocol(next)
+              // 切协议时重置模型；名称若仍是旧默认则同步新建议名
+              setModel('')
+              setCodexCustom(false)
+              setAgyCustom(false)
+              setLabel((prev) => {
+                const prevDefaults = [
+                  '',
+                  'Codex',
+                  'Google (agy)',
+                  'Grok',
+                  'Anthropic',
+                  'OpenAI 兼容'
+                ]
+                // 仅在空或仍是「上一次协议的默认名」时自动改名，避免覆盖用户手填
+                if (!prev.trim() || prevDefaults.includes(prev.trim()) || /^Codex · |^Google · |^Grok · |^Anthropic · |^OpenAI · /.test(prev)) {
+                  return defaultLabelFor(next, '')
+                }
+                return prev
+              })
+            }}
           >
             <option value="openai">OpenAI 兼容</option>
             <option value="anthropic">Anthropic</option>
@@ -2623,45 +3004,261 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             <option value="grok">Grok (grok CLI 登录)</option>
           </select>
         </div>
+        <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
+          <label htmlFor="np-label">名称</label>
+          <input
+            id="np-label"
+            className="input"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder={
+              isCodex
+                ? '例如 Codex / 主力 GPT'
+                : isAg
+                  ? '例如 Google / 主力 Gemini'
+                  : isGrok
+                    ? '例如 Grok'
+                    : '主力 / 备用 / DeepSeek'
+            }
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
+      </div>
+
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
         {isCli ? (
-          <div className="field" style={{ flex: 3, marginBottom: 10 }}>
-            <label>认证方式</label>
-            <div
-              className="meta"
-              style={{
-                padding: '8px 10px',
-                background: 'var(--surface-2)',
-                borderRadius: 6,
-                fontSize: 12
-              }}
-            >
-              {isAg ? (
-                <>使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>agy</code> 完成登录。</>
-              ) : isCodex ? (
-                <>使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>codex login</code> 完成登录。</>
-              ) : (
-                <>使用本机 grok 登录态，无需 API Key / Base URL。首次使用请先在终端运行 <code>grok login</code> 完成登录。</>
-              )}
-            </div>
+          <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
+            <label htmlFor="np-model">模型{modelCountHint}</label>
+            {isAg && agyModels.length > 0 && !agyCustom ? (
+              <select
+                id="np-model"
+                className="select"
+                value={model}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === '__custom__') {
+                    setAgyCustom(true)
+                    setModel('')
+                    return
+                  }
+                  setModel(v)
+                  // 名称仍是默认形态时，随模型更新建议名
+                  setLabel((prev) =>
+                    !prev.trim() || prev === 'Google (agy)' || prev.startsWith('Google · ')
+                      ? defaultLabelFor('antigravity', v)
+                      : prev
+                  )
+                }}
+              >
+                <option value="">agy 默认模型</option>
+                {agyModels.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+                <option value="__custom__">自定义…</option>
+              </select>
+            ) : isAg ? (
+              <div className="row" style={{ gap: 6, width: '100%' }}>
+                <input
+                  id="np-model"
+                  className="input"
+                  style={{ flex: 1, minWidth: 0 }}
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder={
+                    agyModelsLoading ? '加载模型列表…' : '例如 Gemini 3.1 Pro (High)'
+                  }
+                  disabled={agyModelsLoading}
+                  autoComplete="off"
+                />
+                {agyModels.length > 0 ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      setAgyCustom(false)
+                      setModel('')
+                    }}
+                  >
+                    返回列表
+                  </button>
+                ) : null}
+              </div>
+            ) : isGrok && grokModels.length > 0 ? (
+              <select
+                id="np-model"
+                className="select"
+                value={model}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setModel(v)
+                  setLabel((prev) =>
+                    !prev.trim() || prev === 'Grok' || prev.startsWith('Grok · ')
+                      ? defaultLabelFor('grok', v)
+                      : prev
+                  )
+                }}
+              >
+                <option value="">grok 默认模型</option>
+                {grokModels.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : isCodex && codexModels.length > 0 && !codexCustom ? (
+              <select
+                id="np-model"
+                className="select"
+                value={model}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === '__custom__') {
+                    setCodexCustom(true)
+                    setModel('')
+                    return
+                  }
+                  setModel(v)
+                  setLabel((prev) =>
+                    !prev.trim() || prev === 'Codex' || prev.startsWith('Codex · ')
+                      ? defaultLabelFor('codex', v)
+                      : prev
+                  )
+                }}
+              >
+                <option value="">codex 默认模型</option>
+                {codexModels.map((m) => (
+                  <option key={m} value={m}>
+                    {codexModelLabel(m)}
+                  </option>
+                ))}
+                <option value="__custom__">自定义…</option>
+              </select>
+            ) : isCodex ? (
+              <div className="row" style={{ gap: 6, width: '100%' }}>
+                <input
+                  id="np-model"
+                  className="input"
+                  style={{ flex: 1, minWidth: 0 }}
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder={
+                    codexModelsLoading ? '加载模型列表…' : '例如 gpt-5.6-sol / gpt-5.5'
+                  }
+                  disabled={codexModelsLoading}
+                  autoComplete="off"
+                />
+                {codexModels.length > 0 ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      setCodexCustom(false)
+                      setModel('')
+                    }}
+                  >
+                    返回列表
+                  </button>
+                ) : null}
+              </div>
+            ) : isGrok && grokModelsLoading ? (
+              <input className="input" disabled placeholder="加载模型列表…" />
+            ) : (
+              <input
+                id="np-model"
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  isGrok ? '留空用 grok 默认，或填 grok-4.5' : '无法拉取列表，请手动填模型显示名'
+                }
+                autoComplete="off"
+              />
+            )}
           </div>
         ) : (
-          <div className="field" style={{ flex: 2, marginBottom: 10 }}>
-            <label>API Key</label>
-            <input
-              className="input"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-…"
-            />
-          </div>
+          <>
+            <div className="field" style={{ flex: 2, marginBottom: 10, minWidth: 0 }}>
+              <label htmlFor="np-baseurl">Base URL</label>
+              <input
+                id="np-baseurl"
+                className="input"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
+              <label htmlFor="np-model-http">模型</label>
+              <input
+                id="np-model-http"
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="例如 gpt-4o-mini / deepseek-chat"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          </>
         )}
       </div>
+
+      {isCli ? (
+        <div className="field" style={{ marginBottom: 10 }}>
+          <label>认证方式</label>
+          <div
+            className="meta"
+            style={{
+              padding: '8px 10px',
+              background: 'var(--surface-2)',
+              borderRadius: 6,
+              fontSize: 12
+            }}
+          >
+            {isAg ? (
+              <>
+                使用本机 agy 登录态，无需 API Key / Base URL。首次使用请先在终端运行{' '}
+                <code>agy</code> 完成登录。
+              </>
+            ) : isCodex ? (
+              <>
+                使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行{' '}
+                <code>codex login</code> 完成登录。
+              </>
+            ) : (
+              <>
+                使用本机 grok 登录态，无需 API Key / Base URL。首次使用请先在终端运行{' '}
+                <code>grok login</code> 完成登录。
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="field" style={{ marginBottom: 10 }}>
+          <label htmlFor="np-apikey">API Key</label>
+          <input
+            id="np-apikey"
+            className="input"
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="sk-…"
+            autoComplete="off"
+          />
+        </div>
+      )}
+
       <div className="row" style={{ gap: 8 }}>
         <button
+          type="button"
           className="btn btn-primary btn-sm"
           onClick={submit}
-          disabled={saving || !label.trim() || (!isCli && !model.trim())}
+          disabled={saving || (!isCli && (!label.trim() || !model.trim()))}
         >
           {saving ? '保存中…' : '保存并设为默认'}
         </button>

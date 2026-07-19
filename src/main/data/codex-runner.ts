@@ -346,23 +346,55 @@ export async function probeCodex(): Promise<string | null> {
 }
 
 /**
- * 列出 codex 可用模型。
- * codex 没有 `codex models` 命令，从 `~/.codex/config.toml` 读取 `model` 字段
- * 作为默认模型返回。用户也可在 UI 手动输入其他模型名。
- * @returns 模型名数组（通常只有 1 个默认模型），未安装/无配置时返回空数组
+ * Codex CLI 当前常见模型 slug（来自 Codex 客户端模型目录）。
+ * CLI 没有 `codex models` 命令，故维护一份可下拉选择的预设列表；
+ * 新版本出现的模型可通过 UI「自定义」手动填入。
+ */
+export const CODEX_KNOWN_MODELS: readonly string[] = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+  'gpt-5.2'
+]
+
+/** 展示名（设置页下拉用；缺省回退 slug 本身） */
+export const CODEX_MODEL_LABELS: Readonly<Record<string, string>> = {
+  'gpt-5.6-sol': 'GPT-5.6 Sol',
+  'gpt-5.6-terra': 'GPT-5.6 Terra',
+  'gpt-5.6-luna': 'GPT-5.6 Luna',
+  'gpt-5.5': 'GPT-5.5',
+  'gpt-5.4': 'GPT-5.4',
+  'gpt-5.4-mini': 'GPT-5.4 Mini',
+  'gpt-5.2': 'GPT-5.2'
+}
+
+/**
+ * 列出 codex 可用模型（供设置页下拉）。
+ * 合并：config.toml 默认 model（若有）+ 内置 GPT 预设。
+ * @returns slug 数组；config 默认排在最前
  */
 export async function listCodexModels(): Promise<string[]> {
   const configPath = join(homedir(), '.codex', 'config.toml')
+  let configModel = ''
   try {
     const content = await readFile(configPath, 'utf8')
     // 简单解析 `model = "xxx"` 行（TOML 顶层字符串值）
     const match = content.match(/^model\s*=\s*"([^"]+)"/m)
-    if (match && match[1]) {
-      return [match[1]]
-    }
-    return []
+    if (match?.[1]?.trim()) configModel = match[1].trim()
   } catch {
-    // 文件不存在或读取失败
-    return []
+    // 文件不存在或读取失败：仅返回预设
   }
+  const seen = new Set<string>()
+  const out: string[] = []
+  const push = (m: string) => {
+    if (!m || seen.has(m)) return
+    seen.add(m)
+    out.push(m)
+  }
+  push(configModel)
+  for (const m of CODEX_KNOWN_MODELS) push(m)
+  return out
 }

@@ -1,7 +1,12 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
 import { safeHandle } from './safe-handle'
-import type { MemoryExtraction, RhythmEvaluation } from '../../shared/types'
+import type {
+  MemoryApplyResult,
+  MemoryExtraction,
+  RhythmEvaluation,
+  SettingsApplyResult
+} from '../../shared/types'
 import { validateInput, projectIdSchema, chapterNumberSchema, chapterContentSchema } from './validation'
 import { z } from 'zod'
 
@@ -204,7 +209,7 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
-  /** 正文追问：基于本章正文 + 设定流式回答用户的写作疑问，不修改正文 */
+  /** 正文追问：全书视野（总纲/章目录/相邻章/设定追踪）+ 本章正文，只回答不改正文 */
   ipcMain.handle(
     'write:answerChapterQuestion',
     async (
@@ -375,21 +380,57 @@ export function registerWriteIpc(service: WriteService): void {
     'write:syncChapterAfterWrite',
     async (
       _e,
-      payload: { projectId: string; chapterNumber: number; content: string }
+      payload: {
+        projectId: string
+        chapterNumber: number
+        content: string
+        force?: boolean
+      }
     ) => {
       const validated = validateInput(
         z.object({
           projectId: projectIdSchema,
           chapterNumber: chapterNumberSchema,
-          content: chapterContentSchema
+          content: chapterContentSchema,
+          force: z.boolean().optional()
         }),
         payload
       )
       return service.syncChapterAfterWrite(
         validated.projectId,
         validated.chapterNumber,
-        validated.content
+        validated.content,
+        // force：用户手动补跑，忽略 autoMemorySync / pipeline=off
+        { skipIfDisabled: validated.force !== true }
       )
+    }
+  )
+
+  safeHandle(
+    'write:undoChapterSync',
+    async (
+      _e,
+      payload: {
+        projectId: string
+        extraction: MemoryExtraction
+        memory: MemoryApplyResult
+        settings: SettingsApplyResult
+      }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          extraction: z.any(),
+          memory: z.any(),
+          settings: z.any()
+        }),
+        payload
+      )
+      return service.undoChapterSync(validated.projectId, {
+        extraction: validated.extraction as MemoryExtraction,
+        memory: validated.memory as MemoryApplyResult,
+        settings: validated.settings as SettingsApplyResult
+      })
     }
   )
 

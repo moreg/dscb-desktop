@@ -113,6 +113,89 @@ describe('WriteService', () => {
     expect(prompt).toContain('直接输出调整后的完整正文')
   })
 
+  it('answerChapterQuestionStream injects book-wide context: A catalog + B neighbors + settings files', async () => {
+    const fs = await import('fs/promises')
+    const dir = await ps.resolveDir(projectId)
+
+    // A：总纲
+    await fs.writeFile(
+      path.join(dir, '大纲', '大纲.md'),
+      '# 《青云志》大纲\n\n## 主线剧情走向\n\n少年修仙主线\n'
+    )
+
+    // 上下文文件：设定/
+    await fs.mkdir(path.join(dir, '设定'), { recursive: true })
+    await fs.writeFile(
+      path.join(dir, '设定', '题材定位.md'),
+      '# 题材定位\n\n## 核心梗\n重生武术传奇凭运势罗盘摆摊算命。\n'
+    )
+
+    // A：细纲章目录（第 1/2/3 章）
+    await fs.mkdir(path.join(dir, '细纲'), { recursive: true })
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第001章_初入仙门.md'),
+      `# 细纲_第001章_初入仙门.md\n\n## 第 1 章：初入仙门\n\n- **核心事件**：林远踏入宗门\n- **章末钩子**：长老目光一凝\n`
+    )
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第002章_筑基之夜.md'),
+      `# 细纲_第002章_筑基之夜.md\n\n## 第 2 章：筑基之夜\n\n- **核心事件**：林远突破筑基\n- **章末钩子**：门外脚步声\n`
+    )
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第003章_试炼开场.md'),
+      `# 细纲_第003章_试炼开场.md\n\n## 第 3 章：试炼开场\n\n- **核心事件**：外门试炼开始\n`
+    )
+
+    // B：相邻章正文（问第 2 章 → 应注入第 1、3 章）
+    await new ProseRepo(dir).write(1, '第1章正文：林远推开山门，香火扑面。', '初入仙门')
+    await new ProseRepo(dir).write(3, '第3章正文：试炼台鼓声如雷。', '试炼开场')
+
+    await new CharacterRepository(dir).create({ name: '林远', role: '主角', personality: '坚毅' })
+
+    const llm = mockLlm('人物动机合理，因为……')
+    const service = new WriteService(ps, llm)
+    const full = await service.answerChapterQuestionStream(
+      projectId,
+      2,
+      '第2章正文：林远盘膝而坐，真气翻涌。',
+      '这一章和前后衔接自然吗？'
+    )
+
+    expect(full).toBe('人物动机合理，因为……')
+    expect(llm.generateStream).toHaveBeenCalled()
+    // loadChapterContext 可能先调 endingState 等辅助 LLM，取真正的 ask 调用
+    const askCall = vi
+      .mocked(llm.generateStream)
+      .mock.calls.find((c) => (c[1] as { meta?: { feature?: string } } | undefined)?.meta?.feature === 'ask')
+    expect(askCall).toBeDefined()
+    const [prompt, opts] = askCall!
+    expect(opts?.meta).toEqual({ feature: 'ask', projectId, chapterNumber: 2 })
+    expect(opts?.systemPrompt).toBeTruthy()
+
+    // 只答不改
+    expect(prompt).toContain('只回答问题')
+    expect(prompt).toContain('不要重写正文')
+    expect(prompt).toContain('这一章和前后衔接自然吗？')
+    expect(prompt).toContain('第2章正文：林远盘膝而坐，真气翻涌。')
+
+    // A：总纲 + 章目录摘要
+    expect(prompt).toContain('少年修仙主线')
+    expect(prompt).toContain('全书章目录')
+    expect(prompt).toContain('林远踏入宗门')
+    expect(prompt).toContain('林远突破筑基')
+    expect(prompt).toContain('外门试炼开始')
+    expect(prompt).toContain('← 当前章')
+
+    // B：相邻章正文
+    expect(prompt).toContain('相邻章正文')
+    expect(prompt).toContain('林远推开山门，香火扑面')
+    expect(prompt).toContain('试炼台鼓声如雷')
+
+    // 上下文文件：设定
+    expect(prompt).toContain('题材定位')
+    expect(prompt).toContain('运势罗盘')
+    expect(prompt).toContain('林远')
+  })
+
   it('buildChapterPrompt injects default style and allows temporary override', async () => {
     const dir = await ps.resolveDir(projectId)
     await new StyleProfileRepository(dir).write({

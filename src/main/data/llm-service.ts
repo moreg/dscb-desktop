@@ -157,19 +157,44 @@ const LARGE_STREAM_TIMEOUT_MS = 600_000
 const LLM_STREAM_TIMEOUT_MS = 120_000
 
 /**
+ * 需要长超时的分析类 feature（会塞整章正文/细纲，Kimi 等 API 经常 >2 分钟）。
+ * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
+ */
+const LONG_TIMEOUT_FEATURES = new Set([
+  'chapter',
+  'chapter-adjust',
+  'outlineCheck',
+  'review',
+  'deepReview',
+  'rhythmEval',
+  'batchDeepReview',
+  'batchRhythm',
+  'ask',
+  'memoryExtract',
+  'figureGen',
+  'batchMemory',
+  'batchFigure',
+  'humanize',
+  'deslop'
+])
+
+/**
  * 解析本次流式生成的超时毫秒数。
- * - maxTokens >= 8192（含正文默认下限）→ 10 分钟
- * - 正文相关 feature 即使未显式传 maxTokens 也走 10 分钟
- * - 其余 → 2 分钟
+ * - 正文 / 细纲对照 / 审稿 / 记忆等分析类 → 10 分钟
+ * - maxTokens >= 8192 → 10 分钟
+ * - 其余短请求 → 2 分钟
  * 导出供单测覆盖阈值边界。
  */
 export function resolveStreamTimeoutMs(opts: GenerateOptions): number {
   const feature = opts.meta?.feature ?? ''
-  const isChapterWrite =
-    feature === 'chapter' ||
-    feature === 'chapter-adjust' ||
+  const baseFeature = feature.split(':')[0]
+  if (
+    LONG_TIMEOUT_FEATURES.has(feature) ||
+    LONG_TIMEOUT_FEATURES.has(baseFeature) ||
     feature.startsWith('chapter:')
-  if (isChapterWrite) return LARGE_STREAM_TIMEOUT_MS
+  ) {
+    return LARGE_STREAM_TIMEOUT_MS
+  }
   if (opts.maxTokens != null && opts.maxTokens >= LARGE_TOKEN_THRESHOLD) {
     return LARGE_STREAM_TIMEOUT_MS
   }
@@ -204,8 +229,23 @@ function isRetryableStreamError(err: unknown): boolean {
   )
 }
 
+/**
+ * 识别超时/中止类错误。
+ * Node/Electron 的 AbortSignal.timeout 常见为：
+ * - DOMException name=TimeoutError，message="The operation was aborted due to timeout"
+ * - DOMException name=AbortError
+ * - 部分环境抛普通 Error，仅靠 message 匹配
+ * 旧逻辑只认 AbortError，导致超时原文泄漏到 UI。
+ */
 function isAbortError(err: unknown): boolean {
-  return err instanceof DOMException && err.name === 'AbortError'
+  if (err == null || typeof err !== 'object') return false
+  const e = err as { name?: string; message?: string }
+  if (e.name === 'AbortError' || e.name === 'TimeoutError') return true
+  if (typeof e.message === 'string') {
+    if (/aborted due to timeout/i.test(e.message)) return true
+    if (/^The operation was aborted/i.test(e.message)) return true
+  }
+  return false
 }
 
 export class LlmService {

@@ -356,16 +356,39 @@ export async function probeAntigravity(): Promise<string | null> {
 }
 
 /**
+ * agy / Google 侧常见模型显示名（`agy --model` 用显示名，不是 slug）。
+ * 当 `agy models` 因未登录/未安装失败时，作为设置页下拉兜底，
+ * 避免只能手输；真实列表仍以 `agy models` 为准并优先展示。
+ */
+export const ANTIGRAVITY_KNOWN_MODELS: readonly string[] = [
+  'Gemini 3.5 Flash (Medium)',
+  'Gemini 3.5 Flash (High)',
+  'Gemini 3.5 Flash (Low)',
+  'Gemini 3.1 Pro (Low)',
+  'Gemini 3.1 Pro (High)',
+  'Claude Sonnet 4.6 (Thinking)',
+  'Claude Opus 4.6 (Thinking)',
+  'GPT-OSS 120B (Medium)'
+]
+
+/**
  * 列出 agy 可用模型（`agy models` 输出，每行一个显示名）。
- * 需要本机 agy 已登录；未登录/未安装时返回空数组（不抛错，前端据此提示用户）。
+ * 优先返回 CLI 实时列表；未登录/未安装/失败时回退到内置 Gemini 等预设（不抛错）。
  *
- * 实测 `agy models` 输出格式（agy 1.1.0）：
+ * 实测 `agy models` 输出格式（agy 1.1.0+）：
  *   Gemini 3.5 Flash (Medium)
  *   Gemini 3.5 Flash (High)
  *   ...
  * 认证失败时输出 `Error: Please sign in...`（exit 0）。
  */
 export async function listAntigravityModels(): Promise<string[]> {
+  const live = await listAntigravityModelsLive()
+  if (live.length > 0) return live
+  return [...ANTIGRAVITY_KNOWN_MODELS]
+}
+
+/** 仅调用 `agy models`，失败返回空（供测试与内部合并逻辑） */
+export async function listAntigravityModelsLive(): Promise<string[]> {
   return new Promise<string[]>((resolve) => {
     const child = spawn(AGY_BIN, ['models'], {
       stdio: ['ignore', 'pipe', 'pipe'],

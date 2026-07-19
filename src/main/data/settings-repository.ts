@@ -86,8 +86,28 @@ export interface AppSettings {
   /**
    * 续写完成后自动同步记忆与设定（extract → applyMemory → applySettingsPatches）。
    * 默认 true；与 settingsEvolution 独立。
+   * 派生自 autoPostWritePipeline !== 'off'；保留以兼容旧设置与 IPC。
    */
   autoMemorySync?: boolean
+  /**
+   * 续写成功后的自动后处理：
+   * - off：不自动同步
+   * - memory_only：仅记忆/设定同步（默认，省 token）
+   * - full：记忆同步 + 细纲/节奏/图解（不再二次 extract 记忆）
+   */
+  autoPostWritePipeline?: 'off' | 'memory_only' | 'full'
+}
+
+export type AutoPostWritePipeline = 'off' | 'memory_only' | 'full'
+
+export function normalizeAutoPostWritePipeline(
+  raw: unknown,
+  autoMemorySyncFallback?: boolean
+): AutoPostWritePipeline {
+  if (raw === 'off' || raw === 'memory_only' || raw === 'full') return raw
+  // 兼容仅有 autoMemorySync 的旧配置
+  if (autoMemorySyncFallback === false) return 'off'
+  return 'memory_only'
 }
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -124,7 +144,8 @@ const DEFAULTS: AppSettings = {
   aiHighFreq: DEFAULT_AI_HIGH_FREQ,
   reviewRules: DEFAULT_REVIEW_RULES,
   settingsEvolution: 'auto_high',
-  autoMemorySync: true
+  autoMemorySync: true,
+  autoPostWritePipeline: 'memory_only'
 }
 
 /** 续写规则覆盖白名单：只保留注册表内的 key、字符串值（空串=停用该节，保留） */
@@ -401,10 +422,12 @@ export class SettingsRepository {
     const se = stored.settingsEvolution
     const settingsEvolution =
       se === 'off' || se === 'confirm_all' || se === 'auto_high' ? se : DEFAULTS.settingsEvolution
-    const autoMemorySync =
-      typeof stored.autoMemorySync === 'boolean'
-        ? stored.autoMemorySync
-        : (DEFAULTS.autoMemorySync ?? true)
+    const autoPostWritePipeline = normalizeAutoPostWritePipeline(
+      stored.autoPostWritePipeline,
+      typeof stored.autoMemorySync === 'boolean' ? stored.autoMemorySync : undefined
+    )
+    // 与 pipeline 保持一致，供旧 IPC/调用方读取
+    const autoMemorySync = autoPostWritePipeline !== 'off'
     return {
       ...DEFAULTS,
       ...stored,
@@ -422,6 +445,7 @@ export class SettingsRepository {
       reviewRules: sanitizeReviewRules(stored.reviewRules),
       deslopRules: sanitizeDeslopRules(stored.deslopRules),
       settingsEvolution,
+      autoPostWritePipeline,
       autoMemorySync
     }
   }
@@ -465,8 +489,25 @@ export class SettingsRepository {
       deslopRules:
         patch.deslopRules !== undefined ? sanitizeDeslopRules(patch.deslopRules) : current.deslopRules
     }
+
+    // 保持 autoPostWritePipeline 与 autoMemorySync 双向一致
+    if (patch.autoPostWritePipeline !== undefined) {
+      const p = normalizeAutoPostWritePipeline(patch.autoPostWritePipeline)
+      next.autoPostWritePipeline = p
+      next.autoMemorySync = p !== 'off'
+    } else if (patch.autoMemorySync !== undefined) {
+      next.autoMemorySync = patch.autoMemorySync
+      if (!patch.autoMemorySync) {
+        next.autoPostWritePipeline = 'off'
+      } else if (current.autoPostWritePipeline === 'off' || !current.autoPostWritePipeline) {
+        next.autoPostWritePipeline = 'memory_only'
+      } else {
+        next.autoPostWritePipeline = current.autoPostWritePipeline
+      }
+    }
+
     await writeJsonAtomic(this.settingsFile, next)
-    return next
+    return this.get()
   }
 
   async getWritingRequirementTemplates(): Promise<WritingRequirementTemplate[]> {

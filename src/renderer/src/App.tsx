@@ -20,6 +20,15 @@ import TeardownPage from './TeardownPage'
 import CoverPage from './CoverPage'
 import ScanPage from './ScanPage'
 import type { Diagnostic, MemoryEntityType, ProjectMeta } from '../../shared/types'
+import {
+  loadPendingSyncQueue,
+  countPendingSyncQueue,
+  formatPendingSyncBootHint,
+  shouldShowPendingBootHint,
+  markPendingBootHintShown,
+  PENDING_SYNC_CHANGED_EVENT
+} from '../../shared/post-write-sync-session'
+import { getLocalStorage } from '../../main/data/rewrite-persistence'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -40,7 +49,7 @@ type View =
   | { kind: 'figures'; projectId: string }
   | { kind: 'styles' }
   | { kind: 'covers'; projectId: string }
-  | { kind: 'settings' }
+  | { kind: 'settings'; tab?: string }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
   location: '地点',
@@ -102,13 +111,68 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [diagDismissed, setDiagDismissed] = useState(false)
   const [diagExpanded, setDiagExpanded] = useState(false)
+  /** 启动时：待同步队列提醒 */
+  const [bootSyncHint, setBootSyncHint] = useState<string | null>(null)
+  /** 侧栏「设置」角标：待同步条数 */
+  const [pendingSyncCount, setPendingSyncCount] = useState(0)
   const { open: shortcutOpen, hide: hideShortcut } = useShortcutPanelToggle()
+
+  const refreshPendingSyncCount = () => {
+    try {
+      setPendingSyncCount(countPendingSyncQueue(getLocalStorage()))
+    } catch {
+      setPendingSyncCount(0)
+    }
+  }
 
   useEffect(() => {
     void window.api.getTheme().then((nextTheme) => {
       setTheme(nextTheme)
       applyTheme(nextTheme)
     })
+  }, [])
+
+  // 侧栏角标：挂载读一次 + 监听队列变更
+  useEffect(() => {
+    refreshPendingSyncCount()
+    const onChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ count?: number }>).detail
+      if (typeof detail?.count === 'number') setPendingSyncCount(detail.count)
+      else refreshPendingSyncCount()
+    }
+    window.addEventListener(PENDING_SYNC_CHANGED_EVENT, onChanged)
+    // 跨标签/窗口 storage 事件兜底
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'ai-writer:pending-sync-queue' || e.key === null) {
+        refreshPendingSyncCount()
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener(PENDING_SYNC_CHANGED_EVENT, onChanged)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+
+  // 启动提醒：有 N 条待补跑同步（session 内只弹一次）
+  useEffect(() => {
+    try {
+      const storage = getLocalStorage()
+      const queue = loadPendingSyncQueue(storage)
+      const hint = formatPendingSyncBootHint(queue.length)
+      if (!hint) return
+      const sess =
+        typeof sessionStorage !== 'undefined'
+          ? sessionStorage
+          : null
+      if (!shouldShowPendingBootHint(storage, sess, queue.length)) return
+      markPendingBootHintShown(sess)
+      setBootSyncHint(hint)
+      const t = window.setTimeout(() => setBootSyncHint(null), 12000)
+      return () => window.clearTimeout(t)
+    } catch {
+      /* ignore */
+    }
   }, [])
 
   const currentProjectId = projectIdOf(view)
@@ -285,10 +349,25 @@ export default function App() {
         <div className="sidebar-footer">
           <button
             className={`nav-item ${view.kind === 'settings' ? 'active' : ''}`}
-            onClick={() => setView({ kind: 'settings' })}
+            onClick={() =>
+              setView({
+                kind: 'settings',
+                tab: pendingSyncCount > 0 ? 'syncQueue' : undefined
+              })
+            }
+            title={
+              pendingSyncCount > 0
+                ? `${pendingSyncCount} 条记忆同步待补跑`
+                : '设置'
+            }
           >
             <span className="icon">⚙</span>
             设置
+            {pendingSyncCount > 0 ? (
+              <span className="badge badge-alert" aria-label={`${pendingSyncCount} 条待同步`}>
+                {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
+              </span>
+            ) : null}
           </button>
           <button
             className="nav-item"
@@ -306,6 +385,28 @@ export default function App() {
 
       <main className="main-content">
         <div className={mainInnerClass}>
+          {bootSyncHint ? (
+            <div className="diag-banner boot-sync-hint" role="status">
+              <div className="diag-banner-head">
+                <strong>⟳ {bootSyncHint}</strong>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setBootSyncHint(null)
+                      setView({ kind: 'settings', tab: 'syncQueue' })
+                    }}
+                  >
+                    去查看
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setBootSyncHint(null)}>
+                    关闭
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {diagnostics.length > 0 && !diagDismissed && currentProjectId ? (
             <div className="diag-banner">
               <div className="diag-banner-head">
@@ -340,7 +441,12 @@ export default function App() {
             </ErrorBoundary>
           ) : view.kind === 'settings' ? (
             <ErrorBoundary>
-              <SettingsPage />
+              <SettingsPage
+                initialTab={view.kind === 'settings' ? view.tab : undefined}
+                onOpenChapter={(projectId, chapterNumber) =>
+                  setView({ kind: 'editor', projectId, chapterNumber })
+                }
+              />
             </ErrorBoundary>
           ) : view.kind === 'teardown' ? (
             <ErrorBoundary>

@@ -54,14 +54,15 @@ export class SettingsMdRepo {
       readTopLevelRules(dir)
     ])
 
-    // 过滤掉 body 为空的文件（项目创建时的空模板）
-    const filteredWorldview = worldview.filter((w) => w.body.trim())
-    const filteredFactions = factions.filter((f) => f.body.trim())
-    const filteredCustomRules = customRules.filter((r) => r.body.trim())
+    // 过滤空 body 与「待完善」占位模板（避免每章 prompt 注入空壳设定浪费 token）
+    const filteredGenre = isPlaceholderSettingBody(genrePositioning) ? '' : genrePositioning
+    const filteredWorldview = worldview.filter((w) => !isPlaceholderSettingBody(w.body))
+    const filteredFactions = factions.filter((f) => !isPlaceholderSettingBody(f.body))
+    const filteredCustomRules = customRules.filter((r) => !isPlaceholderSettingBody(r.body))
 
     // 全空 → 视为无设定（避免注入空标题段）
     if (
-      !genrePositioning &&
+      !filteredGenre &&
       filteredWorldview.length === 0 &&
       filteredFactions.length === 0 &&
       filteredCustomRules.length === 0
@@ -70,12 +71,54 @@ export class SettingsMdRepo {
     }
 
     return {
-      genrePositioning,
+      genrePositioning: filteredGenre,
       worldview: filteredWorldview,
       factions: filteredFactions,
       customRules: filteredCustomRules
     }
   }
+}
+
+/**
+ * 判断设定文档是否为开书占位 / 无实质内容。
+ * 仅含标题、基本信息元数据、或「待完善」时返回 true。
+ */
+export function isPlaceholderSettingBody(body: string): boolean {
+  const raw = String(body ?? '').trim()
+  if (!raw) return true
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !/^#+\s/.test(l))
+    .filter((l) => !/^\|[\s\-:|]+\|$/.test(l))
+
+  if (lines.length === 0) return true
+
+  let joined = lines
+    .join('\n')
+    .replace(/\*\*/g, '')
+    .replace(/^[-*]\s+/gm, '')
+    .trim()
+
+  if (!joined) return true
+  if (/^[（(]?待完善[)）]?[.。…]*$/.test(joined.replace(/\s/g, ''))) return true
+
+  // 去掉开书模板里的书名/题材等元数据与「待完善」后，若无剩余实质句，则视为占位
+  const stripped = joined
+    .replace(/^[（(]?待完善[)）]?[.。…]*$/gm, '')
+    .replace(/书名\s*[：:].*$/gm, '')
+    .replace(/题材\s*[：:].*$/gm, '')
+    .replace(/预计章节数\s*[：:].*$/gm, '')
+    .replace(/每章字数\s*[：:].*$/gm, '')
+    .replace(/简介\s*[：:].*$/gm, '')
+    .replace(/基本信息/g, '')
+    .replace(/核心设定/g, '')
+    .replace(/[|：:\-—\s]+/g, '')
+    .trim()
+
+  return stripped.length === 0
 }
 
 /** 读取 题材定位.md 的 body（H1 后全部内容） */

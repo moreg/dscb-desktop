@@ -24,6 +24,7 @@ import { resolveGenreVoice } from '../genre-voice'
 export const DESLOP_SYSTEM_PROMPT = `你是一名专业的中文小说文字编辑，专门去除 AI 写作痕迹，让文字回归自然。这叫"改味"——改最少字，效果最大。
 
 铁律：
+0. **语言锁定（最高优先级）**：原文是中文就必须输出中文。禁止翻译、禁止把汉字改成英文单词或拼音句子。严禁「他→He / 她→She / 我→I」、严禁把中文对话/旁白整句英译（如「直接说吧」→「Just say it」）。原文里本来没有的英文专名、英文句子一律不得新增。改味 ≠ 翻译。
 1. **改味优先，不当改错**：只改"怎么说"（表达方式），不改"说什么"（情节/人设/信息）。
 2. **保留创作意图**：不能删除伏笔、钩子、角色特征、关键信息或必要转折。遇到冲突改为降 AI 重写或标注 [需复核]。
 3. **删除比例上限**：轻度 ≤15% / 中度 ≤25% / 重度 ≤35%。超过时分段输出并标记，不得整段删除。
@@ -150,6 +151,7 @@ export function buildDeslopPrompt(
   return `## 任务：去 AI 味改写（${LEVEL_NAMES[level]}，删除比例上限 ${Math.round(maxDeleteRatio * 100)}%）
 
 ### 改写原则
+- **语言锁定**：全文保持中文。禁止英译、禁止「他→He」等中英混写替换；改味不是翻译
 - 只改"怎么说"，不改"说什么"
 - 命中的 Gate 逐项改写，未命中的保持原样
 - 删除比例不得超过 ${Math.round(maxDeleteRatio * 100)}%；超时分段输出标记 [需复核]，不得整段删
@@ -218,8 +220,9 @@ export function buildCleanupPrompt(
 这是上一轮去 AI 味改写后的复扫结果。原文已改过一轮，但仍有 ${remainingFindings.length} 处 AI 味残留。**只改这些残留项，其余已经改好的部分保持原样不动**，不要重新通篇改写。
 
 ### 改写原则
+- **语言锁定**：保持中文，禁止把中文改成英文或「他→He」类替换
 - 只改下方命中的残留 finding，未命中部分必须与原文逐字一致，不得改动
-- 改写后不得引入新的 AI 味（禁用词清单见系统 prompt 铁律 7）
+- 改写后不得引入新的 AI 味（禁用词清单见系统 prompt）
 - 保留伏笔/钩子/角色特征/关键信息/必要转折
 - 替换语感对齐下方"风格语境"段
 
@@ -369,10 +372,25 @@ export function extractRewritten(llmOutput: string): string {
 export function extractChangeSummary(llmOutput: string): string[] {
   const match = llmOutput.match(/【改动说明】\s*([\s\S]*?)$/)
   if (!match) return []
-  return match[1]
+  const raw = match[1]
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => l.startsWith('-'))
+    .filter(Boolean)
+  // 优先取标准 `- ` 列表；也兼容 `•` / `*` / `1.` / `第N行` 等常见变体
+  const bullets = raw.filter(
+    (l) =>
+      /^[-–—*•·]/.test(l) ||
+      /^\d+[.、)]\s*/.test(l) ||
+      /^第\d+[行段]/.test(l)
+  )
+  if (bullets.length > 0) {
+    return bullets.map((l) => (l.startsWith('-') ? l : `- ${l.replace(/^[-–—*•·]\s*/, '')}`))
+  }
+  // 有正文但不是列表：整段保留为一条，避免 UI 完全空白
+  if (raw.length > 0 && !raw.every((l) => l.startsWith('【'))) {
+    return raw.filter((l) => !l.startsWith('【')).map((l) => (l.startsWith('-') ? l : `- ${l}`))
+  }
+  return []
 }
 
 /** 把原文渲染成「行号|正文」格式，供 LLM 在【改动说明】里引用行号 */

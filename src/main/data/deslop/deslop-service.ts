@@ -16,6 +16,8 @@ import {
   extractChangeSummary
 } from '../skill-prompts/deslop/anti-ai-methods'
 import { countWords } from '../words'
+import { summarizeTextDiff } from '../../../shared/text-diff'
+import { guardLanguageLeak } from './language-guard'
 import type {
   DeslopFinding,
   DeslopLevel,
@@ -175,7 +177,7 @@ export class DeslopService {
           meta: { feature: `deslop:pass${passNum}`, ...opts.meta },
           onToken: emit
         })
-        const rewritten = extractRewritten(llmOutput)
+        let rewritten = extractRewritten(llmOutput)
         const passChanges = extractChangeSummary(llmOutput)
         if (passChanges.length > 0) {
           allChangeSummary.push(...passChanges)
@@ -184,6 +186,15 @@ export class DeslopService {
           for (const c of passChanges) emit(`   ${c}\n`)
         } else {
           emit(`\n   改写完成\n`)
+        }
+
+        // 语言守卫：拦截「他→He」/整句英译等越权翻译
+        const langGuard = guardLanguageLeak(finalText, rewritten)
+        if (langGuard.revertedUnits > 0) {
+          rewritten = langGuard.text
+          allChangeSummary.push(...langGuard.notes)
+          emit(`   🚫 语言守卫：回退 ${langGuard.revertedUnits} 处英文化改写\n`)
+          for (const n of langGuard.notes) emit(`   ${n}\n`)
         }
 
         // Phase 3.5：标点兜底（每遍改写后都跑，清理 LLM 可能引入的破折号/省略号）
@@ -200,7 +211,7 @@ export class DeslopService {
         finalText = normalized.text
 
         // Phase 3.6：本遍二次清理（复扫后对本遍 Gate 范围内剩余 blocking 再改，上限 2 轮）
-        finalText = await this.cleanupPass(
+        const cleaned = await this.cleanupPass(
           finalText,
           passGates,
           passNum,
@@ -209,6 +220,10 @@ export class DeslopService {
           opts,
           emit
         )
+        finalText = cleaned.text
+        if (cleaned.changes.length > 0) {
+          allChangeSummary.push(...cleaned.changes)
+        }
 
         // 记录最后一次复扫结果（供 Phase 4 报告）
         lastReport = await this.scan(finalText, { bannedWords: opts.bannedWords })
@@ -218,6 +233,22 @@ export class DeslopService {
     }
 
     // Phase 4：报告
+    // LLM 常漏写【改动说明】或格式不规范 → 文本已变但 changeSummary 为空。
+    // 用段级自动 diff 兜底，保证 UI 总能提示「改了什么」。
+    if (finalText !== text && allChangeSummary.length === 0) {
+      const autoSummary = summarizeTextDiff(text, finalText)
+      if (autoSummary.length > 0) {
+        allChangeSummary.push(...autoSummary)
+        emit(`\n📝 改动说明缺失，已自动对比生成 ${autoSummary.length} 条：\n`)
+        for (const c of autoSummary.slice(0, 10)) emit(`   ${c}\n`)
+        if (autoSummary.length > 10) emit(`   …共 ${autoSummary.length} 条\n`)
+      }
+    } else if (finalText !== text && allChangeSummary.length > 0) {
+      emit(`\n📝 改动明细共 ${allChangeSummary.length} 条\n`)
+    } else if (finalText === text) {
+      emit(`\n📝 正文与改写前一致（无实质改动）\n`)
+    }
+
     const afterWords = countWords(finalText)
     const deleteRatio = beforeWords > 0 ? 1 - afterWords / beforeWords : 0
     const remainingBlocking = lastReport.findings.filter((f) => f.severity === 'blocking')
@@ -250,16 +281,17 @@ export class DeslopService {
     effectiveSystemPrompt: string,
     opts: Pick<DeslopOptions, 'styleContext' | 'textOverrides' | 'bannedWords' | 'whitelist' | 'meta'>,
     emit: (t: string) => void
-  ): Promise<string> {
+  ): Promise<{ text: string; changes: string[] }> {
     const MAX_CLEANUP_ROUNDS = 2
     let result = text
     let round = 0
+    const changes: string[] = []
     // 复扫，只看本遍 Gate 范围内的 blocking
     let scan = await this.scan(result, { whitelist: opts.whitelist, bannedWords: opts.bannedWords })
     let remaining = scan.findings.filter((f) => f.severity === 'blocking' && passGates.includes(f.gate))
     if (remaining.length === 0) {
       emit(`   ✔️ 本遍复扫无 blocking 残留，跳过二次清理。\n`)
-      return result
+      return { text: result, changes }
     }
     while (remaining.length > 0 && round < MAX_CLEANUP_ROUNDS) {
       round += 1
@@ -278,10 +310,18 @@ export class DeslopService {
         meta: { feature: `deslop:cleanup:pass${passNum}:${round}`, ...opts.meta },
         onToken: emit
       })
-      const cleanupRewritten = extractRewritten(cleanupOutput)
+      let cleanupRewritten = extractRewritten(cleanupOutput)
       const cleanupChanges = extractChangeSummary(cleanupOutput)
       if (cleanupChanges.length > 0) {
+        changes.push(...cleanupChanges)
         emit(`   第 ${round} 轮清理改动：${cleanupChanges.length} 处\n`)
+        for (const c of cleanupChanges) emit(`   ${c}\n`)
+      }
+      const cleanupLang = guardLanguageLeak(result, cleanupRewritten)
+      if (cleanupLang.revertedUnits > 0) {
+        cleanupRewritten = cleanupLang.text
+        changes.push(...cleanupLang.notes)
+        emit(`   🚫 语言守卫：回退 ${cleanupLang.revertedUnits} 处英文化改写\n`)
       }
       // 标点兜底
       const reNorm = normalizePunctuation(cleanupRewritten)
@@ -295,7 +335,7 @@ export class DeslopService {
     } else {
       emit(`   ✔️ Pass${passNum} blocking 已清零（${round} 轮）\n`)
     }
-    return result
+    return { text: result, changes }
   }
 
   /* =========================================================

@@ -16,6 +16,8 @@ import type {
   MainOutline,
   DetailedOutlineItem,
   MemoryExtraction,
+  MemoryApplyResult,
+  SettingsApplyResult,
   ProviderConfig,
   RhythmEvaluation,
   ChapterFlowResult,
@@ -381,12 +383,28 @@ const api = {
   syncChapterAfterWrite: (
     projectId: string,
     chapterNumber: number,
-    content: string
+    content: string,
+    opts?: { force?: boolean }
   ) =>
     ipcRenderer.invoke('write:syncChapterAfterWrite', {
       projectId,
       chapterNumber,
-      content
+      content,
+      force: opts?.force === true
+    }),
+  undoChapterSync: (
+    projectId: string,
+    payload: {
+      extraction: MemoryExtraction
+      memory: MemoryApplyResult
+      settings: SettingsApplyResult
+    }
+  ) =>
+    ipcRenderer.invoke('write:undoChapterSync', {
+      projectId,
+      extraction: payload.extraction,
+      memory: payload.memory,
+      settings: payload.settings
     }),
   previewMemoryApply: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:previewMemoryApply', { projectId, extraction }),
@@ -618,6 +636,14 @@ const api = {
     ipcRenderer.invoke('settings:getAutoMemorySync') as Promise<boolean>,
   setAutoMemorySync: (enabled: boolean) =>
     ipcRenderer.invoke('settings:setAutoMemorySync', enabled) as Promise<boolean>,
+  getAutoPostWritePipeline: () =>
+    ipcRenderer.invoke('settings:getAutoPostWritePipeline') as Promise<
+      'off' | 'memory_only' | 'full'
+    >,
+  setAutoPostWritePipeline: (mode: 'off' | 'memory_only' | 'full') =>
+    ipcRenderer.invoke('settings:setAutoPostWritePipeline', mode) as Promise<
+      'off' | 'memory_only' | 'full'
+    >,
   // P13-C：用量预警配置
   getCostAlertConfig: () => ipcRenderer.invoke('settings:getCostAlert'),
   setCostAlertConfig: (cfg: { enabled?: boolean; warning?: number; exceeded?: number }) =>

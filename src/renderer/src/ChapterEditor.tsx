@@ -41,11 +41,33 @@ import {
 import type { UsageSummary, CostAlertConfig, UsageRecord } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type { DetailedOutlineItem, DeslopScanReport, DeslopResult } from '../../shared/types'
+import { findFirstDiffWindow, listChangeHunks, summarizeTextDiff } from '../../shared/text-diff'
 import { buildForeshadowingReminders, type ForeshadowingReminderItem } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { parseForeshadowReceipt } from '../../shared/parsers'
+import {
+  summarizePostWriteSync,
+  formatSyncErrorHint,
+  type PostWriteSyncPhase
+} from '../../shared/post-write-sync'
+import {
+  pushSyncHistory,
+  popSyncHistory,
+  peekSyncHistory,
+  loadPendingSyncQueue,
+  savePendingSyncQueue,
+  upsertPendingSync,
+  removePendingSync,
+  findPendingForChapter,
+  receiptHasUndoableWrites,
+  makeSyncId,
+  loadSyncHistory,
+  saveSyncHistory,
+  type SyncHistoryEntry,
+  type SyncUndoReceipt
+} from '../../shared/post-write-sync-session'
 import AlertDialog from './AlertDialog'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
@@ -303,7 +325,7 @@ export default function ChapterEditor({
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
   const [adjusting, setAdjusting] = useState(false)
-  // 正文追问（chat）：基于本章正文回答写作疑问，不修改正文
+  // 正文追问（chat）：全书视野回答写作疑问，不修改正文
   const [showAskDialog, setShowAskDialog] = useState(false)
   const [askQuestion, setAskQuestion] = useState('')
   const [askMessages, setAskMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
@@ -337,6 +359,35 @@ export default function ChapterEditor({
     details: { title: string; subtitle?: string; content?: string }
   } | null>(null)
   const [flowSyncTrigger, setFlowSyncTrigger] = useState(0)
+  /** 写后自动同步结果，回填流程面板避免二次 extract */
+  const [autoSyncSeed, setAutoSyncSeed] = useState<{
+    extraction: import('../../shared/types').MemoryExtraction
+    memory: import('../../shared/types').MemoryApplyResult
+    settings: import('../../shared/types').SettingsApplyResult
+  } | null>(null)
+  /**
+   * 写后同步状态条：比 3s toast 更持久，支持失败一键补跑 / 多级撤销 / 失败队列。
+   * contentForRetry 保存触发同步时的正文快照（续写/调整完成后的全文）。
+   * undoDepth：会话内可撤销层数（LIFO 栈）。
+   * fromPendingQueue：由 localStorage 失败队列恢复的提示。
+   */
+  const [postWriteSync, setPostWriteSync] = useState<{
+    phase: PostWriteSyncPhase
+    message: string
+    errors: string[]
+    contentForRetry: string
+    at: number
+    canUndo: boolean
+    undoDepth: number
+    fromPendingQueue?: boolean
+    receipt: SyncUndoReceipt | null
+  } | null>(null)
+  const [undoSyncLoading, setUndoSyncLoading] = useState(false)
+  /** 会话内同步撤销栈（仅当前编辑会话；切章清空） */
+  const syncHistoryRef = useRef<SyncHistoryEntry[]>([])
+  const [syncHistoryDepth, setSyncHistoryDepth] = useState(0)
+  /** full 流水线触发时跳过记忆 extract */
+  const [skipMemoryOnAutoSyncAll, setSkipMemoryOnAutoSyncAll] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [castSuggestions, setCastSuggestions] = useState<CastSuggestion[]>([])
   const [castApplied, setCastApplied] = useState(false)
@@ -643,6 +694,50 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     refreshProjectStyleData()
     refreshWritingRequirementTemplates()
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
+    setAutoSyncSeed(null)
+    setPostWriteSync(null)
+    setSkipMemoryOnAutoSyncAll(false)
+    setFlowSyncTrigger(0)
+    // 切章：从 localStorage 恢复撤销栈 + 失败队列
+    try {
+      const storage = getLocalStorage()
+      const hist = loadSyncHistory(storage, projectId, chapterNumber)
+      syncHistoryRef.current = hist
+      setSyncHistoryDepth(hist.length)
+      const pending = findPendingForChapter(
+        loadPendingSyncQueue(storage),
+        projectId,
+        chapterNumber
+      )
+      if (pending?.content?.trim()) {
+        setPostWriteSync({
+          phase: 'failed',
+          message: `有未完成的记忆同步（${new Date(pending.at).toLocaleString()} 失败，已尝试 ${pending.attempts} 次）`,
+          errors: pending.errors,
+          contentForRetry: pending.content,
+          at: pending.at,
+          canUndo: hist.length > 0,
+          undoDepth: hist.length,
+          fromPendingQueue: true,
+          receipt: peekSyncHistory(hist)?.receipt ?? null
+        })
+      } else if (hist.length > 0) {
+        const peek = peekSyncHistory(hist)
+        setPostWriteSync({
+          phase: 'ok',
+          message: `已恢复 ${hist.length} 条可撤销同步（跨会话）`,
+          errors: [],
+          contentForRetry: draft || '',
+          at: peek?.at ?? Date.now(),
+          canUndo: true,
+          undoDepth: hist.length,
+          receipt: peek?.receipt ?? null
+        })
+      }
+    } catch {
+      syncHistoryRef.current = []
+      setSyncHistoryDepth(0)
+    }
   }, [projectId, chapterNumber])
 
   // 订阅外部文件变更：细纲/节奏图谱变 → 刷新本章 meta（标题/情绪/爽点等）。
@@ -1018,6 +1113,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setAutoAudit(null)
     setReviewText('')
     setFlowSyncTrigger(0)
+    setAutoSyncSeed(null)
+    setPostWriteSync(null)
+    setSkipMemoryOnAutoSyncAll(false)
     // 续写会用全新正文替换整章，旧的"已应用改写"记录（含 oldSnippet/newText、
     // 用于流程面板 AI 审稿建议折叠区的 applied 标记）都对不上新正文了。
     // 必须一并清掉，否则新审稿结果的 index 会错误匹配到残留 rewriteHistory
@@ -1067,12 +1165,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       }
       setDirty(true)
       // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
+      // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
       setFlowPanelOpen(true)
-      setFlowSyncTrigger((t) => t + 1)
       // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
       // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
       void runPostGenerateAudit(myGen, finalDraft)
-      // 后台自动同步记忆/设定（受 autoMemorySync 控制）；失败不阻断续写成功
+      // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
       {
         const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
         const fullContent = initialDraft + (receipt ? stripped : finalDraft)
@@ -1113,6 +1211,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setAutoAudit(null)
     setReviewText('')
     setFlowSyncTrigger(0)
+    setAutoSyncSeed(null)
+    setPostWriteSync(null)
+    setSkipMemoryOnAutoSyncAll(false)
     setRewriteHistory([])
     setRedoStack([])
 
@@ -1147,8 +1248,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       }
       setDirty(true)
       setFlowPanelOpen(true)
-      setFlowSyncTrigger((t) => t + 1)
       void runPostGenerateAudit(myGen, revised)
+      // 追问调整会改写正文：与续写一致做记忆/设定同步（受 pipeline 控制）
+      void runPostGenerateMemorySync(myGen, revised)
     } catch {
       if (genRef.current === myGen) {
         setAdjusting(false)
@@ -1158,7 +1260,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   /**
-   * 正文追问：把用户问题连同历史一起发给后端，流式追加到最新一条 assistant 消息。
+   * 正文追问：把用户问题连同历史一起发给后端（全书视野），流式追加到最新一条 assistant 消息。
    * 不修改正文。失败时回滚刚压入的用户消息并提示错误。
    */
   const submitAskQuestion = async () => {
@@ -1253,51 +1355,405 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
+  /** 写后同步失败时自动重试次数（不含首次）；手动「重新同步」不计入 */
+  const POST_WRITE_SYNC_AUTO_RETRIES = 2
+  const POST_WRITE_SYNC_RETRY_DELAY_MS = 1500
+
+  const persistHistoryStack = (stack: SyncHistoryEntry[]) => {
+    try {
+      saveSyncHistory(getLocalStorage(), projectId, chapterNumber, stack)
+    } catch (err) {
+      console.warn('[persistHistoryStack]', err)
+    }
+  }
+
+  const persistFailedSync = (
+    contentSnapshot: string,
+    errors: string[],
+    attempts: number
+  ) => {
+    try {
+      const storage = getLocalStorage()
+      const q = loadPendingSyncQueue(storage)
+      const next = upsertPendingSync(q, {
+        id: makeSyncId('pend'),
+        projectId,
+        chapterNumber,
+        content: contentSnapshot,
+        errors,
+        at: Date.now(),
+        attempts
+      })
+      savePendingSyncQueue(storage, next)
+      // 异步补全书名，设置页列表更易读
+      void window.api.listProjects().then((list) => {
+        const name = list?.find((p) => p.id === projectId)?.name
+        if (!name) return
+        try {
+          const cur = loadPendingSyncQueue(getLocalStorage())
+          const hit = findPendingForChapter(cur, projectId, chapterNumber)
+          if (!hit) return
+          savePendingSyncQueue(
+            getLocalStorage(),
+            upsertPendingSync(cur, { ...hit, projectName: name })
+          )
+        } catch {
+          /* ignore */
+        }
+      })
+    } catch (err) {
+      console.warn('[persistFailedSync]', err)
+    }
+  }
+
+  const clearFailedSyncForChapter = () => {
+    try {
+      const storage = getLocalStorage()
+      const next = removePendingSync(loadPendingSyncQueue(storage), {
+        projectId,
+        chapterNumber
+      })
+      savePendingSyncQueue(storage, next)
+    } catch (err) {
+      console.warn('[clearFailedSyncForChapter]', err)
+    }
+  }
+
   /**
-   * 续写成功后后台同步记忆/设定。
-   * autoMemorySync=false 时 API 返回 null；失败只 toast，不弹死框、不改续写成功态。
+   * 续写/调整成功后后台同步记忆/设定。
+   * 失败：自动重试 → 写入 localStorage 失败队列（跨重启可补跑）。
+   * 成功有写入：压入会话撤销栈（多级撤销）。
    */
-  const runPostGenerateMemorySync = async (myGen: number, fullContent: string) => {
+  const runPostGenerateMemorySync = async (
+    myGen: number,
+    fullContent: string,
+    opts?: {
+      force?: boolean
+      pipelineHint?: 'off' | 'memory_only' | 'full'
+      attempt?: number
+      autoRetry?: boolean
+    }
+  ) => {
+    const contentSnapshot = fullContent
+    const attempt = opts?.attempt ?? 0
+    const allowAutoRetry = opts?.autoRetry !== false
     try {
       const api = window.api as {
+        getAutoPostWritePipeline?: () => Promise<'off' | 'memory_only' | 'full'>
         getAutoMemorySync?: () => Promise<boolean>
         syncChapterAfterWrite?: (
           projectId: string,
           chapterNumber: number,
-          content: string
+          content: string,
+          syncOpts?: { force?: boolean }
         ) => Promise<{
-          memory: { errors?: string[] }
-          settings: { errors?: string[] }
+          memory: import('../../shared/types').MemoryApplyResult
+          settings: import('../../shared/types').SettingsApplyResult
+          extraction: import('../../shared/types').MemoryExtraction
         } | null>
       }
       if (!api.syncChapterAfterWrite) return
-      if (api.getAutoMemorySync) {
-        const enabled = await api.getAutoMemorySync()
-        if (!enabled) return
+
+      let pipeline: 'off' | 'memory_only' | 'full' =
+        opts?.pipelineHint ?? 'memory_only'
+      if (opts?.pipelineHint == null) {
+        if (api.getAutoPostWritePipeline) {
+          pipeline = await api.getAutoPostWritePipeline()
+        } else if (api.getAutoMemorySync) {
+          pipeline = (await api.getAutoMemorySync()) ? 'memory_only' : 'off'
+        }
+      }
+      if (pipeline === 'off' && !opts?.force) {
+        setPostWriteSync(null)
+        return
       }
       if (genRef.current !== myGen) return
-      setUndoToast({ message: '正在同步记忆…', type: 'info' })
-      const sync = await api.syncChapterAfterWrite(projectId, chapterNumber, fullContent)
+
+      const syncingMsg =
+        attempt > 0
+          ? `同步失败，正在自动重试（${attempt}/${POST_WRITE_SYNC_AUTO_RETRIES}）…`
+          : '正在同步记忆与设定…'
+      setPostWriteSync({
+        phase: 'syncing',
+        message: syncingMsg,
+        errors: [],
+        contentForRetry: contentSnapshot,
+        at: Date.now(),
+        canUndo: syncHistoryRef.current.length > 0,
+        undoDepth: syncHistoryRef.current.length,
+        receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+      })
+      setUndoToast({
+        message: attempt > 0 ? syncingMsg : '正在同步记忆…',
+        type: 'info'
+      })
+
+      const sync = await api.syncChapterAfterWrite(
+        projectId,
+        chapterNumber,
+        contentSnapshot,
+        opts?.force ? { force: true } : undefined
+      )
       if (genRef.current !== myGen) return
       if (sync === null) {
         setUndoToast(null)
+        setPostWriteSync({
+          phase: 'skipped',
+          message: '已跳过自动同步（设置中已关闭）',
+          errors: [],
+          contentForRetry: contentSnapshot,
+          at: Date.now(),
+          canUndo: syncHistoryRef.current.length > 0,
+          undoDepth: syncHistoryRef.current.length,
+          receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+        })
         return
       }
-      const errCount =
-        (sync.memory?.errors?.length ?? 0) + (sync.settings?.errors?.length ?? 0)
-      if (errCount > 0) {
+
+      setAutoSyncSeed({
+        extraction: sync.extraction,
+        memory: sync.memory,
+        settings: sync.settings
+      })
+
+      const summary = summarizePostWriteSync(sync)
+      const phase: PostWriteSyncPhase = summary.phase
+
+      if (
+        phase === 'failed' &&
+        allowAutoRetry &&
+        attempt < POST_WRITE_SYNC_AUTO_RETRIES
+      ) {
+        setPostWriteSync({
+          phase: 'syncing',
+          message: `同步失败，${POST_WRITE_SYNC_RETRY_DELAY_MS / 1000}s 后重试（${attempt + 1}/${POST_WRITE_SYNC_AUTO_RETRIES}）…`,
+          errors: summary.errors,
+          contentForRetry: contentSnapshot,
+          at: Date.now(),
+          canUndo: syncHistoryRef.current.length > 0,
+          undoDepth: syncHistoryRef.current.length,
+          receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+        })
+        await new Promise((r) => setTimeout(r, POST_WRITE_SYNC_RETRY_DELAY_MS))
+        if (genRef.current !== myGen) return
+        await runPostGenerateMemorySync(myGen, contentSnapshot, {
+          force: opts?.force,
+          pipelineHint: pipeline,
+          attempt: attempt + 1,
+          autoRetry: true
+        })
+        return
+      }
+
+      let message = summary.message
+      if (pipeline === 'full' && phase === 'ok') {
+        message = `${summary.message}；正在跑细纲/节奏/图解…`
+      }
+      if (phase === 'failed' && attempt > 0) {
+        message = `${summary.message}（已自动重试 ${attempt} 次）`
+      }
+
+      const receipt: SyncUndoReceipt = {
+        extraction: sync.extraction,
+        memory: sync.memory,
+        settings: sync.settings
+      }
+      const undoable =
+        receiptHasUndoableWrites(receipt) &&
+        (phase === 'ok' || phase === 'partial')
+
+      if (phase === 'failed') {
+        persistFailedSync(contentSnapshot, summary.errors, attempt + 1)
+        message = `${message}；已加入待同步队列，关闭应用后仍可补跑`
+      } else {
+        clearFailedSyncForChapter()
+        if (undoable) {
+          syncHistoryRef.current = pushSyncHistory(syncHistoryRef.current, {
+            id: makeSyncId('hist'),
+            projectId,
+            chapterNumber,
+            at: Date.now(),
+            message: summary.message,
+            receipt
+          })
+          setSyncHistoryDepth(syncHistoryRef.current.length)
+          persistHistoryStack(syncHistoryRef.current)
+        }
+      }
+
+      const depth = syncHistoryRef.current.length
+      setPostWriteSync({
+        phase,
+        message:
+          undoable && depth > 1
+            ? `${message}（可撤销 ${depth} 次）`
+            : message,
+        errors: summary.errors,
+        contentForRetry: contentSnapshot,
+        at: Date.now(),
+        canUndo: depth > 0,
+        undoDepth: depth,
+        receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+      })
+
+      if (pipeline === 'full' && !opts?.force && phase !== 'failed') {
+        setSkipMemoryOnAutoSyncAll(true)
+        setFlowSyncTrigger((t) => t + 1)
+      }
+
+      if (phase === 'failed') {
         setUndoToast({
-          message: '记忆同步部分失败（不影响续写）',
+          message: '记忆同步失败，已入队；可点「重新同步」补跑',
+          type: 'warning'
+        })
+      } else if (phase === 'partial') {
+        setUndoToast({
+          message: `${summary.message}（不影响续写）`,
           type: 'warning'
         })
       } else {
-        setUndoToast({ message: '已同步记忆与设定', type: 'info' })
+        setUndoToast({
+          message:
+            pipeline === 'full' && !opts?.force
+              ? '已同步记忆，正在跑细纲/节奏/图解…'
+              : summary.message,
+          type: 'info'
+        })
       }
     } catch (err) {
       console.warn('[runPostGenerateMemorySync]', err)
-      if (genRef.current === myGen) {
-        setUndoToast({ message: '记忆同步跳过', type: 'warning' })
+      if (genRef.current !== myGen) return
+      const msg = err instanceof Error ? err.message : String(err)
+      if (allowAutoRetry && attempt < POST_WRITE_SYNC_AUTO_RETRIES) {
+        setPostWriteSync({
+          phase: 'syncing',
+          message: `同步异常，${POST_WRITE_SYNC_RETRY_DELAY_MS / 1000}s 后重试（${attempt + 1}/${POST_WRITE_SYNC_AUTO_RETRIES}）…`,
+          errors: [msg],
+          contentForRetry: contentSnapshot,
+          at: Date.now(),
+          canUndo: syncHistoryRef.current.length > 0,
+          undoDepth: syncHistoryRef.current.length,
+          receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+        })
+        await new Promise((r) => setTimeout(r, POST_WRITE_SYNC_RETRY_DELAY_MS))
+        if (genRef.current !== myGen) return
+        await runPostGenerateMemorySync(myGen, contentSnapshot, {
+          force: opts?.force,
+          pipelineHint: opts?.pipelineHint,
+          attempt: attempt + 1,
+          autoRetry: true
+        })
+        return
       }
+      persistFailedSync(contentSnapshot, [msg], attempt + 1)
+      setPostWriteSync({
+        phase: 'failed',
+        message: `同步失败：${msg.slice(0, 80)}${attempt > 0 ? `（已重试 ${attempt} 次）` : ''}；已加入待同步队列`,
+        errors: [msg],
+        contentForRetry: contentSnapshot,
+        at: Date.now(),
+        canUndo: syncHistoryRef.current.length > 0,
+        undoDepth: syncHistoryRef.current.length,
+        fromPendingQueue: true,
+        receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+      })
+      setUndoToast({
+        message: '记忆同步失败，已入队；可点「重新同步」补跑',
+        type: 'warning'
+      })
+    }
+  }
+
+  /** 状态条 / 流程面板：对上次正文快照（或失败队列）重新跑同步 */
+  const retryPostWriteSync = () => {
+    const snapshot = postWriteSync?.contentForRetry?.trim()
+      ? postWriteSync.contentForRetry
+      : draft
+    if (!snapshot.trim()) {
+      setUndoToast({ message: '正文为空，无法同步', type: 'warning' })
+      return
+    }
+    const myGen = genRef.current
+    setFlowPanelOpen(true)
+    void runPostGenerateMemorySync(myGen, snapshot, {
+      force: true,
+      attempt: 0,
+      autoRetry: true
+    })
+  }
+
+  /** 忽略失败队列中本章条目（不删除正文） */
+  const dismissPendingSync = () => {
+    clearFailedSyncForChapter()
+    setPostWriteSync((prev) =>
+      prev?.fromPendingQueue || prev?.phase === 'failed'
+        ? null
+        : prev
+    )
+    setUndoToast({ message: '已忽略待同步项', type: 'info' })
+  }
+
+  /** 撤销最近一次写后自动同步（支持多级，LIFO） */
+  const undoLastPostWriteSync = async () => {
+    const { next, popped } = popSyncHistory(syncHistoryRef.current)
+    if (!popped) {
+      setUndoToast({ message: '当前没有可撤销的同步', type: 'warning' })
+      return
+    }
+    const api = window.api as {
+      undoChapterSync?: (
+        projectId: string,
+        payload: SyncUndoReceipt
+      ) => Promise<{ ok: boolean; message: string }>
+    }
+    if (!api.undoChapterSync) {
+      setUndoToast({ message: '当前版本不支持撤销同步', type: 'warning' })
+      return
+    }
+    setUndoSyncLoading(true)
+    try {
+      const res = await api.undoChapterSync(projectId, popped.receipt)
+      syncHistoryRef.current = next
+      setSyncHistoryDepth(next.length)
+      persistHistoryStack(next)
+      const peek = peekSyncHistory(next)
+      const remain = next.length
+      const msg =
+        remain > 0
+          ? `${res.message}；还可撤销 ${remain} 次`
+          : res.message
+      setPostWriteSync({
+        phase: res.ok ? 'skipped' : 'partial',
+        message: msg,
+        errors: res.ok ? [] : [res.message],
+        contentForRetry: postWriteSync?.contentForRetry ?? draft,
+        at: Date.now(),
+        canUndo: remain > 0,
+        undoDepth: remain,
+        receipt: peek?.receipt ?? null
+      })
+      if (peek) {
+        setAutoSyncSeed({
+          extraction: peek.receipt.extraction,
+          memory: peek.receipt.memory,
+          settings: peek.receipt.settings
+        })
+      } else {
+        setAutoSyncSeed(null)
+      }
+      setUndoToast({
+        message: msg,
+        type: res.ok ? 'info' : 'warning'
+      })
+    } catch (err) {
+      // 撤销失败：把弹出的记录压回栈
+      syncHistoryRef.current = pushSyncHistory(next, popped)
+      setSyncHistoryDepth(syncHistoryRef.current.length)
+      persistHistoryStack(syncHistoryRef.current)
+      const msg = err instanceof Error ? err.message : String(err)
+      setUndoToast({ message: `撤销失败：${msg}`, type: 'error' })
+    } finally {
+      setUndoSyncLoading(false)
     }
   }
 
@@ -1316,6 +1772,25 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
     return ordered
   }, [deslopScanReport])
+
+  /** 去 AI 味结果：改动块 + 首差异窗口 + 明细（LLM 漏写时前端再 diff 一次） */
+  const deslopDiffView = useMemo(() => {
+    if (!deslopResult) return null
+    const before = draft
+    const after = deslopResult.rewritten
+    const window = findFirstDiffWindow(before, after, 600)
+    const hunks = listChangeHunks(before, after, 20)
+    const summary =
+      deslopResult.changeSummary.length > 0
+        ? deslopResult.changeSummary
+        : summarizeTextDiff(before, after)
+    return {
+      window,
+      hunks,
+      summary,
+      identical: before === after
+    }
+  }, [deslopResult, draft])
 
   /** 去 AI 味：扫描（确定性，不调 LLM）→ 弹报告 */
   const startDeslopScan = async (): Promise<void> => {
@@ -2440,7 +2915,33 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onClose={() => {
             setFlowPanelOpen(false)
             setFlowSyncTrigger(0)
+            setAutoSyncSeed(null)
+            setSkipMemoryOnAutoSyncAll(false)
           }}
+          postWriteSyncBanner={
+            postWriteSync && postWriteSync.phase !== 'idle'
+              ? {
+                  phase: postWriteSync.phase,
+                  message: postWriteSync.message,
+                  errors: postWriteSync.errors,
+                  canUndo: postWriteSync.canUndo || syncHistoryDepth > 0,
+                  undoDepth: Math.max(postWriteSync.undoDepth, syncHistoryDepth),
+                  fromPendingQueue: postWriteSync.fromPendingQueue
+                }
+              : null
+          }
+          onRetryAutoSync={retryPostWriteSync}
+          onUndoAutoSync={
+            postWriteSync?.canUndo || syncHistoryDepth > 0
+              ? () => void undoLastPostWriteSync()
+              : undefined
+          }
+          onDismissPendingSync={
+            postWriteSync?.fromPendingQueue || postWriteSync?.phase === 'failed'
+              ? dismissPendingSync
+              : undefined
+          }
+          undoAutoSyncLoading={undoSyncLoading}
           onOutlineUpdated={(item) => setChapterOutline(item)}
           onRunAudit={reAudit}
           onJumpToOffset={jumpToOffset}
@@ -2506,6 +3007,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           onUndoRewriteByKey={undoRewriteByKey}
           onRedoRewrite={redoLastRewrite}
           syncAllTrigger={flowSyncTrigger}
+          autoSyncSeed={autoSyncSeed}
+          skipMemoryOnAutoSyncAll={skipMemoryOnAutoSyncAll}
           onFocusQuote={focusQuoteInEditor}
         />
       ) : null}
@@ -2514,6 +3017,104 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </div>
 
         <div className="chapter-main-pane">
+          {/* 写后同步状态条：结果可见 + 失败/部分失败可补跑（比 toast 更持久） */}
+          {postWriteSync && postWriteSync.phase !== 'idle' ? (
+            <div
+              className={`post-write-sync-banner post-write-sync-${postWriteSync.phase}`}
+              role="status"
+            >
+              <div className="post-write-sync-main">
+                <span className="post-write-sync-label">
+                  {postWriteSync.phase === 'syncing'
+                    ? '⟳'
+                    : postWriteSync.phase === 'ok'
+                      ? '✓'
+                      : postWriteSync.phase === 'partial'
+                        ? '⚠'
+                        : postWriteSync.phase === 'failed'
+                          ? '✕'
+                          : '–'}
+                </span>
+                <span className="post-write-sync-msg">{postWriteSync.message}</span>
+              </div>
+              {postWriteSync.errors.length > 0 && postWriteSync.phase !== 'syncing' ? (
+                <div
+                  className="post-write-sync-errors"
+                  title={postWriteSync.errors.join('\n')}
+                >
+                  {formatSyncErrorHint(postWriteSync.errors)}
+                </div>
+              ) : null}
+              <div className="post-write-sync-actions">
+                {(postWriteSync.canUndo || syncHistoryDepth > 0) &&
+                postWriteSync.phase !== 'syncing' ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => void undoLastPostWriteSync()}
+                    disabled={undoSyncLoading}
+                    title="撤销最近一次自动写入的记忆/设定（可多级；不删手动确认的新增实体）"
+                  >
+                    {undoSyncLoading
+                      ? '撤销中…'
+                      : Math.max(postWriteSync.undoDepth, syncHistoryDepth) > 1
+                        ? `撤销同步 (${Math.max(postWriteSync.undoDepth, syncHistoryDepth)})`
+                        : '撤销同步'}
+                  </button>
+                ) : null}
+                {postWriteSync.phase !== 'syncing' &&
+                (postWriteSync.phase === 'failed' ||
+                  postWriteSync.phase === 'partial' ||
+                  postWriteSync.phase === 'ok' ||
+                  postWriteSync.phase === 'skipped' ||
+                  postWriteSync.fromPendingQueue) ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={retryPostWriteSync}
+                    disabled={undoSyncLoading}
+                    title="用正文快照重新提取并同步记忆/设定（失败队列项也会补跑）"
+                  >
+                    {postWriteSync.fromPendingQueue || postWriteSync.phase === 'failed'
+                      ? '补跑同步'
+                      : '重新同步'}
+                  </button>
+                ) : null}
+                {(postWriteSync.fromPendingQueue || postWriteSync.phase === 'failed') &&
+                postWriteSync.phase !== 'syncing' ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={dismissPendingSync}
+                    disabled={undoSyncLoading}
+                    title="从待同步队列移除本章（不改正文）"
+                  >
+                    忽略
+                  </button>
+                ) : null}
+                {postWriteSync.phase !== 'syncing' && !flowPanelOpen ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setFlowPanelOpen(true)}
+                  >
+                    查看详情
+                  </button>
+                ) : null}
+                {postWriteSync.phase !== 'syncing' ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setPostWriteSync(null)}
+                    aria-label="关闭同步状态"
+                  >
+                    ✕
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
           {/* 本章细纲（正文上方，可收起/展开） */}
           <div className="chapter-outline-panel-above" style={{ marginBottom: 16, padding: 12, background: 'var(--surface)', borderRadius: 8, border: '1px solid var(--line)' }}>
             <div className="row" style={{ alignItems: 'baseline' }}>
@@ -2971,7 +3572,17 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             }
           }}
         >
-          <div className="dialog" style={{ maxWidth: 720, maxHeight: '85vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+          <div
+            className="dialog"
+            style={{
+              width: 'min(1100px, 94vw)',
+              maxWidth: 1100,
+              maxHeight: '92vh',
+              overflow: 'auto',
+              padding: '20px 24px'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <h3>🧹 去 AI 味</h3>
 
             {/* 扫描报告 */}
@@ -2986,7 +3597,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 {deslopScanReport.findings.length === 0 ? (
                   <p className="empty">未检测到 AI 写作痕迹，正文很自然。</p>
                 ) : (
-                  <div style={{ maxHeight: 280, overflow: 'auto', fontSize: 12, marginBottom: 12 }}>
+                  <div style={{ maxHeight: 420, overflow: 'auto', fontSize: 12, marginBottom: 12 }}>
                     {deslopFindingsByGate?.map(({ gate, items }) => {
                       const collapsed = deslopCollapsedGates.has(gate)
                       const blockingN = items.filter((f) => f.severity === 'blocking').length
@@ -3056,7 +3667,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   color: 'var(--fg-code, #cdd6f4)',
                   padding: 12,
                   borderRadius: 8,
-                  maxHeight: 320,
+                  maxHeight: 480,
                   overflow: 'auto',
                   fontSize: 12,
                   whiteSpace: 'pre-wrap',
@@ -3088,45 +3699,183 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             {/* 润色结果 diff 预览 */}
             {deslopResult ? (
               <div>
-                <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+                <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <span className="filter-chip">{deslopResult.beforeWords} {'->'} {deslopResult.afterWords} 字</span>
-                  <span className="filter-chip">删除 {(deslopResult.deleteRatio * 100).toFixed(1)}%</span>
+                  <span className="filter-chip">
+                    {deslopResult.deleteRatio >= 0
+                      ? `删除 ${(deslopResult.deleteRatio * 100).toFixed(1)}%`
+                      : `增加 ${(-deslopResult.deleteRatio * 100).toFixed(1)}%`}
+                  </span>
                   <span className="filter-chip">剩余问题 {deslopResult.remainingFindings.length}</span>
                   <span className="filter-chip">Gate {deslopResult.processedGates.join('')}</span>
+                  {deslopDiffView ? (
+                    <span className="filter-chip">
+                      {deslopDiffView.identical
+                        ? '无实质改动'
+                        : `改动 ${deslopDiffView.hunks.length || deslopDiffView.summary.length} 处`}
+                    </span>
+                  ) : null}
                   <button
                     className="btn btn-sm btn-ghost"
                     style={{ marginLeft: 'auto', fontSize: 11 }}
                     onClick={() => setDeslopDiffFull((v) => !v)}
                   >
-                    {deslopDiffFull ? '只看前 600 字' : '看全文'}
+                    {deslopDiffFull ? '只看差异' : '看全文'}
                   </button>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                  <div>
-                    <strong style={{ fontSize: 12 }}>改写前{deslopDiffFull ? '' : '（前 600 字）'}</strong>
-                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: deslopDiffFull ? 400 : 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                      {deslopDiffFull ? draft : draft.slice(0, 600)}
-                    </pre>
+
+                {deslopDiffView?.identical ? (
+                  <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--ink-2)' }}>
+                    正文与改写前一致（可能仅做了扫描收尾、未改写到可见内容）。
+                  </p>
+                ) : null}
+
+                {/* 默认：逐段改动对照；全文模式：从首个差异处起的上下文 / 全文 */}
+                {!deslopDiffFull && deslopDiffView && deslopDiffView.hunks.length > 0 ? (
+                  <div style={{ maxHeight: 520, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {deslopDiffView.hunks.map((h, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          border: '1px solid var(--line)',
+                          borderRadius: 8,
+                          padding: 10,
+                          background: 'var(--surface)'
+                        }}
+                      >
+                        <div style={{ fontSize: 12, color: 'var(--ink-2)', marginBottom: 6 }}>
+                          改动 #{i + 1} · 约第 {h.line} 段
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                          <div>
+                            <strong style={{ fontSize: 12, color: 'var(--vermilion)' }}>改写前</strong>
+                            <pre
+                              style={{
+                                background: 'rgba(220, 38, 38, 0.06)',
+                                padding: 10,
+                                borderRadius: 6,
+                                maxHeight: 200,
+                                overflow: 'auto',
+                                fontSize: 12,
+                                whiteSpace: 'pre-wrap',
+                                margin: '4px 0 0',
+                                color: 'var(--ink)'
+                              }}
+                            >
+                              {h.before || '（删除）'}
+                            </pre>
+                          </div>
+                          <div>
+                            <strong style={{ fontSize: 12, color: 'var(--success, #16a34a)' }}>改写后</strong>
+                            <pre
+                              style={{
+                                background: 'rgba(22, 163, 74, 0.06)',
+                                padding: 10,
+                                borderRadius: 6,
+                                maxHeight: 200,
+                                overflow: 'auto',
+                                fontSize: 12,
+                                whiteSpace: 'pre-wrap',
+                                margin: '4px 0 0',
+                                color: 'var(--ink)'
+                              }}
+                            >
+                              {h.after || '（删除）'}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <div>
-                    <strong style={{ fontSize: 12 }}>改写后{deslopDiffFull ? '' : '（前 600 字）'}</strong>
-                    <pre style={{ background: 'var(--bg-code, #f6f8fa)', padding: 8, borderRadius: 6, maxHeight: deslopDiffFull ? 400 : 240, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                      {deslopDiffFull ? deslopResult.rewritten : deslopResult.rewritten.slice(0, 600)}
-                    </pre>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div>
+                      <strong style={{ fontSize: 12 }}>
+                        改写前
+                        {deslopDiffFull
+                          ? ''
+                          : deslopDiffView && !deslopDiffView.window.identical && deslopDiffView.window.offset > 0
+                            ? `（自第 ${deslopDiffView.window.offset + 1} 字起 600 字）`
+                            : '（前 600 字）'}
+                      </strong>
+                      <pre
+                        style={{
+                          background: 'var(--bg-code, #f6f8fa)',
+                          padding: 8,
+                          borderRadius: 6,
+                          maxHeight: deslopDiffFull ? 560 : 360,
+                          overflow: 'auto',
+                          fontSize: 12,
+                          whiteSpace: 'pre-wrap'
+                        }}
+                      >
+                        {deslopDiffFull
+                          ? draft
+                          : deslopDiffView
+                            ? deslopDiffView.window.beforeSlice
+                            : draft.slice(0, 600)}
+                      </pre>
+                    </div>
+                    <div>
+                      <strong style={{ fontSize: 12 }}>
+                        改写后
+                        {deslopDiffFull
+                          ? ''
+                          : deslopDiffView && !deslopDiffView.window.identical && deslopDiffView.window.offset > 0
+                            ? `（自第 ${deslopDiffView.window.offset + 1} 字起 600 字）`
+                            : '（前 600 字）'}
+                      </strong>
+                      <pre
+                        style={{
+                          background: 'var(--bg-code, #f6f8fa)',
+                          padding: 8,
+                          borderRadius: 6,
+                          maxHeight: deslopDiffFull ? 560 : 360,
+                          overflow: 'auto',
+                          fontSize: 12,
+                          whiteSpace: 'pre-wrap'
+                        }}
+                      >
+                        {deslopDiffFull
+                          ? deslopResult.rewritten
+                          : deslopDiffView
+                            ? deslopDiffView.window.afterSlice
+                            : deslopResult.rewritten.slice(0, 600)}
+                      </pre>
+                    </div>
                   </div>
-                </div>
-                {deslopResult.changeSummary.length > 0 ? (
-                  <div style={{ marginTop: 10 }}>
-                    <strong style={{ fontSize: 12 }}>改动明细（{deslopResult.changeSummary.length} 处）</strong>
-                    <div style={{ maxHeight: 200, overflow: 'auto', fontSize: 12, marginTop: 4 }}>
-                      {deslopResult.changeSummary.map((c, i) => (
-                        <div key={i} className="diag-item" style={{ padding: '4px 8px' }}>
+                )}
+
+                {/* 改动明细：始终展示（LLM 说明或自动 diff） */}
+                <div style={{ marginTop: 10 }}>
+                  <strong style={{ fontSize: 12 }}>
+                    改动明细
+                    {deslopDiffView && deslopDiffView.summary.length > 0
+                      ? `（${deslopDiffView.summary.length} 处）`
+                      : '（无）'}
+                    {deslopResult.changeSummary.length === 0 &&
+                    deslopDiffView &&
+                    deslopDiffView.summary.length > 0
+                      ? ' · 自动对比'
+                      : ''}
+                  </strong>
+                  {deslopDiffView && deslopDiffView.summary.length > 0 ? (
+                    <div style={{ maxHeight: 280, overflow: 'auto', fontSize: 13, marginTop: 4 }}>
+                      {deslopDiffView.summary.map((c, i) => (
+                        <div key={i} className="diag-item" style={{ padding: '6px 10px' }}>
                           <span className="diag-msg">{c.replace(/^- /, '')}</span>
                         </div>
                       ))}
                     </div>
-                  </div>
-                ) : null}
+                  ) : (
+                    <p className="diag-msg" style={{ marginTop: 4, color: 'var(--ink-2)' }}>
+                      {deslopDiffView?.identical
+                        ? '未检出文本差异。'
+                        : '未生成改动说明，可点「看全文」对照，或放弃后重试。'}
+                    </p>
+                  )}
+                </div>
+
                 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length > 0 ? (
                   <p className="diag-msg" style={{ color: '#dc2626', marginTop: 8 }}>
                     ⚠ 复扫仍剩 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length} 处 blocking，建议人工复核
@@ -3139,7 +3888,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                   >
                     放弃
                   </button>
-                  <button className="btn btn-primary" onClick={applyDeslopResult}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={applyDeslopResult}
+                    disabled={deslopDiffView?.identical}
+                    title={deslopDiffView?.identical ? '无改动可应用' : undefined}
+                  >
                     应用到正文
                   </button>
                 </div>
@@ -3792,9 +4546,13 @@ function AskChatDialog({
           }}
         >
           {messages.length === 0 ? (
-            <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--ink-3)', fontSize: 14, maxWidth: 520 }}>
-              <p style={{ margin: '0 0 12px 0' }}>就当前正文向 AI 提问，它已读过本章正文与细纲、人物、伏笔等设定。</p>
-              <p style={{ margin: 0, opacity: 0.85 }}>例如：「为什么要这样写」「这段人物动机合理吗」「伏笔埋够了吗」「节奏是不是太拖」。</p>
+            <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--ink-3)', fontSize: 14, maxWidth: 560 }}>
+              <p style={{ margin: '0 0 12px 0' }}>
+                就当前正文向 AI 提问。它具备全书视野：总纲与章目录摘要、相邻章正文、设定/追踪，以及本章正文与细纲、人物、伏笔。
+              </p>
+              <p style={{ margin: 0, opacity: 0.85 }}>
+                例如：「和前后章衔接自然吗」「这段人物动机合理吗」「伏笔前面埋过吗」「节奏是不是太拖」。
+              </p>
               <p style={{ margin: '12px 0 0 0', opacity: 0.7 }}>只回答，不改正文。支持多轮追问。</p>
             </div>
           ) : null}

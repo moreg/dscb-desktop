@@ -103,6 +103,17 @@ const MAX_TARGET_WORDS = 8000
 const TIMELINE_MAX_CHARS = 2000
 
 /**
+ * 正文追问：相邻章正文范围（±N）。
+ * 用于跨章一致性/伏笔/人物弧线对照，不把全书正文硬塞进 prompt。
+ */
+const ASK_ADJACENT_RANGE = 2
+
+/**
+ * 正文追问：每篇相邻章正文的最大字符数，防止 ±2 章叠加后 token 爆炸。
+ */
+const ASK_ADJACENT_MAX_CHARS = 10_000
+
+/**
  * 从细纲「字数预估」文本解析出整数目标字数。
  * 容忍多种写法：「约 2500 字」「2500-3000」「2500~3000」「不少于3000」。
  * 解析失败或无细纲时返回 undefined，由调用方决定兜底值。
@@ -674,6 +685,80 @@ export class WriteService {
   }
 
   /**
+   * 撤销一次写后同步（best-effort）。
+   * 回滚记忆自动写入 + 设定补丁；不删除用户手动确认的新增实体。
+   */
+  async undoChapterSync(
+    projectId: string,
+    payload: {
+      extraction: MemoryExtraction
+      memory: MemoryApplyResult
+      settings: SettingsApplyResult
+    }
+  ): Promise<import('../../shared/types').ChapterSyncUndoResult> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const extraction = payload.extraction
+    const memWriter = new MemoryWriter(dir)
+    const setWriter = new SettingsWriter(dir)
+
+    let memResult = {
+      reverted: { stateChanges: 0, plotPoints: 0, collected: 0, tracking: 0 },
+      errors: [] as string[]
+    }
+    try {
+      memResult = await memWriter.revertAutomatic(
+        extraction,
+        payload.memory.appliedDiffs ?? []
+      )
+    } catch (err) {
+      memResult = {
+        ...memResult,
+        errors: [(err as Error).message]
+      }
+    }
+
+    let setResult = { reverted: 0, errors: [] as string[] }
+    try {
+      const diffs = payload.settings.appliedDiffs ?? []
+      if (diffs.length > 0) {
+        setResult = await setWriter.revertPatches(extraction.chapterNumber, diffs)
+      }
+    } catch (err) {
+      setResult = { reverted: 0, errors: [(err as Error).message] }
+    }
+
+    const total =
+      memResult.reverted.stateChanges +
+      memResult.reverted.plotPoints +
+      memResult.reverted.collected +
+      memResult.reverted.tracking +
+      setResult.reverted
+    const errCount = memResult.errors.length + setResult.errors.length
+    const parts: string[] = []
+    if (memResult.reverted.stateChanges) parts.push(`状态 ${memResult.reverted.stateChanges}`)
+    if (memResult.reverted.plotPoints) parts.push(`情节 ${memResult.reverted.plotPoints}`)
+    if (memResult.reverted.collected) parts.push(`伏笔 ${memResult.reverted.collected}`)
+    if (memResult.reverted.tracking) parts.push(`追踪 ${memResult.reverted.tracking}`)
+    if (setResult.reverted) parts.push(`设定 ${setResult.reverted}`)
+
+    const message =
+      total === 0
+        ? errCount > 0
+          ? `未能撤销：${[...memResult.errors, ...setResult.errors][0] ?? '无变更'}`
+          : '没有可撤销的自动写入'
+        : errCount > 0
+          ? `已部分撤销 ${parts.join(' · ')}（${errCount} 项失败）`
+          : `已撤销 ${parts.join(' · ')}`
+
+    return {
+      ok: total > 0 && errCount === 0,
+      memory: memResult,
+      settings: setResult,
+      message
+    }
+  }
+
+  /**
    * 续写完成后自动同步记忆与设定。
    * extract → applyMemory（自动部分）→ applySettingsPatches(onlyAuto)。
    * autoMemorySync=false 时返回 null；失败只记 log/errors，不抛。
@@ -798,9 +883,23 @@ export class WriteService {
     if (!this.settings) return true
     try {
       const s = await this.settings.get()
+      if (s.autoPostWritePipeline === 'off') return false
       return s.autoMemorySync !== false
     } catch {
       return true
+    }
+  }
+
+  /** 续写后自动流水线：off | memory_only | full（默认 memory_only） */
+  async getAutoPostWritePipeline(): Promise<'off' | 'memory_only' | 'full'> {
+    if (!this.settings) return 'memory_only'
+    try {
+      const s = await this.settings.get()
+      const p = s.autoPostWritePipeline
+      if (p === 'off' || p === 'memory_only' || p === 'full') return p
+      return s.autoMemorySync === false ? 'off' : 'memory_only'
+    } catch {
+      return 'memory_only'
     }
   }
 
@@ -1419,8 +1518,14 @@ export class WriteService {
   }
 
   /**
-   * 「追问」：基于本章正文 + 设定（细纲/人物/伏笔/上一章结尾）回答用户的写作疑问，
-   * 不修改正文。支持多轮（history 累积），feature 复用 review 路由（分析类任务）。
+   * 「追问」：基于本章正文 + 全书视野回答用户的写作疑问，不修改正文。
+   *
+   * 上下文策略（A + B + 上下文文件）：
+   * - A：总纲、卷纲、全书章目录（标题 + 细纲核心事件）
+   * - B：相邻 ±2 章正文（每章截断），便于跨章对照
+   * - 上下文文件：设定/、追踪/、人物卡、伏笔、设定演进
+   *
+   * 支持多轮（history 累积）；feature 为 ask。
    */
   async answerChapterQuestionStream(
     projectId: string,
@@ -1433,6 +1538,10 @@ export class WriteService {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
     const ctx = await this.loadChapterContext(dir, chapterNumber)
+    const [chapterCatalog, neighborChapters] = await Promise.all([
+      this.loadAskChapterCatalog(dir),
+      this.loadAdjacentChapters(dir, chapterNumber)
+    ])
     const style = await this.loadStyleProfile(
       dir,
       project.defaultStyleProfileId ?? null
@@ -1449,9 +1558,15 @@ export class WriteService {
       content,
       question,
       history,
+      mainSynopsis: ctx.mainSynopsis,
+      volumeOutline: ctx.volumeOutline,
+      settings: ctx.settings,
+      settingsEvolution: ctx.settingsEvolution,
+      tracking: ctx.tracking,
+      chapterCatalog,
+      neighborChapters,
       chapterRequirements: ctx.detail?.writingRequirements?.trim(),
       chapterDetail: ctx.detail,
-      prevTail: ctx.prevTail,
       characters: ctx.characters,
       foreshadowings: ctx.foreshadowings
     })
@@ -1461,6 +1576,108 @@ export class WriteService {
       maxTokens: 4096,
       meta: { feature: 'ask', projectId, chapterNumber }
     })
+  }
+
+  /**
+   * 追问 A 层：全书章目录（节奏图谱标题 + 细纲核心事件 + 是否已有正文）。
+   * 只给摘要行，不塞各章全文，保证长篇也可注入。
+   */
+  private async loadAskChapterCatalog(dir: string): Promise<AskChapterCatalogEntry[]> {
+    const byChapter = new Map<number, AskChapterCatalogEntry>()
+
+    try {
+      const rhythm = await new RhythmHtmlRepo(dir).read()
+      for (const r of rhythm ?? []) {
+        byChapter.set(r.chapter, {
+          chapterNumber: r.chapter,
+          title: r.title?.trim() || `第${r.chapter}章`,
+          plotSummary: '',
+          hasProse: false
+        })
+      }
+    } catch (err) {
+      console.warn('[loadAskChapterCatalog] Failed to load rhythm:', err)
+    }
+
+    try {
+      const all = await new DetailedOutlineMdRepo(dir).listAll()
+      for (const d of all) {
+        const prev = byChapter.get(d.chapterNumber)
+        byChapter.set(d.chapterNumber, {
+          chapterNumber: d.chapterNumber,
+          title: d.title?.trim() || prev?.title || `第${d.chapterNumber}章`,
+          plotSummary: d.plotSummary?.trim() || '',
+          hasProse: prev?.hasProse ?? false
+        })
+      }
+    } catch (err) {
+      console.warn('[loadAskChapterCatalog] Failed to load detailed outline:', err)
+    }
+
+    // 标记是否已有正文（供 AI 区分「已写 / 仅细纲」）
+    const prose = new ProseRepo(dir)
+    for (const entry of byChapter.values()) {
+      try {
+        entry.hasProse = await prose.exists(entry.chapterNumber)
+      } catch {
+        entry.hasProse = false
+      }
+    }
+
+    return [...byChapter.values()].sort((a, b) => a.chapterNumber - b.chapterNumber)
+  }
+
+  /**
+   * 追问 B 层：当前章相邻 ±ASK_ADJACENT_RANGE 章的正文（每章截断）。
+   * 缺正文或读失败的章跳过。
+   */
+  private async loadAdjacentChapters(
+    dir: string,
+    chapterNumber: number,
+    range: number = ASK_ADJACENT_RANGE
+  ): Promise<AskNeighborChapter[]> {
+    const prose = new ProseRepo(dir)
+    const titleMap = new Map<number, string>()
+
+    try {
+      const all = await new DetailedOutlineMdRepo(dir).listAll()
+      for (const d of all) {
+        if (d.title?.trim()) titleMap.set(d.chapterNumber, d.title.trim())
+      }
+    } catch (err) {
+      console.warn('[loadAdjacentChapters] Failed to load titles from outline:', err)
+    }
+    try {
+      const rhythm = await new RhythmHtmlRepo(dir).read()
+      for (const r of rhythm ?? []) {
+        if (!titleMap.has(r.chapter) && r.title?.trim()) {
+          titleMap.set(r.chapter, r.title.trim())
+        }
+      }
+    } catch (err) {
+      console.warn('[loadAdjacentChapters] Failed to load titles from rhythm:', err)
+    }
+
+    const out: AskNeighborChapter[] = []
+    for (let n = chapterNumber - range; n <= chapterNumber + range; n++) {
+      if (n < 1 || n === chapterNumber) continue
+      try {
+        const raw = await prose.read(n)
+        if (!raw.trim()) continue
+        const content =
+          raw.length > ASK_ADJACENT_MAX_CHARS
+            ? raw.slice(0, ASK_ADJACENT_MAX_CHARS) + '\n\n（后文因长度限制省略）'
+            : raw
+        out.push({
+          chapterNumber: n,
+          title: titleMap.get(n) || `第${n}章`,
+          content
+        })
+      } catch (err) {
+        console.warn(`[loadAdjacentChapters] Failed to read chapter ${n}:`, err)
+      }
+    }
+    return out
   }
 
   /**
@@ -1866,6 +2083,23 @@ interface AdjustRenderInput {
   foreshadowings: Foreshadowing[]
 }
 
+/** 追问 A 层：章目录条目 */
+interface AskChapterCatalogEntry {
+  chapterNumber: number
+  title: string
+  /** 细纲核心事件；无细纲时为空 */
+  plotSummary: string
+  /** 是否已有正文文件 */
+  hasProse: boolean
+}
+
+/** 追问 B 层：相邻章正文 */
+interface AskNeighborChapter {
+  chapterNumber: number
+  title: string
+  content: string
+}
+
 interface AskQuestionRenderInput {
   projectName: string
   genre?: string
@@ -1876,9 +2110,22 @@ interface AskQuestionRenderInput {
   question: string
   /** 多轮对话历史（不含本轮）。 */
   history: { role: 'user' | 'assistant'; text: string }[]
+  /** A：总纲 */
+  mainSynopsis?: string
+  /** A：当前卷纲 */
+  volumeOutline?: VolumeOutline
+  /** 上下文文件：设定/ */
+  settings?: SettingsContext | null
+  /** 上下文文件：设定演进 */
+  settingsEvolution?: SettingsEvolutionEntry[]
+  /** 上下文文件：追踪/ */
+  tracking?: TrackingContext | null
+  /** A：全书章目录（标题 + 细纲摘要） */
+  chapterCatalog?: AskChapterCatalogEntry[]
+  /** B：相邻章正文 */
+  neighborChapters?: AskNeighborChapter[]
   chapterRequirements?: string
   chapterDetail?: ChapterDetail
-  prevTail: string
   characters: Character[]
   foreshadowings: Foreshadowing[]
 }
@@ -2165,82 +2412,149 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
 /**
  * 渲染「追问」的 user prompt。
  *
- * 与「追问调整正文」不同：本方法只让 AI 回答用户关于本章写作的疑问，
- * 不输出修订稿、不重写正文。上下文（细纲/人物/伏笔/上一章结尾）作为作答依据。
+ * 与「追问调整正文」不同：本方法只让 AI 回答写作疑问，不输出修订稿。
+ * 上下文 = A（总纲/卷纲/章目录摘要）+ B（相邻章正文）+ 上下文文件（设定/追踪/人物/伏笔）+ 本章全文。
  */
 function renderAskQuestionPrompt(input: AskQuestionRenderInput): string {
   const trimmedContent =
     input.content.length > 30_000
       ? input.content.slice(0, 30_000) + '\n\n（后文因长度限制省略）'
       : input.content
-  const charactersSection =
-    input.characters.length > 0
-      ? `## 主要人物参考\n${input.characters
-          .slice(0, 20)
-          .map((c) => `- ${c.name}${c.role ? `：${c.role}` : ''}${c.personality ? `，${c.personality}` : ''}`)
-          .join('\n')}`
-      : ''
-  const foreshadowingsSection =
-    input.foreshadowings.length > 0
-      ? `## 相关伏笔参考\n${input.foreshadowings
-          .slice(0, 20)
-          .map((f) => `- ${f.content}`)
-          .join('\n')}`
-      : ''
-  // 多轮对话历史（不含本轮）：user/assistant 交替，便于 LLM 把握上下文
-  const historySection =
-    input.history.length > 0
-      ? [
-          '## 前几轮对话（用于理解追问上下文，正文以上面提供的为准）',
-          ...input.history.map(
-            (m) => `${m.role === 'user' ? '用户' : '助手'}：${m.text}`
-          ),
-          ''
-        ].join('\n')
-      : ''
 
-  return [
-    `## 任务：就第 ${input.chapterNumber} 章正文回答用户的写作疑问`,
-    '',
-    '你已读完下方这一章正文及相关设定（细纲、人物、伏笔、上一章结尾）。',
-    '用户会针对本章的写法提问，请以「本书写作助手兼资深编辑」的身份作答。',
-    '',
-    '## 作答要求',
-    '1. **只回答问题，不要重写正文，不要输出修订稿或成品文本。**',
-    '2. 回答要具体、落到正文原文：必要时逐字引用本章原句作为佐证（用「」或引文格式标注），',
-    '   让用户能一眼定位到是哪一段、哪一句。',
-    '3. 先给结论，再给依据；若用户的判断有道理就明确认可，若不成立也直说并解释为什么。',
-    '4. 可以涉及：人物动机/性格一致性、剧情逻辑/伏笔回收、节奏与张力、视角与文风、',
-    '   细纲对照、与上一章衔接、AI 味/套路表达等。按问题类型挑重点，不必面面俱到。',
-    '5. 若问题本身（如「为什么这样写」）是在问设计意图，结合细纲、爽点、伏笔、节奏图谱等设定作答；',
-    '   设定里没有的，合理推断并说明「这是基于正文表现的分析，非设定明文」。',
-    '6. 不要泛泛而谈、不要套话、不要打分；可以用分点说明，但每点都要有正文依据。',
-    '7. 正文以「下方提供的第 N 章正文」为准，不要臆造正文中没有的情节。',
-    '',
-    '## 小说信息',
-    `- 书名：${input.projectName}`,
-    `- 题材：${input.genre ?? '未指定'}`,
-    '',
-    input.chapterRequirements
-      ? `## 本章长期写作要求\n${renderRequirementChecklist(input.chapterRequirements)}`
-      : '',
-    input.chapterDetail
-      ? `## 本章细纲\n${renderChapterDetail(input.chapterDetail, '细纲')}`
-      : '',
-    input.prevTail ? `## 上一章结尾参考\n${input.prevTail}` : '',
-    charactersSection,
-    foreshadowingsSection,
-    historySection,
-    `------ 第 ${input.chapterNumber} 章正文（仅作答依据，请勿修改） ------`,
-    trimmedContent,
-    '',
-    '## 用户本轮提问',
-    input.question.trim(),
-    '',
-    '请基于上述正文与设定回答：'
-  ]
-    .filter(Boolean)
-    .join('\n')
+  const parts: string[] = []
+
+  parts.push(`## 任务：就第 ${input.chapterNumber} 章正文回答用户的写作疑问`)
+  parts.push('')
+  parts.push(
+    '你已获得本书的全书视野材料：总纲/卷纲、章目录摘要、相邻章正文、设定与追踪文件，以及本章完整正文。'
+  )
+  parts.push('用户会针对写作提问，请以「本书写作助手兼资深编辑」的身份作答。')
+  parts.push('')
+  parts.push('## 作答要求')
+  parts.push('1. **只回答问题，不要重写正文，不要输出修订稿或成品文本。**')
+  parts.push(
+    '2. 回答要具体、落到原文：必要时逐字引用本章或相邻章原句作为佐证（用「」或引文格式标注），让用户能定位。'
+  )
+  parts.push('3. 先给结论，再给依据；若用户的判断有道理就明确认可，若不成立也直说并解释为什么。')
+  parts.push(
+    '4. 可以涉及：人物动机/性格一致性、剧情逻辑/伏笔铺设与回收、跨章衔接、节奏与张力、视角与文风、细纲对照、设定规则、AI 味/套路表达等。按问题类型挑重点。'
+  )
+  parts.push(
+    '5. 跨章问题优先对照「章目录摘要」与「相邻章正文」；全书设定问题优先对照「项目设定」「追踪」「伏笔」。设定/正文里没有的，合理推断并标明「基于已提供材料的分析，非明文」。'
+  )
+  parts.push('6. 不要泛泛而谈、不要套话、不要打分；分点时每点都要有材料依据。')
+  parts.push(
+    `7. 本章正文以「第 ${input.chapterNumber} 章正文」为准；相邻章正文用于对照，不要臆造未提供的情节。`
+  )
+  parts.push('')
+
+  // —— 小说信息 + A：总纲 ——
+  parts.push('## 小说信息')
+  parts.push(`- 书名：${input.projectName}`)
+  parts.push(`- 题材：${input.genre ?? '未指定'}`)
+  if (input.mainSynopsis?.trim()) {
+    parts.push(`- 总纲：${input.mainSynopsis.trim()}`)
+  }
+  parts.push('')
+
+  // —— 上下文文件：设定/（全书视野，势力不按本章角色过滤） ——
+  if (input.settings) {
+    parts.push(...renderSettingsSection(input.settings, []))
+  }
+  if (input.settingsEvolution && input.settingsEvolution.length > 0) {
+    parts.push('## 近期设定演进（以正文已揭晓为准，优先于旧底稿冲突项）')
+    for (const e of input.settingsEvolution) {
+      parts.push(`- ${e.chapter} · ${e.file}：${e.summary}`)
+    }
+    parts.push('')
+  }
+
+  // —— A：卷纲 ——
+  if (input.volumeOutline) {
+    parts.push(...renderVolumeSection(input.volumeOutline))
+  }
+
+  // —— 上下文文件：追踪/ ——
+  if (input.tracking) {
+    parts.push(...renderTrackingSection(input.tracking, input.chapterNumber))
+  }
+
+  // —— 人物 / 伏笔 ——
+  if (input.characters.length > 0) {
+    parts.push('## 主要人物参考')
+    for (const c of input.characters.slice(0, 30)) {
+      parts.push(
+        `- ${c.name}${c.role ? `：${c.role}` : ''}${c.personality ? `，${c.personality}` : ''}`
+      )
+    }
+    parts.push('')
+  }
+  if (input.foreshadowings.length > 0) {
+    parts.push('## 相关伏笔参考')
+    for (const f of input.foreshadowings.slice(0, 30)) {
+      const status = f.status ? `（${f.status}）` : ''
+      parts.push(`- ${f.content}${status}`)
+    }
+    parts.push('')
+  }
+
+  // —— A：全书章目录 ——
+  if (input.chapterCatalog && input.chapterCatalog.length > 0) {
+    parts.push('## 全书章目录（标题 + 细纲核心事件；非全文）')
+    parts.push('说明：`[已写]` 表示有正文文件，`[细纲]` 表示仅有大纲/细纲。')
+    for (const ch of input.chapterCatalog) {
+      const flag = ch.hasProse ? '[已写]' : '[细纲]'
+      const current = ch.chapterNumber === input.chapterNumber ? ' ← 当前章' : ''
+      const summary = ch.plotSummary ? `：${ch.plotSummary}` : ''
+      parts.push(
+        `- ${flag} 第 ${ch.chapterNumber} 章 ${ch.title}${summary}${current}`
+      )
+    }
+    parts.push('')
+  }
+
+  // —— 本章细纲 / 写作要求 ——
+  if (input.chapterRequirements) {
+    parts.push('## 本章长期写作要求')
+    parts.push(renderRequirementChecklist(input.chapterRequirements))
+    parts.push('')
+  }
+  if (input.chapterDetail) {
+    parts.push(renderChapterDetail(input.chapterDetail, '本章细纲'))
+    parts.push('')
+  }
+
+  // —— B：相邻章正文 ——
+  if (input.neighborChapters && input.neighborChapters.length > 0) {
+    parts.push('## 相邻章正文（跨章对照用，非本章）')
+    for (const nb of input.neighborChapters) {
+      parts.push(`### 第 ${nb.chapterNumber} 章 ${nb.title}`)
+      parts.push(nb.content)
+      parts.push('')
+    }
+  }
+
+  // —— 多轮历史 ——
+  if (input.history.length > 0) {
+    parts.push('## 前几轮对话（用于理解追问上下文，正文以本轮提供的材料为准）')
+    for (const m of input.history) {
+      parts.push(`${m.role === 'user' ? '用户' : '助手'}：${m.text}`)
+    }
+    parts.push('')
+  }
+
+  // —— 本章正文（放后，注意力更靠问题） ——
+  parts.push(
+    `------ 第 ${input.chapterNumber} 章正文（仅作答依据，请勿修改） ------`
+  )
+  parts.push(trimmedContent)
+  parts.push('')
+  parts.push('## 用户本轮提问')
+  parts.push(input.question.trim())
+  parts.push('')
+  parts.push('请基于上述全书视野材料与本章正文回答：')
+
+  return parts.filter((p) => p !== undefined && p !== null).join('\n')
 }
 
 function renderRequirementChecklist(text: string): string {

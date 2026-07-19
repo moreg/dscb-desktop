@@ -112,6 +112,29 @@ export class ForeshadowingMdRepo {
     await this.updateCell(id, { status: 'collected', actualCollect: chapter })
   }
 
+  /**
+   * 撤销回收：恢复为已埋设、清空实际回收章。
+   * 用于写后同步的 best-effort 回滚。
+   */
+  async uncollect(id: string): Promise<void> {
+    const { path, text } = await this.file()
+    const existing = (await this.list()).find((f) => f.id === id)
+    if (!existing) return
+    const plantChapter = existing.plantChapter
+    const cells = [
+      id,
+      existing.content,
+      existing.note ?? '设定',
+      plantChapter ? fmtChapter(plantChapter, '未埋设') : '未埋设',
+      fmtChapter(existing.expectedCollect),
+      '未回收',
+      unmapStatus(plantChapter ? 'planted' : 'pending')
+    ]
+    const next = replaceTableRow(text, (row) => row[0]?.trim() === id, cells)
+    if (next === text) return
+    await writeTextAtomic(path, next)
+  }
+
   async markMissed(id: string): Promise<void> {
     await this.updateCell(id, { status: 'missed' })
   }

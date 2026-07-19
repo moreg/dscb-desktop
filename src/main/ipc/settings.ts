@@ -111,14 +111,40 @@ export function registerSettingsIpc(
 
   safeHandle('settings:getAutoMemorySync', async (): Promise<boolean> => {
     const all = await repo.get()
-    return all.autoMemorySync !== false
+    return all.autoPostWritePipeline !== 'off' && all.autoMemorySync !== false
   })
   safeHandle(
     'settings:setAutoMemorySync',
     async (_e: IpcMainInvokeEvent, enabled: boolean): Promise<boolean> => {
       const v = validateInput(z.boolean(), enabled)
-      await repo.update({ autoMemorySync: v })
+      await repo.update({
+        autoMemorySync: v,
+        autoPostWritePipeline: v ? 'memory_only' : 'off'
+      })
       return v
+    }
+  )
+
+  safeHandle(
+    'settings:getAutoPostWritePipeline',
+    async (): Promise<'off' | 'memory_only' | 'full'> => {
+      const all = await repo.get()
+      return all.autoPostWritePipeline ?? 'memory_only'
+    }
+  )
+  safeHandle(
+    'settings:setAutoPostWritePipeline',
+    async (
+      _e: IpcMainInvokeEvent,
+      mode: 'off' | 'memory_only' | 'full'
+    ): Promise<'off' | 'memory_only' | 'full'> => {
+      const m =
+        mode === 'off' || mode === 'memory_only' || mode === 'full' ? mode : 'memory_only'
+      await repo.update({
+        autoPostWritePipeline: m,
+        autoMemorySync: m !== 'off'
+      })
+      return m
     }
   )
 

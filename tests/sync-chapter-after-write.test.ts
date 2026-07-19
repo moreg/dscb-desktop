@@ -172,19 +172,67 @@ describe('WriteService.syncChapterAfterWrite', () => {
     expect(result).not.toBeNull()
     expect(result!.memory.errors.some((e) => e.includes('超时'))).toBe(true)
   })
+
+  it('force skips disabled check (manual retry)', async () => {
+    await settings.update({ autoMemorySync: false, autoPostWritePipeline: 'off' })
+    const llm = mockLlm('')
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flow = (service as unknown as { flow: any }).flow
+    const memSpy = vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(FIXED_EXTRACTION)
+
+    const skipped = await service.syncChapterAfterWrite(projectId, 5, '正文', {
+      skipIfDisabled: true
+    })
+    expect(skipped).toBeNull()
+
+    const forced = await service.syncChapterAfterWrite(projectId, 5, '正文', {
+      skipIfDisabled: false
+    })
+    expect(forced).not.toBeNull()
+    expect(forced!.extraction.chapterNumber).toBe(5)
+    expect(memSpy).toHaveBeenCalledTimes(1)
+
+    memSpy.mockRestore()
+  })
+
+  it('pipeline off disables syncChapterAfterWrite', async () => {
+    await settings.update({ autoPostWritePipeline: 'off' })
+    const llm = mockLlm('')
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flow = (service as unknown as { flow: any }).flow
+    const memSpy = vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(FIXED_EXTRACTION)
+    const result = await service.syncChapterAfterWrite(projectId, 5, '正文')
+    expect(result).toBeNull()
+    expect(memSpy).not.toHaveBeenCalled()
+    memSpy.mockRestore()
+  })
 })
 
-describe('SettingsRepository.autoMemorySync', () => {
-  it('defaults to true and persists false', async () => {
+describe('SettingsRepository.autoMemorySync / autoPostWritePipeline', () => {
+  it('defaults to memory_only and keeps pipeline ↔ autoMemorySync in sync', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-ams-'))
     const repo = new SettingsRepo(path.join(dir, 'settings.json'))
     const all = await repo.get()
     expect(all.autoMemorySync).toBe(true)
+    expect(all.autoPostWritePipeline).toBe('memory_only')
 
     await repo.update({ autoMemorySync: false })
     expect((await repo.get()).autoMemorySync).toBe(false)
+    expect((await repo.get()).autoPostWritePipeline).toBe('off')
 
     await repo.update({ autoMemorySync: true })
     expect((await repo.get()).autoMemorySync).toBe(true)
+    expect((await repo.get()).autoPostWritePipeline).toBe('memory_only')
+
+    await repo.update({ autoPostWritePipeline: 'full' })
+    expect((await repo.get()).autoPostWritePipeline).toBe('full')
+    expect((await repo.get()).autoMemorySync).toBe(true)
+
+    await repo.update({ autoPostWritePipeline: 'off' })
+    expect((await repo.get()).autoPostWritePipeline).toBe('off')
+    expect((await repo.get()).autoMemorySync).toBe(false)
   })
 })

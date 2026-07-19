@@ -359,7 +359,7 @@ describe('probeAntigravity', () => {
 })
 
 describe('listAntigravityModels', () => {
-  it('agy models 输出多行 -> 返回模型名数组', async () => {
+  it('agy models 输出多行 -> 优先返回实时列表', async () => {
     fakeChildFactory = () =>
       createFakeChild({
         stdout: 'Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n',
@@ -375,7 +375,7 @@ describe('listAntigravityModels', () => {
     expect(lastSpawnArgs!.args).toEqual(['models'])
   })
 
-  it('未登录 -> 返回空数组（不抛错）', async () => {
+  it('未登录 -> 回退内置 Gemini 预设（不抛错）', async () => {
     fakeChildFactory = () =>
       createFakeChild({
         stdout: 'Error: Please sign in to view available models.',
@@ -383,10 +383,12 @@ describe('listAntigravityModels', () => {
       })
 
     const models = await listAntigravityModels()
-    expect(models).toEqual([])
+    expect(models.length).toBeGreaterThan(0)
+    expect(models).toContain('Gemini 3.1 Pro (High)')
+    expect(models).toContain('Gemini 3.5 Flash (Medium)')
   })
 
-  it('agy 未安装 -> 返回空数组', async () => {
+  it('agy 未安装 -> 回退内置预设', async () => {
     fakeChildFactory = () =>
       createFakeChild({
         stdout: '',
@@ -395,6 +397,6 @@ describe('listAntigravityModels', () => {
       })
 
     const models = await listAntigravityModels()
-    expect(models).toEqual([])
+    expect(models).toContain('Gemini 3.1 Pro (High)')
   })
 })

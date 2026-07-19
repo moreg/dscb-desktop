@@ -178,6 +178,14 @@ describe('buildDeslopPrompt 构建', () => {
     expect(DESLOP_SYSTEM_PROMPT).toContain('统计平均感')
   })
 
+  it('系统铁律与改写原则含语言锁定（禁止中译英）', () => {
+    expect(DESLOP_SYSTEM_PROMPT).toContain('语言锁定')
+    expect(DESLOP_SYSTEM_PROMPT).toMatch(/他→He|禁止翻译/)
+    const prompt = buildDeslopPrompt('他刚才停车。', 'mild', [], ['A', 'B'])
+    expect(prompt).toContain('语言锁定')
+    expect(prompt).toMatch(/改味不是翻译|禁止英译/)
+  })
+
   it('题材为古风时注入古风语气词', () => {
     const prompt = buildDeslopPrompt('原文', 'mild', [], ['A', 'B'], { genre: '古风' })
     expect(prompt).toContain('建议主动使用的题材语气词')
@@ -232,5 +240,16 @@ describe('extractChangeSummary 解析改动说明', () => {
     expect(summary[0]).toContain('仿佛被抽空')
     expect(summary[0]).toContain('口语对话')
     expect(summary[1]).toContain('第7行')
+  })
+
+  it('兼容 • / 编号 / 无短横线的改动说明', () => {
+    const bullets = extractChangeSummary('【改写后】\nx\n\n【改动说明】\n• 第1行改了仿佛\n1. 第2行去排比')
+    expect(bullets.length).toBe(2)
+    expect(bullets[0]).toMatch(/^- /)
+    expect(bullets[1]).toMatch(/^- /)
+
+    const plain = extractChangeSummary('【改写后】\nx\n\n【改动说明】\n第1行｜原句：仿佛 → 改后：好像')
+    expect(plain.length).toBe(1)
+    expect(plain[0]).toContain('仿佛')
   })
 })

@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mkdtemp, mkdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import { SettingsMdRepo } from '../src/main/data/skill-format/settings-md-repo'
+import {
+  SettingsMdRepo,
+  isPlaceholderSettingBody
+} from '../src/main/data/skill-format/settings-md-repo'
 
 const GENRE_POSITIONING = `# 题材定位
 
@@ -110,5 +113,37 @@ describe('SettingsMdRepo', () => {
     // 设定/ 目录存在但无任何 .md 文件
     const result = await new SettingsMdRepo(dir).read()
     expect(result).toBeNull()
+  })
+
+  it('filters open-book placeholder 核心设定 / empty worldview shells', async () => {
+    await writeFile(
+      path.join(dir, '设定', '核心设定.md'),
+      `# 核心设定\n\n## 基本信息\n- **书名**：民国老六\n- **题材**：历史\n\n## 核心设定\n\n（待完善）\n`
+    )
+    await writeFile(path.join(dir, '设定', '题材定位.md'), `# 题材定位\n`)
+    await writeFile(path.join(dir, '设定', '世界观', '背景设定.md'), `# 背景设定\n`)
+    await writeFile(path.join(dir, '设定', '世界观', '力量体系.md'), `# 力量体系\n`)
+
+    const result = await new SettingsMdRepo(dir).read()
+    expect(result).toBeNull()
+  })
+
+  it('keeps real 核心设定 content after user fills it', async () => {
+    await writeFile(
+      path.join(dir, '设定', '核心设定.md'),
+      `# 核心设定\n\n## 金手指\n运势罗盘可看运势线，每次消耗精神力。\n`
+    )
+    const result = await new SettingsMdRepo(dir).read()
+    expect(result).not.toBeNull()
+    expect(result!.customRules.some((r) => r.name === '核心设定')).toBe(true)
+    expect(result!.customRules[0].body).toContain('运势罗盘')
+  })
+})
+
+describe('isPlaceholderSettingBody', () => {
+  it('detects empty and 待完善', () => {
+    expect(isPlaceholderSettingBody('')).toBe(true)
+    expect(isPlaceholderSettingBody('# 标题\n\n（待完善）\n')).toBe(true)
+    expect(isPlaceholderSettingBody('明劲→暗劲→化劲')).toBe(false)
   })
 })
