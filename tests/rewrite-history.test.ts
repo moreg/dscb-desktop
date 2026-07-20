@@ -11,6 +11,8 @@ import {
   popRedo,
   clearRedoStack,
   detectUndoRedoShortcut,
+  isAdjustRewriteKey,
+  ADJUST_REWRITE_KEY,
   REWRITE_HISTORY_CAP,
   type RewriteEntry
 } from '../src/main/data/rewrite-history'
@@ -552,7 +554,7 @@ describe('detectUndoRedoShortcut (P8-B 跨平台快捷键解析)', () => {
     ).toBe('undo')
   })
 
-  // textarea/input 内的核心行为：让原生 undo 处理
+  // textarea/input 内的核心行为：默认让原生 undo 处理
   it('in textarea → null (保留原生 text undo)', () => {
     expect(
       detectUndoRedoShortcut({
@@ -615,5 +617,48 @@ describe('detectUndoRedoShortcut (P8-B 跨平台快捷键解析)', () => {
         key: 'z'
       } as Parameters<typeof detectUndoRedoShortcut>[0])
     ).toBe('undo')
+  })
+
+  it('ignoreInputTarget：textarea 内仍可触发 app undo（按要求重写后 Ctrl+Z）', () => {
+    expect(
+      detectUndoRedoShortcut({
+        ctrl: true, meta: false, shift: false, alt: false,
+        key: 'z', targetTag: 'TEXTAREA',
+        ignoreInputTarget: true
+      })
+    ).toBe('undo')
+  })
+
+  it('ignoreInputTarget：textarea 内 Ctrl+Shift+Z 仍可 redo', () => {
+    expect(
+      detectUndoRedoShortcut({
+        ctrl: true, meta: false, shift: true, alt: false,
+        key: 'z', targetTag: 'textarea',
+        ignoreInputTarget: true
+      })
+    ).toBe('redo')
+  })
+})
+
+describe('按要求重写（整章）撤销', () => {
+  it('isAdjustRewriteKey 识别固定 key 与带后缀 key', () => {
+    expect(isAdjustRewriteKey(ADJUST_REWRITE_KEY)).toBe(true)
+    expect(isAdjustRewriteKey('adjust:1710000')).toBe(true)
+    expect(isAdjustRewriteKey('ai-review-0-1')).toBe(false)
+    expect(isAdjustRewriteKey(undefined)).toBe(false)
+  })
+
+  it('整章替换后 revertInDraft 可还原旧稿', () => {
+    const oldDraft = '旧稿第一段。\n旧稿第二段。'
+    const newDraft = '重写后的完整正文，内容完全不同。'
+    const stack = pushEntry([], oldDraft, newDraft, Date.now(), ADJUST_REWRITE_KEY)
+    expect(stack[0].violationKey).toBe(ADJUST_REWRITE_KEY)
+
+    const restored = revertInDraft(newDraft, newDraft, oldDraft)
+    expect(restored).toBe(oldDraft)
+
+    // 再 redo
+    const redone = applyToDraft(restored, oldDraft, newDraft)
+    expect(redone).toBe(newDraft)
   })
 })

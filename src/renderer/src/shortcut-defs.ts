@@ -17,7 +17,7 @@ export const SHORTCUTS: ShortcutDef[] = [
   { keysMac: '⌘ + /', keysWin: 'Ctrl + /', desc: '显示/隐藏本快捷键面板', group: '导航' },
   { keysMac: '⌘ + Shift + A', keysWin: 'Ctrl + Shift + A', desc: '重新跑 AI 味检查', group: '质检 / 改写' },
   // 撤销
-  { keysMac: '⌘ + Z', keysWin: 'Ctrl + Z', desc: '撤销最近一次改写', group: '撤销 / 重做' },
+  { keysMac: '⌘ + Z', keysWin: 'Ctrl + Z', desc: '撤销最近一次改写 / 按要求重写', group: '撤销 / 重做' },
   { keysMac: '⌘ + Shift + Z', keysWin: 'Ctrl + Shift + Z', desc: '重做', group: '撤销 / 重做' },
   { keysMac: '⌘ + Y', keysWin: 'Ctrl + Y', desc: '重做（Windows 风格）', group: '撤销 / 重做' }
 ]

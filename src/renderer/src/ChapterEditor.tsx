@@ -22,6 +22,7 @@ import {
   popRedo,
   clearRedoStack,
   detectUndoRedoShortcut,
+  ADJUST_REWRITE_KEY,
   type RewriteEntry
 } from '../../main/data/rewrite-history'
 import {
@@ -48,10 +49,20 @@ import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { parseForeshadowReceipt } from '../../shared/parsers'
 import {
+  parseAdjustPlanItems,
+  buildConfirmedPlanFromSelection,
+  selectedPlanTexts
+} from '../../shared/adjust-plan-items'
+import {
   summarizePostWriteSync,
   formatSyncErrorHint,
   type PostWriteSyncPhase
 } from '../../shared/post-write-sync'
+import {
+  buildTempRequirementsFromSelfCheck,
+  formatSelfCheckDelta
+} from '../../shared/self-check-to-requirements'
+import type { ChapterSelfCheckReport } from '../../shared/types'
 import {
   pushSyncHistory,
   popSyncHistory,
@@ -324,7 +335,20 @@ export default function ChapterEditor({
   const [showContinueDialog, setShowContinueDialog] = useState(false)
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
+  /** 按要求重写：AI 给出的修改建议（可编辑，确认后作为落笔方案） */
+  const [adjustPlan, setAdjustPlan] = useState('')
+  /** 从建议中解析出的可勾选落笔要点（默认全选） */
+  const [adjustPlanChecks, setAdjustPlanChecks] = useState<
+    { id: string; text: string; checked: boolean }[]
+  >([])
+  const [adjustPlanning, setAdjustPlanning] = useState(false)
   const [adjusting, setAdjusting] = useState(false)
+  const adjustPlanRef = useRef(0)
+
+  const syncAdjustPlanChecks = (planText: string) => {
+    const items = parseAdjustPlanItems(planText)
+    setAdjustPlanChecks(items.map((it) => ({ ...it, checked: true })))
+  }
   // 正文追问（chat）：全书视野回答写作疑问，不修改正文
   const [showAskDialog, setShowAskDialog] = useState(false)
   const [askQuestion, setAskQuestion] = useState('')
@@ -364,6 +388,7 @@ export default function ChapterEditor({
     extraction: import('../../shared/types').MemoryExtraction
     memory: import('../../shared/types').MemoryApplyResult
     settings: import('../../shared/types').SettingsApplyResult
+    selfCheck?: import('../../shared/types').ChapterSelfCheckReport | null
   } | null>(null)
   /**
    * 写后同步状态条：比 3s toast 更持久，支持失败一键补跑 / 多级撤销 / 失败队列。
@@ -381,7 +406,9 @@ export default function ChapterEditor({
     undoDepth: number
     fromPendingQueue?: boolean
     receipt: SyncUndoReceipt | null
+    selfCheck?: import('../../shared/types').ChapterSelfCheckReport | null
   } | null>(null)
+  const [selfCheckLoading, setSelfCheckLoading] = useState(false)
   const [undoSyncLoading, setUndoSyncLoading] = useState(false)
   /** 会话内同步撤销栈（仅当前编辑会话；切章清空） */
   const syncHistoryRef = useRef<SyncHistoryEntry[]>([])
@@ -657,6 +684,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     ++genRef.current
     setGenerating(false)
     setAdjusting(false)
+    // 切章时关掉「按要求重写」对话框并作废进行中的建议生成
+    ++adjustPlanRef.current
+    setAdjustPlanning(false)
+    setAdjustPlan('')
+    setAdjustPlanChecks([])
+    setShowAdjustDialog(false)
     // 切章/project 时清空内存中的改写历史（避免跨章串台）
     setRewriteHistory([])
     setRedoStack([])
@@ -1006,13 +1039,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         if (dirty && !saving) void saveAndClearDraft()
         return
       }
+      // 有改写/重写历史时：正文 textarea 内也走 app undo（程序化 setDraft 不进浏览器原生栈）
+      const hasAppHistory = rewriteHistory.length > 0 || redoStack.length > 0
       const intent = detectUndoRedoShortcut({
         ctrl: e.ctrlKey,
         meta: e.metaKey,
         shift: e.shiftKey,
         alt: e.altKey,
         key: e.key,
-        targetTag: (e.target as HTMLElement | null)?.tagName ?? ''
+        targetTag: (e.target as HTMLElement | null)?.tagName ?? '',
+        ignoreInputTarget: hasAppHistory
       })
       if (intent === 'undo' && rewriteHistory.length > 0) {
         e.preventDefault()
@@ -1107,6 +1143,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       )
       if (!proceed) return
     }
+    // 改前自检快照：写后复检对比用（按自检续写补洞时可见改善）
+    const previousSelfCheck: ChapterSelfCheckReport | null =
+      postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
     setGenerating(true)
     const initialDraft = draft
     setFlowPanelOpen(false)
@@ -1174,7 +1213,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       {
         const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
         const fullContent = initialDraft + (receipt ? stripped : finalDraft)
-        void runPostGenerateMemorySync(myGen, fullContent)
+        void runPostGenerateMemorySync(myGen, fullContent, {
+          previousSelfCheck
+        })
       }
     } catch {
       if (genRef.current === myGen) {
@@ -1184,7 +1225,27 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
   }
 
-  const adjustChapter = async () => {
+  const closeAdjustDialog = () => {
+    // 生成建议中不允许点遮罩关掉半成品；落笔中对话框本已关闭
+    if (adjustPlanning) return
+    ++adjustPlanRef.current
+    setShowAdjustDialog(false)
+    setAdjustPlanning(false)
+  }
+
+  const openAdjustDialog = () => {
+    ++adjustPlanRef.current
+    setAdjustPlan('')
+    setAdjustPlanChecks([])
+    setAdjustPlanning(false)
+    setShowAdjustDialog(true)
+  }
+
+  /**
+   * 按要求重写 · 第一步：根据用户追问生成修改建议（不改正文）。
+   * 建议流式写入对话框，用户可编辑后再确认落笔。
+   */
+  const planAdjustChapter = async () => {
     const instruction = adjustInstruction.trim()
     if (!draft.trim()) {
       setAlertInfo({ message: '正文为空，无法追问调整' })
@@ -1200,12 +1261,105 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
     if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
       const proceed = window.confirm(
-        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续追问调整？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
+        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续生成修改建议？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
       )
       if (!proceed) return
     }
 
+    setAdjustPlanning(true)
+    setAdjustPlan('')
+    setAdjustPlanChecks([])
+    const myPlan = ++adjustPlanRef.current
+    let planText = ''
+    try {
+      const result = await window.api.planAdjustChapterStream(
+        projectId,
+        chapterNumber,
+        draft,
+        instruction,
+        requestedStyleProfileId,
+        (token, done) => {
+          if (adjustPlanRef.current !== myPlan) return
+          if (token) {
+            planText += token
+            setAdjustPlan(planText)
+          }
+          if (done) {
+            setAdjustPlanning(false)
+            refreshUsage()
+            // 流式结束后再解析勾选项（流式中途标题/列表不完整）
+            if (planText.trim()) syncAdjustPlanChecks(planText)
+          }
+        }
+      )
+      if (adjustPlanRef.current !== myPlan) return
+      if (!result.ok) {
+        setAdjustPlanning(false)
+        setAlertInfo({ message: friendlyLlmError(result.error) })
+        return
+      }
+      if (planText.trim()) {
+        setAdjustPlan(planText)
+        syncAdjustPlanChecks(planText)
+      }
+    } catch (err) {
+      if (adjustPlanRef.current === myPlan) {
+        setAdjustPlanning(false)
+        setAlertInfo({ message: friendlyLlmError((err as Error).message) })
+      }
+    }
+  }
+
+  /**
+   * 按要求重写 · 第二步：用户确认后落笔，用确认方案（若有）改写正文。
+   * @param usePlan 是否把当前修改建议一并交给落笔；false = 直接按要求落笔（跳过建议）
+   */
+  const adjustChapter = async (usePlan: boolean) => {
+    const instruction = adjustInstruction.trim()
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法追问调整' })
+      return
+    }
+    if (!instruction) {
+      setAlertInfo({ message: '请先写下这次要怎么调整正文' })
+      return
+    }
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
+      return
+    }
+    if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
+      const proceed = window.confirm(
+        `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续落笔重写？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
+      )
+      if (!proceed) return
+    }
+
+    let confirmedPlan = ''
+    if (usePlan) {
+      if (!adjustPlan.trim()) {
+        setAlertInfo({ message: '请先生成修改建议，或改用「直接落笔」' })
+        return
+      }
+      if (adjustPlanChecks.length > 0) {
+        const selected = selectedPlanTexts(adjustPlanChecks)
+        if (selected.length === 0) {
+          setAlertInfo({ message: '请至少勾选一条落笔要点，或点「全选」后再落笔' })
+          return
+        }
+        confirmedPlan = buildConfirmedPlanFromSelection(adjustPlan, selected)
+      } else {
+        // 未能解析出列表时，退回整份建议
+        confirmedPlan = adjustPlan.trim()
+      }
+    }
+
+    ++adjustPlanRef.current
+    // 改前自检：落笔后自动复检并对比改善幅度
+    const previousSelfCheck =
+      postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
     setShowAdjustDialog(false)
+    setAdjustPlanning(false)
     setAdjusting(true)
     setFlowPanelOpen(false)
     setAutoAudit(null)
@@ -1237,7 +1391,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
             setAdjusting(false)
             refreshUsage()
           }
-        }
+        },
+        confirmedPlan || null
       )
       if (genRef.current !== myGen) return
       if (!result.ok) {
@@ -1246,11 +1401,25 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         setDraft(sourceDraft)
         return
       }
+      // 整章替换成功：压入撤销栈，Ctrl+Z / 面板「↶ 撤销」可还原旧稿
+      const finalText = revised
+      if (finalText && finalText !== sourceDraft) {
+        setDraft(finalText)
+        pushRewrite(sourceDraft, finalText, ADJUST_REWRITE_KEY)
+        setUndoToast({
+          message: '重写完成，正在自动复检…',
+          type: 'info'
+        })
+      }
       setDirty(true)
       setFlowPanelOpen(true)
-      void runPostGenerateAudit(myGen, revised)
-      // 追问调整会改写正文：与续写一致做记忆/设定同步（受 pipeline 控制）
-      void runPostGenerateMemorySync(myGen, revised)
+      setAdjustPlan('')
+      setAdjustPlanChecks([])
+      void runPostGenerateAudit(myGen, finalText || revised)
+      // 落笔后：记忆同步 + 写后自检复检（对比改前）
+      void runPostGenerateMemorySync(myGen, finalText || revised, {
+        previousSelfCheck
+      })
     } catch {
       if (genRef.current === myGen) {
         setAdjusting(false)
@@ -1432,11 +1601,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       pipelineHint?: 'off' | 'memory_only' | 'full'
       attempt?: number
       autoRetry?: boolean
+      /** 改前自检，用于复检对比文案 */
+      previousSelfCheck?: ChapterSelfCheckReport | null
     }
   ) => {
     const contentSnapshot = fullContent
     const attempt = opts?.attempt ?? 0
     const allowAutoRetry = opts?.autoRetry !== false
+    const previousSelfCheck = opts?.previousSelfCheck ?? null
     try {
       const api = window.api as {
         getAutoPostWritePipeline?: () => Promise<'off' | 'memory_only' | 'full'>
@@ -1450,7 +1622,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           memory: import('../../shared/types').MemoryApplyResult
           settings: import('../../shared/types').SettingsApplyResult
           extraction: import('../../shared/types').MemoryExtraction
+          selfCheck?: ChapterSelfCheckReport | null
         } | null>
+        selfCheckChapter?: (
+          projectId: string,
+          chapterNumber: number,
+          content: string
+        ) => Promise<ChapterSelfCheckReport>
       }
       if (!api.syncChapterAfterWrite) return
 
@@ -1464,7 +1642,53 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         }
       }
       if (pipeline === 'off' && !opts?.force) {
-        setPostWriteSync(null)
+        // 记忆同步关闭时仍跑写后自检（纯算法，零 token）
+        if (api.selfCheckChapter) {
+          try {
+            setSelfCheckLoading(true)
+            const sc = await api.selfCheckChapter(
+              projectId,
+              chapterNumber,
+              contentSnapshot
+            )
+            if (genRef.current !== myGen) return
+            const deltaMsg = formatSelfCheckDelta(previousSelfCheck, sc)
+            setPostWriteSync({
+              phase: sc.ok ? 'ok' : 'partial',
+              message: deltaMsg,
+              errors: sc.ok
+                ? []
+                : sc.items
+                    .filter((i) => i.verdict === 'fail')
+                    .map((i) => `${i.label}：${i.detail}`),
+              contentForRetry: contentSnapshot,
+              at: Date.now(),
+              canUndo: syncHistoryRef.current.length > 0,
+              undoDepth: syncHistoryRef.current.length,
+              receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
+              selfCheck: sc
+            })
+            setAutoSyncSeed((prev) =>
+              prev
+                ? { ...prev, selfCheck: sc }
+                : null
+            )
+            setUndoToast({
+              message: deltaMsg,
+              type: sc.ok ? (sc.counts.warn > 0 ? 'info' : 'success') : 'error'
+            })
+            // 仅自检失败时强制打开面板（warn 用 toast，避免打扰）
+            if (!sc.ok) {
+              setFlowPanelOpen(true)
+            }
+          } catch {
+            setPostWriteSync(null)
+          } finally {
+            setSelfCheckLoading(false)
+          }
+        } else {
+          setPostWriteSync(null)
+        }
         return
       }
       if (genRef.current !== myGen) return
@@ -1513,10 +1737,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setAutoSyncSeed({
         extraction: sync.extraction,
         memory: sync.memory,
-        settings: sync.settings
+        settings: sync.settings,
+        selfCheck: sync.selfCheck ?? null
       })
 
-      const summary = summarizePostWriteSync(sync)
+      const summary = summarizePostWriteSync({
+        ...sync,
+        selfCheck: sync.selfCheck ?? null
+      })
       const phase: PostWriteSyncPhase = summary.phase
 
       if (
@@ -1532,7 +1760,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           at: Date.now(),
           canUndo: syncHistoryRef.current.length > 0,
           undoDepth: syncHistoryRef.current.length,
-          receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+          receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
+          selfCheck: sync.selfCheck ?? null
         })
         await new Promise((r) => setTimeout(r, POST_WRITE_SYNC_RETRY_DELAY_MS))
         if (genRef.current !== myGen) return
@@ -1540,7 +1769,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           force: opts?.force,
           pipelineHint: pipeline,
           attempt: attempt + 1,
-          autoRetry: true
+          autoRetry: true,
+          previousSelfCheck
         })
         return
       }
@@ -1582,6 +1812,16 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       }
 
       const depth = syncHistoryRef.current.length
+      const sc = sync.selfCheck ?? null
+      // 有改前快照时，用复检对比文案替换自检摘要段（保留「已同步…」前缀）
+      if (sc && previousSelfCheck) {
+        const delta = formatSelfCheckDelta(previousSelfCheck, sc)
+        if (message.includes(sc.summary)) {
+          message = message.replace(sc.summary, delta)
+        } else if (!message.includes(delta)) {
+          message = `${message}；${delta}`
+        }
+      }
       setPostWriteSync({
         phase,
         message:
@@ -1593,8 +1833,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         at: Date.now(),
         canUndo: depth > 0,
         undoDepth: depth,
-        receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null
+        receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
+        selfCheck: sc
       })
+
+      // 仅自检失败时强制打开流程面板
+      if (sc && !sc.ok) {
+        setFlowPanelOpen(true)
+      }
 
       if (pipeline === 'full' && !opts?.force && phase !== 'failed') {
         setSkipMemoryOnAutoSyncAll(true)
@@ -1608,7 +1854,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         })
       } else if (phase === 'partial') {
         setUndoToast({
-          message: `${summary.message}（不影响续写）`,
+          message: `${message}（不影响续写）`,
           type: 'warning'
         })
       } else {
@@ -1616,8 +1862,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           message:
             pipeline === 'full' && !opts?.force
               ? '已同步记忆，正在跑细纲/节奏/图解…'
-              : summary.message,
-          type: 'info'
+              : message,
+          type: sc && previousSelfCheck && sc.ok && sc.counts.warn === 0 ? 'success' : 'info'
         })
       }
     } catch (err) {
@@ -1641,7 +1887,8 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           force: opts?.force,
           pipelineHint: opts?.pipelineHint,
           attempt: attempt + 1,
-          autoRetry: true
+          autoRetry: true,
+          previousSelfCheck
         })
         return
       }
@@ -1665,6 +1912,95 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   /** 状态条 / 流程面板：对上次正文快照（或失败队列）重新跑同步 */
+  const applySelfCheckToRewrite = () => {
+    const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    const text = buildTempRequirementsFromSelfCheck(sc, {
+      mode: 'rewrite',
+      chapterNumber
+    })
+    if (!text.trim()) {
+      setUndoToast({ message: '当前自检无失败/留意项，无需改正文', type: 'info' })
+      return
+    }
+    setAdjustInstruction(text)
+    setAdjustPlan('')
+    setAdjustPlanChecks([])
+    setShowAdjustDialog(true)
+    setUndoToast({
+      message: '已填入「按要求重写」：可直接出建议或确认落笔',
+      type: 'success'
+    })
+  }
+
+  const applySelfCheckToContinue = () => {
+    const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    const text = buildTempRequirementsFromSelfCheck(sc, {
+      mode: 'continue',
+      chapterNumber
+    })
+    if (!text.trim()) {
+      setUndoToast({ message: '当前自检无失败/留意项', type: 'info' })
+      return
+    }
+    setTempContextInput(text)
+    setShowContinueDialog(true)
+    setUndoToast({
+      message: '已填入续写临时要求，确认后点「带临时要求续写」',
+      type: 'success'
+    })
+  }
+
+  const rerunSelfCheck = async () => {
+    const api = window.api as {
+      selfCheckChapter?: (
+        projectId: string,
+        chapterNumber: number,
+        content: string
+      ) => Promise<import('../../shared/types').ChapterSelfCheckReport>
+    }
+    if (!api.selfCheckChapter) return
+    setSelfCheckLoading(true)
+    try {
+      const sc = await api.selfCheckChapter(projectId, chapterNumber, draft)
+      setPostWriteSync((prev) =>
+        prev
+          ? {
+              ...prev,
+              selfCheck: sc,
+              message: prev.phase === 'syncing' ? prev.message : `${prev.message.replace(/；写后自检[^；]*/g, '')}；${sc.summary}`.replace(/^；/, '')
+            }
+          : {
+              phase: sc.ok ? 'ok' : 'partial',
+              message: sc.summary,
+              errors: sc.ok
+                ? []
+                : sc.items
+                    .filter((i) => i.verdict === 'fail')
+                    .map((i) => `${i.label}：${i.detail}`),
+              contentForRetry: draft,
+              at: Date.now(),
+              canUndo: syncHistoryRef.current.length > 0,
+              undoDepth: syncHistoryRef.current.length,
+              receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
+              selfCheck: sc
+            }
+      )
+      setAutoSyncSeed((prev) => (prev ? { ...prev, selfCheck: sc } : prev))
+      setUndoToast({
+        message: sc.summary,
+        type: sc.ok ? (sc.counts.warn > 0 ? 'info' : 'success') : 'error'
+      })
+    } catch (err) {
+      console.warn('[rerunSelfCheck]', err)
+      setUndoToast({
+        message: '写后自检失败',
+        type: 'error'
+      })
+    } finally {
+      setSelfCheckLoading(false)
+    }
+  }
+
   const retryPostWriteSync = () => {
     const snapshot = postWriteSync?.contentForRetry?.trim()
       ? postWriteSync.contentForRetry
@@ -2635,11 +2971,11 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         </button>
         <button
           className="btn btn-sm"
-          onClick={() => setShowAdjustDialog(true)}
-          disabled={adjusting || generating}
-          title="按新的追问要求调整当前已生成正文"
+          onClick={openAdjustDialog}
+          disabled={adjusting || generating || adjustPlanning}
+          title="先看修改建议，确认后再落笔重写正文"
         >
-          {adjusting ? '调整中…' : '按要求重写'}
+          {adjusting ? '落笔中…' : adjustPlanning ? '出建议中…' : '按要求重写'}
         </button>
         <button
           className="btn btn-sm"
@@ -2930,6 +3266,13 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 }
               : null
           }
+          selfCheckReport={
+            postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+          }
+          onRerunSelfCheck={() => void rerunSelfCheck()}
+          selfCheckLoading={selfCheckLoading}
+          onApplySelfCheckToRewrite={applySelfCheckToRewrite}
+          onApplySelfCheckToContinue={applySelfCheckToContinue}
           onRetryAutoSync={retryPostWriteSync}
           onUndoAutoSync={
             postWriteSync?.canUndo || syncHistoryDepth > 0
@@ -3936,37 +4279,339 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       ) : null}
 
       {showAdjustDialog ? (
-        <div className="dialog-overlay" onClick={() => setShowAdjustDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
-          <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 780, maxWidth: '95vw', background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 28, boxShadow: 'var(--shadow-lg)' }}>
+        <div
+          className="dialog-overlay"
+          onClick={closeAdjustDialog}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0,0,0,0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10000
+          }}
+        >
+          <div
+            className="dialog-card"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 820,
+              maxWidth: '95vw',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              background: 'var(--surface-2)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--r-md)',
+              padding: 28,
+              boxShadow: 'var(--shadow-lg)'
+            }}
+          >
             <header>
-              <strong style={{ fontSize: 16.5 }}>追问调整正文</strong>
+              <strong style={{ fontSize: 16.5 }}>按要求重写</strong>
             </header>
             <div className="dialog-body" style={{ marginTop: 12 }}>
-              <p style={{ fontSize: 14, color: 'var(--ink-2)', margin: 0, lineHeight: 1.5 }}>
-                写下这次想怎么改，AI 会基于当前编辑器里的正文生成一版完整修订稿，先替换草稿，不会自动保存。
+              <p style={{ fontSize: 14, color: 'var(--ink-2)', margin: 0, lineHeight: 1.55 }}>
+                先写下这次想怎么改。AI 会先给出<strong>修改建议</strong>（不改正文）；你可勾选要执行的落笔要点，
+                再点「确认落笔」。落笔后不会自动保存，可用 Ctrl+Z 撤销。
               </p>
+              <label
+                style={{
+                  display: 'block',
+                  marginTop: 16,
+                  fontSize: 12.5,
+                  color: 'var(--ink-3)',
+                  fontWeight: 600
+                }}
+              >
+                你的修改要求
+              </label>
               <textarea
                 className="textarea"
                 placeholder="例如：把高潮前的铺垫压短一点；加强女主的反击，不要只靠旁白解释；结尾改成一句对话钩子。"
                 value={adjustInstruction}
                 onChange={(e) => setAdjustInstruction(e.target.value)}
-                style={{ width: '100%', minHeight: 240, marginTop: 14, fontSize: 14, padding: 12, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
+                disabled={adjustPlanning || adjusting}
+                style={{
+                  width: '100%',
+                  minHeight: 120,
+                  marginTop: 6,
+                  fontSize: 14,
+                  padding: 12,
+                  borderRadius: 'var(--r-sm)',
+                  background: 'var(--surface)',
+                  border: '1px solid var(--line)',
+                  color: 'var(--ink)',
+                  resize: 'vertical'
+                }}
               />
+
+              {(adjustPlanning || adjustPlan) && (
+                <>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      marginTop: 18,
+                      fontSize: 12.5,
+                      color: 'var(--ink-3)',
+                      fontWeight: 600
+                    }}
+                  >
+                    修改建议
+                    {adjustPlanning ? (
+                      <span style={{ fontWeight: 400, color: 'var(--ink-3)' }}>生成中…</span>
+                    ) : (
+                      <span style={{ fontWeight: 400, color: 'var(--ink-3)' }}>
+                        全文可改；下方勾选要执行的要点
+                      </span>
+                    )}
+                  </label>
+                  <textarea
+                    className="textarea"
+                    placeholder={adjustPlanning ? '正在分析你的要求并撰写建议…' : ''}
+                    value={adjustPlan}
+                    onChange={(e) => setAdjustPlan(e.target.value)}
+                    disabled={adjustPlanning || adjusting}
+                    style={{
+                      width: '100%',
+                      minHeight: adjustPlanChecks.length > 0 ? 160 : 280,
+                      marginTop: 6,
+                      fontSize: 13.5,
+                      lineHeight: 1.55,
+                      padding: 12,
+                      borderRadius: 'var(--r-sm)',
+                      background: 'var(--surface)',
+                      border: '1px solid var(--line)',
+                      color: 'var(--ink)',
+                      resize: 'vertical',
+                      fontFamily: 'var(--font-serif, inherit)'
+                    }}
+                  />
+
+                  {!adjustPlanning && adjustPlan.trim() && (
+                    <div style={{ marginTop: 14 }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 8,
+                          flexWrap: 'wrap'
+                        }}
+                      >
+                        <label
+                          style={{
+                            fontSize: 12.5,
+                            color: 'var(--ink-3)',
+                            fontWeight: 600
+                          }}
+                        >
+                          勾选要落笔的要点
+                          {adjustPlanChecks.length > 0 ? (
+                            <span style={{ fontWeight: 400, marginLeft: 6 }}>
+                              已选 {adjustPlanChecks.filter((x) => x.checked).length}/
+                              {adjustPlanChecks.length}
+                            </span>
+                          ) : null}
+                        </label>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            disabled={adjusting || !adjustPlan.trim()}
+                            onClick={() => syncAdjustPlanChecks(adjustPlan)}
+                            title="若你改过上方建议文案，可重新提取列表"
+                          >
+                            重新提取
+                          </button>
+                          {adjustPlanChecks.length > 0 ? (
+                            <>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                disabled={adjusting}
+                                onClick={() =>
+                                  setAdjustPlanChecks((xs) =>
+                                    xs.map((x) => ({ ...x, checked: true }))
+                                  )
+                                }
+                              >
+                                全选
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                disabled={adjusting}
+                                onClick={() =>
+                                  setAdjustPlanChecks((xs) =>
+                                    xs.map((x) => ({ ...x, checked: false }))
+                                  )
+                                }
+                              >
+                                全不选
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      {adjustPlanChecks.length > 0 ? (
+                        <ul
+                          style={{
+                            listStyle: 'none',
+                            margin: '8px 0 0',
+                            padding: 0,
+                            border: '1px solid var(--line)',
+                            borderRadius: 'var(--r-sm)',
+                            background: 'var(--surface)',
+                            maxHeight: 260,
+                            overflowY: 'auto'
+                          }}
+                        >
+                          {adjustPlanChecks.map((item, idx) => (
+                            <li
+                              key={item.id}
+                              style={{
+                                display: 'flex',
+                                gap: 10,
+                                alignItems: 'flex-start',
+                                padding: '10px 12px',
+                                borderBottom:
+                                  idx < adjustPlanChecks.length - 1
+                                    ? '1px solid var(--line)'
+                                    : 'none'
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={item.checked}
+                                disabled={adjusting}
+                                onChange={() =>
+                                  setAdjustPlanChecks((xs) =>
+                                    xs.map((x) =>
+                                      x.id === item.id ? { ...x, checked: !x.checked } : x
+                                    )
+                                  )
+                                }
+                                style={{ marginTop: 3, flexShrink: 0 }}
+                                id={`adjust-plan-check-${item.id}`}
+                              />
+                              <label
+                                htmlFor={`adjust-plan-check-${item.id}`}
+                                style={{
+                                  fontSize: 13.5,
+                                  lineHeight: 1.5,
+                                  color: item.checked ? 'var(--ink)' : 'var(--ink-3)',
+                                  cursor: adjusting ? 'default' : 'pointer',
+                                  flex: 1
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    color: 'var(--ink-3)',
+                                    fontSize: 12,
+                                    marginRight: 6
+                                  }}
+                                >
+                                  {idx + 1}.
+                                </span>
+                                {item.text}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p
+                          style={{
+                            margin: '8px 0 0',
+                            fontSize: 12.5,
+                            color: 'var(--ink-3)',
+                            lineHeight: 1.5
+                          }}
+                        >
+                          未能从建议中识别编号列表。可点「重新提取」，或直接「确认落笔」按整份建议执行。
+                          理想情况下建议文末有「## 落笔要点」+ 1. 2. 3. 列表。
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-            <footer style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+            <footer
+              style={{
+                marginTop: 24,
+                display: 'flex',
+                justifyContent: 'flex-end',
+                flexWrap: 'wrap',
+                gap: 10
+              }}
+            >
               <button
                 className="btn btn-ghost"
-                onClick={() => setShowAdjustDialog(false)}
+                onClick={closeAdjustDialog}
+                disabled={adjustPlanning || adjusting}
               >
                 取消
               </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => void adjustChapter()}
-                disabled={adjusting || !adjustInstruction.trim()}
-              >
-                {adjusting ? '调整中…' : '开始调整'}
-              </button>
+              {!adjustPlan && !adjustPlanning ? (
+                <>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => void adjustChapter(false)}
+                    disabled={adjusting || !adjustInstruction.trim()}
+                    title="跳过建议，直接按你的要求重写正文"
+                  >
+                    直接落笔
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void planAdjustChapter()}
+                    disabled={adjustPlanning || adjusting || !adjustInstruction.trim()}
+                  >
+                    先看修改建议
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => void planAdjustChapter()}
+                    disabled={adjustPlanning || adjusting || !adjustInstruction.trim()}
+                    title="按当前要求重新生成一份建议"
+                  >
+                    {adjustPlanning ? '生成中…' : '重新生成建议'}
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void adjustChapter(true)}
+                    disabled={
+                      adjustPlanning ||
+                      adjusting ||
+                      !adjustInstruction.trim() ||
+                      !adjustPlan.trim() ||
+                      (adjustPlanChecks.length > 0 &&
+                        adjustPlanChecks.every((x) => !x.checked))
+                    }
+                    title={
+                      adjustPlanChecks.length > 0
+                        ? '仅按勾选的落笔要点重写正文'
+                        : '按整份建议重写正文'
+                    }
+                  >
+                    {adjusting
+                      ? '落笔中…'
+                      : adjustPlanChecks.length > 0
+                        ? `确认落笔（${adjustPlanChecks.filter((x) => x.checked).length}/${adjustPlanChecks.length}）`
+                        : '确认落笔'}
+                  </button>
+                </>
+              )}
             </footer>
           </div>
         </div>

@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// mock child_process.spawn，模拟 codex 子进程行为
+// mock child_process.spawn，模拟 codex app-server 子进程行为
 const { EventEmitter } = require('events')
 
 interface FakeChild extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> }
+  stdin: {
+    write: ReturnType<typeof vi.fn>
+    end: ReturnType<typeof vi.fn>
+    writable: boolean
+  }
   stdout: EventEmitter
   stderr: EventEmitter
   killed: boolean
@@ -17,51 +21,300 @@ let fakeChildFactory: (() => FakeChild) | null = null
 vi.mock('child_process', () => ({
   spawn: vi.fn((bin: string, args: string[]) => {
     lastSpawnArgs = { bin, args }
-    return fakeChildFactory
-      ? fakeChildFactory()
-      : createFakeChild({ stdout: '', exitCode: 0 })
+    return fakeChildFactory ? fakeChildFactory() : createAutoAppServerChild()
   })
 }))
 
-// mock fs/promises.readFile（listCodexModels 读 config.toml）
 vi.mock('fs/promises', () => ({
   readFile: vi.fn()
 }))
 
-function createFakeChild(opts: {
-  stdout: string
-  stderr?: string
-  exitCode: number
-  spawnError?: { code: string; message: string }
-  /** 自定义分块：把 stdout 按指定 Buffer 数组分多次 emit（测试 UTF-8 截断） */
-  stdoutChunks?: Buffer[]
-}): FakeChild {
+function createFakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild
-  child.stdin = { write: vi.fn(), end: vi.fn() }
+  child.stdin = {
+    write: vi.fn(),
+    end: vi.fn(),
+    writable: true
+  }
   child.stdout = new EventEmitter()
   child.stderr = new EventEmitter()
   child.killed = false
   child.kill = vi.fn(() => {
     child.killed = true
+    setImmediate(() => child.emit('close', 0))
   })
+  return child
+}
 
-  setImmediate(() => {
-    if (opts.spawnError) {
-      const err = Object.assign(new Error(opts.spawnError.message), {
-        code: opts.spawnError.code
+/** 解析 stdin 写出的 JSON-RPC，驱动自动响应 */
+function createAutoAppServerChild(opts?: {
+  deltas?: string[]
+  completedText?: string
+  usage?: { input: number; output: number }
+  turnStatus?: 'completed' | 'failed' | 'interrupted'
+  turnErrorMessage?: string
+  failInitialize?: string
+  failThread?: string
+  spawnError?: { code: string; message: string }
+  /** 不自动回复 turn/start 之后的 turn/completed（用于 abort/timeout） */
+  hangAfterTurnStart?: boolean
+  /** 在 delta 之前注入的服务端消息（如审批请求） */
+  injectBeforeDeltas?: Record<string, unknown>[]
+}): FakeChild {
+  const child = createFakeChild()
+  const deltas = opts?.deltas ?? ['你', '好']
+  const completedText = opts?.completedText ?? deltas.join('')
+  const turnStatus = opts?.turnStatus ?? 'completed'
+
+  if (opts?.spawnError) {
+    setImmediate(() => {
+      const err = Object.assign(new Error(opts.spawnError!.message), {
+        code: opts.spawnError!.code
       })
       child.emit('error', err)
-      return
-    }
-    if (opts.stdoutChunks) {
-      for (const c of opts.stdoutChunks) {
-        child.stdout.emit('data', c)
+    })
+    return child
+  }
+
+  child.stdin.write = vi.fn((raw: string) => {
+    const lines = String(raw).split('\n').filter(Boolean)
+    for (const line of lines) {
+      let msg: Record<string, unknown>
+      try {
+        msg = JSON.parse(line)
+      } catch {
+        continue
       }
-    } else {
-      child.stdout.emit('data', Buffer.from(opts.stdout, 'utf8'))
+      const method = msg.method as string | undefined
+      const id = msg.id as number | undefined
+
+      // initialized 通知
+      if (method === 'initialized') continue
+
+      if (method === 'initialize' && id != null) {
+        if (opts?.failInitialize) {
+          setImmediate(() =>
+            child.stdout.emit(
+              'data',
+              Buffer.from(
+                JSON.stringify({
+                  id,
+                  error: { code: -32000, message: opts.failInitialize }
+                }) + '\n',
+                'utf8'
+              )
+            )
+          )
+          continue
+        }
+        setImmediate(() =>
+          child.stdout.emit(
+            'data',
+            Buffer.from(JSON.stringify({ id, result: { userAgent: 'codex' } }) + '\n', 'utf8')
+          )
+        )
+        continue
+      }
+
+      if (method === 'thread/start' && id != null) {
+        if (opts?.failThread) {
+          setImmediate(() =>
+            child.stdout.emit(
+              'data',
+              Buffer.from(
+                JSON.stringify({
+                  id,
+                  error: { code: -32000, message: opts.failThread }
+                }) + '\n',
+                'utf8'
+              )
+            )
+          )
+          continue
+        }
+        setImmediate(() => {
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                id,
+                result: { thread: { id: 'thr_test' } }
+              }) + '\n',
+              'utf8'
+            )
+          )
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                method: 'thread/started',
+                params: { thread: { id: 'thr_test' } }
+              }) + '\n',
+              'utf8'
+            )
+          )
+        })
+        continue
+      }
+
+      if (method === 'turn/start' && id != null) {
+        setImmediate(() => {
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                id,
+                result: { turn: { id: 'turn_test', status: 'inProgress' } }
+              }) + '\n',
+              'utf8'
+            )
+          )
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                method: 'turn/started',
+                params: { turn: { id: 'turn_test' } }
+              }) + '\n',
+              'utf8'
+            )
+          )
+
+          if (opts?.hangAfterTurnStart) return
+
+          for (const extra of opts?.injectBeforeDeltas ?? []) {
+            child.stdout.emit(
+              'data',
+              Buffer.from(JSON.stringify(extra) + '\n', 'utf8')
+            )
+          }
+
+          // 流式 delta
+          for (const d of deltas) {
+            child.stdout.emit(
+              'data',
+              Buffer.from(
+                JSON.stringify({
+                  method: 'item/agentMessage/delta',
+                  params: {
+                    threadId: 'thr_test',
+                    turnId: 'turn_test',
+                    itemId: 'item_0',
+                    delta: d
+                  }
+                }) + '\n',
+                'utf8'
+              )
+            )
+          }
+          // completed 权威全文
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                method: 'item/completed',
+                params: {
+                  threadId: 'thr_test',
+                  turnId: 'turn_test',
+                  item: { id: 'item_0', type: 'agentMessage', text: completedText },
+                  completedAtMs: Date.now()
+                }
+              }) + '\n',
+              'utf8'
+            )
+          )
+          if (opts?.usage) {
+            child.stdout.emit(
+              'data',
+              Buffer.from(
+                JSON.stringify({
+                  method: 'thread/tokenUsage/updated',
+                  params: {
+                    threadId: 'thr_test',
+                    turnId: 'turn_test',
+                    tokenUsage: {
+                      last: {
+                        inputTokens: opts.usage.input,
+                        outputTokens: opts.usage.output,
+                        totalTokens: opts.usage.input + opts.usage.output,
+                        cachedInputTokens: 0,
+                        reasoningOutputTokens: 0
+                      },
+                      total: {
+                        inputTokens: opts.usage.input,
+                        outputTokens: opts.usage.output,
+                        totalTokens: opts.usage.input + opts.usage.output,
+                        cachedInputTokens: 0,
+                        reasoningOutputTokens: 0
+                      },
+                      modelContextWindow: 200000
+                    }
+                  }
+                }) + '\n',
+                'utf8'
+              )
+            )
+          }
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                method: 'turn/completed',
+                params: {
+                  threadId: 'thr_test',
+                  turn: {
+                    id: 'turn_test',
+                    status: turnStatus,
+                    error: opts?.turnErrorMessage
+                      ? { message: opts.turnErrorMessage, codexErrorInfo: null, additionalDetails: null }
+                      : null,
+                    items: [],
+                    itemsView: 'full',
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null
+                  }
+                }
+              }) + '\n',
+              'utf8'
+            )
+          )
+        })
+        continue
+      }
+
+      if (method === 'turn/interrupt' && id != null) {
+        setImmediate(() => {
+          child.stdout.emit(
+            'data',
+            Buffer.from(JSON.stringify({ id, result: {} }) + '\n', 'utf8')
+          )
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              JSON.stringify({
+                method: 'turn/completed',
+                params: {
+                  threadId: 'thr_test',
+                  turn: {
+                    id: 'turn_test',
+                    status: 'interrupted',
+                    error: null,
+                    items: [],
+                    itemsView: 'full',
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null
+                  }
+                }
+              }) + '\n',
+              'utf8'
+            )
+          )
+        })
+      }
     }
-    if (opts.stderr) child.stderr.emit('data', Buffer.from(opts.stderr, 'utf8'))
-    child.emit('close', opts.exitCode)
+    return true
   })
 
   return child
@@ -78,269 +331,251 @@ beforeEach(() => {
   mockedReadFile.mockReset()
 })
 
-/** 构造 codex --json 的标准 JSONL 输出 */
-function codexJsonl(text: string, usage?: { input: number; output: number }): string {
-  const lines = [
-    '{"type":"thread.started","thread_id":"test-id"}',
-    '{"type":"turn.started"}'
-  ]
-  lines.push(JSON.stringify({
-    type: 'item.completed',
-    item: { id: 'item_0', type: 'agent_message', text }
-  }))
-  if (usage) {
-    lines.push(JSON.stringify({
-      type: 'turn.completed',
-      usage: { input_tokens: usage.input, output_tokens: usage.output }
-    }))
-  }
-  return lines.join('\n') + '\n'
-}
-
-describe('runCodex', () => {
-  it('用 stdin 传 prompt，args 含 exec --json --ephemeral', async () => {
+describe('runCodex (app-server)', () => {
+  it('spawn app-server 而非 exec --json', async () => {
     fakeChildFactory = () =>
-      createFakeChild({ stdout: codexJsonl('你好，世界'), exitCode: 0 })
+      createAutoAppServerChild({ deltas: ['好'], usage: { input: 10, output: 1 } })
 
-    const result = await runCodex('回复两个字', {})
+    const result = await runCodex('回复一个字', {})
 
     expect(lastSpawnArgs).not.toBeNull()
-    // bin 可能是 'codex'（Unix）或绝对路径 .exe/.cmd（Windows）
     expect(
       lastSpawnArgs!.bin.endsWith('codex') ||
-      lastSpawnArgs!.bin.endsWith('codex.exe') ||
-      lastSpawnArgs!.bin.endsWith('codex.cmd')
+        lastSpawnArgs!.bin.endsWith('codex.exe') ||
+        lastSpawnArgs!.bin.endsWith('codex.cmd')
     ).toBe(true)
-    expect(lastSpawnArgs!.args).toContain('exec')
-    expect(lastSpawnArgs!.args).toContain('--json')
-    expect(lastSpawnArgs!.args).toContain('--ephemeral')
-    expect(lastSpawnArgs!.args).toContain('--skip-git-repo-check')
-    expect(lastSpawnArgs!.args).toContain('-s')
-    expect(lastSpawnArgs!.args).toContain('read-only')
-    expect(result.full).toBe('你好，世界')
+    expect(lastSpawnArgs!.args).toEqual(['app-server'])
+    expect(result.full).toBe('好')
   })
 
-  it('model 非空时追加 -m', async () => {
-    fakeChildFactory = () =>
-      createFakeChild({ stdout: codexJsonl('好'), exitCode: 0 })
+  it('model 非空时 thread/start 带 model', async () => {
+    let threadStartParams: Record<string, unknown> | null = null
+    fakeChildFactory = () => {
+      const child = createAutoAppServerChild({ deltas: ['好'] })
+      const origWrite = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          try {
+            const msg = JSON.parse(line)
+            if (msg.method === 'thread/start') threadStartParams = msg.params
+          } catch {
+            // skip
+          }
+        }
+        return origWrite(raw)
+      })
+      return child
+    }
 
     await runCodex('测试', { model: 'gpt-5.5' })
-
-    const idx = lastSpawnArgs!.args.indexOf('-m')
-    expect(idx).toBeGreaterThan(-1)
-    expect(lastSpawnArgs!.args[idx + 1]).toBe('gpt-5.5')
+    expect(threadStartParams).not.toBeNull()
+    expect(threadStartParams!.model).toBe('gpt-5.5')
   })
 
-  it('model 为空时跳过 -m', async () => {
-    fakeChildFactory = () =>
-      createFakeChild({ stdout: codexJsonl('好'), exitCode: 0 })
+  it('model 为空时 thread/start 不带 model', async () => {
+    let threadStartParams: Record<string, unknown> | null = null
+    fakeChildFactory = () => {
+      const child = createAutoAppServerChild({ deltas: ['好'] })
+      const origWrite = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          try {
+            const msg = JSON.parse(line)
+            if (msg.method === 'thread/start') threadStartParams = msg.params
+          } catch {
+            // skip
+          }
+        }
+        return origWrite(raw)
+      })
+      return child
+    }
 
     await runCodex('测试', { model: undefined })
-
-    expect(lastSpawnArgs!.args).not.toContain('-m')
+    expect(threadStartParams).not.toBeNull()
+    expect(threadStartParams!.model).toBeUndefined()
   })
 
-  it('解析 JSONL item.completed 提取 agent_message 文本', async () => {
-    const jsonl = [
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"第一段"}}',
-      '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"第二段"}}',
-      '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
-
-    const result = await runCodex('测试', {})
-
-    // 多个 agent_message 文本应拼接
-    expect(result.full).toBe('第一段第二段')
-  })
-
-  it('从 turn.completed 提取精确用量', async () => {
+  it('onToken 按 item/agentMessage/delta 真流式喂回', async () => {
     fakeChildFactory = () =>
-      createFakeChild({
-        stdout: codexJsonl('你好', { input: 1500, output: 10 }),
-        exitCode: 0
+      createAutoAppServerChild({
+        deltas: ['第一', '段', '正文'],
+        completedText: '第一段正文',
+        usage: { input: 100, output: 5 }
+      })
+
+    const tokens: string[] = []
+    const result = await runCodex('测试', { onToken: (t) => tokens.push(t) })
+
+    expect(tokens).toEqual(['第一', '段', '正文'])
+    expect(result.full).toBe('第一段正文')
+  })
+
+  it('item/completed 有全文但无 delta 时兜底喂 onToken', async () => {
+    fakeChildFactory = () => createAutoAppServerChild({ deltas: [], completedText: '整段兜底' })
+
+    const tokens: string[] = []
+    const result = await runCodex('测试', { onToken: (t) => tokens.push(t) })
+
+    expect(tokens).toEqual(['整段兜底'])
+    expect(result.full).toBe('整段兜底')
+  })
+
+  it('有 delta 时 item/completed 不重复 onToken', async () => {
+    fakeChildFactory = () =>
+      createAutoAppServerChild({
+        deltas: ['A', 'B'],
+        completedText: 'AB'
+      })
+
+    const tokens: string[] = []
+    await runCodex('测试', { onToken: (t) => tokens.push(t) })
+    expect(tokens).toEqual(['A', 'B'])
+  })
+
+  it('从 thread/tokenUsage/updated 提取精确用量', async () => {
+    fakeChildFactory = () =>
+      createAutoAppServerChild({
+        deltas: ['你好'],
+        usage: { input: 1500, output: 10 }
       })
 
     const result = await runCodex('测试', {})
-
     expect(result.usage).not.toBeNull()
     expect(result.usage!.inputTokens).toBe(1500)
     expect(result.usage!.outputTokens).toBe(10)
     expect(result.usage!.totalTokens).toBe(1510)
   })
 
-  it('turn.completed 缺失时兜底估算用量', async () => {
-    // 只有 item.completed 没有 turn.completed
-    const jsonl = [
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"你好"}}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
+  it('用量缺失时按字数估算', async () => {
+    fakeChildFactory = () => createAutoAppServerChild({ deltas: ['你好'] }) // 2 字 → ceil(2/1.5)=2
 
     const result = await runCodex('测试', {})
-
-    // 兜底：ceil(2/1.5) = 2
     expect(result.usage!.outputTokens).toBe(2)
   })
 
-  it('onToken 回调按 item.completed 喂回', async () => {
-    const jsonl = [
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"你好"}}',
-      '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
-
-    const tokens: string[] = []
-    await runCodex('测试', { onToken: (t) => tokens.push(t) })
-
-    expect(tokens).toEqual(['你好'])
-  })
-
-  it('UTF-8 多字节字符被 chunk 边界截断时 JSONL 仍能正确解析', async () => {
-    // 构造一条完整的 JSONL，其中 text 含中文"冰冷冰霜"
-    // 把字节在"冰"和"霜"中间断开，模拟 chunk 截断
-    const jsonl = [
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      JSON.stringify({ type: 'item.completed', item: { id: 'i0', type: 'agent_message', text: '冰冷冰霜' } }),
-      '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
-    ].join('\n') + '\n'
-    const full = Buffer.from(jsonl, 'utf8')
-    // 在 "冰冷冰" 和 "霜" 之间断开（前半段含完整 JSON 到 text 字段值的中间）
-    const splitAt = Math.floor(full.length / 2)
+  it('turn failed + model not supported -> CODEX_MODEL_ERROR', async () => {
     fakeChildFactory = () =>
-      createFakeChild({
-        stdout: '',
-        exitCode: 0,
-        stdoutChunks: [full.subarray(0, splitAt), full.subarray(splitAt)]
+      createAutoAppServerChild({
+        deltas: [],
+        turnStatus: 'failed',
+        turnErrorMessage: 'The model is not supported when using Codex with a ChatGPT account.'
       })
-
-    const result = await runCodex('测试', {})
-    expect(result.full).toBe('冰冷冰霜')
-    expect(result.full).not.toContain('\uFFFD')
-  })
-
-  it('turn.failed 事件 -> reject 错误', async () => {
-    const jsonl = [
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      '{"type":"turn.failed","error":{"message":"The model is not supported when using Codex with a ChatGPT account."}}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
 
     await expect(runCodex('测试', {})).rejects.toThrow('CODEX_MODEL_ERROR')
   })
 
-  it('error 事件含 auth -> CODEX_AUTH_EXPIRED', async () => {
-    const jsonl = [
-      '{"type":"error","message":"authentication failed, please login"}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
+  it('鉴权错误 -> CODEX_AUTH_EXPIRED（自动重试一次后仍失败）', async () => {
+    let calls = 0
+    fakeChildFactory = () => {
+      calls++
+      return createAutoAppServerChild({
+        failThread: 'authentication failed, please login'
+      })
+    }
 
     await expect(runCodex('测试', {})).rejects.toThrow('CODEX_AUTH_EXPIRED')
-  })
+    // initialize 成功后 thread/start 失败；auth 重试会再 spawn 一次
+    expect(calls).toBeGreaterThanOrEqual(2)
+  }, 10000)
 
-  it('error 事件含 rate/limit -> LLM_RATE_LIMIT', async () => {
-    const jsonl = [
-      '{"type":"error","message":"rate limit exceeded"}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
+  it('rate limit -> LLM_RATE_LIMIT', async () => {
+    fakeChildFactory = () =>
+      createAutoAppServerChild({
+        deltas: [],
+        turnStatus: 'failed',
+        turnErrorMessage: 'rate limit exceeded'
+      })
 
     await expect(runCodex('测试', {})).rejects.toThrow('LLM_RATE_LIMIT')
   })
 
   it('spawn ENOENT -> CODEX_NOT_FOUND', async () => {
     fakeChildFactory = () =>
-      createFakeChild({
-        stdout: '',
-        exitCode: 0,
+      createAutoAppServerChild({
         spawnError: { code: 'ENOENT', message: 'not found' }
       })
 
     await expect(runCodex('测试', {})).rejects.toThrow('CODEX_NOT_FOUND')
   })
 
-  it('abort signal 触发 kill -> LLM_ABORTED', async () => {
+  it('abort signal 触发 interrupt/kill -> LLM_ABORTED', async () => {
     const controller = new AbortController()
-    fakeChildFactory = () => {
-      const child = new EventEmitter() as FakeChild
-      child.stdin = { write: vi.fn(), end: vi.fn() }
-      child.stdout = new EventEmitter()
-      child.stderr = new EventEmitter()
-      child.killed = false
-      child.kill = vi.fn(() => {
-        child.killed = true
-        setImmediate(() => child.emit('close', 0))
-      })
-      return child
-    }
+    fakeChildFactory = () => createAutoAppServerChild({ hangAfterTurnStart: true, deltas: [] })
 
     const promise = runCodex('测试', { signal: controller.signal })
+    // 等握手与 turn/start 走完
+    await new Promise((r) => setTimeout(r, 30))
     controller.abort()
 
     await expect(promise).rejects.toThrow('LLM_ABORTED')
   })
 
-  it('超时 timer 触发 kill -> LLM_TIMEOUT（即使有部分输出）', async () => {
+  it('超时 -> LLM_TIMEOUT', async () => {
+    fakeChildFactory = () => createAutoAppServerChild({ hangAfterTurnStart: true, deltas: [] })
+
+    await expect(runCodex('测试', { timeoutSec: 0 })).rejects.toThrow('LLM_TIMEOUT')
+  })
+
+  it('审批类 server request 自动 decline', async () => {
+    let declined = false
     fakeChildFactory = () => {
-      const child = new EventEmitter() as FakeChild
-      child.stdin = { write: vi.fn(), end: vi.fn() }
-      child.stdout = new EventEmitter()
-      child.stderr = new EventEmitter()
-      child.killed = false
-      child.kill = vi.fn(() => {
-        child.killed = true
-        // kill 后模拟 close（部分输出已到达但 turn 未完成）
-        setImmediate(() => {
-          child.stdout.emit('data', Buffer.from('{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"部分内容"}}\n', 'utf8'))
-          child.emit('close', 0)
-        })
+      const child = createAutoAppServerChild({
+        deltas: ['好'],
+        // 在 delta 之前插入审批请求（与 turn 同批，避免 turn/completed 后 settled）
+        injectBeforeDeltas: [
+          {
+            method: 'item/commandExecution/requestApproval',
+            id: 9999,
+            params: { threadId: 'thr_test', command: 'echo hi' }
+          }
+        ]
+      })
+      const origWrite = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          try {
+            const msg = JSON.parse(line)
+            if (msg.id != null && msg.result?.decision === 'decline') declined = true
+          } catch {
+            // skip
+          }
+        }
+        return origWrite(raw)
       })
       return child
     }
 
-    // 用极短超时触发 timer
-    await expect(runCodex('测试', { timeoutSec: 0 })).rejects.toThrow('LLM_TIMEOUT')
-  })
-
-  it('非 JSON 行（如 Reading prompt from stdin...）被跳过', async () => {
-    const jsonl = [
-      'Reading prompt from stdin...',
-      '{"type":"thread.started","thread_id":"t1"}',
-      '{"type":"turn.started"}',
-      '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"好"}}',
-      '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
-    ].join('\n') + '\n'
-    fakeChildFactory = () => createFakeChild({ stdout: jsonl, exitCode: 0 })
-
-    const result = await runCodex('测试', {})
-
-    expect(result.full).toBe('好')
+    await runCodex('测试', {})
+    expect(declined).toBe(true)
   })
 })
 
 describe('probeCodex', () => {
   it('codex --version 成功 -> 返回版本号', async () => {
-    fakeChildFactory = () =>
-      createFakeChild({ stdout: 'codex-cli 0.142.5\n', exitCode: 0 })
+    fakeChildFactory = () => {
+      const child = createFakeChild()
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from('codex-cli 0.144.6\n', 'utf8'))
+        child.emit('close', 0)
+      })
+      return child
+    }
 
     const v = await probeCodex()
-    expect(v).toBe('codex-cli 0.142.5')
+    expect(v).toBe('codex-cli 0.144.6')
     expect(lastSpawnArgs!.args).toEqual(['--version'])
   })
 
   it('codex 未安装 -> 返回 null', async () => {
-    fakeChildFactory = () =>
-      createFakeChild({
-        stdout: '',
-        exitCode: 0,
-        spawnError: { code: 'ENOENT', message: 'not found' }
+    fakeChildFactory = () => {
+      const child = createFakeChild()
+      setImmediate(() => {
+        const err = Object.assign(new Error('not found'), { code: 'ENOENT' })
+        child.emit('error', err)
       })
+      return child
+    }
 
     const v = await probeCodex()
     expect(v).toBeNull()
@@ -355,7 +590,6 @@ describe('listCodexModels', () => {
     expect(models[0]).toBe('gpt-5.5')
     expect(models).toContain('gpt-5.6-sol')
     expect(models).toContain('gpt-5.4')
-    // 不重复
     expect(models.filter((m) => m === 'gpt-5.5')).toHaveLength(1)
   })
 

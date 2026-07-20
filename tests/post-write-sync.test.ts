@@ -79,6 +79,38 @@ describe('summarizePostWriteSync', () => {
     expect(s.errors.length).toBe(2)
   })
 
+  it('appends self-check summary without elevating sync phase when self-check fails', () => {
+    const s = summarizePostWriteSync({
+      memory: { applied: { ...emptyApplied, plotPoints: 1 }, errors: [] },
+      settings: { applied: 0, errors: [] },
+      extraction: {},
+      selfCheck: {
+        ok: false,
+        summary: '写后自检未通过：1 项失败（到期伏笔回收迹象）',
+        counts: { fail: 1, warn: 0, pass: 3 }
+      }
+    })
+    // 同步本身成功 → phase 仍为 ok；自检结果仅附加在 message
+    expect(s.phase).toBe('ok')
+    expect(s.message).toContain('情节 1')
+    expect(s.message).toContain('写后自检未通过')
+  })
+
+  it('keeps ok when self-check passes with warnings', () => {
+    const s = summarizePostWriteSync({
+      memory: { applied: emptyApplied, errors: [] },
+      settings: { applied: 0, errors: [] },
+      extraction: {},
+      selfCheck: {
+        ok: true,
+        summary: '写后自检通过（2 项需留意）',
+        counts: { fail: 0, warn: 2, pass: 4 }
+      }
+    })
+    expect(s.phase).toBe('ok')
+    expect(s.message).toContain('写后自检通过')
+  })
+
   it('ok extract-only pending without auto writes', () => {
     const s = summarizePostWriteSync({
       memory: { applied: emptyApplied, errors: [] },

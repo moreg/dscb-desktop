@@ -597,13 +597,24 @@ export interface RendererApi {
     existingText: string | undefined,
     onToken: (token: string, done: boolean) => void
   ) => Promise<{ ok: boolean; error?: string }>
-  adjustChapterStream: (
+  /** 按要求重写 · 先出修改建议（不改正文） */
+  planAdjustChapterStream: (
     projectId: string,
     chapterNumber: number,
     content: string,
     instruction: string,
     styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void
+  ) => Promise<{ ok: boolean; error?: string }>
+  adjustChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileId: string | null | undefined,
+    onToken: (token: string, done: boolean) => void,
+    /** 用户已确认的修改方案；有则落笔时严格按此执行 */
+    confirmedPlan?: string | null
   ) => Promise<{ ok: boolean; error?: string }>
   getProjectsRoot: () => Promise<string>
   setProjectsRoot: (path: string) => Promise<string>
@@ -662,7 +673,15 @@ export interface RendererApi {
     memory: MemoryApplyResult
     settings: SettingsApplyResult
     extraction: MemoryExtraction
+    /** 写后自检清单对照（算法）；同步关闭时也可能仅返回此项 */
+    selfCheck?: ChapterSelfCheckReport | null
   } | null>
+  /** 单独跑写后自检（不写记忆） */
+  selfCheckChapter: (
+    projectId: string,
+    chapterNumber: number,
+    content: string
+  ) => Promise<ChapterSelfCheckReport>
   /**
    * 撤销一次写后同步的自动写入（best-effort）。
    * 需传入上次 sync 返回的 extraction + memory/settings 结果。
@@ -1207,6 +1226,10 @@ export interface VolumeOutline {
   fileName: string
   /** H2 节列表（卷核心/情绪弧线/爽点节奏/伏笔/反转/各章核心事件/卷末钩子 等） */
   sections: { title: string; body: string }[]
+  /** 卷起始章（来自大纲.md 卷表，可选） */
+  chapterStart?: number
+  /** 卷结束章（来自大纲.md 卷表，可选） */
+  chapterEnd?: number
 }
 
 /** 细纲每章的完整细节（来自 细纲/第NN卷.md 每章块） */
@@ -1337,6 +1360,40 @@ export interface AuditReport {
   /** 各 severity 计数（错误数即等于阻断 strict 模式所需修复数） */
   counts: { error: number; warn: number; info: number }
   violations: AuditViolation[]
+}
+
+/** 写后自检清单对照结果（纯算法，对照写前清单） */
+export type SelfCheckVerdict = 'pass' | 'fail' | 'warn' | 'skip'
+
+export type SelfCheckCategory =
+  | 'continuity'
+  | 'plot'
+  | 'foreshadow'
+  | 'power'
+  | 'structure'
+  | 'ban'
+
+export interface SelfCheckItemResult {
+  id: string
+  category: SelfCheckCategory
+  label: string
+  verdict: SelfCheckVerdict
+  detail: string
+}
+
+export interface ChapterSelfCheckReport {
+  schemaVersion: 1
+  chapterNumber: number
+  generatedAt: string
+  counts: { pass: number; fail: number; warn: number; skip: number }
+  items: SelfCheckItemResult[]
+  /**
+   * 无 fail 即为 true（warn 仍算通过）。
+   * 注意：未执行/加载异常应为 false，勿与「正文合格」混淆。
+   */
+  ok: boolean
+  /** toast / 状态条短文案（启发式检查，供参考） */
+  summary: string
 }
 
 /**
@@ -1947,6 +2004,8 @@ export interface ChapterFlowResult {
   figure: FigureDraft
   /** LLM 深度审稿 findings（仅当 settings.autoDeepReview=true 时填充；否则空数组） */
   deepReview?: AuditViolation[]
+  /** 写后自检清单对照（算法） */
+  selfCheck?: ChapterSelfCheckReport | null
 }
 
 /* ==========================================================

@@ -85,6 +85,34 @@ export class ProseRepo {
   }
 
   /**
+   * 枚举 正文/ 目录中已有正文文件的章号（升序去重）。
+   * 用于中程记忆：只注入「已写过」的章摘要，避免把未写细纲当成既成事实。
+   */
+  async listChapterNumbers(): Promise<number[]> {
+    const dir = join(this.projectDir, '正文')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch {
+      return []
+    }
+    const nums = new Set<number>()
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue
+      // 第001章 … / 第1章 …
+      const skill = f.match(/^第0*(\d+)章/)
+      if (skill) {
+        nums.add(parseInt(skill[1], 10))
+        continue
+      }
+      // 001.md
+      const legacy = f.match(/^(\d+)\.md$/)
+      if (legacy) nums.add(parseInt(legacy[1], 10))
+    }
+    return Array.from(nums).sort((a, b) => a - b)
+  }
+
+  /**
    * 在 正文/ 目录中查找技能格式的章节文件（第NNN章 标题.md 或 第NNN章_标题.md）。
    * 优先匹配空格分隔的新格式；找不到再匹配下划线分隔的旧格式。
    * @returns 匹配的文件完整路径，或 null

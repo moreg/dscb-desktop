@@ -102,7 +102,7 @@ describe('TrackingMdRepo', () => {
     expect(result!.timeline).toContain('1923 年深秋')
     expect(result!.timeline).toContain('苏九重生归来')
 
-    // 进度摘要取最后 3 条
+    // 进度摘要：fixture 共 3 条，全部返回
     expect(result!.recentProgress).toHaveLength(3)
     expect(result!.recentProgress[2].date).toBe('2026-07-05')
     expect(result!.recentProgress[1].blocker).toBe('时间线冲突')
@@ -111,6 +111,57 @@ describe('TrackingMdRepo', () => {
     expect(result!.openIssues).toHaveLength(2)
     expect(result!.openIssues[0].problem).toContain('精神力账目')
     expect(result!.openIssues[1].status).toBe('处理中')
+  })
+
+  it('优先解析「最新状态摘要」表，忽略早期当前状态快照', async () => {
+    const dual = `# 角色状态快照
+
+## 当前状态（第 1 卷第 10 章末尾 — 角色初登场快照）
+
+| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |
+|------|----------|----------|----------|----------|----------|----------|
+| 苏九 | 暗劲；铁罗盘 Lv.1 | 中立偏苟 | 解决沈清秋 | 铜钱 | 段老虎：代理人 | 第 10 章 |
+
+## 关键节点最新状态摘要
+
+| 角色 | 最新武力 | 最新罗盘 | 最新立场 | 最新目标 | 重要状态章 |
+|------|----------|----------|----------|----------|-----------|
+| **苏九** | 罡劲初期（第 305 章）| 玉罗盘（第 305 章）| 改变国运成功 | 悄然隐退 | 第 400 章 |
+| **沈清秋** | 无武功（普通人）| — | 与苏九正式成婚 | — | 第 386 章 |
+
+## 状态变更记录
+
+| 章节 | 角色 | 变更内容 |
+|------|------|----------|
+| 第 1 章 | 苏九 | 重生归来 |
+`
+    await writeFile(path.join(dir, '追踪', '角色状态.md'), dual)
+    const result = await new TrackingMdRepo(dir).read(400)
+    expect(result).not.toBeNull()
+    expect(result!.characterStates).toHaveLength(2)
+    const su = result!.characterStates.find((c) => c.name === '苏九')
+    expect(su).toBeDefined()
+    expect(su!.power).toContain('罡劲')
+    expect(su!.power).not.toContain('暗劲')
+    expect(su!.items).toContain('玉罗盘')
+    expect(su!.stance).toContain('改变国运')
+    expect(su!.goal).toContain('隐退')
+    expect(su!.updateChapter).toBe(400)
+  })
+
+  it('非日更表格式的上下文.md 不注入进度（避免工程追踪文档误读）', async () => {
+    const outlineTrack = `# 《某某》细纲生成追踪
+
+## 批次完成记录
+
+| 批次 | 章节范围 | 章节数 | 累计 |
+|------|---------|--------|------|
+| 批 1 | 242-249 | 8 | 8 |
+`
+    await writeFile(path.join(dir, '追踪', '上下文.md'), outlineTrack)
+    const result = await new TrackingMdRepo(dir).read(10)
+    // 无有效追踪内容 → null
+    expect(result).toBeNull()
   })
 
   it('filters state changes by chapterNumber correctly', async () => {

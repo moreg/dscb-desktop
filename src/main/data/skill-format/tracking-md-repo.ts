@@ -14,7 +14,7 @@ export interface TrackingContext {
   stateChanges: StateChangeRecord[]
   /** 时间线文字（来自 追踪/时间线.md 的「历史事件与小说事件对照表」节 body） */
   timeline: string
-  /** 日更进度摘要（来自 追踪/上下文.md，取最后 3 条） */
+  /** 日更进度摘要（来自 追踪/上下文.md，取最后 RECENT_PROGRESS_LIMIT 条） */
   recentProgress: ProgressEntry[]
   /** 待处理问题（来自 追踪/问题记录.md，过滤状态含「待处理/处理中」） */
   openIssues: IssueRecord[]
@@ -144,35 +144,106 @@ export interface TrackingDisplayData {
 }
 
 /**
- * 解析「当前状态」表（H2「当前状态」节下的表）。
- * 表头：角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节
+ * 解析角色状态快照。
+ *
+ * 长篇防偏：优先「最新状态」表（如「关键节点最新状态摘要」），
+ * 避免早期「当前状态（第 N 章末尾）」初登场快照污染后期续写。
+ *
+ * 兼容表头：
+ * - 标准：角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节
+ * - 最新摘要：角色 | 最新武力 | 最新罗盘 | 最新立场 | 最新目标 | 重要状态章
  */
 function parseCharacterStates(text: string): CharacterStateSnapshot[] {
   const doc = parseDoc(text)
-  const sec = doc.sections.find((s) => s.title.includes('当前状态'))
-  const body = sec ? sec.body : doc.body
+  const body = pickCharacterStateBody(doc)
+  return parseCharacterStateTable(body)
+}
+
+/**
+ * 选择用于注入续写的状态表正文。
+ * 优先级：标题含「最新」的节 → 多个「当前状态」中 updateChapter 均值最高的表 → 首个当前状态 → doc.body
+ */
+function pickCharacterStateBody(doc: {
+  body: string
+  sections: { title: string; body: string }[]
+}): string {
+  const latestSecs = doc.sections.filter((s) =>
+    /最新状态|最新.*摘要|当前最新|关键节点最新/.test(s.title)
+  )
+  for (const sec of latestSecs) {
+    const parsed = parseCharacterStateTable(sec.body)
+    if (parsed.length > 0) return sec.body
+  }
+
+  const currentSecs = doc.sections.filter((s) => s.title.includes('当前状态'))
+  if (currentSecs.length === 0) return doc.body
+  if (currentSecs.length === 1) return currentSecs[0].body
+
+  // 多个「当前状态」节：选平均更新章节号最高的一张表（更接近「现在」）
+  let best = currentSecs[0]
+  let bestScore = -1
+  for (const sec of currentSecs) {
+    const rows = parseCharacterStateTable(sec.body)
+    if (rows.length === 0) continue
+    const avg =
+      rows.reduce((sum, r) => sum + (r.updateChapter || 0), 0) / rows.length
+    if (avg >= bestScore) {
+      bestScore = avg
+      best = sec
+    }
+  }
+  return best.body
+}
+
+/** 从表格 body 解析角色状态行（表头别名兼容） */
+function parseCharacterStateTable(body: string): CharacterStateSnapshot[] {
   const { headers, rows } = parseTable(body)
-  if (headers.length < 5) return []
+  if (headers.length < 2) return []
   const idx = {
     name: headers.findIndex((h) => h.includes('角色') || h.includes('姓名')),
-    power: headers.findIndex((h) => h.includes('实力')),
+    power: headers.findIndex(
+      (h) => h.includes('实力') || h.includes('武力') || h.includes('战力')
+    ),
     stance: headers.findIndex((h) => h.includes('立场')),
     goal: headers.findIndex((h) => h.includes('目标')),
-    items: headers.findIndex((h) => h.includes('道具')),
+    items: headers.findIndex(
+      (h) => h.includes('道具') || h.includes('罗盘') || h.includes('装备')
+    ),
     relations: headers.findIndex((h) => h.includes('关系')),
-    updateCh: headers.findIndex((h) => h.includes('更新') && h.includes('章节'))
+    updateCh: headers.findIndex(
+      (h) =>
+        (h.includes('更新') && h.includes('章节')) ||
+        h.includes('重要状态章') ||
+        h.includes('状态章') ||
+        (h.includes('章节') && h.includes('更新'))
+    )
   }
+  // 若「重要状态章」单独成列且 updateCh 未命中，再扫一遍只含「章」的列
+  if (idx.updateCh < 0) {
+    idx.updateCh = headers.findIndex(
+      (h) => h.includes('状态章') || (h.includes('章') && !h.includes('角色'))
+    )
+  }
+  if (idx.name < 0) return []
+
   const result: CharacterStateSnapshot[] = []
   for (const row of rows) {
     const name = cell(row, idx.name)
     if (!name || name === '-') continue
+    // 跳过表内说明行/加粗汇总行（无实质状态字段）
+    const power = cell(row, idx.power)
+    const stance = cell(row, idx.stance)
+    const goal = cell(row, idx.goal)
+    const items = cell(row, idx.items)
+    const relations = cell(row, idx.relations)
+    if (!power && !stance && !goal && !items && !relations) continue
     result.push({
-      name,
-      power: cell(row, idx.power),
-      stance: cell(row, idx.stance),
-      goal: cell(row, idx.goal),
-      items: cell(row, idx.items),
-      relations: cell(row, idx.relations),
+      name: name.replace(/\*\*/g, '').trim(),
+      power,
+      stance,
+      goal,
+      items,
+      relations,
       updateChapter: parseChapterNum(cell(row, idx.updateCh)) ?? 0
     })
   }
@@ -241,9 +312,13 @@ function hasTimelineDataRows(timeline: string): boolean {
   return false
 }
 
+/** 日更进度注入条数（人工备注/阻塞点；章级剧情记忆另由剧情点中程摘要承担） */
+const RECENT_PROGRESS_LIMIT = 8
+
 /**
- * 解析日更进度表，取最后 3 条。
+ * 解析日更进度表，取最后 RECENT_PROGRESS_LIMIT 条。
  * 表头：日期 | 章节 | 进度摘要 | 下一章目标 | 阻塞点
+ * 若文件不是进度表（如表头不含「进度/摘要」），返回 []，避免把工程追踪文档误注入。
  */
 function parseProgress(text: string): ProgressEntry[] {
   const doc = parseDoc(text)
@@ -256,6 +331,8 @@ function parseProgress(text: string): ProgressEntry[] {
     nextGoal: headers.findIndex((h) => h.includes('下一章') || h.includes('目标')),
     blocker: headers.findIndex((h) => h.includes('阻塞') || h.includes('问题'))
   }
+  // 非日更表（如细纲批次完成记录）直接丢弃
+  if (idx.date < 0 || idx.summary < 0) return []
   const entries: ProgressEntry[] = []
   for (const row of rows) {
     const date = cell(row, idx.date)
@@ -268,7 +345,7 @@ function parseProgress(text: string): ProgressEntry[] {
       blocker: cell(row, idx.blocker)
     })
   }
-  return entries.slice(-3)
+  return entries.slice(-RECENT_PROGRESS_LIMIT)
 }
 
 /**

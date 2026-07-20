@@ -137,7 +137,11 @@ export function clearRedoStack(): RewriteEntry[] {
  * - macOS: Cmd+Z = undo, Cmd+Shift+Z = redo（Ctrl+Y 在 Mac 上不常用）
  *
  * 此函数只判断"是否是 undo/redo 快捷键"，是否拦截（preventDefault）
- * 取决于调用方对 target 的判断（textarea 内不拦截，保留原生 undo）。
+ * 取决于调用方对 target 的判断。
+ *
+ * 默认：textarea/input 内不拦截，保留浏览器原生文字 undo。
+ * 当调用方有改写/重写历史时，可设 ignoreInputTarget=true，让 Ctrl+Z
+ * 在正文编辑框内也能撤销「应用到正文 / 按要求重写」等程序化替换。
  */
 export type UndoRedoIntent = 'undo' | 'redo' | null
 
@@ -151,14 +155,28 @@ export interface ShortcutEvent {
   key: string
   /** 当前焦点元素标签（用于判断是否在 textarea/input 内） */
   targetTag: string
+  /**
+   * 为 true 时即使焦点在 input/textarea 也返回 undo/redo 意图。
+   * 用于：改写历史非空时优先撤销 AI 应用结果（原生栈里没有程序化 setDraft）。
+   */
+  ignoreInputTarget?: boolean
+}
+
+/** 「按要求重写」整章替换在 rewriteHistory 中使用的 violationKey */
+export const ADJUST_REWRITE_KEY = 'adjust'
+
+export function isAdjustRewriteKey(key: string | undefined): boolean {
+  return key === ADJUST_REWRITE_KEY || (key?.startsWith(`${ADJUST_REWRITE_KEY}:`) ?? false)
 }
 
 export function detectUndoRedoShortcut(e: ShortcutEvent): UndoRedoIntent {
-  // 在文本输入控件内：让浏览器原生 undo 处理（用户输入的文字 undo）
-  // 这是标准编辑器行为：text field 内 Ctrl+Z = text undo，不是 app undo
-  const tag = e.targetTag?.toLowerCase() ?? ''
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-    return null
+  // 在文本输入控件内：默认让浏览器原生 undo 处理（用户输入的文字 undo）
+  // 有 app 级改写历史时由调用方设 ignoreInputTarget，改为走 app undo
+  if (!e.ignoreInputTarget) {
+    const tag = e.targetTag?.toLowerCase() ?? ''
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      return null
+    }
   }
 
   const mod = e.ctrl || e.meta

@@ -238,7 +238,7 @@ const api = {
       .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, existingText, requestId })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
-  adjustChapterStream: (
+  planAdjustChapterStream: (
     projectId: string,
     chapterNumber: number,
     content: string,
@@ -255,7 +255,43 @@ const api = {
     }
     ipcRenderer.on('llm:token', handler as never)
     return ipcRenderer
-      .invoke('write:adjustChapter', { projectId, chapterNumber, content, instruction, styleProfileId, requestId })
+      .invoke('write:planAdjustChapter', {
+        projectId,
+        chapterNumber,
+        content,
+        instruction,
+        styleProfileId,
+        requestId
+      })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+  },
+  adjustChapterStream: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileId: string | null | undefined,
+    onToken: (token: string, done: boolean) => void,
+    confirmedPlan?: string | null
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('llm:token', handler as never)
+    return ipcRenderer
+      .invoke('write:adjustChapter', {
+        projectId,
+        chapterNumber,
+        content,
+        instruction,
+        confirmedPlan: confirmedPlan ?? null,
+        styleProfileId,
+        requestId
+      })
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
@@ -391,6 +427,12 @@ const api = {
       chapterNumber,
       content,
       force: opts?.force === true
+    }),
+  selfCheckChapter: (projectId: string, chapterNumber: number, content: string) =>
+    ipcRenderer.invoke('write:selfCheckChapter', {
+      projectId,
+      chapterNumber,
+      content
     }),
   undoChapterSync: (
     projectId: string,

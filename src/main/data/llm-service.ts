@@ -500,10 +500,9 @@ export class LlmService {
   }
 
   /**
-   * codex 协议调用：委托 codex-runner 跑 `codex exec` 子进程。
-   * systemPrompt 与 user prompt 合并为单条（codex exec 单轮，不支持 system role）。
-   * codex 返回精确 token 用量（turn.completed.usage），比 agy 估算更准。
-   * 不需串行化（--ephemeral session 隔离，并发安全）。
+   * codex 协议调用：委托 codex-runner 跑 `codex app-server`（真流式 delta）。
+   * systemPrompt 与 user prompt 合并为单条（单轮 turn，不支持 system role）。
+   * 用量来自 thread/tokenUsage/updated；每次独立 ephemeral thread，并发安全。
    */
   private async generateViaCodex(
     p: ProviderConfig,

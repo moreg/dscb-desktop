@@ -136,8 +136,9 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /** 按要求重写 · 第一步：只出修改建议，不改正文 */
   ipcMain.handle(
-    'write:adjustChapter',
+    'write:planAdjustChapter',
     async (
       e,
       payload: {
@@ -162,7 +163,7 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        await service.adjustChapterStream(
+        await service.planAdjustChapterStream(
           validated.projectId,
           validated.chapterNumber,
           validated.content,
@@ -176,6 +177,58 @@ export function registerWriteIpc(service: WriteService): void {
                 done: false
               })
           }
+        )
+        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'write:adjustChapter',
+    async (
+      e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        content: string
+        instruction: string
+        confirmedPlan?: string | null
+        styleProfileId?: string | null
+        requestId: string
+      }
+    ) => {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            chapterNumber: chapterNumberSchema,
+            content: chapterContentSchema,
+            instruction: z.string().min(1).max(10_000),
+            confirmedPlan: z.string().max(50_000).nullable().optional(),
+            styleProfileId: styleProfileIdSchema,
+            requestId: z.string().min(1)
+          }),
+          payload
+        )
+        await service.adjustChapterStream(
+          validated.projectId,
+          validated.chapterNumber,
+          validated.content,
+          validated.instruction,
+          validated.styleProfileId,
+          {
+            onToken: (token) =>
+              win?.webContents.send('llm:token', {
+                requestId: validated.requestId,
+                token,
+                done: false
+              })
+          },
+          validated.confirmedPlan
         )
         win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true }
@@ -402,6 +455,29 @@ export function registerWriteIpc(service: WriteService): void {
         validated.content,
         // force：用户手动补跑，忽略 autoMemorySync / pipeline=off
         { skipIfDisabled: validated.force !== true }
+      )
+    }
+  )
+
+  /** 写后自检清单对照（纯算法，不写记忆） */
+  safeHandle(
+    'write:selfCheckChapter',
+    async (
+      _e,
+      payload: { projectId: string; chapterNumber: number; content: string }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          content: chapterContentSchema
+        }),
+        payload
+      )
+      return service.selfCheckChapter(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.content
       )
     }
   )

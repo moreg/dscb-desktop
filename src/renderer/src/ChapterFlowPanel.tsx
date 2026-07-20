@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
   AuditReport,
   ChapterReviewReport,
+  ChapterSelfCheckReport,
   DetailedOutlineItem,
   FigureDraft,
   MemoryApplyPreview,
@@ -33,6 +34,7 @@ import type { RewriteEntry } from '../../main/data/rewrite-history'
 import type { PostWriteSyncPhase } from '../../shared/post-write-sync'
 import { formatSyncErrorHint } from '../../shared/post-write-sync'
 import ChapterAuditPanel from './ChapterAuditPanel'
+import ChapterSelfCheckPanel from './ChapterSelfCheckPanel'
 
 /** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
 function friendlyFlowError(err: string): string {
@@ -107,6 +109,7 @@ interface Props {
     extraction: MemoryExtraction
     memory: MemoryApplyResult
     settings: SettingsApplyResult
+    selfCheck?: ChapterSelfCheckReport | null
   } | null
   /**
    * 当 syncAllTrigger 触发时跳过记忆提取（记忆已由 syncChapterAfterWrite 完成）。
@@ -122,6 +125,15 @@ interface Props {
     undoDepth?: number
     fromPendingQueue?: boolean
   } | null
+  /** 编辑器持有的写后自检报告（与 banner 同源） */
+  selfCheckReport?: ChapterSelfCheckReport | null
+  /** 用当前 draft 重新跑写后自检 */
+  onRerunSelfCheck?: () => void | Promise<void>
+  selfCheckLoading?: boolean
+  /** 自检失败项 → 按要求重写 */
+  onApplySelfCheckToRewrite?: () => void
+  /** 自检失败项 → 续写临时要求 */
+  onApplySelfCheckToContinue?: () => void
   /** 失败 / 部分失败 / 手动补跑：重新跑记忆与设定同步 */
   onRetryAutoSync?: () => void
   /** 撤销最近一次写后自动同步（可多级） */
@@ -161,6 +173,11 @@ export default function ChapterFlowPanel(props: Props) {
     autoSyncSeed,
     skipMemoryOnAutoSyncAll,
     postWriteSyncBanner,
+    selfCheckReport,
+    onRerunSelfCheck,
+    selfCheckLoading,
+    onApplySelfCheckToRewrite,
+    onApplySelfCheckToContinue,
     onRetryAutoSync,
     onUndoAutoSync,
     onDismissPendingSync,
@@ -194,6 +211,10 @@ export default function ChapterFlowPanel(props: Props) {
   const [newLocResult, setNewLocResult] = useState<number | null>(null)
   const [newItemResult, setNewItemResult] = useState<number | null>(null)
   const [newForeshadowingResult, setNewForeshadowingResult] = useState<number | null>(null)
+
+  // 写后自检（优先用 props；autoSyncSeed 注入时覆盖本地）
+  const [localSelfCheck, setLocalSelfCheck] = useState<ChapterSelfCheckReport | null>(null)
+  const [localSelfCheckLoading, setLocalSelfCheckLoading] = useState(false)
 
   // 节奏评估状态
   const [rhythmEvaluating, setRhythmEvaluating] = useState(false)
@@ -761,6 +782,9 @@ export default function ChapterFlowPanel(props: Props) {
     setMemoryResult(autoSyncSeed.memory)
     setSettingsResult(autoSyncSeed.settings)
     setMemoryExtracting(false)
+    if (autoSyncSeed.selfCheck) {
+      setLocalSelfCheck(autoSyncSeed.selfCheck)
+    }
 
     const allErrors = [
       ...(autoSyncSeed.memory.errors ?? []),
@@ -911,6 +935,38 @@ export default function ChapterFlowPanel(props: Props) {
             </div>
           </div>
         ) : null}
+
+        <ChapterSelfCheckPanel
+          report={selfCheckReport ?? localSelfCheck}
+          defaultExpanded
+          rerunLoading={selfCheckLoading || localSelfCheckLoading}
+          onApplyToRewrite={onApplySelfCheckToRewrite}
+          onApplyToContinue={onApplySelfCheckToContinue}
+          onRerun={
+            onRerunSelfCheck
+              ? () => void onRerunSelfCheck()
+              : async () => {
+                  const api = window.api as {
+                    selfCheckChapter?: (
+                      pid: string,
+                      ch: number,
+                      content: string
+                    ) => Promise<ChapterSelfCheckReport>
+                  }
+                  if (!api.selfCheckChapter) return
+                  setLocalSelfCheckLoading(true)
+                  try {
+                    const r = await api.selfCheckChapter(projectId, chapterNumber, draft)
+                    setLocalSelfCheck(r)
+                  } catch (err) {
+                    console.warn('[ChapterFlowPanel] selfCheck failed:', err)
+                  } finally {
+                    setLocalSelfCheckLoading(false)
+                  }
+                }
+          }
+        />
+
         {auditReport ? (
           <div style={{ marginTop: 8 }}>
             <ChapterAuditPanel

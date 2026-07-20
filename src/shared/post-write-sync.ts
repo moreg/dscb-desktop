@@ -63,6 +63,12 @@ export interface PostWriteSyncInput {
     settingsPatches?: { confidence?: string }[]
     settingsSuggestions?: unknown[]
   }
+  /** 写后自检清单对照（可选） */
+  selfCheck?: {
+    ok: boolean
+    summary: string
+    counts?: { fail?: number; warn?: number; pass?: number }
+  } | null
 }
 
 function n(v: number | undefined): number {
@@ -173,6 +179,12 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
     } else {
       message = '已同步（本章无新增状态/设定）'
     }
+  }
+
+  // 附加写后自检摘要：不抬升同步 phase（避免「自检未过」被当成「同步失败」）
+  const sc = input.selfCheck
+  if (sc && typeof sc.summary === 'string' && sc.summary.trim()) {
+    message = `${message}；${sc.summary}`
   }
 
   return {

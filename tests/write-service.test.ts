@@ -58,6 +58,164 @@ describe('WriteService', () => {
     expect(system).toContain('禁用高频词')
   })
 
+  it('buildChapterPrompt injects recent plot summaries as mid-range memory', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const { mkdir, writeFile } = await import('fs/promises')
+    await mkdir(path.join(dir, '记忆', '剧情点'), { recursive: true })
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    await writeFile(
+      path.join(dir, '记忆', '剧情点', '第003章 初露锋芒.md'),
+      `# 第3章 初露锋芒\n\n## 字段\n\n- **核心事件**：林远当众击败赵乾，名声初起\n`,
+      'utf-8'
+    )
+    await writeFile(
+      path.join(dir, '记忆', '剧情点', '第004章 收徒风波.md'),
+      `# 第4章 收徒风波\n\n## 字段\n\n- **核心事件**：长老逼林远收徒，林远拒绝并立下赌约\n`,
+      'utf-8'
+    )
+    // 仅已写正文的章进入中程记忆
+    await new ProseRepo(dir).write(3, '第三章正文：林远击败赵乾。')
+    await new ProseRepo(dir).write(4, '第四章结尾：林远离开大殿。')
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 5)
+    expect(user).toContain('近期已写章节摘要')
+    expect(user).toContain('已有正文')
+    expect(user).toContain('第 3 章')
+    expect(user).toContain('击败赵乾')
+    expect(user).toContain('第 4 章')
+    expect(user).toContain('收徒')
+    expect(user).toContain('禁止遗忘')
+  })
+
+  it('buildChapterPrompt injects chapter self-check checklist (suspense, foreshadow, power bounds)', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const { mkdir, writeFile } = await import('fs/promises')
+    await mkdir(path.join(dir, '设定', '世界观'), { recursive: true })
+    await mkdir(path.join(dir, '追踪'), { recursive: true })
+    await writeFile(
+      path.join(dir, '设定', '世界观', '金手指.md'),
+      `# 金手指
+
+## 限制与副作用
+- **限制**：只能看到当日运势，无法看到长期命运
+- **限制**：调整幅度有限，只能调 1-2 级，不能直接改变命运
+- **消耗**：每次使用消耗精神力，连续使用会头痛
+`,
+      'utf-8'
+    )
+    await new OutlineRepository(dir).upsertDetailed({
+      chapterNumber: 2,
+      plotSummary: '林远当众击败赵乾，立下赌约',
+      hook: '长老突然现身'
+    })
+    // 上一章正文 → 触发结尾状态或至少 prevTail 衔接自检
+    await new ProseRepo(dir).write(1, '赵乾惨叫一声跪倒在地。林远收剑，望向山门阴影：「谁？」')
+
+    // 到期伏笔
+    await writeFile(
+      path.join(dir, '追踪', '伏笔.md'),
+      `# 伏笔
+
+| 内容 | 状态 | 埋设章节 | 预计回收 |
+|---|---|---|---|
+| 山门阴影中的人是谁 | 已埋设 | 1 | 2 |
+| 长老的真实身份 | 已埋设 | 1 | 9 |
+`,
+      'utf-8'
+    )
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    // mock extractEndingState to return suspense
+    ;(service as any).flow = {
+      extractEndingState: async () => ({
+        chapterNumber: 1,
+        characterPositions: [{ name: '林远', location: '山门', action: '收剑' }],
+        characterStates: [],
+        timePoint: '黄昏',
+        unfinished: ['尚未看清山门来人'],
+        suspense: '山门阴影里站着谁？',
+        props: ['长剑']
+      })
+    }
+
+    const { user } = await service.buildChapterPrompt(projectId, 2)
+    expect(user).toContain('写前/写后自检清单')
+    expect(user).toContain('上章悬念')
+    expect(user).toContain('山门阴影')
+    expect(user).toContain('未完成')
+    expect(user).toContain('本章核心事件')
+    expect(user).toContain('击败赵乾')
+    expect(user).toContain('金手指边界')
+    expect(user).toMatch(/只能|无法|不能|消耗/)
+    expect(user).toContain('输出前必须对照')
+  })
+
+  it('buildChapterPrompt injects volume anchors and blocks future spoilers', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const { mkdir, writeFile } = await import('fs/promises')
+    await mkdir(path.join(dir, '大纲'), { recursive: true })
+    // 大纲.md 卷表：本章落在第 1 卷
+    await writeFile(
+      path.join(dir, '大纲', '大纲.md'),
+      `# 青云志
+
+## 主线剧情走向
+
+少年修仙
+
+### 第1卷：开端（第1-10章）
+
+立足门派
+
+## 逐章节奏标注
+
+| 章节 | 标题 | 情绪 | 爽点 |
+|---|---|---|---|
+| 1 | 开篇 | 5 | 1 |
+`,
+      'utf-8'
+    )
+    await writeFile(
+      path.join(dir, '大纲', '第1卷_开端.md'),
+      `# 卷纲：第1卷 开端（第1-10章）
+
+## 卷核心
+- **卷名**：开端
+- **章节范围**：第1-10章
+- **核心冲突**：林远立足门派，暗中积蓄
+- **人物弧线**：落魄外门 → 崭露头角
+
+## 情绪弧线
+1-3章铺垫 → 4-7章打脸 → 8-10章卷终
+
+## 反转
+- 第 3 章：林远当众打脸赵乾
+- 第 9 章：长老真实身份揭晓（卷末）
+
+## 各章核心事件
+
+### 第3章：初露锋芒
+- **核心事件**：林远击败赵乾
+
+### 第9章：身份揭晓
+- **核心事件**：长老身份揭晓，林远卷入宗门秘辛
+`,
+      'utf-8'
+    )
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 5)
+    expect(user).toContain('卷级定位')
+    expect(user).toContain('硬约束')
+    // 未来反转不得抢写
+    expect(user).toContain('禁止提前')
+    expect(user).toContain('第 9 章')
+    // 已发生反转可保留
+    expect(user).toContain('第 3 章')
+    expect(user).toContain('击败赵乾')
+  })
+
   it('generateChapterStream calls llm with assembled prompt', async () => {
     const llm = mockLlm('生成的正文')
     const service = new WriteService(ps, llm)
@@ -85,6 +243,52 @@ describe('WriteService', () => {
     expect(prompt).toContain('当前正文：主角只是站着解释。')
     expect(prompt).toContain('直接输出调整后的完整正文')
     expect(opts?.meta).toEqual({ feature: 'chapter-adjust', projectId, chapterNumber: 1 })
+  })
+
+  it('planAdjustChapterStream only asks for a plan, not revised prose', async () => {
+    const llm = mockLlm('## 理解你的要求\n加强冲突。\n## 落笔要点\n1. 改对话')
+    const service = new WriteService(ps, llm)
+
+    const full = await service.planAdjustChapterStream(
+      projectId,
+      1,
+      '当前正文：主角只是站着解释。',
+      '加强动作冲突，删掉旁白解释。'
+    )
+
+    expect(full).toContain('落笔要点')
+    expect(llm.generateStream).toHaveBeenCalled()
+    const [prompt, opts] = vi.mocked(llm.generateStream).mock.calls[0]
+    expect(prompt).toContain('先出修改方案')
+    expect(prompt).toContain('不落笔')
+    expect(prompt).toContain('禁止输出修订后的完整正文')
+    expect(prompt).toContain('加强动作冲突，删掉旁白解释。')
+    expect(prompt).toContain('当前正文：主角只是站着解释。')
+    expect(prompt).not.toContain('直接输出调整后的完整正文')
+    expect(opts?.meta).toEqual({ feature: 'chapter-adjust-plan', projectId, chapterNumber: 1 })
+  })
+
+  it('adjustChapterStream includes confirmed plan when user approved suggestions', async () => {
+    const llm = mockLlm('按方案修订后的正文')
+    const service = new WriteService(ps, llm)
+    const plan = '## 落笔要点\n1. 删旁白\n2. 加动作对峙'
+
+    await service.adjustChapterStream(
+      projectId,
+      1,
+      '当前正文：主角只是站着解释。',
+      '加强动作冲突',
+      null,
+      {},
+      plan
+    )
+
+    const [prompt] = vi.mocked(llm.generateStream).mock.calls[0]
+    expect(prompt).toContain('用户已确认的修改方案')
+    expect(prompt).toContain('删旁白')
+    expect(prompt).toContain('加动作对峙')
+    expect(prompt).toContain('加强动作冲突')
+    expect(prompt).toContain('直接输出调整后的完整正文')
   })
 
   it('adjustChapter prompt enforces user instruction as highest priority over outline/character', async () => {

@@ -25,6 +25,13 @@ import { FigureHtmlRepo } from './skill-format/figure-html-repo'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
 import { TrackingMdRepo, type TrackingContext } from './skill-format/tracking-md-repo'
 import { SettingsMdRepo, type SettingsContext } from './skill-format/settings-md-repo'
+import {
+  PlotPointRepo,
+  RECENT_PLOT_CHAPTERS,
+  type PlotChapterSummary
+} from './memory/plot-point-repo'
+import { evaluateChapterSelfCheck } from './chapter-self-check'
+import { extractPowerBoundaryBullets } from './power-boundary'
 import { readText, parseDoc } from './skill-format/md-parser'
 import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
 import { DeslopService } from './deslop/deslop-service'
@@ -55,7 +62,8 @@ import type {
   RhythmEntry,
   RhythmEvaluation,
   StyleProfile,
-  VolumeOutline
+  VolumeOutline,
+  ChapterSelfCheckReport
 } from '../../shared/types'
 import {
   parseFigureDraftJson,
@@ -101,6 +109,12 @@ const MAX_TARGET_WORDS = 8000
  * 2000 字符约 1200 token，足够覆盖民国类项目的时间轴要点。
  */
 const TIMELINE_MAX_CHARS = 2000
+
+/**
+ * 中程记忆：注入「本章之前最近 N 章」剧情点摘要。
+ * 与 RECENT_PLOT_CHAPTERS 对齐；长篇靠此保持卷内因果，而非只靠上章正文。
+ */
+const RECENT_PLOT_SUMMARY_LIMIT = RECENT_PLOT_CHAPTERS
 
 /**
  * 正文追问：相邻章正文范围（±N）。
@@ -208,6 +222,7 @@ export class WriteService {
       foreshadowings: ctx.foreshadowings,
       characters: ctx.characters,
       tracking: ctx.tracking,
+      recentPlotSummaries: ctx.recentPlotSummaries,
       chapterNumber,
       targetWords,
       tempContext,
@@ -252,7 +267,8 @@ export class WriteService {
     chapterNumber: number,
     content: string,
     instruction: string,
-    styleProfileId?: string | null
+    styleProfileId?: string | null,
+    confirmedPlan?: string | null
   ): Promise<{ system: string; user: string }> {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
@@ -272,6 +288,7 @@ export class WriteService {
       chapterNumber,
       instruction,
       content,
+      confirmedPlan: confirmedPlan?.trim() || undefined,
       chapterRequirements: ctx.detail?.writingRequirements?.trim(),
       chapterDetail: ctx.detail,
       prevTail: ctx.prevTail,
@@ -282,7 +299,11 @@ export class WriteService {
     return { system, user }
   }
 
-  async adjustChapterStream(
+  /**
+   * 「按要求重写」第一步：只出修改建议/方案，不改正文、不输出修订稿。
+   * 供用户确认后再调用 adjustChapterStream 落笔。
+   */
+  async planAdjustChapterStream(
     projectId: string,
     chapterNumber: number,
     content: string,
@@ -291,12 +312,56 @@ export class WriteService {
     maybeOpts: GenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    const dir = await this.projectService.resolveDir(projectId)
+    const project = await this.projectService.getProjectData(projectId)
+    const style = await this.loadStyleProfile(
+      dir,
+      styleProfileId ?? project.defaultStyleProfileId ?? null
+    )
+    const ctx = await this.loadChapterContext(dir, chapterNumber)
+    const overrides = this.settings
+      ? (await this.settings.get()).chapterRuleOverrides ?? {}
+      : {}
+    const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const user = renderAdjustPlanUserPrompt({
+      projectName: project.name,
+      genre: project.genre,
+      chapterNumber,
+      instruction,
+      content,
+      chapterRequirements: ctx.detail?.writingRequirements?.trim(),
+      chapterDetail: ctx.detail,
+      prevTail: ctx.prevTail,
+      characters: ctx.characters,
+      foreshadowings: ctx.foreshadowings
+    })
+    // 方案是编辑意见，不是小说正文：走普通流式，不做 assertNovelProse
+    return this.llm.generateStream(user, {
+      ...opts,
+      systemPrompt: system,
+      maxTokens: opts.maxTokens ?? 4096,
+      meta: { feature: 'chapter-adjust-plan', projectId, chapterNumber }
+    })
+  }
+
+  async adjustChapterStream(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    instruction: string,
+    styleProfileIdOrOpts?: string | null | GenerateOptions,
+    maybeOpts: GenerateOptions = {},
+    confirmedPlan?: string | null
+  ): Promise<string> {
+    const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     const prompt = await this.buildAdjustChapterPrompt(
       projectId,
       chapterNumber,
       content,
       instruction,
-      styleProfileId
+      styleProfileId,
+      confirmedPlan
     )
     const full = await this.generateProseStream(prompt.user, {
       ...opts,
@@ -759,9 +824,153 @@ export class WriteService {
   }
 
   /**
-   * 续写完成后自动同步记忆与设定。
-   * extract → applyMemory（自动部分）→ applySettingsPatches(onlyAuto)。
-   * autoMemorySync=false 时返回 null；失败只记 log/errors，不抛。
+   * 写后自检：轻量加载（细纲/伏笔/设定/上章正文尾），**不**走 loadChapterContext，
+   * **不**调用 extractEndingState（避免二次 LLM）。纯算法验正文。
+   */
+  async selfCheckChapter(
+    projectId: string,
+    chapterNumber: number,
+    content: string
+  ): Promise<ChapterSelfCheckReport> {
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+
+      // 并行轻量读盘，跳过人物全量、节奏、时间线、剧情点中程、LLM 结尾提取
+      const [detail, foreshadowings, settings, settingsEvolution, prevTail, doNotAdvanceHints] =
+        await Promise.all([
+          this.loadSelfCheckDetail(dir, chapterNumber),
+          this.loadSelfCheckForeshadowings(dir),
+          new SettingsMdRepo(dir).read().catch(() => null),
+          new SettingsWriter(dir).readRecentEvolution(5).catch(() => [] as SettingsEvolutionEntry[]),
+          chapterNumber > 1
+            ? new ProseRepo(dir).read(chapterNumber - 1).then((t) => tail(t, PREV_TAIL_CHARS)).catch(() => '')
+            : Promise.resolve(''),
+          this.loadSelfCheckVolumeHints(dir, chapterNumber)
+        ])
+
+      const powerBullets = extractPowerBoundaryBullets(settings, settingsEvolution)
+
+      return evaluateChapterSelfCheck({
+        chapterNumber,
+        content,
+        // 轻量路径：不调 LLM 结构化结尾；有 prevTail 时仍可做「对接」弱检查
+        prevEndingState: undefined,
+        prevTail,
+        plotSummary: detail?.plotSummary,
+        hook: detail?.hook,
+        foreshadowings,
+        powerBoundaryBullets: powerBullets,
+        settings,
+        settingsEvolution,
+        doNotAdvanceHints
+      })
+    } catch (err) {
+      console.warn('[selfCheckChapter] failed:', err)
+      return {
+        schemaVersion: 1,
+        chapterNumber,
+        generatedAt: new Date().toISOString(),
+        counts: { pass: 0, fail: 1, warn: 0, skip: 0 },
+        items: [
+          {
+            id: 'self_check_error',
+            category: 'structure',
+            label: '自检执行',
+            verdict: 'fail',
+            detail: `自检未完成：${(err as Error).message}`
+          }
+        ],
+        ok: false,
+        summary: '写后自检未执行（加载异常）'
+      }
+    }
+  }
+
+  /** 自检专用：只取本章细纲核心字段 */
+  private async loadSelfCheckDetail(
+    dir: string,
+    chapterNumber: number
+  ): Promise<{ plotSummary?: string; hook?: string } | undefined> {
+    try {
+      const all = await new DetailedOutlineMdRepo(dir).listAll()
+      const d = all.find((x) => x.chapterNumber === chapterNumber)
+      if (d) return { plotSummary: d.plotSummary, hook: d.hook }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const items = await new OutlineRepository(dir).listDetailed()
+      const item = items.find((d) => d.chapterNumber === chapterNumber)
+      if (item) return { plotSummary: item.plotSummary, hook: item.hook }
+    } catch {
+      /* ignore */
+    }
+    return undefined
+  }
+
+  private async loadSelfCheckForeshadowings(dir: string): Promise<
+    { content: string; status: string; expectedCollect?: number; plantChapter?: number }[]
+  > {
+    try {
+      const list = await new ForeshadowingMdRepo(dir).list()
+      if (list.length > 0) {
+        return list.map((f) => ({
+          content: f.content,
+          status: f.status,
+          expectedCollect: f.expectedCollect,
+          plantChapter: f.plantChapter
+        }))
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const list = await new ForeshadowingRepository(dir).list()
+      return list.map((f) => ({
+        content: f.content,
+        status: f.status,
+        expectedCollect: f.expectedCollect,
+        plantChapter: f.plantChapter
+      }))
+    } catch {
+      return []
+    }
+  }
+
+  /** 自检专用：卷纲里章号 > 本章 的短句（禁抢写），不加载完整 ChapterContext */
+  private async loadSelfCheckVolumeHints(dir: string, chapterNumber: number): Promise<string[]> {
+    try {
+      const outlineRead = await new OutlineMdRepo(dir).read()
+      if (!outlineRead) return []
+      const vol = outlineRead.volumes.find(
+        (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
+      )
+      if (!vol) return []
+      const volumeOutline = await this.loadVolumeOutline(dir, vol.number)
+      if (!volumeOutline) return []
+      const hints: string[] = []
+      for (const sec of volumeOutline.sections) {
+        if (!/反转|各章/.test(sec.title)) continue
+        for (const line of sec.body.split(/\r?\n/)) {
+          const m = line.match(/第\s*(\d+)\s*章/)
+          if (!m) continue
+          const n = parseInt(m[1], 10)
+          if (n > chapterNumber) {
+            const t = line.replace(/^[-*]\s*/, '').trim()
+            if (t) hints.push(t.slice(0, 120))
+          }
+          if (hints.length >= 8) return hints
+        }
+      }
+      return hints
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 续写完成后：写后自检 +（可选）记忆/设定同步。
+   * 自检始终跑；记忆同步关闭时返回空 memory + selfCheck。
    */
   async syncChapterAfterWrite(
     projectId: string,
@@ -772,11 +981,13 @@ export class WriteService {
     memory: MemoryApplyResult
     settings: SettingsApplyResult
     extraction: MemoryExtraction
+    selfCheck?: ChapterSelfCheckReport | null
   } | null> {
     const skipIfDisabled = opts?.skipIfDisabled !== false
+    let memorySyncDisabled = false
     try {
       if (skipIfDisabled && !(await this.isAutoMemorySyncEnabled())) {
-        return null
+        memorySyncDisabled = true
       }
     } catch (err) {
       console.warn('[syncChapterAfterWrite] Failed to read autoMemorySync:', err)
@@ -814,11 +1025,32 @@ export class WriteService {
       settingsSuggestions: []
     }
 
+    // 写后自检始终尝试（与记忆同步开关解耦）
+    let selfCheck: ChapterSelfCheckReport | null = null
+    if (content?.trim()) {
+      try {
+        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+      } catch (err) {
+        console.warn('[syncChapterAfterWrite] selfCheck failed:', err)
+      }
+    }
+
+    if (memorySyncDisabled) {
+      // 记忆同步关闭：仍返回自检结果，避免 UI 拿不到写后审查
+      return {
+        memory: emptyMemory,
+        settings: emptySettings,
+        extraction: emptyExtraction,
+        selfCheck
+      }
+    }
+
     if (!content?.trim()) {
       return {
         memory: { ...emptyMemory, errors: ['正文为空，跳过同步'] },
         settings: emptySettings,
-        extraction: emptyExtraction
+        extraction: emptyExtraction,
+        selfCheck
       }
     }
 
@@ -867,14 +1099,15 @@ export class WriteService {
         settings = { ...emptySettings, errors: [msg] }
       }
 
-      return { memory, settings, extraction }
+      return { memory, settings, extraction, selfCheck }
     } catch (err) {
       const msg = (err as Error).message
       console.warn('[syncChapterAfterWrite] failed:', err)
       return {
         memory: { ...emptyMemory, errors: [msg] },
         settings: emptySettings,
-        extraction: emptyExtraction
+        extraction: emptyExtraction,
+        selfCheck
       }
     }
   }
@@ -1194,9 +1427,15 @@ export class WriteService {
     onProgress('generating')
     const content = await this.generateChapterStream(projectId, chapterNumber, opts)
 
-    // 2. 质检
+    // 2. 质检 + 写后自检清单对照
     onProgress('audit')
     const audit = await this.auditChapter(projectId, content)
+    let selfCheck: ChapterSelfCheckReport | null = null
+    try {
+      selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] selfCheck failed:', err)
+    }
 
     // 预加载步骤 3-6 所需的支撑数据（只读磁盘一次）
     let outlineText = ''
@@ -1358,7 +1597,17 @@ export class WriteService {
     }
 
     onProgress('done')
-    return { chapterNumber, content, audit, outlineDiff, memory, rhythm, figure, deepReview }
+    return {
+      chapterNumber,
+      content,
+      audit,
+      outlineDiff,
+      memory,
+      rhythm,
+      figure,
+      deepReview,
+      selfCheck
+    }
   }
 
   /**
@@ -1563,6 +1812,7 @@ export class WriteService {
       settings: ctx.settings,
       settingsEvolution: ctx.settingsEvolution,
       tracking: ctx.tracking,
+      recentPlotSummaries: ctx.recentPlotSummaries,
       chapterCatalog,
       neighborChapters,
       chapterRequirements: ctx.detail?.writingRequirements?.trim(),
@@ -1876,7 +2126,16 @@ export class WriteService {
         const vol = outlineRead.volumes.find(
           (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
         )
-        if (vol) volumeOutline = await this.loadVolumeOutline(dir, vol.number)
+        if (vol) {
+          volumeOutline = await this.loadVolumeOutline(dir, vol.number)
+          if (volumeOutline) {
+            volumeOutline = {
+              ...volumeOutline,
+              chapterStart: vol.chapterStart,
+              chapterEnd: vol.chapterEnd
+            }
+          }
+        }
       }
     } catch (err) {
       console.warn('[loadChapterContext] Failed to load outline from md:', err)
@@ -1962,6 +2221,17 @@ export class WriteService {
       // skip
     }
 
+    // 中程记忆：本章之前最近 N 章剧情点摘要（优先记忆/剧情点，细纲补洞）
+    let recentPlotSummaries: PlotChapterSummary[] = []
+    try {
+      recentPlotSummaries = await new PlotPointRepo(dir).listSummariesBefore(
+        chapterNumber,
+        RECENT_PLOT_SUMMARY_LIMIT
+      )
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to load recent plot summaries:', err)
+    }
+
     // 设定目录（题材定位/世界观/势力/规则）
     let settings: SettingsContext | null = null
     try {
@@ -1991,7 +2261,8 @@ export class WriteService {
       rhythmEntry,
       foreshadowings,
       characters,
-      tracking
+      tracking,
+      recentPlotSummaries
     }
   }
 
@@ -2038,6 +2309,8 @@ interface ChapterContext {
   foreshadowings: Foreshadowing[]
   characters: Character[]
   tracking: TrackingContext | null
+  /** 中程记忆：本章之前最近若干章剧情摘要 */
+  recentPlotSummaries: PlotChapterSummary[]
 }
 
 /** 取尾部 n 字符（按字符数，不按字节） */
@@ -2061,6 +2334,8 @@ interface RenderInput {
   foreshadowings: Foreshadowing[]
   characters: Character[]
   tracking?: TrackingContext | null
+  /** 中程记忆：本章之前最近若干章剧情摘要 */
+  recentPlotSummaries?: PlotChapterSummary[]
   chapterNumber: number
   /** 本章目标字数（用于强约束 LLM 写够）。 */
   targetWords: number
@@ -2076,6 +2351,11 @@ interface AdjustRenderInput {
   instruction: string
   /** 本章已生成的待调整正文。 */
   content: string
+  /**
+   * 用户已确认的修改方案（来自 planAdjustChapterStream）。
+   * 有则落笔时严格按方案执行；无则仅按 instruction 改。
+   */
+  confirmedPlan?: string
   chapterRequirements?: string
   chapterDetail?: ChapterDetail
   prevTail: string
@@ -2120,6 +2400,8 @@ interface AskQuestionRenderInput {
   settingsEvolution?: SettingsEvolutionEntry[]
   /** 上下文文件：追踪/ */
   tracking?: TrackingContext | null
+  /** 中程记忆：本章之前最近若干章剧情摘要 */
+  recentPlotSummaries?: PlotChapterSummary[]
   /** A：全书章目录（标题 + 细纲摘要） */
   chapterCatalog?: AskChapterCatalogEntry[]
   /** B：相邻章正文 */
@@ -2167,9 +2449,9 @@ function renderUserPrompt(input: RenderInput): string {
     }
   }
 
-  // 1.2 卷级定位（卷核心/情绪弧线/爽点节奏/伏笔规划）
+  // 1.2 卷级定位 + 卷内锚点（防提前剧透 / 对齐卷目标）
   if (input.volumeOutline) {
-    parts.push(...renderVolumeSection(input.volumeOutline))
+    parts.push(...renderVolumeSection(input.volumeOutline, input.chapterNumber))
   }
 
   // 2. 本章细纲
@@ -2270,6 +2552,11 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(...renderTrackingSection(input.tracking, input.chapterNumber))
   }
 
+  // 5.2 中程记忆：近 K 章剧情点摘要（长篇防写偏主通道）
+  if (input.recentPlotSummaries && input.recentPlotSummaries.length > 0) {
+    parts.push(...renderRecentPlotSummaries(input.recentPlotSummaries, input.chapterNumber))
+  }
+
   // 6. 伏笔
   if (input.foreshadowings.length > 0) {
     parts.push('---')
@@ -2308,6 +2595,9 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push('```')
   }
 
+  // 6.2 章末自检清单（紧贴输出指令，强制勾选：悬念/伏笔/金手指/禁抢写）
+  parts.push(...renderChapterSelfCheck(input))
+
   // 7. 输出最终指令 + 伏笔回执格式
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
@@ -2320,6 +2610,9 @@ function renderUserPrompt(input: RenderInput): string {
       `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
     )
   }
+  parts.push(
+    '**输出前必须对照上文【写前/写后自检清单】逐条确认**；有任一条未落实，先补进正文再输出。'
+  )
   // 7.1 临时写作要求复述（最高优先级，紧贴输出指令强化注意力）
   if (input.tempContext) {
     parts.push(`**【再次强调 · 本章临时写作要求（最高优先级，必须逐条落实，覆盖细纲与硬性写作要求）】**：`)
@@ -2342,10 +2635,84 @@ function renderUserPrompt(input: RenderInput): string {
 }
 
 /**
+ * 渲染「按要求重写 · 先看建议」的 user prompt。
+ * 只输出修改方案与意见，绝不输出修订后的完整正文。
+ */
+function renderAdjustPlanUserPrompt(input: AdjustRenderInput): string {
+  const trimmedContent =
+    input.content.length > 30_000
+      ? input.content.slice(0, 30_000) + '\n\n（后文因长度限制省略）'
+      : input.content
+  const charactersSection =
+    input.characters.length > 0
+      ? `## 主要人物参考\n${input.characters
+          .slice(0, 20)
+          .map((c) => `- ${c.name}${c.role ? `：${c.role}` : ''}${c.personality ? `，${c.personality}` : ''}`)
+          .join('\n')}`
+      : ''
+  const foreshadowingsSection =
+    input.foreshadowings.length > 0
+      ? `## 相关伏笔参考\n${input.foreshadowings
+          .slice(0, 20)
+          .map((f) => `- ${f.content}`)
+          .join('\n')}`
+      : ''
+
+  return [
+    `## 任务：为第 ${input.chapterNumber} 章「按要求重写」先出修改方案（不落笔）`,
+    '',
+    '用户想按某条追问要求改写本章正文。你是资深网文/小说编辑，请先审读原文与要求，给出具体、可执行的修改建议与意见，供用户确认。',
+    '**本步禁止输出修订后的完整正文，禁止整章重写，禁止用大段成品小说代替方案。**',
+    '',
+    '## 输出要求',
+    '1. 先用 1～3 句复述你对用户意图的理解；若要求含糊或可多种解读，列出你准备采用的解读并说明原因。',
+    '2. 对照当前正文，点明拟改动的位置：尽量引用关键原句/段落特征（用「」标出），让用户能定位。',
+    '3. 给出具体修改建议：每条写清「改什么 / 怎么改 / 改完应达到什么效果」；不要空泛套话。',
+    '4. 明确建议**保留不动**的部分，避免无故大改。',
+    '5. 指出风险与取舍：人物一致性、节奏、伏笔、与细纲冲突等；若某条要求有副作用，直说并给可选方案。',
+    '6. 文末必须用「## 落笔要点」列出确认后执行的条目清单：每条一行、用 `1. 2. 3.` 编号；每条只写一件可独立执行的改动（用户会在界面上勾选其中几条再落笔）。',
+    '7. 「落笔要点」不要写成长段分析；分析放在前面章节，要点保持短句、可勾选。',
+    '8. 语气像编辑给作者回方案，不要写成已改完的正文。',
+    '',
+    '## 建议结构（可按此组织，小标题可用）',
+    '## 理解你的要求',
+    '## 原文相关位置',
+    '## 修改建议',
+    '## 风险与取舍',
+    '## 落笔要点',
+    '',
+    `## 小说信息`,
+    `- 书名：${input.projectName}`,
+    `- 题材：${input.genre ?? '未指定'}`,
+    '',
+    input.chapterRequirements
+      ? `## 本章长期写作要求（参考）\n${renderRequirementChecklist(input.chapterRequirements)}`
+      : '',
+    input.chapterDetail
+      ? `## 本章细纲（参考）\n${renderChapterDetail(input.chapterDetail, '本章细纲')}`
+      : '',
+    input.prevTail ? `## 上一章结尾参考\n${input.prevTail}` : '',
+    charactersSection,
+    foreshadowingsSection,
+    '',
+    `------ 第 ${input.chapterNumber} 章当前正文 ------`,
+    trimmedContent,
+    '',
+    `## 用户追问要求`,
+    input.instruction.trim(),
+    '',
+    '请基于上述要求，只输出修改方案与意见（不要输出修订正文）：'
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+/**
  * 渲染「追问调整正文」的 user prompt。
  *
  * 优先级语义：用户追问要求为最高优先级，覆盖细纲、人物、伏笔、长期写作要求等一切既有约束；
  * 冲突时以用户要求为准。结构上把用户要求放在当前正文之后、紧贴输出指令，使其处于 LLM 注意力最靠后处。
+ * 若提供 confirmedPlan，则落笔时以用户确认的方案为准具体执行。
  */
 function renderAdjustUserPrompt(input: AdjustRenderInput): string {
   const trimmedContent =
@@ -2365,6 +2732,16 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
           .join('\n')}`
       : ''
 
+  const planSection = input.confirmedPlan?.trim()
+    ? [
+        '',
+        `## 用户已确认的修改方案（落笔时严格按此执行；若与上方「用户追问要求」细节冲突，以本方案为准）`,
+        input.confirmedPlan.trim(),
+        '',
+        '请把上述方案中的每一条落笔要点落实到正文中，不要遗漏，也不要擅自扩大改动范围。'
+      ].join('\n')
+    : ''
+
   return [
     `## 任务：按用户追问调整第 ${input.chapterNumber} 章已生成正文`,
     '',
@@ -2373,13 +2750,14 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
     '',
     '## 优先级（务必严格遵守）',
     '1. **用户追问要求是最高优先级，覆盖一切既有约束。** 凡用户明确要求改的（剧情走向、人物行为、场景、写法、节奏、删减、增写等），必须改到位；若用户要求与细纲、人物卡、伏笔、长期写作要求冲突，以用户要求为准，并在调整后让正文自洽。',
-    '2. 用户**没有**提及的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与用户要求直接冲突，无条件让位于用户要求。',
-    '3. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非用户要求明确涉及增减篇幅。',
-    '4. 不要把修改要求、分析过程、对照清单或免责声明写进正文。',
-    '5. 避免引入新的 AI 味套话，保持动作、对话、细节和因果推进。',
+    '2. 若提供了「用户已确认的修改方案」，按该方案的落笔要点与具体建议执行；方案未点名的部分尽量保持原貌。',
+    '3. 用户**没有**提及的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与用户要求直接冲突，无条件让位于用户要求。',
+    '4. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非用户要求明确涉及增减篇幅。',
+    '5. 不要把修改要求、分析过程、对照清单或免责声明写进正文。',
+    '6. 避免引入新的 AI 味套话，保持动作、对话、细节和因果推进。',
     '',
     '## 执行方式',
-    '- 先逐条拆解用户的追问要求，明确每一条要落到正文的哪个段落/情节。',
+    '- 先逐条拆解用户的追问要求（及已确认方案），明确每一条要落到正文的哪个段落/情节。',
     '- 改写时逐一落实，不要遗漏任何一条；与原意冲突处，按用户要求重写而非折中。',
     '- 输出前自检：用户提出的每一条要求是否都已体现在正文中；若有遗漏，回头补齐再输出。',
     '',
@@ -2402,6 +2780,7 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
     '',
     `## 用户追问要求（最高优先级，必须逐条落实到上方正文）`,
     input.instruction.trim(),
+    planSection,
     '',
     '请基于上述追问要求，直接输出调整后的完整正文：'
   ]
@@ -2469,14 +2848,20 @@ function renderAskQuestionPrompt(input: AskQuestionRenderInput): string {
     parts.push('')
   }
 
-  // —— A：卷纲 ——
+  // —— A：卷纲 + 卷内锚点 ——
   if (input.volumeOutline) {
-    parts.push(...renderVolumeSection(input.volumeOutline))
+    parts.push(...renderVolumeSection(input.volumeOutline, input.chapterNumber))
   }
 
   // —— 上下文文件：追踪/ ——
   if (input.tracking) {
     parts.push(...renderTrackingSection(input.tracking, input.chapterNumber))
+  }
+
+  // —— 中程记忆：近 K 章剧情点 ——
+  if (input.recentPlotSummaries && input.recentPlotSummaries.length > 0) {
+    parts.push(...renderRecentPlotSummaries(input.recentPlotSummaries, input.chapterNumber))
+    parts.push('')
   }
 
   // —— 人物 / 伏笔 ——
@@ -2700,26 +3085,193 @@ function renderSettingsSection(settings: SettingsContext, characters: Character[
   return parts
 }
 
+/** 卷纲单节注入的最大字符数（防卷纲全文撑爆 token） */
+const VOLUME_SECTION_MAX_CHARS = 1200
+
 /**
- * 渲染卷级定位段（卷核心/情绪弧线/爽点节奏/伏笔规划）。
- * 从卷纲文件的 H2 节中提取关键约束素材。
+ * 渲染卷级定位 + 卷内硬锚点。
+ * - 卷核心/情绪/爽点/伏笔：注入（截断）
+ * - 反转 / 各章核心事件：按当前章号拆成「已发生」与「禁止提前」
+ * - 明确写出本章在卷中的位置与卷末不得抢写的约束
  */
-function renderVolumeSection(vol: VolumeOutline): string[] {
+function renderVolumeSection(vol: VolumeOutline, chapterNumber: number): string[] {
   const parts: string[] = []
-  // 只注入有价值的节：卷核心/情绪弧线/爽点节奏/伏笔/反转
-  const usefulTitles = ['卷核心', '情绪弧线', '爽点节奏', '伏笔', '反转', '核心冲突', '人物弧线']
-  const sections = vol.sections.filter((s) =>
-    usefulTitles.some((t) => s.title.includes(t))
-  )
-  if (sections.length === 0) return parts
+  const anchors = extractVolumeAnchors(vol, chapterNumber)
 
   parts.push('---')
   parts.push(`# 卷级定位：第 ${vol.number} 卷 ${vol.name}`)
-  for (const s of sections) {
-    parts.push(`## ${s.title}`)
-    parts.push(s.body.trim())
+
+  if (vol.chapterStart != null && vol.chapterEnd != null) {
+    const total = vol.chapterEnd - vol.chapterStart + 1
+    const idx = chapterNumber - vol.chapterStart + 1
+    const phase =
+      idx <= Math.ceil(total * 0.25)
+        ? '开篇铺垫'
+        : idx <= Math.ceil(total * 0.6)
+          ? '卷中推进'
+          : idx < total
+            ? '高潮收束前'
+            : '卷终'
+    parts.push(
+      `**本章位置**：第 ${chapterNumber} 章 · 本卷第 ${idx}/${total} 章（${phase}，范围 ${vol.chapterStart}-${vol.chapterEnd}）`
+    )
   }
+
+  // 硬锚点优先
+  if (anchors.coreGoals.length > 0) {
+    parts.push('## 【硬约束 · 本卷必须对齐】')
+    parts.push('写作须服务本卷目标，禁止把卷末大事件提前写完或写成另一条主线：')
+    for (const g of anchors.coreGoals) parts.push(`- ${g}`)
+  }
+  if (anchors.doNotAdvance.length > 0) {
+    parts.push('## 【硬约束 · 禁止提前剧透/抢写】')
+    parts.push('以下为本卷更后章节的事件，**本章禁止写出、暗示到揭晓或抢先完成**：')
+    for (const d of anchors.doNotAdvance.slice(0, 10)) parts.push(`- ${d}`)
+  }
+  if (anchors.alreadyHappened.length > 0) {
+    parts.push('## 本卷已发生关键节点（保持连续，勿遗忘）')
+    for (const a of anchors.alreadyHappened.slice(-8)) parts.push(`- ${a}`)
+  }
+
+  // 卷纲节：排除反转/各章（已按章拆过）；其余截断注入
+  const usefulTitles = ['卷核心', '情绪弧线', '爽点节奏', '伏笔', '核心冲突', '人物弧线']
+  const skipForBody = ['反转', '各章']
+  for (const s of vol.sections) {
+    if (skipForBody.some((t) => s.title.includes(t))) continue
+    if (!usefulTitles.some((t) => s.title.includes(t))) continue
+    const body = s.body.trim()
+    if (!body) continue
+    parts.push(`## ${s.title}`)
+    parts.push(
+      body.length > VOLUME_SECTION_MAX_CHARS
+        ? body.slice(0, VOLUME_SECTION_MAX_CHARS) + '\n…（卷纲节已截断）'
+        : body
+    )
+  }
+
   return parts
+}
+
+/**
+ * 从卷纲抽取：卷目标、本章前已发生节点、本章后禁止抢写节点。
+ */
+function extractVolumeAnchors(
+  vol: VolumeOutline,
+  chapterNumber: number
+): { coreGoals: string[]; alreadyHappened: string[]; doNotAdvance: string[] } {
+  const coreGoals: string[] = []
+  const alreadyHappened: string[] = []
+  const doNotAdvance: string[] = []
+
+  const coreSec = vol.sections.find(
+    (s) => s.title.includes('卷核心') || s.title.includes('核心冲突')
+  )
+  if (coreSec) {
+    for (const line of coreSec.body.split(/\r?\n/)) {
+      const t = line.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').trim()
+      if (!t || t.startsWith('#')) continue
+      // 抓目标向字段
+      if (
+        /核心冲突|核心情绪|人物弧线|卷名|章节范围|时间线|地点|罗盘|武力/.test(t) ||
+        t.includes('：') ||
+        t.includes(':')
+      ) {
+        if (t.length > 8 && t.length < 200) coreGoals.push(t)
+      }
+      if (coreGoals.length >= 8) break
+    }
+  }
+
+  // 反转节：按「第 N 章」拆分
+  for (const sec of vol.sections.filter((s) => s.title.includes('反转'))) {
+    for (const line of sec.body.split(/\r?\n/)) {
+      const t = line.replace(/^[-*]\s*/, '').trim()
+      if (!t) continue
+      const m = t.match(/第\s*(\d+)\s*章/)
+      if (!m) continue
+      const n = parseInt(m[1], 10)
+      const item = t.length > 180 ? t.slice(0, 179) + '…' : t
+      if (n < chapterNumber) alreadyHappened.push(item)
+      else if (n > chapterNumber) doNotAdvance.push(item)
+    }
+  }
+
+  // 各章核心事件：### 第N章 或 - **核心事件**
+  for (const sec of vol.sections.filter(
+    (s) => s.title.includes('各章') || s.title.includes('核心事件')
+  )) {
+    // 按 ### 或行内第N章 切块
+    const blocks = splitVolumeChapterBlocks(sec.body)
+    for (const b of blocks) {
+      if (b.chapter === chapterNumber) continue // 本章细纲另有，不在此重复剧透全文
+      const oneLine =
+        b.title && b.summary
+          ? `第 ${b.chapter} 章「${b.title}」：${b.summary}`
+          : b.summary
+            ? `第 ${b.chapter} 章：${b.summary}`
+            : b.title
+              ? `第 ${b.chapter} 章「${b.title}」`
+              : ''
+      if (!oneLine) continue
+      const item = oneLine.length > 180 ? oneLine.slice(0, 179) + '…' : oneLine
+      if (b.chapter < chapterNumber) alreadyHappened.push(item)
+      else if (b.chapter > chapterNumber) doNotAdvance.push(item)
+    }
+  }
+
+  // 情绪弧线里「N-M章」区间：若整段都在本章之后，可作为节奏禁抢提示（轻量）
+  const emotion = vol.sections.find((s) => s.title.includes('情绪弧线'))
+  if (emotion) {
+    const body = emotion.body.replace(/\s+/g, ' ').trim()
+    if (body && body.length < 400) {
+      // 不拆章号时整段作参考即可；render 里仍会注入完整情绪弧线节
+    }
+  }
+
+  return { coreGoals, alreadyHappened, doNotAdvance }
+}
+
+/** 解析卷纲「各章核心事件」节中的章节块 */
+function splitVolumeChapterBlocks(
+  body: string
+): { chapter: number; title: string; summary: string }[] {
+  const out: { chapter: number; title: string; summary: string }[] = []
+  const lines = body.split(/\r?\n/)
+  let cur: { chapter: number; title: string; lines: string[] } | null = null
+
+  const flush = () => {
+    if (!cur) return
+    const text = cur.lines.join('\n')
+    const core =
+      text.match(/\*\*核心事件\*\*[：:]\s*(.+)/)?.[1]?.trim() ||
+      text.match(/核心事件[：:]\s*(.+)/)?.[1]?.trim() ||
+      cur.lines.map((l) => l.replace(/^[-*]\s*/, '').trim()).find((l) => l && !l.startsWith('**')) ||
+      ''
+    out.push({
+      chapter: cur.chapter,
+      title: cur.title,
+      summary: core.replace(/\*\*/g, '').trim()
+    })
+    cur = null
+  }
+
+  for (const line of lines) {
+    const h3 = line.match(/^###\s*第\s*(\d+)\s*章[：:\s]*(.*)$/)
+    const h2ish = line.match(/^第\s*(\d+)\s*章[：:\s]+(.+)$/)
+    const m = h3 || h2ish
+    if (m && !line.trim().startsWith('|')) {
+      flush()
+      cur = {
+        chapter: parseInt(m[1], 10),
+        title: (m[2] || '').replace(/\*\*/g, '').trim(),
+        lines: []
+      }
+      continue
+    }
+    if (cur) cur.lines.push(line)
+  }
+  flush()
+  return out
 }
 
 /**
@@ -2759,15 +3311,15 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
     }
   }
 
-  // 时间线（全书时间轴，截断防 token 爆炸）
+  // 时间线：优先保留本章附近/已发生章相关行，再截断
   if (tracking.timeline) {
     parts.push('## 时间线')
-    parts.push(tracking.timeline.slice(0, TIMELINE_MAX_CHARS))
+    parts.push(filterTimelineForChapter(tracking.timeline, chapterNumber, TIMELINE_MAX_CHARS))
   }
 
-  // 日更进度摘要（最后 3 条，含下一章目标/阻塞点）
+  // 日更进度摘要（人工备注/阻塞点；章级因果以「近期已写章节摘要」为准）
   if (tracking.recentProgress.length > 0) {
-    parts.push('## 近期写作进度')
+    parts.push('## 近期写作进度（日更备注）')
     for (const p of tracking.recentProgress) {
       parts.push(`- ${p.date}（${p.chapter}）：${p.summary}`)
       if (p.nextGoal && p.nextGoal !== '—') parts.push(`  · 下一章目标：${p.nextGoal}`)
@@ -2785,6 +3337,179 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
   }
 
   return parts
+}
+
+/**
+ * 章末/写前自检清单：把「最容易写偏」的硬项收成可勾选列表，紧贴输出指令。
+ * 来源：上章悬念与未完成、本章核心事件、到期/禁爆伏笔、金手指边界、卷级禁抢写。
+ */
+function renderChapterSelfCheck(input: RenderInput): string[] {
+  const checks: string[] = []
+  const ch = input.chapterNumber
+
+  // —— 1. 上章衔接 ——
+  const prev = input.prevEndingState
+  if (prev?.suspense?.trim()) {
+    checks.push(
+      `□ **上章悬念**：本章必须回应或延续——${clipCheck(prev.suspense, 140)}`
+    )
+  }
+  if (prev?.unfinished?.length) {
+    for (const u of prev.unfinished.slice(0, 5)) {
+      if (!u?.trim()) continue
+      checks.push(`□ **上章未完成**：${clipCheck(u, 120)}`)
+    }
+  }
+  if (prev?.characterPositions?.length) {
+    const pos = prev.characterPositions
+      .slice(0, 4)
+      .map((p) => `${p.name}在${p.location}`)
+      .join('；')
+    if (pos) checks.push(`□ **人物位置连续**：开头不瞬移——${clipCheck(pos, 120)}`)
+  }
+  if (input.prevTail?.trim() && !prev?.suspense) {
+    checks.push('□ **上章结尾对接**：开头时间/地点/人物状态与上章正文末尾一致')
+  }
+
+  // —— 2. 本章任务 ——
+  const core = input.chapterDetail?.plotSummary?.trim()
+  if (core) {
+    checks.push(`□ **本章核心事件已完成（不可跑题）**：${clipCheck(core, 160)}`)
+  }
+  if (input.chapterDetail?.hook?.trim()) {
+    checks.push(`□ **章末钩子方向**：${clipCheck(input.chapterDetail.hook, 100)}`)
+  }
+  if (input.chapterDetail?.writingRequirements?.trim() || input.tempContext?.trim()) {
+    checks.push('□ **硬性/临时写作要求**：上文清单已逐条落实，无遗漏弱化')
+  }
+
+  // —— 3. 伏笔 ——
+  const planted = input.foreshadowings.filter((f) => f.status === 'planted')
+  const dueNow = planted.filter((f) => f.expectedCollect === ch)
+  if (dueNow.length > 0) {
+    checks.push(
+      `□ **到期伏笔必须回收（${dueNow.length}）**：${dueNow
+        .map((f) => clipCheck(f.content, 60))
+        .join('；')}`
+    )
+  }
+  const notYet = planted.filter(
+    (f) => f.expectedCollect != null && f.expectedCollect > ch
+  )
+  if (notYet.length > 0) {
+    checks.push(
+      `□ **未到期伏笔禁止提前揭穿**：${notYet
+        .slice(0, 5)
+        .map((f) => clipCheck(f.content, 50))
+        .join('；')}${notYet.length > 5 ? '…' : ''}`
+    )
+  }
+
+  // —— 4. 金手指边界卡 ——
+  const boundaries = extractPowerBoundaryBullets(
+    input.settings ?? null,
+    input.settingsEvolution ?? []
+  )
+  if (boundaries.length > 0) {
+    checks.push('□ **金手指边界（不可越权）**：')
+    for (const b of boundaries.slice(0, 8)) {
+      checks.push(`  · ${b}`)
+    }
+  } else {
+    checks.push('□ **金手指/能力边界**：未突破设定中的能见范围、消耗、反噬与不可为')
+  }
+
+  // —— 5. 全局禁止 ——
+  checks.push('□ **未抢写下一章/卷末大事件**：不提前完成后续核心反转')
+  checks.push('□ **人设与状态连续**：实力/立场/道具与「当前状态快照」不矛盾')
+  checks.push('□ **章末形态**：以对话或事件收束，禁止总结式旁白收尾')
+
+  const parts: string[] = []
+  parts.push('---')
+  parts.push(`# 【写前/写后自检清单】（第 ${ch} 章 · 输出正文前必须逐条确认）`)
+  parts.push(
+    '下列为本章防写偏硬项。写的过程中对照，**全部落实后再输出**；做不到的项不得用旁白糊弄跳过。'
+  )
+  for (const c of checks) parts.push(c)
+  return parts
+}
+
+function clipCheck(s: string, max: number): string {
+  const t = s.replace(/\s+/g, ' ').trim()
+  if (t.length <= max) return t
+  return t.slice(0, max - 1) + '…'
+}
+
+/**
+ * 渲染中程记忆：本章之前最近若干「已写正文」章的剧情点摘要。
+ * 硬约束语义：保持因果与人设连续，禁止遗忘或推翻已发生事件。
+ */
+function renderRecentPlotSummaries(
+  summaries: PlotChapterSummary[],
+  chapterNumber: number
+): string[] {
+  if (summaries.length === 0) return []
+  const first = summaries[0].chapterNumber
+  const last = summaries[summaries.length - 1].chapterNumber
+  const parts: string[] = []
+  parts.push('---')
+  parts.push(
+    `# 近期已写章节摘要（第 ${first}–${last} 章 · 共 ${summaries.length} 章已写正文 · 写第 ${chapterNumber} 章前必读）`
+  )
+  parts.push(
+    '以下为**已有正文**的章节情节（非未写细纲），写作时必须保持因果与人设连续：**禁止遗忘、矛盾或推翻**；可在此基础上推进，不可当作未发生。'
+  )
+  for (const p of summaries) {
+    const title = p.title ? `「${p.title}」` : ''
+    parts.push(`- 第 ${p.chapterNumber} 章${title}：${p.summary}`)
+  }
+  return parts
+}
+
+/**
+ * 时间线截断：优先保留无章号行 + 本章附近/已发生章相关行，避免塞入全书过远未来。
+ */
+function filterTimelineForChapter(
+  timeline: string,
+  chapterNumber: number,
+  maxChars: number
+): string {
+  const lines = timeline.split(/\r?\n/)
+  const scored: { line: string; score: number }[] = []
+  for (const line of lines) {
+    const m = line.match(/第\s*(\d+)\s*章/)
+    if (!m) {
+      // 表头、历史背景等：保留但低优先级
+      scored.push({ line, score: line.includes('|') && /---|章节|事件|时间/.test(line) ? 50 : 10 })
+      continue
+    }
+    const n = parseInt(m[1], 10)
+    if (n > chapterNumber + 5) {
+      // 明显未来章：丢弃，防剧透
+      continue
+    }
+    // 越靠近本章分越高
+    const dist = Math.abs(chapterNumber - n)
+    scored.push({ line, score: 1000 - dist })
+  }
+  // 稳定：同分数保持原序
+  scored.sort((a, b) => b.score - a.score)
+  const picked: string[] = []
+  let size = 0
+  // 先按分数取，再按原文顺序输出更易读
+  const chosen = new Set<string>()
+  for (const s of scored) {
+    if (size + s.line.length + 1 > maxChars) continue
+    chosen.add(s.line)
+    size += s.line.length + 1
+  }
+  for (const line of lines) {
+    if (chosen.has(line)) picked.push(line)
+  }
+  if (picked.length === 0) return timeline.slice(0, maxChars)
+  let out = picked.join('\n')
+  if (out.length > maxChars) out = out.slice(0, maxChars) + '\n…'
+  return out
 }
 
 /**

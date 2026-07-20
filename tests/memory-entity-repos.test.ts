@@ -450,6 +450,69 @@ describe('PlotPointRepo', () => {
     expect(plots[0].name).toMatch(/第.*12.*章/)
     expect(plots[0].customFields?.['章节号']).toBe('12')
   })
+
+  it('listSummariesBefore 返回本章之前最近 N 章摘要（不含本章）', async () => {
+    for (const [n, title, event] of [
+      [1, '开端', '重生摆摊'],
+      [2, '试探', '沈清秋采访'],
+      [3, '改运', '暗中改段老虎运势'],
+      [10, '远期', '不该出现在窗口内']
+    ] as const) {
+      await writeFile(
+        path.join(dir, '记忆', '剧情点', `第${String(n).padStart(3, '0')}章 ${title}.md`),
+        `# 第${n}章 ${title}\n\n## 字段\n\n- **核心事件**：${event}\n`,
+        'utf-8'
+      )
+    }
+    // onlyWithProse=false：不依赖正文文件，纯窗口测试
+    const summaries = await repo.listSummariesBefore(4, 12, { onlyWithProse: false })
+    expect(summaries.map((s) => s.chapterNumber)).toEqual([1, 2, 3])
+    expect(summaries[0].summary).toContain('重生摆摊')
+    expect(summaries[2].title).toContain('改运')
+    expect(summaries.every((s) => s.chapterNumber !== 4)).toBe(true)
+    expect(summaries.every((s) => s.chapterNumber !== 10)).toBe(true)
+  })
+
+  it('listSummariesBefore 缺剧情点时用细纲补洞', async () => {
+    await writeFile(
+      path.join(dir, '细纲', '细纲_第002章_码头风云.md'),
+      `# 第 2 章\n\n## 字段\n\n- **核心事件**：码头发生火并前奏\n`,
+      'utf-8'
+    )
+    const summaries = await repo.listSummariesBefore(3, 5, { onlyWithProse: false })
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].chapterNumber).toBe(2)
+    expect(summaries[0].summary).toContain('火并')
+    expect(summaries[0].title).toContain('码头风云')
+  })
+
+  it('listSummariesBefore 默认仅保留已写正文的章', async () => {
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    for (const [n, title, event] of [
+      [1, '开端', '重生摆摊'],
+      [2, '试探', '仅有剧情点无正文'],
+      [3, '改运', '暗中改运']
+    ] as const) {
+      await writeFile(
+        path.join(dir, '记忆', '剧情点', `第${String(n).padStart(3, '0')}章 ${title}.md`),
+        `# 第${n}章 ${title}\n\n## 字段\n\n- **核心事件**：${event}\n`,
+        'utf-8'
+      )
+    }
+    // 只写 1、3 章正文
+    await writeFile(path.join(dir, '正文', '001.md'), '第一章正文', 'utf-8')
+    await writeFile(path.join(dir, '正文', '第003章 改运.md'), '第三章正文', 'utf-8')
+
+    const summaries = await repo.listSummariesBefore(4, 12)
+    expect(summaries.map((s) => s.chapterNumber)).toEqual([1, 3])
+    expect(summaries[0].summary).toContain('重生摆摊')
+    expect(summaries[1].summary).toContain('改运')
+    expect(summaries.every((s) => s.chapterNumber !== 2)).toBe(true)
+  })
+
+  it('listSummariesBefore 第 1 章返回空', async () => {
+    expect(await repo.listSummariesBefore(1)).toEqual([])
+  })
 })
 
 // ============ RelationshipRepo ============

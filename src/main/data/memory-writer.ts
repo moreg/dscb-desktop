@@ -194,7 +194,7 @@ export class MemoryWriter {
       }
     }
 
-    // 2.6 上下文进度：始终写入 追踪/上下文.md（续写会读最近 3 条）
+    // 2.6 上下文进度：始终写入 追踪/上下文.md（续写会读最近若干条日更备注；章级记忆另走剧情点）
     try {
       await this.appendProgress(
         extraction.chapterNumber,
@@ -234,6 +234,10 @@ export class MemoryWriter {
       } catch (e) {
         errors.push(`伏笔回收失败 ${cf.content}: ${(e as Error).message}`)
       }
+    }
+
+    if (plotPoints > 0) {
+      PlotPointRepo.invalidateCache(this.projectDir)
     }
 
     return {
@@ -548,7 +552,7 @@ export class MemoryWriter {
   }
 
   /**
-   * 写入 追踪/上下文.md 进度表（续写会读最近 3 条）。
+   * 写入 追踪/上下文.md 进度表（续写会读最近若干条日更备注）。
    * 缺文件自动建骨架；同章已有行则覆盖摘要（重同步刷新）。
    */
   private async appendProgress(
