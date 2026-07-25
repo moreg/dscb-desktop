@@ -10,7 +10,7 @@ import {
 } from '../../shared/dismissed-keys'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { isReviewKey } from '../../shared/review-suggestions'
-import { isAdjustRewriteKey } from '../../main/data/rewrite-history'
+import { isAdjustRewriteKey, isFormatProseKey } from '../../main/data/rewrite-history'
 
 interface RewriteEntry {
   oldSnippet: string
@@ -532,6 +532,7 @@ export default function ChapterAuditPanel({
                     const getRuleName = (key?: string) => {
                       if (!key) return '自定义改写'
                       if (isAdjustRewriteKey(key)) return '按要求重写'
+                      if (isFormatProseKey(key)) return '正文格式化'
                       if (isReviewKey(key)) return 'AI 改稿建议'
                       const v = report?.violations.find(x => violationKey(x) === key)
                       if (v) {

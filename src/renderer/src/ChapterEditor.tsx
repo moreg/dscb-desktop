@@ -33,6 +33,8 @@ import {
   clearRedoStack,
   detectUndoRedoShortcut,
   ADJUST_REWRITE_KEY,
+  FORMAT_PROSE_KEY,
+  isWholeDocRewriteKey,
   type RewriteEntry
 } from '../../main/data/rewrite-history'
 import {
@@ -100,6 +102,10 @@ import {
   parseCastJson,
   type CastPresence
 } from '../../shared/cast-presence'
+import {
+  formatChapterProse,
+  needsChapterProseFormat
+} from '../../shared/format-chapter-prose'
 
 interface Props {
   projectId: string
@@ -714,7 +720,20 @@ export default function ChapterEditor({
   /** 内部：把 popped 的 newText 还原成 oldSnippet，再触发 reAudit */
   const applyRevert = (popped: RewriteEntry) => {
     setDraft((d) => {
-      const next = revertInDraft(d, popped.newText, popped.oldSnippet)
+      // 整章级操作（格式化 / 按要求重写）：优先全文还原
+      // 仅做换行归一化兜底（\r\n / 首尾空行），不把「用户改过的空格」当成未改动
+      let next: string
+      if (isWholeDocRewriteKey(popped.violationKey)) {
+        const norm = (s: string) =>
+          s.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/^\n+/, '').replace(/\n+$/, '')
+        if (d === popped.newText || norm(d) === norm(popped.newText)) {
+          next = popped.oldSnippet
+        } else {
+          next = revertInDraft(d, popped.newText, popped.oldSnippet)
+        }
+      } else {
+        next = revertInDraft(d, popped.newText, popped.oldSnippet)
+      }
       if (next === d) {
         // 找不到新文本（可能用户手动改过）— P6-C 显示 toast
         setUndoToast({
@@ -1471,6 +1490,12 @@ export default function ChapterEditor({
     const myGen = ++genRef.current
     let finalDraft = ''
     let requestId: string | null = null
+    /**
+     * await 成功后由本路径独占终态（格式化 + setDraft）。
+     * done/token 可能晚到：禁止再写编辑器，否则会盖掉已格式化正文。
+     * 伏笔回执 IPC 仍可在 done 里发（幂等）。
+     */
+    let editorFinalized = false
     /** 本会话仍有效时清理 busy 标志，避免 done 事件与 invoke 回包乱序导致永久「落墨中」 */
     const releaseIfMine = (): void => {
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
@@ -1490,7 +1515,10 @@ export default function ChapterEditor({
           if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
           if (token) {
             finalDraft += token
-            setDraft(initialDraft + finalDraft, { preserveCaret: false })
+            // 终态后忽略迟到 token，避免冲掉 await 路径的格式化结果
+            if (!editorFinalized) {
+              setDraft(initialDraft + finalDraft, { preserveCaret: false })
+            }
           }
           if (done) {
             // done 可能晚于 / 早于 invoke resolve；只做轻量收尾，完整状态以 await 后为准
@@ -1499,7 +1527,10 @@ export default function ChapterEditor({
             refreshUsage() // P10-A：续写完成更新今日用量
             const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
             if (receipt) {
-              setDraft(initialDraft + stripped, { preserveCaret: false })
+              // 仅在 await 尚未终态化时写草稿；终态由 await 统一 strip + 格式化
+              if (!editorFinalized) {
+                setDraft(initialDraft + stripped, { preserveCaret: false })
+              }
               window.api.applyForeshadowReceipt(targetProjectId, targetChapter, receipt)
                 .then(res => {
                   if (res.planted > 0 || res.collected > 0) {
@@ -1533,18 +1564,25 @@ export default function ChapterEditor({
       // 关键：即使 done 事件尚未到达 / 丢失，也必须结束 generating，否则会永久停在「停止生成」
       streamCompletedRef.current = true
       releaseIfMine()
-      setDirty(true)
-      // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
-      // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
-      setFlowPanelOpen(true)
-      // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
-      // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
-      void runPostGenerateAudit(myGen, finalDraft)
-      // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
+      // 标记终态：此后 stream 回调不得再 setDraft
+      editorFinalized = true
+      // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
         const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
         const fullContent = initialDraft + (receipt ? stripped : finalDraft)
-        void runPostGenerateMemorySync(myGen, fullContent, {
+        const formatted = formatDraftProse(fullContent, {
+          silent: true,
+          recordHistory: true
+        })
+        setDirty(true)
+        // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
+        // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
+        setFlowPanelOpen(true)
+        // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
+        // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
+        void runPostGenerateAudit(myGen, formatted)
+        // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
+        void runPostGenerateMemorySync(myGen, formatted, {
           previousSelfCheck
         })
       }
@@ -1753,6 +1791,8 @@ export default function ChapterEditor({
     const myGen = ++genRef.current
     let revised = ''
     let requestId: string | null = null
+    /** await 终态化后忽略迟到 token，避免盖掉格式化后的整章正文 */
+    let editorFinalized = false
     const releaseIfMine = (): void => {
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       streamBusyRef.current = false
@@ -1771,7 +1811,9 @@ export default function ChapterEditor({
           if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
           if (token) {
             revised += token
-            setDraft(revised, { preserveCaret: false })
+            if (!editorFinalized) {
+              setDraft(revised, { preserveCaret: false })
+            }
           }
           if (done) {
             streamCompletedRef.current = true
@@ -1801,13 +1843,25 @@ export default function ChapterEditor({
       // 与续写相同：invoke 回包到达即结束 adjusting，不依赖 done 事件顺序
       streamCompletedRef.current = true
       releaseIfMine()
-      // 整章替换成功：压入撤销栈，Ctrl+Z / 面板「↶ 撤销」可还原旧稿
-      const finalText = revised
+      editorFinalized = true
+      // 重写完成后自动格式化（去空格/空行，保留换行），再压撤销栈 / 复检
+      const rawFinal = revised || ''
+      const finalText = formatChapterProse(rawFinal)
+      const didFormat = finalText !== rawFinal
       if (finalText && finalText !== sourceDraft) {
         setDraft(finalText, { preserveCaret: false })
         pushRewrite(sourceDraft, finalText, ADJUST_REWRITE_KEY)
         setUndoToast({
-          message: '重写完成，正在自动复检…',
+          message: didFormat
+            ? '重写完成并已格式化，正在自动复检…'
+            : '重写完成，正在自动复检…',
+          type: 'info'
+        })
+      } else if (didFormat) {
+        // 与源稿等价但仅空白不同：仍写入紧凑稿
+        setDraft(finalText, { preserveCaret: false })
+        setUndoToast({
+          message: '重写完成并已格式化，正在自动复检…',
           type: 'info'
         })
       }
@@ -1815,9 +1869,10 @@ export default function ChapterEditor({
       setFlowPanelOpen(true)
       setAdjustPlan('')
       setAdjustPlanChecks([])
-      void runPostGenerateAudit(myGen, finalText || revised)
+      const contentForPost = finalText || rawFinal
+      void runPostGenerateAudit(myGen, contentForPost)
       // 落笔后：记忆同步 + 写后自检复检（对比改前）
-      void runPostGenerateMemorySync(myGen, finalText || revised, {
+      void runPostGenerateMemorySync(myGen, contentForPost, {
         previousSelfCheck
       })
     } catch {
@@ -2907,6 +2962,46 @@ export default function ChapterEditor({
     }
   }
 
+  /**
+   * 正文格式化：去掉空格与空行，保留段落换行。
+   * 默认写入撤销栈（Ctrl+Z / 流程面板「↶ 撤销」可还原）。
+   * @param source 指定文本时用该文本（续写收尾）；否则用当前 draft
+   * @param opts.silent 自动触发时不弹「无需格式化」；有改动时仍给简短 toast
+   * @param opts.recordHistory 默认 true；仅在调用方已自行压栈时关
+   * @returns 格式化后的文本
+   */
+  const formatDraftProse = (
+    source?: string,
+    opts?: { silent?: boolean; recordHistory?: boolean }
+  ): string => {
+    const base = source ?? draftRef.current
+    const next = formatChapterProse(base)
+    if (next === base) {
+      if (!opts?.silent) {
+        setUndoToast({ message: '正文无需格式化', type: 'info' })
+      }
+      return base
+    }
+    // 整章替换：必须压栈，否则 setDraft 不进浏览器原生 undo，Ctrl+Z 会失效
+    if (opts?.recordHistory !== false) {
+      pushRewrite(base, next, FORMAT_PROSE_KEY)
+    }
+    setDraft(next, { preserveCaret: false })
+    setDirty(true)
+    if (!opts?.silent) {
+      setUndoToast({
+        message: '已去掉空格与空行（Ctrl+Z 可撤销）',
+        type: 'info'
+      })
+    } else {
+      setUndoToast({
+        message: '已自动格式化（Ctrl+Z 可撤销）',
+        type: 'info'
+      })
+    }
+    return next
+  }
+
   const handleFind = (searchText: string) => {
     setFindText(searchText)
     if (!searchText) {
@@ -3376,6 +3471,14 @@ export default function ChapterEditor({
         </button>
         <button className="btn btn-sm" onClick={() => void handleCopyDraft()} title="复制当前正文到剪贴板">
           复制正文
+        </button>
+        <button
+          className="btn btn-sm"
+          onClick={() => formatDraftProse(undefined, { recordHistory: true })}
+          disabled={!needsChapterProseFormat(draft) || generating || adjusting}
+          title="去掉行内空格（含英文词间空格）与空行，保留段落换行；续写/重写完成后也会自动执行。Ctrl+Z 可撤销"
+        >
+          格式化
         </button>
         <button
           className="btn btn-sm"

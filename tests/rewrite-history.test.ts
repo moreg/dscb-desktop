@@ -12,7 +12,10 @@ import {
   clearRedoStack,
   detectUndoRedoShortcut,
   isAdjustRewriteKey,
+  isFormatProseKey,
+  isWholeDocRewriteKey,
   ADJUST_REWRITE_KEY,
+  FORMAT_PROSE_KEY,
   REWRITE_HISTORY_CAP,
   type RewriteEntry
 } from '../src/main/data/rewrite-history'
@@ -660,5 +663,35 @@ describe('按要求重写（整章）撤销', () => {
     // 再 redo
     const redone = applyToDraft(restored, oldDraft, newDraft)
     expect(redone).toBe(newDraft)
+  })
+})
+
+describe('正文格式化（整章）撤销 key / 守卫', () => {
+  it('isFormatProseKey / isWholeDocRewriteKey', () => {
+    expect(isFormatProseKey(FORMAT_PROSE_KEY)).toBe(true)
+    expect(isFormatProseKey('format-prose:1')).toBe(true)
+    expect(isFormatProseKey(ADJUST_REWRITE_KEY)).toBe(false)
+    expect(isFormatProseKey(undefined)).toBe(false)
+
+    expect(isWholeDocRewriteKey(FORMAT_PROSE_KEY)).toBe(true)
+    expect(isWholeDocRewriteKey(ADJUST_REWRITE_KEY)).toBe(true)
+    expect(isWholeDocRewriteKey('ai-review-0')).toBe(false)
+  })
+
+  it('整章格式化 undo/redo 全文还原', () => {
+    const oldDraft = '甲 乙\n\n丙'
+    const newDraft = '甲乙\n丙'
+    const stack = pushEntry([], oldDraft, newDraft, Date.now(), FORMAT_PROSE_KEY)
+    expect(stack[0].violationKey).toBe(FORMAT_PROSE_KEY)
+
+    const restored = revertInDraft(newDraft, newDraft, oldDraft)
+    expect(restored).toBe(oldDraft)
+    expect(applyToDraft(restored, oldDraft, newDraft)).toBe(newDraft)
+  })
+
+  it('空 newText / oldSnippet 不因 indexOf("") 误改全文', () => {
+    const draft = '完整正文'
+    expect(revertInDraft(draft, '', '旧')).toBe(draft)
+    expect(applyToDraft(draft, '', '新')).toBe(draft)
   })
 })

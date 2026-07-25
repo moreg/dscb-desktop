@@ -165,8 +165,20 @@ export interface ShortcutEvent {
 /** 「按要求重写」整章替换在 rewriteHistory 中使用的 violationKey */
 export const ADJUST_REWRITE_KEY = 'adjust'
 
+/** 「正文格式化」整章替换在 rewriteHistory 中使用的 violationKey */
+export const FORMAT_PROSE_KEY = 'format-prose'
+
 export function isAdjustRewriteKey(key: string | undefined): boolean {
   return key === ADJUST_REWRITE_KEY || (key?.startsWith(`${ADJUST_REWRITE_KEY}:`) ?? false)
+}
+
+export function isFormatProseKey(key: string | undefined): boolean {
+  return key === FORMAT_PROSE_KEY || (key?.startsWith(`${FORMAT_PROSE_KEY}:`) ?? false)
+}
+
+/** 是否整章级替换（格式化 / 按要求重写）——撤销时优先全文还原，不走片段 indexOf */
+export function isWholeDocRewriteKey(key: string | undefined): boolean {
+  return isAdjustRewriteKey(key) || isFormatProseKey(key)
 }
 
 export function detectUndoRedoShortcut(e: ShortcutEvent): UndoRedoIntent {
@@ -198,8 +210,13 @@ export function detectUndoRedoShortcut(e: ShortcutEvent): UndoRedoIntent {
 /**
  * 把 newText 在 draft 里替换为 oldSnippet，返回新 draft。
  * 找不到 newText 时返回原 draft（调用方应给出提示）。
+ *
+ * 整章替换（draft 全文等于 newText）时直接还原 oldSnippet，避免超长正文
+ * 走 indexOf 的边界问题。
  */
 export function revertInDraft(draft: string, newText: string, oldSnippet: string): string {
+  if (draft === newText) return oldSnippet
+  if (!newText) return draft
   const idx = draft.indexOf(newText)
   if (idx < 0) return draft
   return draft.slice(0, idx) + oldSnippet + draft.slice(idx + newText.length)
@@ -296,8 +313,12 @@ export function findRewriteTarget(
 /**
  * 把 oldSnippet 在 draft 里替换为 newText，返回新 draft。
  * 找不到 oldSnippet 时返回原 draft。
+ *
+ * 整章替换（draft 全文等于 oldSnippet）时直接换成 newText。
  */
 export function applyToDraft(draft: string, oldSnippet: string, newText: string): string {
+  if (draft === oldSnippet) return newText
+  if (!oldSnippet) return draft
   const idx = draft.indexOf(oldSnippet)
   if (idx < 0) return draft
   return draft.slice(0, idx) + newText + draft.slice(idx + oldSnippet.length)
