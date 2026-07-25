@@ -44,13 +44,23 @@ describe('evaluateChapterSelfCheck', () => {
     expect(r.summary).toMatch(/通过/)
   })
 
-  it('章末无对话事件 → ending_form fail', () => {
+  it('不再检查 ending_form（章末对话/事件形态已移除）', () => {
+    // 纯心理收尾、无对话/事件词：不应再因 ending_form 失败
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 1,
+      content: '他想了很多。\n窗外的雨渐渐小了。\n这一夜，他只是静静坐着。'
+    })
+    expect(r.items.find((i) => i.id === 'ending_form')).toBeUndefined()
+    expect(r.ok).toBe(true)
+  })
+
+  it('章末说教模板 → ending_taboo fail', () => {
     const r = evaluateChapterSelfCheck({
       chapterNumber: 1,
       content: '他想了很多。\n人生就是这样。\n或许这就是命运。\n他明白了一个道理。'
     })
     expect(r.ok).toBe(false)
-    const ending = r.items.find((i) => i.id === 'ending_form' || i.id === 'ending_taboo')
+    const ending = r.items.find((i) => i.id === 'ending_taboo')
     expect(ending?.verdict).toBe('fail')
   })
 

@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from 'fs'
 import { join, relative, sep } from 'path'
 import type { BrowserWindow } from 'electron'
+import { safeSend } from '../ipc/safe-handle'
 
 export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose'
 
@@ -77,9 +78,7 @@ export class ProjectFileWatcher {
 
   private notify(kind: FileChangeKind): void {
     if (!this.currentProjectId) return
-    const win = this.windowGetter()
-    if (!win || win.isDestroyed()) return
-    win.webContents.send('project:files-changed', {
+    safeSend(this.windowGetter(), 'project:files-changed', {
       projectId: this.currentProjectId,
       kind
     } satisfies FileChangeEvent)

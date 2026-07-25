@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
-import { safeHandle } from './safe-handle'
+import { beginStream, endStream } from '../data/stream-abort-registry'
+import { safeHandle, safeSend } from './safe-handle'
 import type {
   MemoryApplyResult,
   MemoryExtraction,
@@ -113,23 +114,29 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        await service.generateChapterStream(
-          validated.projectId,
-          validated.chapterNumber,
-          validated.styleProfileId,
-          {
-            tempContext: validated.tempContext,
-            existingText: validated.existingText,
-            onToken: (token) =>
-              win?.webContents.send('llm:token', {
-                requestId: validated.requestId,
-                token,
-                done: false
-              })
-          }
-        )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
-        return { ok: true }
+        const signal = beginStream(validated.requestId)
+        try {
+          await service.generateChapterStream(
+            validated.projectId,
+            validated.chapterNumber,
+            validated.styleProfileId,
+            {
+              tempContext: validated.tempContext,
+              existingText: validated.existingText,
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          return { ok: true }
+        } finally {
+          endStream(validated.requestId)
+        }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }
@@ -163,23 +170,29 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        await service.planAdjustChapterStream(
-          validated.projectId,
-          validated.chapterNumber,
-          validated.content,
-          validated.instruction,
-          validated.styleProfileId,
-          {
-            onToken: (token) =>
-              win?.webContents.send('llm:token', {
-                requestId: validated.requestId,
-                token,
-                done: false
-              })
-          }
-        )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
-        return { ok: true }
+        const signal = beginStream(validated.requestId)
+        try {
+          await service.planAdjustChapterStream(
+            validated.projectId,
+            validated.chapterNumber,
+            validated.content,
+            validated.instruction,
+            validated.styleProfileId,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          return { ok: true }
+        } finally {
+          endStream(validated.requestId)
+        }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }
@@ -214,24 +227,30 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        await service.adjustChapterStream(
-          validated.projectId,
-          validated.chapterNumber,
-          validated.content,
-          validated.instruction,
-          validated.styleProfileId,
-          {
-            onToken: (token) =>
-              win?.webContents.send('llm:token', {
-                requestId: validated.requestId,
-                token,
-                done: false
-              })
-          },
-          validated.confirmedPlan
-        )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
-        return { ok: true }
+        const signal = beginStream(validated.requestId)
+        try {
+          await service.adjustChapterStream(
+            validated.projectId,
+            validated.chapterNumber,
+            validated.content,
+            validated.instruction,
+            validated.styleProfileId,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            },
+            validated.confirmedPlan
+          )
+          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          return { ok: true }
+        } finally {
+          endStream(validated.requestId)
+        }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }
@@ -248,13 +267,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.reviewChapterStream(payload.projectId, payload.chapterNumber, payload.content, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -305,14 +324,14 @@ export function registerWriteIpc(service: WriteService): void {
           validated.history,
           {
             onToken: (token) =>
-              win?.webContents.send('llm:token', {
+              safeSend(win, 'llm:token', {
                 requestId: validated.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -327,13 +346,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.detectCastStream(payload.projectId, payload.chapterNumber, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -348,13 +367,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.detectRelationshipsStream(payload.projectId, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -383,14 +402,14 @@ export function registerWriteIpc(service: WriteService): void {
           payload.content,
           {
             onToken: (token) =>
-              win?.webContents.send('llm:token', {
+              safeSend(win, 'llm:token', {
                 requestId: payload.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -408,13 +427,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.extractMemoryStream(payload.projectId, payload.chapterNumber, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -627,13 +646,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.evaluateRhythmStream(payload.projectId, payload.chapterNumber, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -658,13 +677,13 @@ export function registerWriteIpc(service: WriteService): void {
       try {
         await service.generateFigureStream(payload.projectId, payload.chapterNumber, {
           onToken: (token) =>
-            win?.webContents.send('llm:token', {
+            safeSend(win, 'llm:token', {
               requestId: payload.requestId,
               token,
               done: false
             })
         })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -708,7 +727,7 @@ export function registerWriteIpc(service: WriteService): void {
           validated.fromChapter,
           validated.toChapter,
           (chapter, result) => {
-            win?.webContents.send('write:batchChapterComplete', {
+            safeSend(win, 'write:batchChapterComplete', {
               requestId: validated.requestId,
               chapter,
               result
@@ -717,14 +736,14 @@ export function registerWriteIpc(service: WriteService): void {
           validated.styleProfileId,
           {
             onToken: (token) =>
-              win?.webContents.send('llm:token', {
+              safeSend(win, 'llm:token', {
                 requestId: validated.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true, progress }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
@@ -761,7 +780,7 @@ export function registerWriteIpc(service: WriteService): void {
           validated.fromChapter,
           validated.toChapter,
           (chapter, result) => {
-            win?.webContents.send('write:batchChapterComplete', {
+            safeSend(win, 'write:batchChapterComplete', {
               requestId: validated.requestId,
               chapter,
               result
@@ -770,14 +789,14 @@ export function registerWriteIpc(service: WriteService): void {
           validated.styleProfileId,
           {
             onToken: (token) =>
-              win?.webContents.send('llm:token', {
+              safeSend(win, 'llm:token', {
                 requestId: validated.requestId,
                 token,
                 done: false
               })
           }
         )
-        win?.webContents.send('llm:token', { requestId: validated.requestId, token: '', done: true })
+        safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true, progress }
       } catch (err) {
         return { ok: false, error: (err as Error).message }

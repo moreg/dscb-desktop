@@ -15,7 +15,10 @@ import { ProjectFileWatcher, classifyChangeForTest } from '../src/main/data/proj
 describe('ProjectFileWatcher', () => {
   let dir: string
   let sendMock: ReturnType<typeof vi.fn>
-  let windowMock: { isDestroyed: () => boolean; webContents: { send: typeof sendMock } }
+  let windowMock: {
+    isDestroyed: () => boolean
+    webContents: { isDestroyed: () => boolean; send: typeof sendMock }
+  }
   let watcher: ProjectFileWatcher
 
   beforeEach(async () => {
@@ -30,7 +33,7 @@ describe('ProjectFileWatcher', () => {
     sendMock = vi.fn()
     windowMock = {
       isDestroyed: () => false,
-      webContents: { send: sendMock }
+      webContents: { isDestroyed: () => false, send: sendMock }
     }
     watcher = new ProjectFileWatcher(() => windowMock as never)
   })

@@ -1353,6 +1353,7 @@ a:hover { color: var(--vermilion); }
 .chip-accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .chip-vermilion { background: var(--vermilion-soft); color: var(--vermilion); border-color: transparent; font-weight: 600; }
 .chip-success { background: var(--success-soft); color: var(--success); border-color: transparent; }
+.chip-muted { background: var(--surface-2); color: var(--ink-3); border-color: transparent; }
 .chip-warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 .chip-danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 
@@ -1617,15 +1618,22 @@ hr.soft {
   margin-top: 0 !important;
 }
 .editor-text-wrapper.with-line-numbers .editor-text {
+  /* 为绝对定位的 gutter 留出左侧空间，wrapper 高度只由 textarea 决定 */
+  margin-left: 48px;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
   border-left: none;
 }
 .editor-line-gutter {
+  /* 绝对定位贴齐 textarea 外框：不再参与 flex 高度计算，
+     避免「行号 min-content 撑高整页 → 滚动跳顶」；
+     高度仍可由 JS 精确写成 textarea.clientHeight，未写入时 top/bottom 已锁高。 */
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
   width: 48px;
   min-width: 48px;
-  /* 高度由 JS 在 measure 时同步为 textarea 的 clientHeight（单一事实源），
-     不在 CSS 写死 calc，避免与 textarea 各持一份表达式、改一处忘另一处。 */
   background: var(--surface-2, var(--surface));
   border: 1px solid var(--line);
   border-right: 1px solid var(--line-soft);
@@ -2758,6 +2766,7 @@ pre.body {
 }
 .cast-suggestion.unknown { border-left: 3px solid var(--warning); }
 .cast-suggestion.known   { border-left: 3px solid var(--success); }
+.cast-suggestion.mentioned { border-left: 3px solid var(--ink-3); opacity: 0.88; }
 .cast-suggestion.applied { opacity: 0.55; }
 
 /* =========================================================

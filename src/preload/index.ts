@@ -195,9 +195,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('llm:generate', { prompt, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   getMainOutline: (id: string) => ipcRenderer.invoke('outline:getMain', id),
   updateMainOutline: (id: string, patch: Partial<MainOutline>) =>
@@ -218,6 +225,9 @@ const api = {
   listFigures: (id: string) => ipcRenderer.invoke('figure:list', id),
   readFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:read', id, fileName),
   openFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:open', id, fileName),
+  /** 取消进行中的流式生成（传 generate/adjust 返回对象上的 requestId） */
+  abortStream: (requestId: string) =>
+    ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>,
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
@@ -234,9 +244,23 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
-      .invoke('write:generateChapter', { projectId, chapterNumber, styleProfileId, tempContext, existingText, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+    const result = ipcRenderer
+      .invoke('write:generateChapter', {
+        projectId,
+        chapterNumber,
+        styleProfileId,
+        tempContext,
+        existingText,
+        requestId
+      })
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   planAdjustChapterStream: (
     projectId: string,
@@ -254,7 +278,7 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:planAdjustChapter', {
         projectId,
         chapterNumber,
@@ -263,7 +287,14 @@ const api = {
         styleProfileId,
         requestId
       })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   adjustChapterStream: (
     projectId: string,
@@ -282,7 +313,7 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:adjustChapter', {
         projectId,
         chapterNumber,
@@ -292,7 +323,14 @@ const api = {
         styleProfileId,
         requestId
       })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
   setProjectsRoot: (path: string) => ipcRenderer.invoke('settings:setProjectsRoot', path),

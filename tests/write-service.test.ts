@@ -958,6 +958,30 @@ describe('WriteService', () => {
       await expect(service.detectCastStream(projectId, 1)).resolves.toBeDefined()
     })
 
+    it('detectCastStream prompt distinguishes appeared vs mentioned-only names', async () => {
+      const dir = await ps.resolveDir(projectId)
+      await new CharacterRepository(dir).create({ name: '沈清秋', role: '配角' })
+      await new ProseRepo(dir).write(
+        1,
+        '苏九推门而入。段老虎说：沈清秋昨天提过赵四。'
+      )
+
+      const llm = mockLlm('[]')
+      const service = new WriteService(ps, llm)
+      await service.detectCastStream(projectId, 1)
+
+      expect(llm.generateStream).toHaveBeenCalled()
+      const [prompt, opts] = vi.mocked(llm.generateStream).mock.calls[0]
+      expect(prompt).toContain('真正出场')
+      expect(prompt).toContain('仅被提及')
+      expect(prompt).toContain('appeared')
+      expect(prompt).toContain('mentioned')
+      expect(prompt).toContain('不要把「提到名字」当成出场')
+      expect(prompt).toContain('沈清秋')
+      expect(prompt).toContain('苏九推门而入')
+      expect(opts?.meta).toEqual({ feature: 'cast', projectId })
+    })
+
     it('buildChapterPrompt for chapter 1 does not throw on missing prev chapter', async () => {
       const dir = await ps.resolveDir(projectId)
       const { writeFile, mkdir } = await import('fs/promises')

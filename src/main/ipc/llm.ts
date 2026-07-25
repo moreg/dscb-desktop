@@ -1,10 +1,11 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { safeHandle } from './safe-handle'
+import { safeHandle, safeSend } from './safe-handle'
 import { LlmService } from '../data/llm-service'
 import { SecretStore } from '../data/secret-store'
 import { listAntigravityModels } from '../data/antigravity-runner'
 import { listCodexModels } from '../data/codex-runner'
 import { listGrokModels } from '../data/grok-runner'
+import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../../shared/types'
 
 /**
@@ -250,26 +251,44 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     return listGrokModels()
   })
 
+  // 取消进行中的流式生成（续写 / 重写 / 通用 generate）
+  safeHandle('llm:abort', async (_e, requestId: unknown): Promise<{ ok: boolean }> => {
+    if (typeof requestId !== 'string' || !requestId.trim()) {
+      throw new Error('ABORT_INVALID: requestId required')
+    }
+    return { ok: abortStream(requestId.trim()) }
+  })
+
   // 流式生成（保持原协议：onToken + requestId）
   ipcMain.handle(
     'llm:generate',
     async (e, payload: { prompt: string; requestId: string }) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.generateStream(payload.prompt, {
-          meta: { feature: 'other' },
-          onToken: (token) =>
-            win?.webContents.send('llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
-        win?.webContents.send('llm:token', { requestId: payload.requestId, token: '', done: true })
-        return { ok: true }
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.generateStream(payload.prompt, {
+            meta: { feature: 'other' },
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+          safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
+          return { ok: true }
+        } finally {
+          endStream(payload.requestId)
+        }
       } catch (err) {
-        console.error('[ipc:llm:generate]', err)
-        return { ok: false, error: (err as Error).message }
+        const message = err instanceof Error ? err.message : String(err)
+        // 用户取消是预期路径，不打 error 噪音
+        if (message !== 'LLM_ABORTED') {
+          console.error('[ipc:llm:generate]', err)
+        }
+        return { ok: false, error: message }
       }
     }
   )

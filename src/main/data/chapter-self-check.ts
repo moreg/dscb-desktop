@@ -57,10 +57,6 @@ const ENDING_TABOO: Array<{ re: RegExp; reason: string }> = [
   { re: /故事.*?才(开始|刚刚)/, reason: 'AI 味结尾' }
 ]
 
-const DIALOGUE_RE = /["'""「『][^"'""」』\n]{1,200}["'""」』]/
-const EVENT_HINT_RE =
-  /突然|猛地|骤然|忽然|出现|推开|冲|响起|传来|倒下|跪下|转身|伸手|抓住|门外|来人|声音|脚步/
-
 /** 能力越权常见套话（相对「只能看当日/不能改命运」类边界） */
 const POWER_OVERCLAIM_RE =
   /预知未来|看穿一生|看清终身|改变命运|逆天改命|注定的结局|未来三[年月日]|十年后必然|看透生死/
@@ -84,13 +80,10 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
     return finalize(ch, items)
   }
 
-  // 1) 章末形态
-  items.push(checkEndingForm(content))
-
-  // 2) 章末说教
+  // 1) 章末说教（已去掉「章末必须对话/事件收束」形态检查，避免误伤正常心理/总结收尾）
   items.push(checkEndingTaboo(content))
 
-  // 3) 上章悬念
+  // 2) 上章悬念
   if (input.prevEndingState?.suspense?.trim()) {
     items.push(
       checkKeywordPresence({
@@ -272,28 +265,6 @@ function finalize(chapterNumber: number, items: SelfCheckItemResult[]): ChapterS
     items,
     ok,
     summary
-  }
-}
-
-function checkEndingForm(content: string): SelfCheckItemResult {
-  const paras = content
-    .split(/\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-  const tail = paras.slice(-3).join('\n')
-  const hasDialogue = DIALOGUE_RE.test(tail)
-  const hasEvent = EVENT_HINT_RE.test(tail)
-  const ok = hasDialogue || hasEvent
-  return {
-    id: 'ending_form',
-    category: 'structure',
-    label: '章末以对话或事件收束',
-    verdict: ok ? 'pass' : 'fail',
-    detail: ok
-      ? hasDialogue
-        ? '章末含对话'
-        : '章末含事件/动作迹象'
-      : '章末最后几段未见对话或事件钩子，可能是总结/心理收尾'
   }
 }
 

@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AuditReport, AuditViolation, ChapterReviewReport, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
+import {
+  addDismissedKey,
+  auditIgnoredStorageKey,
+  clearDismissedKeys,
+  loadDismissedKeys,
+  removeDismissedKey
+} from '../../shared/dismissed-keys'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { isReviewKey } from '../../shared/review-suggestions'
 import { isAdjustRewriteKey } from '../../main/data/rewrite-history'
@@ -177,8 +184,15 @@ export default function ChapterAuditPanel({
   // LLM 深度审稿（M3）：手动触发，结果合并进同一面板的「深度审稿」分组
   const [deepReviewRunning, setDeepReviewRunning] = useState(false)
   const [deepReviewFindings, setDeepReviewFindings] = useState<AuditViolation[]>([])
-  // 已忽略的违例集合（M3：忽略提醒功能）
-  const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(new Set())
+  // 已忽略的违例：按项目+章节持久化，重检/重开面板不再弹出
+  const auditIgnoreStoreKey = auditIgnoredStorageKey(projectId, chapterNumber ?? 0)
+  const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(() =>
+    loadDismissedKeys(auditIgnoredStorageKey(projectId, chapterNumber ?? 0))
+  )
+
+  useEffect(() => {
+    setIgnoredKeys(loadDismissedKeys(auditIgnoredStorageKey(projectId, chapterNumber ?? 0)))
+  }, [projectId, chapterNumber])
   // 每条 violation 的 humanize 状态：key = violationKey(v)，value = {loading, result, error, appliedAt}
   // appliedAt 标记"用户已把此条改写应用到正文"，用于显示"已应用"角标和"↶ 撤销这次"按钮。
   const [humanizeMap, setHumanizeMap] = useState<
@@ -326,15 +340,11 @@ export default function ChapterAuditPanel({
   }
 
   const handleIgnoreViolation = (key: string) => {
-    setIgnoredKeys((prev) => new Set(prev).add(key))
+    setIgnoredKeys(addDismissedKey(auditIgnoreStoreKey, key))
   }
 
   const handleRestoreViolation = (key: string) => {
-    setIgnoredKeys((prev) => {
-      const next = new Set(prev)
-      next.delete(key)
-      return next
-    })
+    setIgnoredKeys(removeDismissedKey(auditIgnoreStoreKey, key))
   }
 
   const isIgnored = (v: AuditViolation) => ignoredKeys.has(violationKey(v))
@@ -456,7 +466,7 @@ export default function ChapterAuditPanel({
                   cursor: 'pointer'
                 }}
                 title="点击恢复所有已忽略的提醒"
-                onClick={() => setIgnoredKeys(new Set())}
+                onClick={() => setIgnoredKeys(clearDismissedKeys(auditIgnoreStoreKey))}
               >
                 已忽略 {ignoredKeys.size} 条（点击恢复）
               </span>

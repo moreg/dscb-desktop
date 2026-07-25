@@ -108,6 +108,7 @@ function pickIssueItems(
 /** 按检查 id / 类别给可操作改法提示 */
 function actionHint(item: SelfCheckItemResult): string {
   const id = item.id
+  // ending_form 已从自检引擎移除；保留提示以防旧报告仍带该 id
   if (id === 'ending_form') {
     return '改写章末 2～4 段：用一句对话或一个突然动作/来人收束，删掉总结式旁白。'
   }

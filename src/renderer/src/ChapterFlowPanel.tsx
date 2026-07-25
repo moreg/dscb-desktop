@@ -30,6 +30,14 @@ import {
   needsConfirmOutlineUpdate,
   recomputeOutlineDiffPassed
 } from '../../shared/outline-diff-apply'
+import {
+  addDismissedKeys,
+  loadDismissedKeys,
+  outlineAppliedStorageKey,
+  outlineDiffStableKey,
+  outlineIgnoredStorageKey,
+  saveDismissedKeys
+} from '../../shared/dismissed-keys'
 import type { RewriteEntry } from '../../main/data/rewrite-history'
 import type { PostWriteSyncPhase } from '../../shared/post-write-sync'
 import { formatSyncErrorHint } from '../../shared/post-write-sync'
@@ -187,10 +195,16 @@ export default function ChapterFlowPanel(props: Props) {
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
   const [outlineError, setOutlineError] = useState('')
-  /** 已忽略的差异下标（相对于 outlineDiff.diffs 原序） */
-  const [outlineIgnored, setOutlineIgnored] = useState<Set<number>>(() => new Set())
-  /** 已成功回写细纲的差异下标 */
-  const [outlineApplied, setOutlineApplied] = useState<Set<number>>(() => new Set())
+  /**
+   * 已忽略 / 已回写的差异：内容稳定键（非列表下标），并持久化到 localStorage。
+   * 重检、关面板、切走再回来都不会再当「待处理」弹出。
+   */
+  const [outlineIgnoredKeys, setOutlineIgnoredKeys] = useState<Set<string>>(() =>
+    loadDismissedKeys(outlineIgnoredStorageKey(projectId, chapterNumber))
+  )
+  const [outlineAppliedKeys, setOutlineAppliedKeys] = useState<Set<string>>(() =>
+    loadDismissedKeys(outlineAppliedStorageKey(projectId, chapterNumber))
+  )
   const [outlineApplying, setOutlineApplying] = useState(false)
   const [outlineApplyError, setOutlineApplyError] = useState('')
   /** 防连点：state 禁用前的同步锁 */
@@ -304,6 +318,15 @@ export default function ChapterFlowPanel(props: Props) {
     }
   }
 
+  // 切章时从 localStorage 加载本章已忽略/已回写集合
+  useEffect(() => {
+    setOutlineIgnoredKeys(loadDismissedKeys(outlineIgnoredStorageKey(projectId, chapterNumber)))
+    setOutlineAppliedKeys(loadDismissedKeys(outlineAppliedStorageKey(projectId, chapterNumber)))
+    setOutlineDiff(null)
+    setOutlineError('')
+    setOutlineApplyError('')
+  }, [projectId, chapterNumber])
+
   const runOutlineCheck = async () => {
     if (!draft.trim()) {
       setOutlineError('正文为空，无法对照')
@@ -312,8 +335,7 @@ export default function ChapterFlowPanel(props: Props) {
     setOutlineChecking(true)
     setOutlineDiff(null)
     setOutlineError('')
-    setOutlineIgnored(new Set())
-    setOutlineApplied(new Set())
+    // 不清空 ignored/applied：重检后按内容键自动隐藏已处理项
     setOutlineApplyError('')
     let buffer = ''
     try {
@@ -341,19 +363,26 @@ export default function ChapterFlowPanel(props: Props) {
   }
 
   const markOutlineResolved = (indexes: number[], mode: 'ignore' | 'apply') => {
+    if (!outlineDiff) return
+    const keys = indexes
+      .map((i) => outlineDiff.diffs[i])
+      .filter(Boolean)
+      .map((d) => outlineDiffStableKey(d))
+    if (keys.length === 0) return
     if (mode === 'ignore') {
-      setOutlineIgnored((prev) => {
-        const next = new Set(prev)
-        for (const i of indexes) next.add(i)
-        return next
-      })
+      const storageKey = outlineIgnoredStorageKey(projectId, chapterNumber)
+      const next = addDismissedKeys(storageKey, keys)
+      setOutlineIgnoredKeys(next)
     } else {
-      setOutlineApplied((prev) => {
-        const next = new Set(prev)
-        for (const i of indexes) next.add(i)
-        return next
-      })
+      const storageKey = outlineAppliedStorageKey(projectId, chapterNumber)
+      const next = addDismissedKeys(storageKey, keys)
+      setOutlineAppliedKeys(next)
     }
+  }
+
+  const isOutlineResolved = (d: OutlineDiffItem): boolean => {
+    const k = outlineDiffStableKey(d)
+    return outlineIgnoredKeys.has(k) || outlineAppliedKeys.has(k)
   }
 
   const loadCurrentOutline = async (): Promise<DetailedOutlineItem | null> => {
@@ -370,13 +399,11 @@ export default function ChapterFlowPanel(props: Props) {
     if (!outlineDiff || indexes.length === 0) return
     if (outlineApplyingRef.current) return
 
-    const unique = [...new Set(indexes)].filter(
-      (i) =>
-        i >= 0 &&
-        i < outlineDiff.diffs.length &&
-        !outlineIgnored.has(i) &&
-        !outlineApplied.has(i)
-    )
+    const unique = [...new Set(indexes)].filter((i) => {
+      if (i < 0 || i >= outlineDiff.diffs.length) return false
+      const d = outlineDiff.diffs[i]
+      return d && !isOutlineResolved(d)
+    })
     if (unique.length === 0) return
 
     const targets = unique
@@ -440,9 +467,8 @@ export default function ChapterFlowPanel(props: Props) {
     const indexes = outlineDiff.diffs
       .map((d, i) => ({ d, i }))
       .filter(
-        ({ d, i }) =>
-          !outlineIgnored.has(i) &&
-          !outlineApplied.has(i) &&
+        ({ d }) =>
+          !isOutlineResolved(d) &&
           isRecommendedOutlineUpdate(d) &&
           !needsConfirmOutlineUpdate(d)
       )
@@ -715,10 +741,12 @@ export default function ChapterFlowPanel(props: Props) {
 
   const outlineResolvedIndexes = useMemo(() => {
     const s = new Set<number>()
-    for (const i of outlineIgnored) s.add(i)
-    for (const i of outlineApplied) s.add(i)
+    if (!outlineDiff) return s
+    outlineDiff.diffs.forEach((d, i) => {
+      if (isOutlineResolved(d)) s.add(i)
+    })
     return s
-  }, [outlineIgnored, outlineApplied])
+  }, [outlineDiff, outlineIgnoredKeys, outlineAppliedKeys])
 
   const outlineEffectivePassed = useMemo(() => {
     if (!outlineDiff) return true
@@ -728,12 +756,12 @@ export default function ChapterFlowPanel(props: Props) {
   const recommendedOutlineCount = useMemo(() => {
     if (!outlineDiff) return 0
     return outlineDiff.diffs.filter(
-      (d, i) =>
-        !outlineResolvedIndexes.has(i) &&
+      (d) =>
+        !isOutlineResolved(d) &&
         isRecommendedOutlineUpdate(d) &&
         !needsConfirmOutlineUpdate(d)
     ).length
-  }, [outlineDiff, outlineResolvedIndexes])
+  }, [outlineDiff, outlineIgnoredKeys, outlineAppliedKeys])
 
   const pendingOutlineCount = useMemo(() => {
     if (!outlineDiff) return 0
@@ -1056,8 +1084,9 @@ export default function ChapterFlowPanel(props: Props) {
                 ) : null}
                 <ul className="bare" style={{ display: 'grid', gap: 8 }}>
                   {sortedDiffs.map(({ diff: d, index }) => {
-                    const ignored = outlineIgnored.has(index)
-                    const applied = outlineApplied.has(index)
+                    const k = outlineDiffStableKey(d)
+                    const ignored = outlineIgnoredKeys.has(k)
+                    const applied = outlineAppliedKeys.has(k)
                     const resolved = ignored || applied
                     const canUpdate = canUpdateOutlineFromDiff(d)
                     return (

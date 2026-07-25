@@ -1,4 +1,14 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  type SetStateAction,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ChangeEvent as ReactChangeEvent
+} from 'react'
 import type {
   AuditReport,
   ChapterContent,
@@ -86,6 +96,10 @@ import {
   getWritingRequirementTemplate
 } from '../../shared/writing-requirement-templates'
 import type { WritingRequirementTemplate } from '../../shared/writing-requirement-templates'
+import {
+  parseCastJson,
+  type CastPresence
+} from '../../shared/cast-presence'
 
 interface Props {
   projectId: string
@@ -153,10 +167,27 @@ interface CastSuggestion {
   name: string
   reason: string
   quote: string
+  /** appeared=真正登场；mentioned=仅被点名，不算登场 */
+  presence: CastPresence
   /** 是否已加入登场 */
   applied: boolean
   /** 匹配到的人物 id；undefined 表示未在人物库中 */
   characterId?: string
+}
+
+type DraftUpdateOptions = {
+  /**
+   * 是否在写入 DOM 前保留当前 scrollTop。
+   * 切章 / 整章加载应为 false（滚回顶部）。
+   * 默认 true。
+   */
+  captureScroll?: boolean
+  /**
+   * 程序化改写正文后是否尽量保留光标。
+   * 流式续写等整段替换可设 false（光标不必跟旧位置）。
+   * 默认 true。
+   */
+  preserveCaret?: boolean
 }
 
 export default function ChapterEditor({
@@ -224,11 +255,84 @@ export default function ChapterEditor({
     }
   }, [isDraggingSidebar])
 
-  const [draft, setDraft] = useState('')
+  const [draft, setDraftState] = useState('')
+  /** 与 textarea DOM 同步的正文镜像；用户输入走非受控，避免 value 回写导致滚动乱跳。 */
+  const draftRef = useRef('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lineGutterRef = useRef<HTMLDivElement>(null)
   const lineGutterInnerRef = useRef<HTMLDivElement>(null)
   const mirrorRef = useRef<HTMLDivElement>(null)
+  /** 正文区滚动位置：行号测量等旁路 DOM 操作偶发把 scrollTop 清零时用于写回。 */
+  const editorScrollTopRef = useRef(0)
+  /** 测量 / 程序化写 DOM 期间忽略 onScroll 对 ref 的中间态污染。 */
+  const editorRestoringRef = useRef(false)
+  /**
+   * 回车/删行等会改行高布局的按键：在 keydown 时钉住 scrollTop。
+   * 浏览器/行号重排偶发把视口甩到光标顶对齐（图1 中间回车 → 图2 文字飞到顶部），
+   * 输入后若跳动超过阈值则写回此锚点。null 表示未锚定。
+   */
+  const pinScrollToRef = useRef<number | null>(null)
+  const pinScrollRafRef = useRef(0)
+
+  const applyEditorScroll = useCallback((scrollTop: number) => {
+    const el = textareaRef.current
+    if (!el) return
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight)
+    const next = Math.max(0, Math.min(scrollTop, maxScroll))
+    editorRestoringRef.current = true
+    if (el.scrollTop !== next) el.scrollTop = next
+    editorScrollTopRef.current = el.scrollTop
+    if (lineGutterInnerRef.current) {
+      lineGutterInnerRef.current.style.transform = `translateY(${-el.scrollTop}px)`
+    }
+    editorRestoringRef.current = false
+  }, [])
+
+  /**
+   * 正文更新入口。
+   * - 用户打字：只 setState，不写 textarea.value（非受控，浏览器自己保滚动/光标）。
+   * - 程序化改写（续写/撤销/替换/切章）：必要时写 DOM，并显式保留 scroll。
+   */
+  const setDraft = useCallback((value: SetStateAction<string>, opts?: DraftUpdateOptions) => {
+    const prev = draftRef.current
+    const next = typeof value === 'function' ? (value as (p: string) => string)(prev) : value
+    draftRef.current = next
+
+    const el = textareaRef.current
+    if (el && el.value !== next) {
+      const captureScroll = opts?.captureScroll !== false
+      const preserveCaret = opts?.preserveCaret !== false
+      const savedScroll = captureScroll ? el.scrollTop : 0
+      const savedStart = el.selectionStart
+      const savedEnd = el.selectionEnd
+      pinScrollToRef.current = null
+      editorRestoringRef.current = true
+      el.value = next
+      if (captureScroll) {
+        el.scrollTop = savedScroll
+        editorScrollTopRef.current = savedScroll
+        if (preserveCaret) {
+          try {
+            const len = next.length
+            el.setSelectionRange(Math.min(savedStart, len), Math.min(savedEnd, len))
+            // setSelectionRange 可能带动滚屏，再钉回目标 scroll
+            if (el.scrollTop !== savedScroll) el.scrollTop = savedScroll
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        el.scrollTop = 0
+        editorScrollTopRef.current = 0
+      }
+      if (lineGutterInnerRef.current) {
+        lineGutterInnerRef.current.style.transform = `translateY(${-el.scrollTop}px)`
+      }
+      editorRestoringRef.current = false
+    }
+
+    setDraftState(next)
+  }, [])
   const [showLineNumbers, setShowLineNumbers] = useState(() => {
     return localStorage.getItem('ai-writer:show-line-numbers') !== 'false'
   })
@@ -631,26 +735,36 @@ export default function ChapterEditor({
   const castRef = useRef(0)
   const genRef = useRef(0)
   const askRef = useRef(0)
+  /**
+   * 章节会话世代：切章 / 切项目时递增。
+   * 用于作废 hasLlmKey 等待期间的异步，避免旧章 token 写进新章。
+   */
+  const sessionEpochRef = useRef(0)
+  /** 所有进行中的流式 requestId（可并发登记；取消时全部 abort） */
+  const activeStreamRequestIdsRef = useRef(new Set<string>())
+  /** 任一正文类流占用中（防 出建议 同时点 续写） */
+  const streamBusyRef = useRef(false)
+  /** 当前流已收到 done：忽略迟到的停止点击，避免误回滚 / 跳过 dirty */
+  const streamCompletedRef = useRef(false)
+  /** 开始生成前的正文快照，取消时回滚 */
+  const preStreamDraftRef = useRef<string | null>(null)
+  /** 用户主动点了取消：收尾时不弹错误框 */
+  const userAbortedRef = useRef(false)
 
-function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characterId'>[] {
-  // LLM 可能输出 ```json ... ``` 或多余文本；尝试提取首个 JSON 数组
-  const m = text.match(/\[\s*[\s\S]*?\]\s*(?=$|[^\]]*$)/)
-  const candidate = m ? m[0] : text
-  try {
-    const arr = JSON.parse(candidate)
-    if (!Array.isArray(arr)) return []
-    return arr
-      .filter((x) => x && typeof x === 'object' && typeof x.name === 'string')
-      .map((x) => ({
-        name: String(x.name).trim(),
-        reason: typeof x.reason === 'string' ? x.reason.trim() : '',
-        quote: typeof x.quote === 'string' ? x.quote.trim() : ''
-      }))
-      .filter((x) => x.name)
-  } catch {
-    return []
+  const trackStreamRequest = (requestId: string): void => {
+    activeStreamRequestIdsRef.current.add(requestId)
   }
-}
+  const untrackStreamRequest = (requestId: string): void => {
+    activeStreamRequestIdsRef.current.delete(requestId)
+  }
+  const abortAllTrackedStreams = (): void => {
+    const ids = [...activeStreamRequestIdsRef.current]
+    activeStreamRequestIdsRef.current.clear()
+    for (const id of ids) {
+      void window.api.abortStream(id).catch(() => undefined)
+    }
+  }
+
 
   const refreshCharacters = () => {
     void window.api.listCharacters(projectId).then(setCharacters)
@@ -681,6 +795,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
 
   useEffect(() => {
+    // 切章：递增会话世代 + 打断全部流，避免旧章 token 落到新章
+    // （含 hasLlmKey 等待中、尚未拿到 requestId 的异步）
+    sessionEpochRef.current += 1
+    abortAllTrackedStreams()
+    streamBusyRef.current = false
+    streamCompletedRef.current = false
     ++genRef.current
     setGenerating(false)
     setAdjusting(false)
@@ -690,10 +810,15 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setAdjustPlan('')
     setAdjustPlanChecks([])
     setShowAdjustDialog(false)
+    preStreamDraftRef.current = null
+    userAbortedRef.current = false
     // 切章/project 时清空内存中的改写历史（避免跨章串台）
     setRewriteHistory([])
     setRedoStack([])
     setLastSavedAt(null) // P11-A：切章时重置"上次保存"指示
+    // 切章时清空正文 DOM/state 与滚动基准（非受控 textarea 必须显式写 DOM）
+    setDraft('', { captureScroll: false })
+    editorRestoringRef.current = false
     // 切章时清空追问对话历史（追问是针对本章的，跨章不再相关）
     ++askRef.current
     setAsking(false)
@@ -710,7 +835,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     }
     void window.api.getChapter(projectId, chapterNumber).then((c) => {
       setData(c)
-      setDraft(c.content)
+      setDraft(c.content, { captureScroll: false })
       setDirty(false)
       setSessionStartWords(c.meta.wordCount)
     })
@@ -782,7 +907,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       if (dirty) return // 用户有未保存输入，跳过，保存后会重新读盘
       void window.api.getChapter(projectId, chapterNumber).then((c) => {
         setData(c)
-        setDraft(c.content)
+        setDraft(c.content, { captureScroll: false })
         setSessionStartWords(c.meta.wordCount)
       })
     })
@@ -920,16 +1045,54 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     localStorage.setItem('ai-writer:show-line-numbers', String(showLineNumbers))
   }, [showLineNumbers])
 
-  // 行号：计算每行渲染高度（用隐藏的 mirror div 精确测量自动换行后的实际行高）
+  /** 行号测量等旁路操作后，把 scrollTop / gutter 钉回已知位置。 */
+  const restoreEditorScroll = useCallback(() => {
+    const pin = pinScrollToRef.current
+    applyEditorScroll(pin != null ? pin : editorScrollTopRef.current)
+  }, [applyEditorScroll])
+
+  /**
+   * 回车等改行操作后：若视口异常大跳（常见为光标行被甩到可视区顶部），写回 keydown 锚点。
+   * 合法的贴边滚屏通常只有 1～2 行高，用阈值区分；小幅合法滚动则采纳并释放锚点。
+   */
+  const stabilizePinnedScroll = useCallback(() => {
+    const el = textareaRef.current
+    const pinTo = pinScrollToRef.current
+    if (!el || pinTo == null) return false
+    const delta = Math.abs(el.scrollTop - pinTo)
+    // 1 行合法贴边 ≈ baseLineHeight；异常「飞顶」常达半屏以上
+    const threshold = Math.max(baseLineHeight * 3, 80)
+    if ((el.scrollTop === 0 && pinTo > 0) || delta > threshold) {
+      applyEditorScroll(pinTo)
+      return true
+    }
+    // 合法微调：接受浏览器结果，释放锚点，避免后续 measure 强行钉回旧 scrollTop
+    editorScrollTopRef.current = el.scrollTop
+    pinScrollToRef.current = null
+    return false
+  }, [applyEditorScroll, baseLineHeight])
+
+  // 行号：用隐藏 mirror 测量每行实际高度。
+  // 注意：用户输入已改为非受控，不再在每次 draft 更新时 useLayoutEffect 强写 scroll/selection
+  // （那套逻辑会与浏览器 caret 滚屏互相抢，回车时表现为「乱飞」）。
+  // 测量放到 rAF 后执行，并在测量前后钉住 scroll，避免 mirror 大改 DOM 时连带清零。
   useEffect(() => {
     if (!showLineNumbers || !mirrorRef.current || !textareaRef.current) {
-      setLineHeights([])
+      setLineHeights((prev) => (prev.length === 0 ? prev : []))
       return
     }
     const measure = () => {
       const mirror = mirrorRef.current
       const textarea = textareaRef.current
       if (!mirror || !textarea) return
+      // 有回车锚点时先纠偏（异常大跳才写回；合法贴边滚屏会释放锚点）
+      if (pinScrollToRef.current != null) {
+        stabilizePinnedScroll()
+      } else if (!editorRestoringRef.current) {
+        editorScrollTopRef.current = textarea.scrollTop
+      }
+      const savedScroll = editorScrollTopRef.current
+      editorRestoringRef.current = true
       const cs = getComputedStyle(textarea)
       // 复制所有影响断行的计算样式到 mirror，让每行换行点和行数与 textarea 完全一致，
       // 否则一行长正文自动折行后行号会累积偏移。wordBreak/overflowWrap/textWrap 尤为关键。
@@ -956,7 +1119,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         width: `${textarea.clientWidth}px`,
         boxSizing: 'border-box'
       })
-      const lines = draft.split('\n')
+      const lines = draftRef.current.split('\n')
       mirror.innerHTML = ''
       for (const line of lines) {
         const div = document.createElement('div')
@@ -967,49 +1130,133 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       for (let i = 0; i < mirror.children.length; i++) {
         heights.push((mirror.children[i] as HTMLElement).offsetHeight)
       }
-      setLineHeights(heights)
+      setLineHeights((prev) => {
+        if (prev.length === heights.length && prev.every((h, i) => h === heights[i])) {
+          return prev
+        }
+        return heights
+      })
       // 基准行高 = 未折行行的最小高度（折行行只会更高）。
       // 草稿为空 / 全部折行时回退到 getComputedStyle 的 line-height（已是像素值），保证兜底始终反映真实排版。
       const minH = heights.length > 0 ? Math.min(...heights) : 0
       if (minH > 0) {
-        setBaseLineHeight(minH)
+        setBaseLineHeight((prev) => (prev === minH ? prev : minH))
       } else {
         const lh = parseFloat(cs.lineHeight)
-        setBaseLineHeight(Number.isFinite(lh) && lh > 0 ? lh : 32)
+        const next = Number.isFinite(lh) && lh > 0 ? lh : 32
+        setBaseLineHeight((prev) => (prev === next ? prev : next))
       }
       // 把 gutter 高度锁定为 textarea 的可视高度（单一事实源）。
-      // textarea 是高度权威（max-height / resize 手柄 / 响应式都在它身上），
-      // gutter 直接抄它的 clientHeight，无需在 CSS 里复制同一份高度表达式，
-      // 彻底消除「两处各写一份 calc、改一处忘另一处」的耦合错位。
       const gutter = lineGutterRef.current
       if (gutter) gutter.style.height = `${textarea.clientHeight}px`
+      if (textarea.scrollTop !== savedScroll) {
+        textarea.scrollTop = savedScroll
+      }
+      if (lineGutterInnerRef.current) {
+        lineGutterInnerRef.current.style.transform = `translateY(${-textarea.scrollTop}px)`
+      }
+      editorRestoringRef.current = false
+      // 测量 DOM 可能再次触发异常滚屏，再钉一次（锚点若已因合法滚动释放则 no-op）
+      if (pinScrollToRef.current != null) {
+        stabilizePinnedScroll()
+      }
     }
-    measure()
-    // ResizeObserver 回调用 rAF 合并同帧内的多次触发，避免回调里改 DOM 尺寸
-    // 又触发新回调，形成 "ResizeObserver loop" 警告（被全局 error 监听器升级成崩溃）。
-    let rafId = 0
+    // 合并同帧多次 draft 更新；不在 layout 阶段同步大改 DOM，避免和回车滚屏抢帧。
+    let rafId = requestAnimationFrame(measure)
     const scheduleMeasure = () => {
-      if (rafId) return
-      rafId = requestAnimationFrame(() => {
-        rafId = 0
-        measure()
-      })
+      cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(measure)
     }
     const observer = new ResizeObserver(scheduleMeasure)
     observer.observe(textareaRef.current)
     return () => {
-      if (rafId) cancelAnimationFrame(rafId)
+      cancelAnimationFrame(rafId)
       observer.disconnect()
     }
-  }, [draft, showLineNumbers])
+  }, [draft, showLineNumbers, stabilizePinnedScroll])
+
+  // 行号高度提交后：优先写回回车锚点 / 被清零的 scroll，避免和 caret 抢位置时把「飞顶」锁死。
+  useLayoutEffect(() => {
+    if (!showLineNumbers) return
+    const el = textareaRef.current
+    if (!el) return
+    if (pinScrollToRef.current != null) {
+      stabilizePinnedScroll()
+      return
+    }
+    if (el.scrollTop === 0 && editorScrollTopRef.current > 0) {
+      restoreEditorScroll()
+    } else {
+      editorScrollTopRef.current = el.scrollTop
+      if (lineGutterInnerRef.current) {
+        lineGutterInnerRef.current.style.transform = `translateY(${-el.scrollTop}px)`
+      }
+    }
+  }, [lineHeights, baseLineHeight, showLineNumbers, restoreEditorScroll, stabilizePinnedScroll])
 
   const handleEditorScroll = useCallback(() => {
     // 用 transform 平移行号内容层来跟随 textarea 滚动。
     // gutter 是 overflow:hidden + 固定高度，scrollTop 对它无效，必须用 translateY。
-    if (lineGutterInnerRef.current && textareaRef.current) {
-      lineGutterInnerRef.current.style.transform = `translateY(${-textareaRef.current.scrollTop}px)`
+    const el = textareaRef.current
+    if (!el) return
+    if (!editorRestoringRef.current && pinScrollToRef.current == null) {
+      editorScrollTopRef.current = el.scrollTop
+    }
+    if (lineGutterInnerRef.current) {
+      lineGutterInnerRef.current.style.transform = `translateY(${-el.scrollTop}px)`
     }
   }, [])
+
+  // 卸载时清掉回车锚点 rAF，避免卸载后写 DOM
+  useEffect(() => {
+    return () => {
+      if (pinScrollRafRef.current) cancelAnimationFrame(pinScrollRafRef.current)
+      pinScrollToRef.current = null
+    }
+  }, [])
+
+  /** 回车/删行前钉住 scrollTop，供 onChange / 行号测量写回。 */
+  const handleEditorKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Enter' && e.key !== 'Backspace' && e.key !== 'Delete') return
+    const el = e.currentTarget
+    pinScrollToRef.current = el.scrollTop
+    editorScrollTopRef.current = el.scrollTop
+  }, [])
+
+  const handleEditorChange = useCallback(
+    (e: ReactChangeEvent<HTMLTextAreaElement>) => {
+      const el = e.target
+      const v = el.value
+      draftRef.current = v
+
+      const pinTo = pinScrollToRef.current
+      if (pinTo != null) {
+        // 先立刻纠正本帧内的飞顶，再在 rAF 里挡行号测量后的二次跳动
+        stabilizePinnedScroll()
+        if (pinScrollRafRef.current) cancelAnimationFrame(pinScrollRafRef.current)
+        pinScrollRafRef.current = requestAnimationFrame(() => {
+          pinScrollRafRef.current = 0
+          stabilizePinnedScroll()
+          // 稳定两帧后释放锚点，避免挡住用户随后的手动滚动
+          requestAnimationFrame(() => {
+            if (pinScrollToRef.current === pinTo) {
+              pinScrollToRef.current = null
+            }
+          })
+        })
+      } else {
+        editorScrollTopRef.current = el.scrollTop
+      }
+
+      setDraftState(v)
+      setDirty(true)
+      if (findResults.length > 0) {
+        setFindResults([])
+        setCurrentResultIndex(-1)
+      }
+    },
+    [findResults.length, stabilizePinnedScroll]
+  )
 
   // 全局快捷键：Ctrl+Shift+A 重新质检 + Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo
   useEffect(() => {
@@ -1131,11 +1378,63 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
   }
   saveRef.current = save // P19-A：让 saveAndClearDraft 在保存后清掉 draft
 
+  /** 取消续写 / 出建议 / 落笔重写。立即停 UI 与 token 写入，并通知主进程 abort 子进程/请求。 */
+  const cancelActiveStream = () => {
+    // 流已正常完成且 UI 已空闲：忽略迟到的停止点击，以免误回滚
+    if (
+      streamCompletedRef.current &&
+      !generating &&
+      !adjusting &&
+      !adjustPlanning &&
+      !streamBusyRef.current
+    ) {
+      return
+    }
+    if (
+      activeStreamRequestIdsRef.current.size === 0 &&
+      !streamBusyRef.current &&
+      !generating &&
+      !adjusting &&
+      !adjustPlanning
+    ) {
+      return
+    }
+    userAbortedRef.current = true
+    // 作废本轮 gen / plan，后续 token 全部丢弃
+    ++genRef.current
+    ++adjustPlanRef.current
+    const restore = preStreamDraftRef.current
+    // 续写 / 落笔会改正文，取消时回滚；出建议不改正文
+    if (restore != null && (generating || adjusting)) {
+      setDraft(restore)
+    }
+    setGenerating(false)
+    setAdjusting(false)
+    setAdjustPlanning(false)
+    streamBusyRef.current = false
+    streamCompletedRef.current = false
+    preStreamDraftRef.current = null
+    abortAllTrackedStreams()
+    setUndoToast({ message: '已取消生成', type: 'info' })
+  }
+
+  const isStreamAbortError = (error: string | undefined): boolean => {
+    if (userAbortedRef.current) return true
+    if (!error) return false
+    return error === 'LLM_ABORTED' || error.includes('LLM_ABORTED')
+  }
+
   const aiGenerate = async (tempContextVal?: string) => {
+    if (streamBusyRef.current || generating || adjusting || adjustPlanning) return
+    const myEpoch = sessionEpochRef.current
+    const targetProjectId = projectId
+    const targetChapter = chapterNumber
+
     if (!(await window.api.hasLlmKey())) {
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
+    if (sessionEpochRef.current !== myEpoch) return
     // P14-C：硬上限拦截——若 usage 已超阈值且用户开启 blockOnExceeded，弹确认
     if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
       const proceed = window.confirm(
@@ -1143,11 +1442,18 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       )
       if (!proceed) return
     }
+    if (sessionEpochRef.current !== myEpoch) return
+    if (streamBusyRef.current) return
+
     // 改前自检快照：写后复检对比用（按自检续写补洞时可见改善）
     const previousSelfCheck: ChapterSelfCheckReport | null =
       postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    streamBusyRef.current = true
+    streamCompletedRef.current = false
     setGenerating(true)
+    userAbortedRef.current = false
     const initialDraft = draft
+    preStreamDraftRef.current = initialDraft
     setFlowPanelOpen(false)
     setAutoAudit(null)
     setReviewText('')
@@ -1164,26 +1470,37 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setRedoStack([])
     const myGen = ++genRef.current
     let finalDraft = ''
+    let requestId: string | null = null
+    /** 本会话仍有效时清理 busy 标志，避免 done 事件与 invoke 回包乱序导致永久「落墨中」 */
+    const releaseIfMine = (): void => {
+      if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      streamBusyRef.current = false
+      setGenerating(false)
+      if (requestId) untrackStreamRequest(requestId)
+      preStreamDraftRef.current = null
+    }
     try {
-      const result = await window.api.generateChapterStream(
-        projectId,
-        chapterNumber,
+      const stream = window.api.generateChapterStream(
+        targetProjectId,
+        targetChapter,
         requestedStyleProfileId,
         tempContextVal,
         initialDraft,
         (token, done) => {
-          if (genRef.current !== myGen) return
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
           if (token) {
             finalDraft += token
-            setDraft(initialDraft + finalDraft)
+            setDraft(initialDraft + finalDraft, { preserveCaret: false })
           }
           if (done) {
-            setGenerating(false)
+            // done 可能晚于 / 早于 invoke resolve；只做轻量收尾，完整状态以 await 后为准
+            streamCompletedRef.current = true
+            releaseIfMine()
             refreshUsage() // P10-A：续写完成更新今日用量
             const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
             if (receipt) {
-              setDraft(initialDraft + stripped)
-              window.api.applyForeshadowReceipt(projectId, chapterNumber, receipt)
+              setDraft(initialDraft + stripped, { preserveCaret: false })
+              window.api.applyForeshadowReceipt(targetProjectId, targetChapter, receipt)
                 .then(res => {
                   if (res.planted > 0 || res.collected > 0) {
                     setUndoToast({ message: `AI自动记录了伏笔：新增 ${res.planted} 条，回收 ${res.collected} 条`, type: 'warning' })
@@ -1194,14 +1511,28 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
           }
         }
       )
-      if (genRef.current !== myGen) return
-      if (!result.ok) {
-        setGenerating(false)
-        // 流式过程中可能已写入错误旁白（如 agent 流程说明），失败时回滚到续写前
-        setDraft(initialDraft)
-        setAlertInfo({ message: friendlyLlmError(result.error) })
+      requestId = stream.requestId
+      trackStreamRequest(stream.requestId)
+      // 若在 invoke 前已切章/取消，立刻 abort（pending abort 也会拦住 begin）
+      if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
+        void stream.abort().catch(() => undefined)
+        releaseIfMine()
         return
       }
+      const result = await stream
+      if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      if (!result.ok) {
+        // 流式过程中可能已写入错误旁白（如 agent 流程说明），失败时回滚到续写前
+        setDraft(initialDraft)
+        releaseIfMine()
+        if (!isStreamAbortError(result.error)) {
+          setAlertInfo({ message: friendlyLlmError(result.error) })
+        }
+        return
+      }
+      // 关键：即使 done 事件尚未到达 / 丢失，也必须结束 generating，否则会永久停在「停止生成」
+      streamCompletedRef.current = true
+      releaseIfMine()
       setDirty(true)
       // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
       // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
@@ -1218,16 +1549,20 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         })
       }
     } catch {
-      if (genRef.current === myGen) {
-        setGenerating(false)
+      if (genRef.current === myGen && sessionEpochRef.current === myEpoch) {
         setDraft(initialDraft)
+        releaseIfMine()
       }
     }
   }
 
   const closeAdjustDialog = () => {
-    // 生成建议中不允许点遮罩关掉半成品；落笔中对话框本已关闭
-    if (adjustPlanning) return
+    // 出建议中：点取消 = 停止生成并关对话框
+    if (adjustPlanning) {
+      cancelActiveStream()
+      setShowAdjustDialog(false)
+      return
+    }
     ++adjustPlanRef.current
     setShowAdjustDialog(false)
     setAdjustPlanning(false)
@@ -1246,6 +1581,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
    * 建议流式写入对话框，用户可编辑后再确认落笔。
    */
   const planAdjustChapter = async () => {
+    if (streamBusyRef.current || generating || adjusting || adjustPlanning) return
     const instruction = adjustInstruction.trim()
     if (!draft.trim()) {
       setAlertInfo({ message: '正文为空，无法追问调整' })
@@ -1255,57 +1591,88 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setAlertInfo({ message: '请先写下这次要怎么调整正文' })
       return
     }
+    const myEpoch = sessionEpochRef.current
+    const targetProjectId = projectId
+    const targetChapter = chapterNumber
     if (!(await window.api.hasLlmKey())) {
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
+    if (sessionEpochRef.current !== myEpoch) return
     if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
       const proceed = window.confirm(
         `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续生成修改建议？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
       )
       if (!proceed) return
     }
+    if (sessionEpochRef.current !== myEpoch) return
+    if (streamBusyRef.current) return
 
+    streamBusyRef.current = true
+    streamCompletedRef.current = false
     setAdjustPlanning(true)
+    userAbortedRef.current = false
     setAdjustPlan('')
     setAdjustPlanChecks([])
     const myPlan = ++adjustPlanRef.current
     let planText = ''
+    let requestId: string | null = null
+    const releaseIfMine = (): void => {
+      if (adjustPlanRef.current !== myPlan || sessionEpochRef.current !== myEpoch) return
+      streamBusyRef.current = false
+      setAdjustPlanning(false)
+      if (requestId) untrackStreamRequest(requestId)
+    }
     try {
-      const result = await window.api.planAdjustChapterStream(
-        projectId,
-        chapterNumber,
+      const stream = window.api.planAdjustChapterStream(
+        targetProjectId,
+        targetChapter,
         draft,
         instruction,
         requestedStyleProfileId,
         (token, done) => {
-          if (adjustPlanRef.current !== myPlan) return
+          if (adjustPlanRef.current !== myPlan || sessionEpochRef.current !== myEpoch) return
           if (token) {
             planText += token
             setAdjustPlan(planText)
           }
           if (done) {
-            setAdjustPlanning(false)
+            streamCompletedRef.current = true
+            releaseIfMine()
             refreshUsage()
             // 流式结束后再解析勾选项（流式中途标题/列表不完整）
             if (planText.trim()) syncAdjustPlanChecks(planText)
           }
         }
       )
-      if (adjustPlanRef.current !== myPlan) return
-      if (!result.ok) {
-        setAdjustPlanning(false)
-        setAlertInfo({ message: friendlyLlmError(result.error) })
+      requestId = stream.requestId
+      trackStreamRequest(stream.requestId)
+      if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
+        void stream.abort().catch(() => undefined)
+        releaseIfMine()
         return
       }
+      const result = await stream
+      if (adjustPlanRef.current !== myPlan || sessionEpochRef.current !== myEpoch) return
+      if (!result.ok) {
+        releaseIfMine()
+        if (!isStreamAbortError(result.error)) {
+          setAlertInfo({ message: friendlyLlmError(result.error) })
+        }
+        return
+      }
+      streamCompletedRef.current = true
+      releaseIfMine()
       if (planText.trim()) {
         setAdjustPlan(planText)
         syncAdjustPlanChecks(planText)
       }
     } catch (err) {
-      if (adjustPlanRef.current === myPlan) {
-        setAdjustPlanning(false)
-        setAlertInfo({ message: friendlyLlmError((err as Error).message) })
+      if (adjustPlanRef.current === myPlan && sessionEpochRef.current === myEpoch) {
+        releaseIfMine()
+        if (!isStreamAbortError((err as Error).message)) {
+          setAlertInfo({ message: friendlyLlmError((err as Error).message) })
+        }
       }
     }
   }
@@ -1315,6 +1682,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
    * @param usePlan 是否把当前修改建议一并交给落笔；false = 直接按要求落笔（跳过建议）
    */
   const adjustChapter = async (usePlan: boolean) => {
+    if (streamBusyRef.current || generating || adjusting || adjustPlanning) return
     const instruction = adjustInstruction.trim()
     if (!draft.trim()) {
       setAlertInfo({ message: '正文为空，无法追问调整' })
@@ -1324,16 +1692,22 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
       setAlertInfo({ message: '请先写下这次要怎么调整正文' })
       return
     }
+    const myEpoch = sessionEpochRef.current
+    const targetProjectId = projectId
+    const targetChapter = chapterNumber
     if (!(await window.api.hasLlmKey())) {
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
+    if (sessionEpochRef.current !== myEpoch) return
     if (usage && shouldBlockAiGenerate(usage.month.cost, costAlertConfig)) {
       const proceed = window.confirm(
         `本月 AI 费用已达 ${formatCost(usage.month.cost)}，超过预警线 ${formatCost(costAlertConfig.exceeded)}。\n\n确认继续落笔重写？\n\n（提示：可在 设置 → 用量与费用 关闭"exceeded 时弹确认"）`
       )
       if (!proceed) return
     }
+    if (sessionEpochRef.current !== myEpoch) return
+    if (streamBusyRef.current) return
 
     let confirmedPlan = ''
     if (usePlan) {
@@ -1358,9 +1732,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     // 改前自检：落笔后自动复检并对比改善幅度
     const previousSelfCheck =
       postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    streamBusyRef.current = true
+    streamCompletedRef.current = false
     setShowAdjustDialog(false)
     setAdjustPlanning(false)
     setAdjusting(true)
+    userAbortedRef.current = false
     setFlowPanelOpen(false)
     setAutoAudit(null)
     setReviewText('')
@@ -1372,39 +1749,62 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
     setRedoStack([])
 
     const sourceDraft = draft
+    preStreamDraftRef.current = sourceDraft
     const myGen = ++genRef.current
     let revised = ''
+    let requestId: string | null = null
+    const releaseIfMine = (): void => {
+      if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      streamBusyRef.current = false
+      setAdjusting(false)
+      if (requestId) untrackStreamRequest(requestId)
+      preStreamDraftRef.current = null
+    }
     try {
-      const result = await window.api.adjustChapterStream(
-        projectId,
-        chapterNumber,
+      const stream = window.api.adjustChapterStream(
+        targetProjectId,
+        targetChapter,
         sourceDraft,
         instruction,
         requestedStyleProfileId,
         (token, done) => {
-          if (genRef.current !== myGen) return
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
           if (token) {
             revised += token
-            setDraft(revised)
+            setDraft(revised, { preserveCaret: false })
           }
           if (done) {
-            setAdjusting(false)
+            streamCompletedRef.current = true
+            releaseIfMine()
             refreshUsage()
           }
         },
         confirmedPlan || null
       )
-      if (genRef.current !== myGen) return
-      if (!result.ok) {
-        setAdjusting(false)
-        setAlertInfo({ message: friendlyLlmError(result.error) })
-        setDraft(sourceDraft)
+      requestId = stream.requestId
+      trackStreamRequest(stream.requestId)
+      if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
+        void stream.abort().catch(() => undefined)
+        releaseIfMine()
         return
       }
+      const result = await stream
+      if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      if (!result.ok) {
+        setDraft(sourceDraft)
+        releaseIfMine()
+        if (!isStreamAbortError(result.error)) {
+          setAlertInfo({ message: friendlyLlmError(result.error) })
+        }
+        return
+      }
+      // 与续写相同：invoke 回包到达即结束 adjusting，不依赖 done 事件顺序
+      streamCompletedRef.current = true
+      releaseIfMine()
       // 整章替换成功：压入撤销栈，Ctrl+Z / 面板「↶ 撤销」可还原旧稿
       const finalText = revised
       if (finalText && finalText !== sourceDraft) {
-        setDraft(finalText)
+        setDraft(finalText, { preserveCaret: false })
         pushRewrite(sourceDraft, finalText, ADJUST_REWRITE_KEY)
         setUndoToast({
           message: '重写完成，正在自动复检…',
@@ -1421,9 +1821,9 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         previousSelfCheck
       })
     } catch {
-      if (genRef.current === myGen) {
-        setAdjusting(false)
+      if (genRef.current === myGen && sessionEpochRef.current === myEpoch) {
         setDraft(sourceDraft)
+        releaseIfMine()
       }
     }
   }
@@ -2204,9 +2604,14 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         return
       }
       const parsed = parseCastJson(buffer)
-      // 匹配人物库
+      // 匹配人物库（精确名优先；唯一包含关系时模糊匹配）
       const merged: CastSuggestion[] = parsed.map((p) => {
-        const found = characters.find((c) => c.name === p.name)
+        const exact = characters.find((c) => c.name === p.name)
+        if (exact) return { ...p, applied: false, characterId: exact.id }
+        const hits = characters.filter(
+          (c) => c.name.includes(p.name) || p.name.includes(c.name)
+        )
+        const found = hits.length === 1 ? hits[0] : undefined
         return { ...p, applied: false, characterId: found?.id }
       })
       setCastSuggestions(merged)
@@ -2217,7 +2622,10 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
 
   const applyCastSuggestions = async () => {
     if (!data) return
-    const matched = castSuggestions.filter((s) => s.characterId && !s.applied)
+    // 默认只把真正出场的人加入登场；仅被提及的不自动勾选
+    const matched = castSuggestions.filter(
+      (s) => s.characterId && !s.applied && s.presence === 'appeared'
+    )
     if (matched.length === 0) return
     const ids = new Set(appearing)
     matched.forEach((s) => s.characterId && ids.add(s.characterId))
@@ -2980,7 +3388,7 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <button
           className="btn btn-sm"
           onClick={() => setShowAskDialog(true)}
-          disabled={asking || generating}
+          disabled={asking || generating || adjusting || adjustPlanning}
           title="就当前正文向 AI 提问，如「为什么这样写」「人物动机合理吗」，只回答不改正文"
         >
           {asking ? '追问中…' : '💬 追问'}
@@ -2988,26 +3396,42 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <button
           className="btn btn-sm"
           onClick={() => void startDeslopScan()}
-          disabled={deslopScanning || deslopRunning || !draft.trim()}
+          disabled={
+            deslopScanning ||
+            deslopRunning ||
+            !draft.trim() ||
+            generating ||
+            adjusting ||
+            adjustPlanning
+          }
           title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
         >
           {deslopScanning ? '扫描中…' : '🧹 去 AI 味'}
         </button>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={() => {
-            const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
-            if (skip) {
-              void aiGenerate()
-            } else {
-              setTempContextInput('')
-              setShowContinueDialog(true)
-            }
-          }}
-          disabled={generating || adjusting}
-        >
-          {generating ? '落墨中…' : '✦ 续写'}
-        </button>
+        {generating || adjusting || adjustPlanning ? (
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={cancelActiveStream}
+            title="停止当前 AI 生成，并恢复开始前的正文"
+          >
+            ⏹ 停止生成
+          </button>
+        ) : (
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => {
+              const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
+              if (skip) {
+                void aiGenerate()
+              } else {
+                setTempContextInput('')
+                setShowContinueDialog(true)
+              }
+            }}
+          >
+            ✦ 续写
+          </button>
+        )}
         <button
           className={`btn btn-sm${flowPanelOpen ? ' btn-primary' : ''}`}
           onClick={() => setFlowPanelOpen((open) => !open)}
@@ -3567,16 +3991,12 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
         <textarea
           ref={textareaRef}
           className="editor-text"
-          value={draft}
+          // 非受控：禁止 value={draft}。用户输入只改 state，浏览器自管滚动/光标；
+          // 切章/续写/撤销等程序化改写由 setDraft 写 DOM。
+          defaultValue=""
           onScroll={handleEditorScroll}
-          onChange={(e) => {
-            setDraft(e.target.value)
-            setDirty(true)
-            if (findResults.length > 0) {
-              setFindResults([])
-              setCurrentResultIndex(-1)
-            }
-          }}
+          onKeyDown={handleEditorKeyDown}
+          onChange={handleEditorChange}
           placeholder="此处落笔，或点「续写」让 AI 接续成文……"
         />
         <div ref={mirrorRef} className="editor-text-mirror" aria-hidden="true" />
@@ -4552,13 +4972,23 @@ function parseCastJson(text: string): Omit<CastSuggestion, 'applied' | 'characte
                 gap: 10
               }}
             >
-              <button
-                className="btn btn-ghost"
-                onClick={closeAdjustDialog}
-                disabled={adjustPlanning || adjusting}
-              >
-                取消
-              </button>
+              {adjustPlanning ? (
+                <button
+                  className="btn btn-danger"
+                  onClick={cancelActiveStream}
+                  title="停止生成修改建议"
+                >
+                  ⏹ 停止生成
+                </button>
+              ) : (
+                <button
+                  className="btn btn-ghost"
+                  onClick={closeAdjustDialog}
+                  disabled={adjusting}
+                >
+                  取消
+                </button>
+              )}
               {!adjustPlan && !adjustPlanning ? (
                 <>
                   <button
@@ -4811,7 +5241,9 @@ function CastSuggestionPanel({
   onApply: () => void | Promise<void>
   onClose: () => void
 }) {
-  const matched = suggestions.filter((s) => s.characterId)
+  const appeared = suggestions.filter((s) => s.presence === 'appeared')
+  const mentioned = suggestions.filter((s) => s.presence === 'mentioned')
+  const matched = appeared.filter((s) => s.characterId)
   const unmatched = suggestions.filter((s) => !s.characterId)
   const charById = new Map<string, Character>(characters.map((c) => [c.id, c]))
   return (
@@ -4853,28 +5285,49 @@ function CastSuggestionPanel({
           ) : null}
           <div className="row" style={{ marginBottom: 6 }}>
             <span className="meta">
-              共 {suggestions.length} 人 · {matched.length} 可一键应用
+              共 {suggestions.length} 人 · 出场 {appeared.length} · 仅提及 {mentioned.length}
+              {matched.length > 0 ? ` · ${matched.length} 可一键应用` : ''}
               {applied ? ' · 已应用' : ''}
             </span>
             <button
               className="btn btn-primary btn-sm"
               onClick={onApply}
               disabled={matched.length === 0 || matched.every((m) => m.applied)}
+              title="只把「真正出场」的人物加入本章登场；仅被提及的不会自动加入"
             >
-              {matched.every((m) => m.applied) ? '已应用' : `应用 ${matched.length} 个到登场`}
+              {matched.length === 0
+                ? '无出场可应用'
+                : matched.every((m) => m.applied)
+                  ? '已应用'
+                  : `应用 ${matched.length} 个出场到登场`}
             </button>
           </div>
+          {mentioned.length > 0 ? (
+            <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              「仅提及」= 正文里点到名字但人没到场，默认不计入本章登场。
+            </p>
+          ) : null}
           {suggestions.map((s, i) => (
             <div
               key={i}
               className={`cast-suggestion ${s.characterId ? 'known' : 'unknown'} ${
-                s.applied ? 'applied' : ''
-              }`}
+                s.presence === 'mentioned' ? 'mentioned' : ''
+              } ${s.applied ? 'applied' : ''}`}
             >
               <div className="row" style={{ alignItems: 'baseline' }}>
                 <span className="name">
                   {s.name}
-                  {s.applied ? <span className="chip chip-success" style={{ marginLeft: 8 }}>已加入</span> : null}
+                  <span
+                    className={`chip ${s.presence === 'appeared' ? 'chip-success' : 'chip-muted'}`}
+                    style={{ marginLeft: 8 }}
+                  >
+                    {s.presence === 'appeared' ? '出场' : '仅提及'}
+                  </span>
+                  {s.applied ? (
+                    <span className="chip chip-success" style={{ marginLeft: 6 }}>
+                      已加入
+                    </span>
+                  ) : null}
                 </span>
                 <span
                   className="meta"

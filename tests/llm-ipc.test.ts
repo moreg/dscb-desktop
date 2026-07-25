@@ -61,6 +61,33 @@ describe('registerLlmIpc handlers', () => {
     registerLlmIpc(store, service)
   })
 
+  it('llm:abort registers pending for unknown requestId (begin 前取消)', async () => {
+    const { beginStream, clearAllStreams, endStream } = await import(
+      '../src/main/data/stream-abort-registry'
+    )
+    clearAllStreams()
+    const handler = handlers.get('llm:abort')
+    expect(handler).toBeDefined()
+    const out = (await handler!(null, 'no-such-request')) as { ok: boolean }
+    // pending abort：返回 ok，后续 begin 得到 aborted signal
+    expect(out).toEqual({ ok: true })
+    const signal = beginStream('no-such-request')
+    expect(signal.aborted).toBe(true)
+    endStream('no-such-request')
+  })
+
+  it('llm:abort aborts a registered stream', async () => {
+    const { beginStream, clearAllStreams } = await import(
+      '../src/main/data/stream-abort-registry'
+    )
+    clearAllStreams()
+    const signal = beginStream('req-abort-me')
+    const handler = handlers.get('llm:abort')
+    const out = (await handler!(null, 'req-abort-me')) as { ok: boolean }
+    expect(out).toEqual({ ok: true })
+    expect(signal.aborted).toBe(true)
+  })
+
   it('llm:listProviders returns masked key, never plaintext', async () => {
     await store.write({
       activeId: 'p1',

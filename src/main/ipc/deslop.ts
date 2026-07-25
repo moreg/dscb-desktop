@@ -8,7 +8,7 @@ import {
   resolveDeslopTextOverrides,
   resolveDeslopBannedWords
 } from '../data/skill-prompts/deslop/deslop-rules'
-import { safeHandle } from './safe-handle'
+import { safeHandle, safeSend } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 import { join } from 'path'
 import type { DeslopStyleContext } from '../../shared/types'
@@ -73,7 +73,7 @@ export function registerDeslopIpc(
         const bannedWords = resolveDeslopBannedWords(deslopRules.bannedWords)
         const textOverrides = resolveDeslopTextOverrides(deslopRules.textOverrides ?? {})
         const send = (token: string): void => {
-          win?.webContents.send('deslop:token', {
+          safeSend(win, 'deslop:token', {
             requestId: validated.requestId,
             token,
             done: false
@@ -88,7 +88,7 @@ export function registerDeslopIpc(
           styleContext,
           meta: { projectId: validated.projectId }
         })
-        win?.webContents.send('deslop:token', {
+        safeSend(win, 'deslop:token', {
           requestId: validated.requestId,
           token: '',
           done: true
@@ -96,7 +96,7 @@ export function registerDeslopIpc(
         return result
       } catch (err) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
-        win?.webContents.send('deslop:token', { requestId, token: '', done: true })
+        safeSend(win, 'deslop:token', { requestId, token: '', done: true })
         throw err
       }
     }

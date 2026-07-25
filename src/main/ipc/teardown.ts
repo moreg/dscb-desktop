@@ -1,7 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { TeardownService } from '../data/teardown/teardown-service'
-import { safeHandle } from './safe-handle'
+import { safeHandle, safeSend } from './safe-handle'
 import { validateInput } from './validation'
 
 const bookNameSchema = z
@@ -51,7 +51,7 @@ export function registerTeardownIpc(service: TeardownService): void {
           payload
         )
         const send = (token: string): void => {
-          win?.webContents.send('teardown:token', {
+          safeSend(win, 'teardown:token', {
             requestId: validated.requestId,
             token,
             done: false
@@ -62,7 +62,7 @@ export function registerTeardownIpc(service: TeardownService): void {
         } else {
           await service.runShort(validated.bookName, { onToken: send })
         }
-        win?.webContents.send('teardown:token', {
+        safeSend(win, 'teardown:token', {
           requestId: validated.requestId,
           token: '',
           done: true
@@ -70,7 +70,7 @@ export function registerTeardownIpc(service: TeardownService): void {
         return { ok: true }
       } catch (err) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
-        win?.webContents.send('teardown:token', { requestId, token: '', done: true })
+        safeSend(win, 'teardown:token', { requestId, token: '', done: true })
         throw err
       }
     }
@@ -87,14 +87,14 @@ export function registerTeardownIpc(service: TeardownService): void {
           payload
         )
         const send = (token: string): void => {
-          win?.webContents.send('teardown:token', {
+          safeSend(win, 'teardown:token', {
             requestId: validated.requestId,
             token,
             done: false
           })
         }
         await service.continueLong(validated.bookName, { onToken: send })
-        win?.webContents.send('teardown:token', {
+        safeSend(win, 'teardown:token', {
           requestId: validated.requestId,
           token: '',
           done: true
@@ -102,7 +102,7 @@ export function registerTeardownIpc(service: TeardownService): void {
         return { ok: true }
       } catch (err) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
-        win?.webContents.send('teardown:token', { requestId, token: '', done: true })
+        safeSend(win, 'teardown:token', { requestId, token: '', done: true })
         throw err
       }
     }

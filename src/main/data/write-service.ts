@@ -1931,8 +1931,9 @@ export class WriteService {
   }
 
   /**
-   * 识别本章出场人物：返回 JSON 数组，每项 { name, reason, quote? }
+   * 识别本章出场人物：返回 JSON 数组，每项 { name, reason, quote?, presence }
    * name 是人物原文中的称呼（可能不是人物库中的规范名）
+   * presence=appeared 才算真正登场；mentioned 仅被点名，不算登场
    */
   async detectCastStream(
     projectId: string,
@@ -1947,14 +1948,21 @@ export class WriteService {
       ? chapter.content.slice(0, 6000) + '\n…（后文已省略）'
       : chapter.content
     const prompt = [
-      `请识别下面的小说章节正文中所有出场人物，并给出他们在本章做的事情。`,
+      `请识别下面的小说章节正文中的人物，区分「真正出场」与「仅被提及」。`,
       ``,
       `已知人物库（可参考但不要局限于此；正文中出现的别名/称呼/外号都要识别）：${known || '（空）'}`,
       ``,
+      `判定标准（严格）：`,
+      `- appeared（真正出场/登场）：该人物在本章场景中有实体参与。满足任一即可：亲自到场、说话、动作、被当面观察描写、通过电话/通信实时互动。`,
+      `- mentioned（仅被提及，不算登场）：只是被别人提起名字/身份/往事/传闻/回忆/信件内容点名，本人不在当前场景、没有实时互动。`,
+      `- 不要把「提到名字」当成出场。例如「想起沈清秋说过」「听说赵四死了」「段老虎的部下」——若本人未到场，一律 mentioned。`,
+      `- 群众/无名路人可不列；同一人物多个称呼只输出一条，name 优先用人物库规范名。`,
+      ``,
       `输出要求：`,
-      `- 严格 JSON 数组，每个元素 { "name": 字符串, "reason": 一句话说明他/她在章中做了什么, "quote": 关键原文 1 句（≤ 30 字，可选） }`,
+      `- 严格 JSON 数组，每个元素：`,
+      `  { "name": 字符串, "presence": "appeared"|"mentioned", "reason": 一句话说明依据, "quote": 关键原文 1 句（≤ 30 字，可选） }`,
+      `- presence 必须填写；真正登场才写 appeared。`,
       `- 不要任何解释、标题、Markdown 代码块。`,
-      `- 若某人物只被提及未出场，可不列入。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
       trimmed

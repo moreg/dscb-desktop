@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { IpcMainInvokeEvent } from 'electron'
 import { SettingsRepository } from '../data/settings-repository'
 import { LlmService } from '../data/llm-service'
-import { safeHandle } from './safe-handle'
+import { safeHandle, safeSend } from './safe-handle'
 import { validateInput } from './validation'
 import type { DeslopRulesBundle } from '../../shared/types'
 import {
@@ -116,7 +116,7 @@ export function registerDeslopRulesIpc(
         )
         const prompt = buildDeslopRuleEditPrompt(currentMd, validated.instruction)
         const send = (token: string): void => {
-          win?.webContents.send('deslopRules:token', {
+          safeSend(win, 'deslopRules:token', {
             requestId: validated.requestId,
             token,
             done: false
@@ -127,7 +127,7 @@ export function registerDeslopRulesIpc(
           meta: { feature: 'deslop:editRules' },
           onToken: send
         })
-        win?.webContents.send('deslopRules:token', {
+        safeSend(win, 'deslopRules:token', {
           requestId: validated.requestId,
           token: '',
           done: true
@@ -135,7 +135,7 @@ export function registerDeslopRulesIpc(
         return output
       } catch (err) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
-        win?.webContents.send('deslopRules:token', { requestId, token: '', done: true })
+        safeSend(win, 'deslopRules:token', { requestId, token: '', done: true })
         throw err
       }
     }

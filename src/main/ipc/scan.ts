@@ -1,7 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { ScanService } from '../data/scan/scan-service'
-import { safeHandle } from './safe-handle'
+import { safeHandle, safeSend } from './safe-handle'
 import { validateInput } from './validation'
 
 const platformSchema = z.enum([
@@ -63,14 +63,14 @@ export function registerScanIpc(scanService: ScanService): void {
       try {
         const validated = validateInput(scanAnalyzeSchema, payload)
         const send = (token: string): void => {
-          win?.webContents.send('scan:token', {
+          safeSend(win, 'scan:token', {
             requestId: validated.requestId,
             token,
             done: false
           })
         }
         await scanService.analyzeRank(validated.report, validated.platform, send)
-        win?.webContents.send('scan:token', {
+        safeSend(win, 'scan:token', {
           requestId: validated.requestId,
           token: '',
           done: true
@@ -78,7 +78,7 @@ export function registerScanIpc(scanService: ScanService): void {
         return { ok: true }
       } catch (err) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
-        win?.webContents.send('scan:token', { requestId, token: '', done: true })
+        safeSend(win, 'scan:token', { requestId, token: '', done: true })
         throw err
       }
     }

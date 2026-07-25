@@ -389,6 +389,15 @@ export interface ReviewRulesBundle {
 
 export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose'
 
+/**
+ * 可取消的流式 IPC 句柄：可 await 完成结果，也可用 requestId / abort 中途打断。
+ * （Promise 上挂 requestId、abort，兼容现有 `const r = await api.xxxStream(...)` 写法）
+ */
+export type StreamHandle = Promise<{ ok: boolean; error?: string }> & {
+  requestId: string
+  abort: () => Promise<{ ok: boolean }>
+}
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
@@ -565,7 +574,7 @@ export interface RendererApi {
   generateStream: (
     prompt: string,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   getMainOutline: (projectId: string) => Promise<MainOutline | null>
   updateMainOutline: (projectId: string, patch: Partial<MainOutline>) => Promise<MainOutline>
   generateMainOutline: (projectId: string) => Promise<MainOutline>
@@ -589,6 +598,8 @@ export interface RendererApi {
   listFigures: (projectId: string) => Promise<FigureSummary[]>
   readFigure: (projectId: string, fileName: string) => Promise<ChapterFigure | null>
   openFigure: (projectId: string, fileName: string) => Promise<void>
+  /** 取消进行中的流式生成（requestId 来自 StreamHandle） */
+  abortStream: (requestId: string) => Promise<{ ok: boolean }>
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
@@ -596,7 +607,7 @@ export interface RendererApi {
     tempContext: string | undefined,
     existingText: string | undefined,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
     projectId: string,
@@ -605,7 +616,7 @@ export interface RendererApi {
     instruction: string,
     styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   adjustChapterStream: (
     projectId: string,
     chapterNumber: number,
@@ -615,7 +626,7 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void,
     /** 用户已确认的修改方案；有则落笔时严格按此执行 */
     confirmedPlan?: string | null
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   getProjectsRoot: () => Promise<string>
   setProjectsRoot: (path: string) => Promise<string>
   getTheme: () => Promise<'light' | 'dark' | 'system'>
