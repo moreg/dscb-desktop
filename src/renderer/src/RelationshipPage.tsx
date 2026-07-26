@@ -89,12 +89,15 @@ const FORCE_ALPHA_DECAY = 0.02
 const MIN_ZOOM = 0.4
 const MAX_ZOOM = 3
 const LABEL_MAX_CHARS = 4
+/** 光晕框顶部留出的标签带高度：8(边距)+20(标签)+6(与节点圆的间隙)+30(半径) */
+const HALO_TOP_PAD = 64
+const FACTION_LABEL_MAX_CHARS = 8
 
-/** 把 name 截到前 4 字（中文按 1 字算），长名末尾加省略号。 */
-function shortLabel(name: string): string {
-  const chars = [...name]
-  if (chars.length <= LABEL_MAX_CHARS) return name
-  return chars.slice(0, LABEL_MAX_CHARS).join('') + '…'
+/** 按字符截断（中文按 1 字算），超长末尾加省略号。节点名和阵营标签共用。 */
+function truncateChars(text: string, maxChars: number): string {
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
+  return chars.slice(0, maxChars).join('') + '…'
 }
 
 const ROLE_BUCKETS = [
@@ -197,13 +200,15 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   useEffect(refresh, [projectId])
 
   const factionOf = (c: Character): string => {
-    if (c.role && ROLE_BUCKETS.some((b) => b.match.some((m) => c.role!.includes(m)))) {
-      return c.role
-    }
+    const bucket = c.role
+      ? ROLE_BUCKETS.find((b) => b.match.some((m) => c.role!.includes(m)))
+      : undefined
+    if (bucket) return bucket.label
     const factionTag = (c.tags ?? []).find((t) =>
       ['天玄宗', '魔门', '皇室', '书院', '门派'].some((k) => t.includes(k))
     )
-    return factionTag ?? (c.role ?? '其他')
+    // 描述型 role（如"XX的客人"）不当阵营，统一归入其他，避免一人一框
+    return factionTag ?? '其他'
   }
 
   const factionList = useMemo(() => {
@@ -603,25 +608,30 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
               >
                 {factionList.length > 0 && nodesRef.current.length > 0
                   ? Array.from(new Set(nodesRef.current.map((n) => n.faction))).map((f) => {
+                      // "其他"是杂项兜底，成员散落各处，画包围框会罩住整个画布
+                      if (f === '其他') return null
                       const groupNodes = nodesRef.current.filter((n) => n.faction === f)
                       if (groupNodes.length === 0) return null
                       const xs = groupNodes.map((n) => n.x ?? 0)
                       const ys = groupNodes.map((n) => n.y ?? 0)
                       const minX = Math.min(...xs) - 40
                       const maxX = Math.max(...xs) + 40
-                      const minY = Math.min(...ys) - 36
+                      // 顶部多留一条标签带，避免标签压在节点圆上
+                      const minY = Math.min(...ys) - HALO_TOP_PAD
                       const maxY = Math.max(...ys) + 48
-                      
+
                       const style = getFactionStyle(f)
-                      const labelWidth = Math.max(48, f.length * 12 + 16)
-                      
+                      const tag = truncateChars(f, FACTION_LABEL_MAX_CHARS)
+                      const labelWidth = Math.max(48, [...tag].length * 12 + 16)
+                      const boxWidth = Math.max(maxX - minX, labelWidth + 16)
+
                       return (
                         <g key={f}>
                           <rect
                             className="faction-halo"
                             x={minX}
                             y={minY}
-                            width={maxX - minX}
+                            width={boxWidth}
                             height={maxY - minY}
                             rx={12}
                             fill={style.fill}
@@ -648,7 +658,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
                               textAnchor="middle"
                               dominantBaseline="middle"
                             >
-                              {f}
+                              {tag}
                             </text>
                           </g>
                         </g>
@@ -951,8 +961,9 @@ function NodeWithTooltip({
     if (!wrapEl || !svgEl) return
     const svgRect = svgEl.getBoundingClientRect()
     const wrapRect = wrapEl.getBoundingClientRect()
-    const rx = ((node.x! + transform.x) / GRAPH_WIDTH) * svgRect.width
-    const ry = ((node.y! + transform.y) / GRAPH_HEIGHT) * svgRect.height
+    // 内容组的变换是 translate(tx ty) scale(k)，viewBox 坐标 = node.x * k + tx
+    const rx = ((node.x! * transform.k + transform.x) / GRAPH_WIDTH) * svgRect.width
+    const ry = ((node.y! * transform.k + transform.y) / GRAPH_HEIGHT) * svgRect.height
     let top = ry - NODE_RADIUS * transform.k - 12
     if (top < 8) top = ry + NODE_RADIUS * transform.k + 12
     const half = 130
@@ -1013,7 +1024,7 @@ function NodeWithTooltip({
         style={{ cursor: 'grab' }}
       />
       <text x={x} y={y + 1} className="rel-node-label">
-        {shortLabel(node.name)}
+        {truncateChars(node.name, LABEL_MAX_CHARS)}
       </text>
       {open && wrapEl
         ? createPortal(

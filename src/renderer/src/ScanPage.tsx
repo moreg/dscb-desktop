@@ -23,6 +23,20 @@ function parseRawMarkdownToSections(raw: string): MdSection[] {
   return raw.trim() ? [{ title: '', body: raw }] : []
 }
 
+/** "起点（自动采集）" → "起点"；找不到平台配置时原样返回 */
+function platformLabelOf(platform: string): string {
+  const label = PLATFORM_OPTIONS.find((p) => p.value === platform)?.label
+  return label ? label.split('（')[0] : platform
+}
+
+/** "起点内置趋势_20260725.md" → "起点内置趋势"；日期已在 meta 行展示，标题里不重复 */
+function prettyReportName(fileName: string): string {
+  const base = fileName.replace(/\.md$/i, '')
+  const m = base.match(/^(.*)_(\d{8})$/)
+  // m[1] 可能为空串（如 "_20260725.md"），此时退回完整 base 避免空标题
+  return m && m[1] ? m[1] : base
+}
+
 export default function ScanPage(): React.ReactElement {
   const [reports, setReports] = useState<ScanReportSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -227,7 +241,7 @@ export default function ScanPage(): React.ReactElement {
           <span>📊 榜单采集与配置</span>
         </div>
         <div className="row" style={{ gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div className="field" style={{ flex: '1 1 240px', marginBottom: 0 }}>
+          <div className="field" style={{ flex: '0 1 360px', minWidth: 220, marginBottom: 0 }}>
             <label style={{ fontSize: 13, fontWeight: 600 }}>选择目标平台</label>
             <select
               className="input"
@@ -297,8 +311,8 @@ export default function ScanPage(): React.ReactElement {
 
       {/* 报告列表 + 详情 */}
       <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: 20 }}>
-        {/* 左侧：历史报告 */}
-        <div>
+        {/* 左侧：历史报告（sticky 跟随滚动） */}
+        <div className="scan-sidebar">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, margin: 0, fontWeight: 600, color: 'var(--ink)' }}>历史报告</h3>
             <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>共 {reports.length} 份</span>
@@ -309,10 +323,10 @@ export default function ScanPage(): React.ReactElement {
           ) : reports.length === 0 ? (
             <p className="empty">还没有扫榜报告。</p>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 600, overflowY: 'auto', paddingRight: 2 }}>
+            <div className="scan-report-list">
               {reports.map((r) => {
                 const isActive = activeReport === r.fileName
-                const platformLabel = PLATFORM_OPTIONS.find((p) => p.value === r.platform)?.label.split('（')[0] ?? r.platform
+                const platformLabel = platformLabelOf(r.platform)
                 return (
                   <div
                     key={r.fileName}
@@ -321,29 +335,31 @@ export default function ScanPage(): React.ReactElement {
                     tabIndex={0}
                     onClick={() => void openReport(r.fileName)}
                     onKeyDown={(e) => {
+                      // 只处理卡片自身的按键；删除按钮冒泡上来的 Enter/Space 不拦截，
+                      // 否则 preventDefault 会吞掉按钮的原生激活，键盘删除变成打开报告
+                      if (e.target !== e.currentTarget) return
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault()
                         void openReport(r.fileName)
                       }
                     }}
                   >
-                    <div className="scan-report-name">{r.fileName}</div>
+                    <div className="scan-report-name">{prettyReportName(r.fileName)}</div>
                     <div className="scan-report-meta">
                       <span>{platformLabel} · {r.bookCount} 本</span>
                       <span>{new Date(r.scannedAt).toLocaleDateString('zh-CN')}</span>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 2 }}>
-                      <button
-                        className="btn btn-ghost btn-sm btn-danger"
-                        style={{ padding: '2px 8px', fontSize: 11, height: 'auto', minHeight: 'unset' }}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void handleDelete(r.fileName)
-                        }}
-                      >
-                        删除
-                      </button>
-                    </div>
+                    <button
+                      className="scan-report-del"
+                      title={`删除 ${r.fileName}`}
+                      aria-label={`删除报告 ${r.fileName}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void handleDelete(r.fileName)
+                      }}
+                    >
+                      ×
+                    </button>
                   </div>
                 )
               })}
@@ -369,8 +385,19 @@ export default function ScanPage(): React.ReactElement {
                 }}
               >
                 <div>
-                  <span style={{ fontSize: 11, color: 'var(--ink-3)', display: 'block' }}>当前查看报告</span>
-                  <strong style={{ fontSize: 14, color: 'var(--ink)' }}>{activeReport}</strong>
+                  <strong style={{ fontSize: 15, color: 'var(--ink)', display: 'block' }} title={activeReport}>
+                    {prettyReportName(activeReport)}
+                  </strong>
+                  {(() => {
+                    const summary = reports.find((r) => r.fileName === activeReport)
+                    if (!summary) return null
+                    return (
+                      <span style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 2, display: 'block' }}>
+                        {platformLabelOf(summary.platform)} · {summary.bookCount} 本 ·{' '}
+                        {new Date(summary.scannedAt).toLocaleDateString('zh-CN')}
+                      </span>
+                    )
+                  })()}
                 </div>
                 <button
                   className="btn btn-primary"
@@ -430,7 +457,7 @@ export default function ScanPage(): React.ReactElement {
                 color: 'var(--ink-3)'
               }}
             >
-              <p style={{ margin: 0, fontSize: 14 }}>← 请从左侧选择一份报告查看排版详情，或在上方发起榜单采集。</p>
+              <p style={{ margin: 0, fontSize: 14 }}>← 请从左侧选择一份报告查看详情，或在上方发起榜单采集。</p>
             </div>
           )}
         </div>
