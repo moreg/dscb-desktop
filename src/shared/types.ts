@@ -773,14 +773,16 @@ export interface RendererApi {
     fileName: string,
     html: string
   ) => Promise<string>
-  /** 批量续写：从 fromChapter 到 toChapter 逐章生成，每章完成后暂停等用户确认 */
+  /** 批量续写：从 fromChapter 到 toChapter 逐章生成，每章完成后暂停等用户确认。
+   *  可传 requestId，配合 abortStream(requestId) 中断当前章的生成。 */
   generateBatch: (
     projectId: string,
     fromChapter: number,
     toChapter: number,
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    onToken?: (token: string, done: boolean) => void
+    onToken?: (token: string, done: boolean) => void,
+    requestId?: string
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
@@ -789,7 +791,8 @@ export interface RendererApi {
     toChapter: number,
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    onToken?: (token: string, done: boolean) => void
+    onToken?: (token: string, done: boolean) => void,
+    requestId?: string
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   getUsageSummary: () => Promise<UsageSummary>
   /** P16-C：按日期获取 LLM 调用详情（点击趋势图某天柱状图） */

@@ -1202,6 +1202,12 @@ a:hover { color: var(--vermilion); }
   font-weight: 700;
   color: var(--ink);
   letter-spacing: 0.02em;
+  /* 超长标题截断：换行会把状态 chip 挤到第二行，列表行高不齐 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
 }
 .chapter-row .ch-synopsis {
   font-size: 12.5px;
@@ -1257,6 +1263,8 @@ a:hover { color: var(--vermilion); }
   margin-bottom: 12px;
 }
 .editor-toolbar .spacer { flex: 1; }
+/* 质检面板头部同样用 spacer 把右侧按钮组推到行尾 */
+.audit-panel-header .spacer { flex: 1; }
 
 /* 工具栏"更多"下拉菜单 */
 .toolbar-more-menu {
@@ -1314,6 +1322,8 @@ a:hover { color: var(--vermilion); }
   font-family: var(--font-sans);
 }
 .editor-status:hover { filter: brightness(0.95); }
+/* 暗色下"更暗"没有反馈感，改提亮 */
+:root.dark .editor-status:hover { filter: brightness(1.2); }
 .editor-meta-line {
   display: flex;
   align-items: center;
@@ -1549,7 +1559,9 @@ a:hover { color: var(--vermilion); }
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 50;
+  /* 必须压过 .chapter-flow-panel（z=70）：流程面板 fixed 常开，
+     低于它时「去 AI 味」等弹窗右侧会被面板盖住；仍低于确认弹窗（80）与 toast（100） */
+  z-index: 75;
   padding: 16px;
   animation: fadeIn 0.15s ease-out;
 }
@@ -2357,6 +2369,10 @@ pre.body {
   opacity: 1;
   background: rgba(0, 0, 0, 0.08);
 }
+/* 暗底上黑色叠加几乎不可见，改浅色叠加 */
+:root.dark .reminder-tag .reminder-dismiss:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
 
 /* =========================================================
    本章伏笔提醒表（plant / reinforce / collect 三段式）
@@ -2814,6 +2830,11 @@ pre.body {
 .editor-preview .hl.location  { background: var(--hl-location);  color: var(--hl-location-text); }
 .editor-preview .hl.aiword    { background: var(--hl-aiword, #fff3bf); color: var(--hl-aiword-text, #8a5a00); text-decoration: underline wavy var(--hl-aiword-text, #8a5a00); text-underline-offset: 2px; }
 .hl.aiword { background: var(--hl-aiword, #fff3bf); color: var(--hl-aiword-text, #8a5a00); border-radius: 3px; }
+/* 非作用域版本：预览页签顶部的图例色块位于 .editor-preview 之外，
+   没有这组规则时图例只是无色文字，起不到说明作用 */
+.hl.char      { background: var(--hl-char);      color: var(--hl-char-text);      border-radius: 3px; }
+.hl.foreshadow { background: var(--hl-foreshadow); color: var(--hl-foreshadow-text); border-radius: 3px; }
+.hl.location  { background: var(--hl-location);  color: var(--hl-location-text);  border-radius: 3px; }
 .hl-toggle {
   display: inline-flex;
   align-items: center;
@@ -3323,6 +3344,12 @@ pre.body {
   margin: 8px 0;
   font-family: var(--font-kai);
 }
+/* 流程/质检面板里的行内错误提示（<p class="err"> / <span class="err">）。
+   缺了这条时错误文案与正文同色，失败难以察觉 */
+.err {
+  color: var(--vermilion);
+  font-size: 12.5px;
+}
 .chip.status-pending     { background: var(--surface-2); color: var(--ink-2); }
 .chip.status-generating  { background: var(--inkstone-soft); color: var(--inkstone); border-color: transparent; }
 .chip.status-flow        { background: var(--inkstone-soft); color: var(--inkstone); border-color: transparent; }
@@ -3801,6 +3828,14 @@ pre.body {
   border: 1px solid var(--line-soft);
   background: var(--surface-2);
 }
+/* 紧凑模式：嵌在同步状态条下方时收紧留白 */
+.self-check-panel.self-check-compact {
+  margin: 6px 0 4px;
+  padding: 6px 10px;
+}
+.self-check-compact .self-check-title { font-size: 12.5px; }
+.self-check-compact .self-check-list { margin-top: 6px; gap: 4px; }
+.self-check-compact .self-check-item { padding: 4px 6px; }
 .self-check-panel.self-check-status-fail {
   border-color: var(--vermilion, #c62828);
   background: var(--vermilion-soft, #fdecea);
@@ -3853,6 +3888,10 @@ pre.body {
 .self-check-status-warn .self-check-badge {
   color: #b45309;
   border-color: var(--warning, #f59e0b);
+}
+/* 暗色下 #b45309 深棕字对比度不足（约 3:1 · 11.5px 小字），提亮 */
+:root.dark .self-check-status-warn .self-check-badge {
+  color: #fbbf24;
 }
 .self-check-status-ok .self-check-badge {
   color: var(--success, #2e7d32);
@@ -3919,6 +3958,19 @@ pre.body {
   background: #ffe0b2;
   color: #e65100;
 }
+/* 暗色主题：浅色马卡龙圆标在暗底上过于刺眼，改半透明深色 + 亮字 */
+:root.dark .self-check-verdict-pass {
+  background: rgba(46, 125, 50, 0.3);
+  color: #a5d6a7;
+}
+:root.dark .self-check-verdict-fail {
+  background: rgba(198, 40, 40, 0.32);
+  color: #ef9a9a;
+}
+:root.dark .self-check-verdict-warn {
+  background: rgba(245, 158, 11, 0.28);
+  color: #ffcc80;
+}
 .self-check-verdict-skip {
   background: var(--surface-2);
   color: var(--ink-3);
@@ -3963,7 +4015,9 @@ pre.body {
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 100;
+  /* toast 必须永远可见：部分弹窗用内联 zIndex 10000，低于它时
+     对话框开着触发的提示（如费用预警）会被完全盖住 */
+  z-index: 10010;
   padding: 10px 14px;
   border-radius: 6px;
   font-size: 13px;

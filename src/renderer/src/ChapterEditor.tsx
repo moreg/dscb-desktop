@@ -32,6 +32,7 @@ import {
   detectUndoRedoShortcut,
   ADJUST_REWRITE_KEY,
   FORMAT_PROSE_KEY,
+  DESLOP_APPLY_KEY,
   isWholeDocRewriteKey,
   type RewriteEntry
 } from '../../main/data/rewrite-history'
@@ -744,6 +745,22 @@ export default function ChapterEditor({
   const preStreamDraftRef = useRef<string | null>(null)
   /** 用户主动点了取消：收尾时不弹错误框 */
   const userAbortedRef = useRef(false)
+  /** 最近一次手动打字的时间：晚于最近一次 AI 改写时，Ctrl+Z 让位给浏览器原生撤销 */
+  const lastManualEditAtRef = useRef(0)
+  /**
+   * 追问 / 去 AI 味 / 登场识别的流句柄。
+   * 这几条流走 trackStream（仅卸载时 abort），不在 activeStreamRequestIdsRef 里，
+   * 切章或用户点「停止」时需要单独 abort，否则后台白跑整次 LLM。
+   */
+  const askHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const deslopHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const castHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const abortSideStreams = (): void => {
+    for (const ref of [askHandleRef, deslopHandleRef, castHandleRef]) {
+      void ref.current?.abort().catch(() => undefined)
+      ref.current = null
+    }
+  }
 
   const trackStreamRequest = (requestId: string): void => {
     activeStreamRequestIdsRef.current.add(requestId)
@@ -789,6 +806,7 @@ export default function ChapterEditor({
     // （含 hasLlmKey 等待中、尚未拿到 requestId 的异步）
     sessionEpochRef.current += 1
     abortAllTrackedStreams()
+    abortSideStreams()
     streamBusyRef.current = false
     streamCompletedRef.current = false
     ++genRef.current
@@ -815,6 +833,19 @@ export default function ChapterEditor({
     setAskMessages([])
     setAskQuestion('')
     setShowAskDialog(false)
+    // 切章时作废登场识别与去 AI 味的旧章结果：残留结果在新章上点「应用」
+    // 会把旧章的人物/润色全文写进新章
+    ++castRef.current
+    setDetecting(false)
+    setCastSuggestions([])
+    setShowCastPanel(false)
+    setCastApplied(false)
+    setSavingCast(false)
+    setDeslopScanReport(null)
+    setDeslopResult(null)
+    setDeslopLog('')
+    setDeslopRunning(false)
+    setDeslopScanning(false)
     // P9-A：从 localStorage 加载该章的持久化改写历史（如果存在）
     const storage = getLocalStorage()
     const persisted = loadState(storage, projectId, chapterNumber)
@@ -823,7 +854,11 @@ export default function ChapterEditor({
       setRedoStack(persisted.redoStack)
       setLastSavedAt(Date.now()) // P11-A：刚加载时也算"已保存"
     }
+    // 代际守卫：快速连切两章时，慢的旧回包若晚到会覆盖新章内容——
+    // 编辑器显示 A 章正文而保存目标是 B 章，Ctrl+S 即串章覆盖
+    const loadEpoch = sessionEpochRef.current
     void window.api.getChapter(projectId, chapterNumber).then((c) => {
+      if (sessionEpochRef.current !== loadEpoch) return
       setData(c)
       setDraft(c.content, { captureScroll: false })
       setDirty(false)
@@ -876,7 +911,9 @@ export default function ChapterEditor({
           phase: 'ok',
           message: `已恢复 ${hist.length} 条可撤销同步（跨会话）`,
           errors: [],
-          contentForRetry: draft || '',
+          // 此刻闭包里的 draft 还是上一章正文（新章尚未加载完）；留空让
+          // retryPostWriteSync 回退到重试时的实时 draft，避免把旧章内容按本章号同步
+          contentForRetry: '',
           at: peek?.at ?? Date.now(),
           canUndo: true,
           undoDepth: hist.length,
@@ -935,6 +972,9 @@ export default function ChapterEditor({
   useEffect(() => {
     // 跳过"刚加载章节"和"切章中"的初始化写
     if (!data) return
+    // 切章瞬间 draft 已清空但 data 还是旧章对象：此时 (draft=''、chapterNumber=新章)
+    // 会把空字符串写成新章草稿，之后弹「0 字未保存草稿」横幅，点恢复正文被清空
+    if (data.meta.chapterNumber !== chapterNumber) return
     // 跳过未变更的"setDraft(c.content)"——data.content === draft 时没必要写
     if (data.content === draft) return
     const timer = setTimeout(() => {
@@ -969,10 +1009,17 @@ export default function ChapterEditor({
   // 实现：包装 save 为 saveAndClearDraft（用 ref 避免循环引用）
   const saveRef = useRef<() => Promise<void>>(async () => {})
   const saveAndClearDraft = useCallback(async () => {
-    await saveRef.current()
-    // P19-B：上报保存 delta 到 weekly stats
-    const delta = (data?.content.length ?? 0) - draft.length
-    reportSaveDelta(-delta) // 注意：save 后的字 = data.content.length（旧的），增量 = 新字 - 旧字 = -delta
+    try {
+      await saveRef.current()
+    } catch {
+      // save 内部已弹错误框；失败时保留 .draft 兜底，不上报字数也不清草稿
+      return
+    }
+    // P19-B：上报保存 delta 到 weekly stats。
+    // 口径对齐全局「非空白字符数」（words.ts / \S 计数），原始 .length 会把换行空格算进增量
+    const countNonSpace = (s: string) => (s.match(/\S/g) ?? []).length
+    const delta = countNonSpace(data?.content ?? '') - countNonSpace(draft)
+    reportSaveDelta(-delta) // 注意：save 后的字 = data.content（旧的），增量 = 新字 - 旧字 = -delta
     await window.api.discardDraft(projectId, chapterNumber)
     setDraftBanner(null)
   }, [projectId, chapterNumber, data, draft])
@@ -1243,6 +1290,8 @@ export default function ChapterEditor({
 
       setDraftState(v)
       setDirty(true)
+      // 记录手动编辑时间：Ctrl+Z 路由用它判断该走浏览器原生撤销还是 app 撤销
+      lastManualEditAtRef.current = Date.now()
       if (findResults.length > 0) {
         setFindResults([])
         setCurrentResultIndex(-1)
@@ -1279,8 +1328,14 @@ export default function ChapterEditor({
         if (dirty && !saving) void saveAndClearDraft()
         return
       }
-      // 有改写/重写历史时：正文 textarea 内也走 app undo（程序化 setDraft 不进浏览器原生栈）
-      const hasAppHistory = rewriteHistory.length > 0 || redoStack.length > 0
+      // 有改写/重写历史时：正文 textarea 内也走 app undo（程序化 setDraft 不进浏览器原生栈）。
+      // 例外：最近一次 AI 改写之后用户又手动打过字——此时 Ctrl+Z 的直觉是撤刚打的字，
+      // 不能把更早的 AI 改写回滚掉；让位给浏览器原生撤销（原生栈耗尽后可用面板「↶ 撤销」回滚 AI 改写）
+      const lastRewriteAt =
+        rewriteHistory.length > 0 ? rewriteHistory[rewriteHistory.length - 1].at : 0
+      const typedSinceRewrite = lastManualEditAtRef.current > lastRewriteAt
+      const hasAppHistory =
+        (rewriteHistory.length > 0 || redoStack.length > 0) && !typedSinceRewrite
       const intent = detectUndoRedoShortcut({
         ctrl: e.ctrlKey,
         meta: e.metaKey,
@@ -1315,6 +1370,18 @@ export default function ChapterEditor({
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [dirty])
+
+  /**
+   * 切章/返回前把未保存输入立即落盘为草稿。
+   * 自动草稿有 800ms debounce 且切章 cleanup 会 clearTimeout：
+   * 刚打完字就点「下一章」时这段字既没正式保存也没进草稿文件，会永久丢失。
+   * 这里同步补写一次（fire-and-forget，目标章号取当前闭包值，不受切章影响）。
+   */
+  const flushDraftBeforeLeave = (): void => {
+    if (!dirty || !data) return
+    if (data.content === draft) return
+    void window.api.saveDraft(projectId, chapterNumber, draft).catch(() => undefined)
+  }
 
   /**
    * 手动重新跑 AI 味检查（写完之后任何时候都能重看违例清单）。
@@ -1360,10 +1427,19 @@ export default function ChapterEditor({
       }
     }
     setSaving(true)
+    // 保存有 audit 等待窗口，期间可能已切章：写盘目标是闭包章号（正确），
+    // 但 setData 只能作用于仍在本章时，否则会把旧章内容盖到新章视图上
+    const saveEpoch = sessionEpochRef.current
     try {
       const meta = await window.api.updateChapterContent(projectId, chapterNumber, draft)
-      setData({ meta, content: draft })
-      setDirty(false)
+      if (sessionEpochRef.current === saveEpoch) {
+        setData({ meta, content: draft })
+        setDirty(false)
+      }
+    } catch (err) {
+      // 磁盘写失败时静默会让用户以为已保存；dirty 保持 true，明确报错
+      setAlertInfo({ message: `保存失败：${(err as Error).message}` })
+      throw err
     } finally {
       setSaving(false)
     }
@@ -1900,7 +1976,7 @@ export default function ChapterEditor({
     const myAsk = ++askRef.current
     let assistantText = ''
     try {
-      const result = await trackStream(window.api.answerChapterQuestionStream(
+      const handle = window.api.answerChapterQuestionStream(
         projectId,
         chapterNumber,
         draft,
@@ -1922,10 +1998,14 @@ export default function ChapterEditor({
             refreshUsage()
           }
         }
-      ))
+      )
+      askHandleRef.current = handle
+      const result = await trackStream(handle)
       if (askRef.current !== myAsk) return
       if (!result.ok) {
         setAsking(false)
+        // 用户主动停止：保留已生成的部分回答，不弹错误
+        if ((result.error ?? '').includes('LLM_ABORTED')) return
         setAlertInfo({ message: friendlyLlmError(result.error) })
         // 移除本轮占位（用户消息 + 空 assistant）
         setAskMessages((m) => m.slice(0, prevMessages.length))
@@ -1933,10 +2013,20 @@ export default function ChapterEditor({
     } catch (err) {
       if (askRef.current === myAsk) {
         setAsking(false)
-        setAlertInfo({ message: friendlyLlmError((err as Error).message) })
+        const msg = (err as Error).message ?? ''
+        if (msg.includes('LLM_ABORTED')) return
+        setAlertInfo({ message: friendlyLlmError(msg) })
         setAskMessages((m) => m.slice(0, prevMessages.length))
       }
+    } finally {
+      askHandleRef.current = null
     }
+  }
+
+  /** 停止进行中的追问回答（保留已生成的部分文本） */
+  const stopAsking = (): void => {
+    void askHandleRef.current?.abort().catch(() => undefined)
+    setAsking(false)
   }
 
   /** 续写后的自动质检：失败静默，不阻断；中途切走则丢弃结果。 */
@@ -2566,6 +2656,8 @@ export default function ChapterEditor({
     try {
       const report = await window.api.deslopScan(projectId, draft)
       setDeslopScanReport(report)
+    } catch (err) {
+      setAlertInfo({ message: `扫描失败：${friendlyLlmError((err as Error).message)}` })
     } finally {
       setDeslopScanning(false)
     }
@@ -2580,25 +2672,44 @@ export default function ChapterEditor({
     setDeslopRunning(true)
     setDeslopLog('')
     setDeslopResult(null)
+    const myEpoch = sessionEpochRef.current
     try {
-      const result = await trackStream(
-        window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
-          if (token) setDeslopLog((l) => l + token)
-          if (done) setDeslopRunning(false)
-        })
-      )
+      const handle = window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
+        if (sessionEpochRef.current !== myEpoch) return
+        if (token) setDeslopLog((l) => l + token)
+        if (done) setDeslopRunning(false)
+      })
+      deslopHandleRef.current = handle
+      const result = await trackStream(handle)
+      if (sessionEpochRef.current !== myEpoch) return
       setDeslopResult(result)
     } catch (err) {
-      setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError((err as Error).message)}` })
+      // 切章 / 用户点停止导致的 abort 不弹错误框
+      if (sessionEpochRef.current !== myEpoch) return
+      const msg = (err as Error).message ?? ''
+      if (!msg.includes('LLM_ABORTED')) {
+        setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError(msg)}` })
+      }
     } finally {
-      setDeslopRunning(false)
+      deslopHandleRef.current = null
+      if (sessionEpochRef.current === myEpoch) setDeslopRunning(false)
     }
+  }
+
+  /** 停止进行中的去 AI 味润色（保留已生成日志，不产出结果） */
+  const stopDeslop = (): void => {
+    void deslopHandleRef.current?.abort().catch(() => undefined)
+    setDeslopRunning(false)
   }
 
   /** 应用去 AI 味结果到正文 */
   const applyDeslopResult = (): void => {
     if (!deslopResult) return
+    const before = draft
     setDraft(deslopResult.rewritten)
+    // 必须置 dirty 并压改写栈：否则保存按钮仍显示「已存」无法保存，Ctrl+Z 也撤不掉
+    setDirty(true)
+    pushRewrite(before, deslopResult.rewritten, DESLOP_APPLY_KEY)
     setDeslopResult(null)
     setDeslopScanReport(null)
     setDeslopLog('')
@@ -2616,7 +2727,7 @@ export default function ChapterEditor({
     const myCast = ++castRef.current
     let buffer = ''
     try {
-      const result = await trackStream(window.api.detectCastStream(
+      const handle = window.api.detectCastStream(
         projectId,
         chapterNumber,
         (token, done) => {
@@ -2624,7 +2735,9 @@ export default function ChapterEditor({
           if (token) buffer += token
           if (done) setDetecting(false)
         }
-      ))
+      )
+      castHandleRef.current = handle
+      const result = await trackStream(handle)
       if (castRef.current !== myCast) return
       if (!result.ok) {
         setDetecting(false)
@@ -2645,6 +2758,8 @@ export default function ChapterEditor({
       setCastSuggestions(merged)
     } catch {
       if (castRef.current === myCast) setDetecting(false)
+    } finally {
+      castHandleRef.current = null
     }
   }
 
@@ -2786,11 +2901,15 @@ export default function ChapterEditor({
     }
   }
 
+  // 当前非空白字数：渲染中多处要用（字数条/进度条/会话字数），
+  // 数万字章节每键触发多次全文正则并分配数组会造成打字卡顿，统一算一次
+  const draftWordCount = useMemo(() => (draft.match(/\S/g) ?? []).length, [draft])
+
   // 会话字数：当前字数 - 进入时字数
-  const sessionWords = useMemo(() => {
-    const cur = (draft.match(/\S/g) ?? []).length
-    return Math.max(0, cur - sessionStartWords)
-  }, [draft, sessionStartWords])
+  const sessionWords = useMemo(
+    () => Math.max(0, draftWordCount - sessionStartWords),
+    [draftWordCount, sessionStartWords]
+  )
 
   // 联动高亮：构建 (text, kind) 序列
   const previewSegments = useMemo(() => {
@@ -2896,6 +3015,20 @@ export default function ChapterEditor({
     }
   }
 
+  /**
+   * offset → scrollTop：优先用 mirror 实测的每行高度（lineHeights 含软折行），
+   * 中文长段落一行折成十几视觉行时，按逻辑行 × 固定行高会偏差数屏。
+   */
+  const scrollTopForOffset = (offset: number): number => {
+    const row = draft.slice(0, offset).split('\n').length
+    let top = 0
+    for (let i = 0; i < row - 1; i++) {
+      top += lineHeights[i] ?? baseLineHeight
+    }
+    // 目标行上方留约 4 行余量
+    return Math.max(0, top - baseLineHeight * 4)
+  }
+
   /** 流程面板卡片点击后聚焦正文中对应 quote：传给 ChapterFlowPanel.onFocusQuote */
   const focusQuoteInEditor = (quote: string) => {
     if (!quote || !textareaRef.current) return
@@ -2904,9 +3037,7 @@ export default function ChapterEditor({
     const el = textareaRef.current
     el.focus()
     el.setSelectionRange(pos, pos + quote.length)
-    const row = draft.slice(0, pos).split('\n').length
-    const lineHeight = 32
-    el.scrollTop = Math.max(0, (row - 5) * lineHeight)
+    el.scrollTop = scrollTopForOffset(pos)
   }
 
   const highlightMatch = (start: number, length: number) => {
@@ -2914,9 +3045,7 @@ export default function ChapterEditor({
     if (!el) return
     el.focus()
     el.setSelectionRange(start, start + length)
-    const row = draft.slice(0, start).split('\n').length
-    const lineHeight = 32
-    el.scrollTop = Math.max(0, (row - 5) * lineHeight)
+    el.scrollTop = scrollTopForOffset(start)
   }
 
   const jumpToOffset = (offset: number) => {
@@ -3051,6 +3180,31 @@ export default function ChapterEditor({
     setCurrentResultIndex(-1)
     setUndoToast({ message: `已成功替换 ${matchesCount} 处匹配项`, type: 'info' })
   }
+
+  // 程序化改稿（应用改写/撤销重做/格式化/去 AI 味/切章）不走 handleEditorChange 的
+  // 清空逻辑，查找命中偏移会失效——此时点「替换」会在错误位置切割正文。
+  // 兜底：draft 变化后若查找条仍有命中，按新正文重算；结果一致则不动（不打扰游标）。
+  useEffect(() => {
+    if (!findText || findResults.length === 0) return
+    const lowerDraft = draft.toLowerCase()
+    const lowerSearch = findText.toLowerCase()
+    const results: number[] = []
+    let idx = 0
+    while ((idx = lowerDraft.indexOf(lowerSearch, idx)) >= 0) {
+      results.push(idx)
+      idx += findText.length
+    }
+    if (
+      results.length === findResults.length &&
+      results.every((v, i) => v === findResults[i])
+    ) {
+      return
+    }
+    setFindResults(results)
+    setCurrentResultIndex(results.length > 0 ? 0 : -1)
+    // 只跟 draft 变化兜底重算；findText 变化由 handleFind 全量处理
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft])
   const foreshadowingReminders = useMemo(
     () => buildForeshadowingReminders(chapterNumber, chapterOutline, foreshadowings),
     [chapterNumber, chapterOutline, foreshadowings]
@@ -3178,7 +3332,8 @@ export default function ChapterEditor({
     }
   }
   const onTitleInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
+    // isComposing：中文输入法按 Enter 选词不能触发提交
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
       e.preventDefault()
       void submitTitleEdit()
     } else if (e.key === 'Escape') {
@@ -3245,7 +3400,15 @@ export default function ChapterEditor({
       <div className="page-head">
         <div className="page-head-row">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button className="btn btn-ghost btn-sm" onClick={onBack} title="返回章节列表" style={{ marginRight: 6 }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                flushDraftBeforeLeave()
+                onBack()
+              }}
+              title="返回章节列表"
+              style={{ marginRight: 6 }}
+            >
               ← 返回
             </button>
             {(() => {
@@ -3256,7 +3419,10 @@ export default function ChapterEditor({
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => {
-                        if (idx > 0) onNavigateChapter(allChapters[idx - 1].chapterNumber)
+                        if (idx > 0) {
+                          flushDraftBeforeLeave()
+                          onNavigateChapter(allChapters[idx - 1].chapterNumber)
+                        }
                       }}
                       disabled={idx <= 0}
                     >
@@ -3266,6 +3432,7 @@ export default function ChapterEditor({
                       className="btn btn-ghost btn-sm"
                       onClick={() => {
                         if (idx !== -1 && idx < allChapters.length - 1) {
+                          flushDraftBeforeLeave()
                           onNavigateChapter(allChapters[idx + 1].chapterNumber)
                         }
                       }}
@@ -3602,7 +3769,7 @@ export default function ChapterEditor({
           <div className="goal-row" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span>本章字数</span>
             <span>
-              <span className="num">{(draft.match(/\S/g) ?? []).length}</span> /{' '}
+              <span className="num">{draftWordCount}</span> /{' '}
               {isEditingGoal ? (
                 <input
                   type="number"
@@ -3615,7 +3782,7 @@ export default function ChapterEditor({
                     setIsEditingGoal(false)
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
                       const val = Number(editingGoalVal) || 0
                       handleSaveChapterGoal(val)
                       setIsEditingGoal(false)
@@ -3641,8 +3808,8 @@ export default function ChapterEditor({
           </div>
           <div className="goal-bar" style={{ marginTop: 4 }}>
             <div
-              className={`fill ${(draft.match(/\S/g) ?? []).length >= chapterGoal ? 'done' : ''}`}
-              style={{ width: `${Math.min(100, ((draft.match(/\S/g) ?? []).length / Math.max(1, chapterGoal)) * 100)}%` }}
+              className={`fill ${draftWordCount >= chapterGoal ? 'done' : ''}`}
+              style={{ width: `${Math.min(100, (draftWordCount / Math.max(1, chapterGoal)) * 100)}%` }}
             />
           </div>
         </div>
@@ -4072,6 +4239,9 @@ export default function ChapterEditor({
           // 非受控：禁止 value={draft}。用户输入只改 state，浏览器自管滚动/光标；
           // 切章/续写/撤销等程序化改写由 setDraft 写 DOM。
           defaultValue=""
+          // 流式生成期间锁定输入：每个 token 都会整体覆写 el.value，
+          // 此时用户手打的内容会被下一个 token 无提示冲掉
+          readOnly={generating || adjusting}
           onScroll={handleEditorScroll}
           onKeyDown={handleEditorKeyDown}
           onChange={handleEditorChange}
@@ -4482,6 +4652,15 @@ export default function ChapterEditor({
                   </div>
                 )}
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+                  {deslopRunning ? (
+                    <button
+                      className="btn btn-danger"
+                      onClick={stopDeslop}
+                      title="停止润色（不产出结果；多轮润色可能耗时数分钟）"
+                    >
+                      ⏹ 停止润色
+                    </button>
+                  ) : null}
                   <button
                     className="btn btn-ghost"
                     onClick={() => { setDeslopScanReport(null); setDeslopLog('') }}
@@ -5132,12 +5311,17 @@ export default function ChapterEditor({
           question={askQuestion}
           onQuestionChange={setAskQuestion}
           onSubmit={() => void submitAskQuestion()}
-          onClose={() => setShowAskDialog(false)}
+          onClose={() => {
+            // 回答中也允许关闭：先停流再关，不把用户锁在对话框里
+            if (asking) stopAsking()
+            setShowAskDialog(false)
+          }}
           onClear={() => {
             ++askRef.current
-            setAsking(false)
+            stopAsking()
             setAskMessages([])
           }}
+          onStop={stopAsking}
         />
       ) : null}
 
@@ -5535,6 +5719,8 @@ interface AskChatDialogProps {
   onSubmit: () => void
   onClose: () => void
   onClear: () => void
+  /** 停止进行中的回答（保留已生成部分）。网络卡住时用户不至于被锁死在对话框里 */
+  onStop: () => void
 }
 
 /**
@@ -5613,15 +5799,18 @@ function AskChatDialog({
   onQuestionChange,
   onSubmit,
   onClose,
-  onClear
+  onClear,
+  onStop
 }: AskChatDialogProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  // 新消息 / 流式追加时滚动到底部
+  // 新消息 / 流式追加时滚动到底部——但用户主动上翻回看时不拽回去
+  // （每 token 强制滚底会让长回答完全无法回看前文）
+  const stickToBottomRef = useRef(true)
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight
   }, [messages])
 
   // 对话框挂载时自动聚焦输入框
@@ -5630,6 +5819,8 @@ function AskChatDialog({
   }, [])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // isComposing：中文输入法按 Enter 选词不能触发发送（半句话就发出去并开始扣费）
+    if (e.nativeEvent.isComposing) return
     // Enter 发送，Ctrl/Cmd/Shift+Enter 换行
     if (e.key === 'Enter') {
       if (e.ctrlKey || e.metaKey || e.shiftKey) {
@@ -5660,9 +5851,7 @@ function AskChatDialog({
   return (
     <div
       className="dialog-overlay"
-      onClick={() => {
-        if (!asking) onClose()
-      }}
+      onClick={onClose}
       style={{
         position: 'fixed',
         top: 0,
@@ -5695,6 +5884,15 @@ function AskChatDialog({
         <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
           <strong style={{ fontSize: 16.5 }}>💬 正文追问</strong>
           <div style={{ display: 'flex', gap: 6 }}>
+            {asking ? (
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={onStop}
+                title="停止当前回答（保留已生成的部分）"
+              >
+                ⏹ 停止
+              </button>
+            ) : null}
             {messages.length > 0 && !asking ? (
               <button
                 className="btn btn-ghost btn-sm"
@@ -5704,7 +5902,7 @@ function AskChatDialog({
                 清空对话
               </button>
             ) : null}
-            <button className="btn btn-ghost btn-sm" onClick={onClose} disabled={asking}>
+            <button className="btn btn-ghost btn-sm" onClick={onClose}>
               关闭
             </button>
           </div>
@@ -5712,6 +5910,10 @@ function AskChatDialog({
 
         <div
           ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget
+            stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+          }}
           style={{
             flex: 1,
             overflow: 'auto',

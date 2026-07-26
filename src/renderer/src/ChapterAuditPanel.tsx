@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { AuditReport, AuditViolation, ChapterReviewReport, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
 import {
@@ -9,7 +9,7 @@ import {
 } from '../../shared/dismissed-keys'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { isReviewKey } from '../../shared/review-suggestions'
-import { isAdjustRewriteKey, isFormatProseKey } from '../../main/data/rewrite-history'
+import { isAdjustRewriteKey, isDeslopApplyKey, isFormatProseKey } from '../../main/data/rewrite-history'
 
 interface RewriteEntry {
   oldSnippet: string
@@ -35,6 +35,13 @@ interface Props {
    * 返回值：是否真正应用成功。false 表示 snippet 为空或在正文中找不到（如已被其他改写覆盖），
    * 此时调用方不应标记 appliedAt——否则会出现"提示已应用但正文未变"。 */
   onApplyRewrite?: (snippet: string, rewritten: string, violationKey: string) => boolean
+  /** 批量应用：一次性把多条改写按位置倒序应用到正文（父组件只 setDraft + reAudit 一次）。
+   *  返回真正应用成功的条数。 */
+  onApplyRewriteBatch?: (
+    edits: Array<{ snippet: string; rewritten: string; violationKey: string }>
+  ) => number
+  /** 按文本内容聚焦正文（用于 offset 不可靠的深度审稿发现） */
+  onFocusQuote?: (quote: string) => void
   /** 撤销最近一次改写（顶层按钮快捷路径） */
   onUndoRewrite?: () => void | Promise<void>
   /** 撤销指定位置的改写（0=最近一次，1=次新...）— 用于下拉菜单 */
@@ -163,6 +170,8 @@ export default function ChapterAuditPanel({
   onRunAgain,
   onJumpToOffset,
   onApplyRewrite,
+  onApplyRewriteBatch,
+  onFocusQuote,
   onUndoRewrite,
   onUndoRewriteAt,
   onUndoRewriteByKey,
@@ -177,12 +186,20 @@ export default function ChapterAuditPanel({
   const [collapsed, setCollapsed] = useState(false)
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 })
+  // 批量改写的取消开关：点「停止」/切章/卸载时置 true，串行循环在下一条前检查并退出。
+  const batchCancelRef = useRef(false)
+  useEffect(() => {
+    return () => {
+      batchCancelRef.current = true
+    }
+  }, [])
   const [undoMenuOpen, setUndoMenuOpen] = useState(false)
   // 结构化报告摘要折叠态：默认收起，生成报告后自动展开
   const [reportCollapsed, setReportCollapsed] = useState(true)
   // LLM 深度审稿（M3）：手动触发，结果合并进同一面板的「深度审稿」分组
   const [deepReviewRunning, setDeepReviewRunning] = useState(false)
   const [deepReviewFindings, setDeepReviewFindings] = useState<AuditViolation[]>([])
+  const [deepReviewError, setDeepReviewError] = useState('')
   // 已忽略的违例：按项目+章节持久化，重检/重开面板不再弹出
   const auditIgnoreStoreKey = auditIgnoredStorageKey(projectId, chapterNumber ?? 0)
   const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(() =>
@@ -191,6 +208,12 @@ export default function ChapterAuditPanel({
 
   useEffect(() => {
     setIgnoredKeys(loadDismissedKeys(auditIgnoredStorageKey(projectId, chapterNumber ?? 0)))
+    // 深度审稿结果属于旧章正文：残留会按新章 draft 算行号、点击跳错位置，
+    // strict 模式下还会把旧章 error 计入 blocked，必须随章清空。
+    setDeepReviewFindings([])
+    setDeepReviewError('')
+    // 在途批量改写同理：旧章的串行 LLM 循环继续跑只会烧 token 并污染新章状态。
+    batchCancelRef.current = true
   }, [projectId, chapterNumber])
   // 每条 violation 的 humanize 状态：key = violationKey(v)，value = {loading, result, error, appliedAt}
   // appliedAt 标记"用户已把此条改写应用到正文"，用于显示"已应用"角标和"↶ 撤销这次"按钮。
@@ -285,17 +308,22 @@ export default function ChapterAuditPanel({
     for (const cat of Object.keys(grouped) as Array<keyof typeof grouped>) {
       const items = grouped[cat]
       if (!items) continue
-      items.slice(0, 50).forEach((v, i) => {
+      items.slice(0, 50).forEach((v) => {
         if (!v.snippet || v.category === 'word_count') return
-        const key = `${cat}-${i}`
+        // key 必须与渲染端查表一致（violationKey），否则结果永远显示不出来，
+        // 「已有结果跳过」也永远查不到，重复跑批量会重复烧 token。
+        const key = violationKey(v)
         if (humanizeMap[key]?.result) return // 已有结果
+        if (targets.some((t) => t.key === key)) return // 去重：同键违例只改一次
         targets.push({ v, key })
       })
     }
     if (targets.length === 0) return
+    batchCancelRef.current = false
     setBatchRunning(true)
     setBatchProgress({ done: 0, total: targets.length })
     for (let i = 0; i < targets.length; i++) {
+      if (batchCancelRef.current) break
       const { v, key } = targets[i]
       setHumanizeMap((m) => ({ ...m, [key]: { loading: true } }))
       try {
@@ -328,11 +356,14 @@ export default function ChapterAuditPanel({
   const handleDeepReview = async () => {
     if (!draft || deepReviewRunning) return
     setDeepReviewRunning(true)
+    setDeepReviewError('')
     try {
       const findings = await window.api.runDeepReview(projectId, draft, chapterNumber ?? 1)
       setDeepReviewFindings(findings)
     } catch (err) {
       console.warn('[deepReview] failed:', err)
+      // 静默失败会让用户误以为「审完没问题」，必须在面板里露出错误
+      setDeepReviewError((err as Error).message || '深度审稿失败')
     } finally {
       setDeepReviewRunning(false)
     }
@@ -353,6 +384,53 @@ export default function ChapterAuditPanel({
     () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings].filter(v => !isIgnored(v))),
     [report, deepReviewFindings, isIgnored]
   )
+
+  /**
+   * 待批量应用的改写：已有 AI 改写结果、未应用、且原片段仍在正文中。
+   * 按位置倒序（onApplyRewriteBatch 契约）——从后往前替换不会破坏更早片段的偏移。
+   */
+  const pendingBatchApplies = useMemo(() => {
+    if (!onApplyRewriteBatch || !draft) return []
+    const edits: Array<{ snippet: string; rewritten: string; violationKey: string; pos: number }> = []
+    const seen = new Set<string>()
+    for (const cat of Object.keys(grouped) as Array<keyof typeof grouped>) {
+      for (const v of grouped[cat] ?? []) {
+        if (!v.snippet) continue
+        const key = violationKey(v)
+        if (seen.has(key)) continue
+        seen.add(key)
+        const st = humanizeMap[key]
+        if (!st?.result?.rewritten || st.appliedAt) continue
+        const pos = draft.indexOf(v.snippet)
+        if (pos === -1) continue
+        edits.push({ snippet: v.snippet, rewritten: st.result.rewritten, violationKey: key, pos })
+      }
+    }
+    return edits.sort((a, b) => b.pos - a.pos)
+  }, [grouped, humanizeMap, draft, onApplyRewriteBatch])
+
+  const handleApplyAll = () => {
+    if (!onApplyRewriteBatch || pendingBatchApplies.length === 0) return
+    const applied = onApplyRewriteBatch(
+      pendingBatchApplies.map(({ snippet, rewritten, violationKey: vk }) => ({
+        snippet,
+        rewritten,
+        violationKey: vk
+      }))
+    )
+    if (applied > 0) {
+      // 已按"原片段仍在正文中"预筛，正常情况下全部应用成功；统一标记
+      const at = Date.now()
+      setHumanizeMap((m) => {
+        const next = { ...m }
+        for (const e of pendingBatchApplies) {
+          const entry = next[e.violationKey]
+          if (entry) next[e.violationKey] = { ...entry, appliedAt: at }
+        }
+        return next
+      })
+    }
+  }
 
   // offset → 行号映射：一次遍历 draft 预计算，避免每条违例都 substring().split('\n')（O(n²)）
   const lineOfOffset = useMemo(() => {
@@ -497,9 +575,20 @@ export default function ChapterAuditPanel({
           <span className="audit-blocked-hint">strict 模式：错误需修复后才能保存</span>
         )}
         {batchRunning && (
-          <span className="muted" style={{ fontSize: 12 }}>
-            批量改写 {batchProgress.done}/{batchProgress.total}…
-          </span>
+          <>
+            <span className="muted" style={{ fontSize: 12 }}>
+              批量改写 {batchProgress.done}/{batchProgress.total}…
+            </span>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                batchCancelRef.current = true
+              }}
+              title="停止批量改写（已完成的结果保留）"
+            >
+              ⏹ 停止
+            </button>
+          </>
         )}
         {onUndoRewrite && (rewriteHistory?.length ?? 0) > 0 && (
           <div className="audit-undo-menu-root" style={{ position: 'relative' }}>
@@ -531,6 +620,7 @@ export default function ChapterAuditPanel({
                       if (!key) return '自定义改写'
                       if (isAdjustRewriteKey(key)) return '按要求重写'
                       if (isFormatProseKey(key)) return '正文格式化'
+                      if (isDeslopApplyKey(key)) return '去 AI 味'
                       if (isReviewKey(key)) return 'AI 改稿建议'
                       const v = report?.violations.find(x => violationKey(x) === key)
                       if (v) {
@@ -609,6 +699,16 @@ export default function ChapterAuditPanel({
         >
           {batchRunning ? `改写中…` : '✎ 批量改写'}
         </button>
+        {pendingBatchApplies.length >= 2 && (
+          <button
+            className="btn btn-sm audit-rewrite-btn-success"
+            onClick={handleApplyAll}
+            disabled={batchRunning}
+            title="把所有已改写未应用的结果一次性替换进正文（一次审计、逐条可撤销）"
+          >
+            ✓ 应用全部（{pendingBatchApplies.length}）
+          </button>
+        )}
         <button
           className="btn btn-sm audit-rewrite-btn-primary"
           onClick={handleDeepReview}
@@ -617,6 +717,11 @@ export default function ChapterAuditPanel({
         >
           {deepReviewRunning ? '审稿中…' : '🔍 AI 深度审稿'}
         </button>
+        {deepReviewError && (
+          <span className="err" style={{ fontSize: 12 }} title={deepReviewError}>
+            深度审稿失败：{deepReviewError.slice(0, 60)}
+          </span>
+        )}
         {onRunAgain && (
           <button
             className="btn btn-ghost btn-sm"
@@ -701,10 +806,16 @@ export default function ChapterAuditPanel({
                             onClick={
                               v.offset != null && onJumpToOffset
                                 ? () => onJumpToOffset(v.offset!)
-                                : undefined
+                                : onFocusQuote
+                                  ? // 深度审稿发现常无可靠 offset：按文本内容聚焦
+                                    () => onFocusQuote(v.snippet!)
+                                  : undefined
                             }
                             style={{
-                              cursor: v.offset != null && onJumpToOffset ? 'pointer' : 'default'
+                              cursor:
+                                (v.offset != null && onJumpToOffset) || onFocusQuote
+                                  ? 'pointer'
+                                  : 'default'
                             }}
                           >
                             {v.snippet}

@@ -630,9 +630,11 @@ const api = {
     toChapter: number,
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    onToken?: (token: string, done: boolean) => void
+    onToken?: (token: string, done: boolean) => void,
+    // 调用方可自带 requestId，配合 abortStream(requestId) 实现「停止批量续写」
+    externalRequestId?: string
   ) => {
-    const requestId = crypto.randomUUID()
+    const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
       _e: unknown,
       payload: { requestId: string; chapter: number; result: ChapterFlowResult }
@@ -670,9 +672,10 @@ const api = {
     toChapter: number,
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    onToken?: (token: string, done: boolean) => void
+    onToken?: (token: string, done: boolean) => void,
+    externalRequestId?: string
   ) => {
-    const requestId = crypto.randomUUID()
+    const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
       _e: unknown,
       payload: { requestId: string; chapter: number; result: ChapterFlowResult }

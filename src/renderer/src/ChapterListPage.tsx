@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ChapterMeta,
   Character,
@@ -65,16 +65,25 @@ export default function ChapterListPage({
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
   const [page, setPage] = useState(1)
 
-  const refresh = () => {
-    setLoading(true)
+  /** 请求序号：并发刷新时只认最新一次的回包，防止慢的旧响应覆盖新响应 */
+  const refreshSeqRef = useRef(0)
+  /**
+   * @param opts.showLoading 仅首次加载/切项目时整页转「展卷中…」；
+   * 外部文件变更触发的刷新（批量续写每章落盘都会触发）静默替换，
+   * 避免列表反复卸载重挂、滚动位置丢失
+   */
+  const refresh = (opts?: { showLoading?: boolean }) => {
+    const seq = ++refreshSeqRef.current
+    if (opts?.showLoading) setLoading(true)
     void window.api.listChapters(projectId)
       .then((list) => {
+        if (seq !== refreshSeqRef.current) return
         setChapters(list)
         setLoading(false)
       })
       .catch((err) => {
         console.error('[ChapterListPage] Failed to load chapters:', err)
-        setLoading(false)
+        if (seq === refreshSeqRef.current) setLoading(false)
       })
   }
   const refreshCharacters = () => {
@@ -85,7 +94,7 @@ export default function ChapterListPage({
 
   useEffect(() => {
     setPage(1)
-    refresh()
+    refresh({ showLoading: true })
     refreshCharacters()
     void window.api.getProject(projectId).then(setProjectData).catch((err) => {
       console.error('[ChapterListPage] Failed to load project:', err)
@@ -139,8 +148,29 @@ export default function ChapterListPage({
       if (!map.has(v)) map.set(v, [])
       map.get(v)!.push(c)
     }
-    return [...map.entries()].sort((a, b) => a[0] - b[0])
+    // 按组内首章的章节号排序（而非卷号）：按卷号升序会让「未分卷」（0）恒排最前，
+    // 分卷/未分卷混排的页面展示顺序会偏离章节号顺序
+    return [...map.entries()].sort((a, b) => a[1][0].chapterNumber - b[1][0].chapterNumber)
   }, [paged])
+
+  /**
+   * 卷头展示用的全量统计：范围/章数必须基于整个项目算，
+   * 不能用分页切片——否则翻页后「第 1 卷（21-40 章）」这种失真范围会误导用户。
+   */
+  const volumeStats = useMemo(() => {
+    const m = new Map<number, { min: number; max: number; total: number }>()
+    for (const c of chapters) {
+      const v = c.volume ?? 0
+      const s = m.get(v)
+      if (!s) m.set(v, { min: c.chapterNumber, max: c.chapterNumber, total: 1 })
+      else {
+        s.min = Math.min(s.min, c.chapterNumber)
+        s.max = Math.max(s.max, c.chapterNumber)
+        s.total += 1
+      }
+    }
+    return m
+  }, [chapters])
 
   return (
     <div>
@@ -180,30 +210,49 @@ export default function ChapterListPage({
 
       <div className="toolbar">
         <div className="filters">
-          <span
-            className={`filter-chip ${filter === 'all' ? 'active' : ''}`}
-            onClick={() => {
-              setFilter('all')
+          {(() => {
+            const chipKeyDown = (apply: () => void) => (e: React.KeyboardEvent) => {
+              // span 无原生键盘激活；Enter/空格与点击等价
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                apply()
+              }
+            }
+            const applyFilter = (f: 'all' | ChapterStatus) => {
+              setFilter(f)
               setPage(1)
-            }}
-          >
-            全部 · {counts.all ?? 0}
-          </span>
-          {(Object.keys(STATUS_FULL) as ChapterStatus[]).map((s) =>
-            counts[s] ? (
-              <span
-                key={s}
-                className={`filter-chip ${filter === s ? 'active' : ''}`}
-                onClick={() => {
-                  setFilter(s)
-                  setPage(1)
-                }}
-                title={STATUS_FULL[s]}
-              >
-                {STATUS_FULL[s]} · {counts[s]}
-              </span>
-            ) : null
-          )}
+            }
+            return (
+              <>
+                <span
+                  className={`filter-chip ${filter === 'all' ? 'active' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => applyFilter('all')}
+                  onKeyDown={chipKeyDown(() => applyFilter('all'))}
+                >
+                  全部 · {counts.all ?? 0}
+                </span>
+                {(Object.keys(STATUS_FULL) as ChapterStatus[]).map((s) =>
+                  // 计数为 0 但正处于该筛选时仍要显示：否则激活中的 chip 凭空消失，
+                  // 用户看不出自己在筛什么、也没法点回「全部」以外的入口
+                  counts[s] || filter === s ? (
+                    <span
+                      key={s}
+                      className={`filter-chip ${filter === s ? 'active' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => applyFilter(s)}
+                      onKeyDown={chipKeyDown(() => applyFilter(s))}
+                      title={STATUS_FULL[s]}
+                    >
+                      {STATUS_FULL[s]} · {counts[s] ?? 0}
+                    </span>
+                  ) : null
+                )}
+              </>
+            )
+          })()}
         </div>
       </div>
 
@@ -225,9 +274,13 @@ export default function ChapterListPage({
             <div key={vol} className="volume-group">
               <div className="volume-head">
                 {vol > 0
-                  ? `第 ${vol} 卷（${chs[0].chapterNumber}-${chs[chs.length - 1].chapterNumber} 章）`
+                  ? `第 ${vol} 卷（${volumeStats.get(vol)?.min ?? chs[0].chapterNumber}-${volumeStats.get(vol)?.max ?? chs[chs.length - 1].chapterNumber} 章）`
                   : '未分卷'}
-                <span className="volume-count">{chs.length} 章</span>
+                <span className="volume-count">
+                  {(volumeStats.get(vol)?.total ?? chs.length) === chs.length
+                    ? `${chs.length} 章`
+                    : `本页 ${chs.length} / 共 ${volumeStats.get(vol)!.total} 章`}
+                </span>
               </div>
               {chs.map((c) => {
                 const cast = (c.appearingCharacters ?? []).slice(0, 4)
@@ -342,7 +395,12 @@ export default function ChapterListPage({
           current={projectData?.benchmarkBooks ?? []}
           onClose={() => setShowBenchmark(false)}
           onSaved={async () => {
-            setProjectData(await window.api.getProject(projectId))
+            // 保存已成功，刷新项目数据失败不应把对话框卡在打开态
+            try {
+              setProjectData(await window.api.getProject(projectId))
+            } catch (err) {
+              console.error('[ChapterListPage] Failed to refresh project after save:', err)
+            }
             setShowBenchmark(false)
           }}
         />
@@ -364,14 +422,18 @@ function NewChapterDialog({
 }) {
   const [title, setTitle] = useState(defaultTitle)
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
   const submit = async () => {
-    if (!title.trim()) return
+    // 必须挡 saving：Enter 提交不经过按钮的 disabled，连按会并发 createChapter 建出重复章节
+    if (!title.trim() || saving) return
     setSaving(true)
+    setError('')
     try {
       await window.api.createChapter(projectId, { title: title.trim() })
       onCreated()
     } catch (err) {
-      alert((err as Error).message)
+      // 应用内错误位，替代阻塞式原生 alert（与批量对话框的 error-text 风格一致）
+      setError((err as Error).message || '创建失败')
     } finally {
       setSaving(false)
     }
@@ -388,10 +450,12 @@ function NewChapterDialog({
             onChange={(e) => setTitle(e.target.value)}
             autoFocus
             onKeyDown={(e) => {
-              if (e.key === 'Enter') void submit()
+              // isComposing：中文输入法按 Enter 选词不能触发提交
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) void submit()
             }}
           />
         </div>
+        {error ? <div className="error-text">创建失败：{error}</div> : null}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button className="btn btn-ghost" onClick={onClose}>
             取消
@@ -416,9 +480,17 @@ function BatchWriteDialog({
   onClose: () => void
   onChapterCompleted: () => void
 }) {
-  // 默认从最后一章的下一章开始
-  const [fromChapter, setFromChapter] = useState(maxChapter + 1)
-  const [toChapter, setToChapter] = useState(maxChapter + 3)
+  // 默认从最后一章的下一章开始。
+  // 用字符串保存输入：数字受控值会把清空立刻回显成 0，用户无法正常重新输入
+  const [fromChapterStr, setFromChapterStr] = useState(String(maxChapter + 1))
+  const [toChapterStr, setToChapterStr] = useState(String(maxChapter + 3))
+  const fromChapter = Number(fromChapterStr)
+  const toChapter = Number(toChapterStr)
+  const rangeValid =
+    Number.isInteger(fromChapter) &&
+    Number.isInteger(toChapter) &&
+    fromChapter >= 1 &&
+    toChapter >= fromChapter
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<BatchProgress | null>(null)
   const [lastResult, setLastResult] = useState<ChapterFlowResult | null>(null)
@@ -426,6 +498,16 @@ function BatchWriteDialog({
   const [streamingText, setStreamingText] = useState('')
   const { projectData, styleProfiles } = useProjectStyleData(projectId)
   const [styleProfileId, setStyleProfileId] = useState<string | null>(null)
+  // 当前批量运行的 requestId：「⏹ 停止」按钮用它 abortStream 中断当前章生成
+  const batchRequestIdRef = useRef<string | null>(null)
+  const [stopping, setStopping] = useState(false)
+  // 流式预览自动滚底：不滚的话超过容器高度后新 token 一直藏在滚动条下方，
+  // 「正在生成…」看起来像卡住了
+  const streamingBoxRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = streamingBoxRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [streamingText])
 
   const status = progress?.status ?? 'pending'
   const isFinished = status === 'completed' || status === 'failed'
@@ -447,6 +529,10 @@ function BatchWriteDialog({
   }, [projectId])
 
   const startBatch = async () => {
+    if (!Number.isInteger(fromChapter) || !Number.isInteger(toChapter)) {
+      setError('请填写起始与结束章号')
+      return
+    }
     if (fromChapter > toChapter) {
       setError('起始章号不能大于结束章号')
       return
@@ -456,10 +542,13 @@ function BatchWriteDialog({
       return
     }
     setRunning(true)
+    setStopping(false)
     setError(null)
     setProgress(null)
     setLastResult(null)
     setStreamingText('')
+    const requestId = crypto.randomUUID()
+    batchRequestIdRef.current = requestId
     try {
       const res = await window.api.generateBatch(
         projectId,
@@ -475,7 +564,8 @@ function BatchWriteDialog({
           if (!done && token) {
             setStreamingText((prev) => prev + token)
           }
-        }
+        },
+        requestId
       )
       if (res.ok && res.progress) {
         setProgress(res.progress)
@@ -486,16 +576,21 @@ function BatchWriteDialog({
       setError((err as Error).message)
     } finally {
       setRunning(false)
+      setStopping(false)
       setStreamingText('')
+      batchRequestIdRef.current = null
     }
   }
 
   const resumeBatch = async () => {
     if (!progress) return
     setRunning(true)
+    setStopping(false)
     setError(null)
     // 保留 lastResult 直到新结果到达（M3 修复）
     setStreamingText('')
+    const requestId = crypto.randomUUID()
+    batchRequestIdRef.current = requestId
     try {
       const res = await window.api.resumeBatch(
         projectId,
@@ -511,7 +606,8 @@ function BatchWriteDialog({
           if (!done && token) {
             setStreamingText((prev) => prev + token)
           }
-        }
+        },
+        requestId
       )
       if (res.ok && res.progress) {
         setProgress(res.progress)
@@ -522,8 +618,20 @@ function BatchWriteDialog({
       setError((err as Error).message)
     } finally {
       setRunning(false)
+      setStopping(false)
       setStreamingText('')
+      batchRequestIdRef.current = null
     }
+  }
+
+  const stopBatch = () => {
+    const id = batchRequestIdRef.current
+    if (!id) return
+    setStopping(true)
+    // 中断当前章的 LLM 生成；generateBatch 的 promise 会以 failed 进度返回
+    void window.api.abortStream(id).catch(() => {
+      setStopping(false)
+    })
   }
 
   const statusLabel: Record<BatchProgress['status'], string> = {
@@ -583,8 +691,8 @@ function BatchWriteDialog({
               className="input"
               type="number"
               min={1}
-              value={fromChapter}
-              onChange={(e) => setFromChapter(Number(e.target.value))}
+              value={fromChapterStr}
+              onChange={(e) => setFromChapterStr(e.target.value)}
               disabled={running}
             />
           </div>
@@ -593,9 +701,9 @@ function BatchWriteDialog({
             <input
               className="input"
               type="number"
-              min={fromChapter}
-              value={toChapter}
-              onChange={(e) => setToChapter(Number(e.target.value))}
+              min={Number.isInteger(fromChapter) ? fromChapter : 1}
+              value={toChapterStr}
+              onChange={(e) => setToChapterStr(e.target.value)}
               disabled={running}
             />
           </div>
@@ -618,7 +726,9 @@ function BatchWriteDialog({
               <div className="batch-progress-reason">{progress.pauseReason}</div>
             ) : null}
             {progress.error ? (
-              <div className="batch-progress-error">{progress.error}</div>
+              <div className="batch-progress-error">
+                {progress.error.includes('LLM_ABORTED') ? '已停止生成（可点「继续」重试当前章）' : progress.error}
+              </div>
             ) : null}
             {progress.completed.length > 0 ? (
               <div className="batch-progress-completed">
@@ -629,7 +739,7 @@ function BatchWriteDialog({
         ) : null}
 
         {streamingText ? (
-          <div className="batch-streaming">
+          <div className="batch-streaming" ref={streamingBoxRef}>
             <div className="batch-streaming-head">正在生成…</div>
             <pre className="batch-streaming-text">{streamingText}</pre>
           </div>
@@ -677,6 +787,16 @@ function BatchWriteDialog({
         {error ? <div className="error-text">{error}</div> : null}
 
         <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+          {running && (
+            <button
+              className="btn btn-ghost"
+              onClick={stopBatch}
+              disabled={stopping}
+              title="中断当前章的生成（已完成的章节保留，可稍后继续）"
+            >
+              {stopping ? '停止中…' : '⏹ 停止'}
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={onClose} disabled={running}>
             {isFinished ? '关闭' : '取消'}
           </button>
@@ -684,7 +804,7 @@ function BatchWriteDialog({
             <button
               className="btn btn-primary"
               onClick={startBatch}
-              disabled={running || fromChapter < 1 || toChapter < fromChapter}
+              disabled={running || !rangeValid}
             >
               {running ? '生成中…' : '开始批量续写'}
             </button>
@@ -735,11 +855,16 @@ function BenchmarkDialog({
     })
   }
 
+  const [saveError, setSaveError] = useState('')
   const save = async (): Promise<void> => {
     setSaving(true)
+    setSaveError('')
     try {
       await window.api.setBenchmarkBooks(projectId, Array.from(selected))
       onSaved()
+    } catch (err) {
+      // 无 catch 时保存失败会静默成 unhandled rejection，用户以为没点上
+      setSaveError((err as Error).message || '保存失败')
     } finally {
       setSaving(false)
     }
@@ -793,6 +918,8 @@ function BenchmarkDialog({
             已选 {selected.size} 本：{Array.from(selected).map((n) => `《${n}》`).join('、')}
           </p>
         ) : null}
+
+        {saveError ? <div className="error-text">保存失败：{saveError}</div> : null}
 
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
           <button className="btn btn-ghost" onClick={onClose}>

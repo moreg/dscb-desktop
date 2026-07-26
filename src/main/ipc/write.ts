@@ -770,29 +770,37 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        const progress = await service.generateChaptersBatch(
-          validated.projectId,
-          validated.fromChapter,
-          validated.toChapter,
-          (chapter, result) => {
-            safeSend(win, 'write:batchChapterComplete', {
-              requestId: validated.requestId,
-              chapter,
-              result
-            })
-          },
-          validated.styleProfileId,
-          {
-            onToken: (token) =>
-              safeSend(win, 'llm:token', {
+        // 批量流也登记进 abort 注册表：渲染端「停止」按钮 invoke llm:abort(requestId)
+        // 即可中断当前章的 LLM 生成（后续步骤自然不再执行，progress 返回 failed）。
+        const signal = beginStream(validated.requestId)
+        try {
+          const progress = await service.generateChaptersBatch(
+            validated.projectId,
+            validated.fromChapter,
+            validated.toChapter,
+            (chapter, result) => {
+              safeSend(win, 'write:batchChapterComplete', {
                 requestId: validated.requestId,
-                token,
-                done: false
+                chapter,
+                result
               })
-          }
-        )
-        safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-        return { ok: true, progress }
+            },
+            validated.styleProfileId,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          return { ok: true, progress }
+        } finally {
+          endStream(validated.requestId)
+        }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }
@@ -823,29 +831,35 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        const progress = await service.resumeChaptersBatch(
-          validated.projectId,
-          validated.fromChapter,
-          validated.toChapter,
-          (chapter, result) => {
-            safeSend(win, 'write:batchChapterComplete', {
-              requestId: validated.requestId,
-              chapter,
-              result
-            })
-          },
-          validated.styleProfileId,
-          {
-            onToken: (token) =>
-              safeSend(win, 'llm:token', {
+        const signal = beginStream(validated.requestId)
+        try {
+          const progress = await service.resumeChaptersBatch(
+            validated.projectId,
+            validated.fromChapter,
+            validated.toChapter,
+            (chapter, result) => {
+              safeSend(win, 'write:batchChapterComplete', {
                 requestId: validated.requestId,
-                token,
-                done: false
+                chapter,
+                result
               })
-          }
-        )
-        safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-        return { ok: true, progress }
+            },
+            validated.styleProfileId,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          return { ok: true, progress }
+        } finally {
+          endStream(validated.requestId)
+        }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }
