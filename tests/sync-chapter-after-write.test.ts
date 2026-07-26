@@ -105,7 +105,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
     memSpy.mockRestore()
   })
 
-  it('returns null and does not write when autoMemorySync is false', async () => {
+  it('skips extraction and writes when autoMemorySync is false (still returns selfCheck shell)', async () => {
     await settings.update({ autoMemorySync: false })
     const llm = mockLlm('')
     const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
@@ -120,7 +120,11 @@ describe('WriteService.syncChapterAfterWrite', () => {
       '林远在青云山击败了赵乾。'
     )
 
-    expect(result).toBeNull()
+    // 记忆同步关闭时不再返回 null：自检与开关解耦，UI 仍需要拿到写后审查结果。
+    // 关键约束是"不提取、不落盘"，而非返回值为空。
+    expect(result).not.toBeNull()
+    expect(result!.extraction.newPlotPoints).toEqual([])
+    expect(result!.memory.applied.plotPoints).toBe(0)
     expect(memSpy).not.toHaveBeenCalled()
 
     const dir = await ps.resolveDir(projectId)
@@ -185,19 +189,23 @@ describe('WriteService.syncChapterAfterWrite', () => {
     const skipped = await service.syncChapterAfterWrite(projectId, 5, '正文', {
       skipIfDisabled: true
     })
-    expect(skipped).toBeNull()
+    // 开关关闭时返回空壳（不提取），而非 null
+    expect(skipped).not.toBeNull()
+    expect(skipped!.extraction.newPlotPoints).toEqual([])
+    expect(memSpy).not.toHaveBeenCalled()
 
     const forced = await service.syncChapterAfterWrite(projectId, 5, '正文', {
       skipIfDisabled: false
     })
     expect(forced).not.toBeNull()
     expect(forced!.extraction.chapterNumber).toBe(5)
+    expect(forced!.extraction.newPlotPoints.length).toBe(1)
     expect(memSpy).toHaveBeenCalledTimes(1)
 
     memSpy.mockRestore()
   })
 
-  it('pipeline off disables syncChapterAfterWrite', async () => {
+  it('pipeline off disables memory extraction in syncChapterAfterWrite', async () => {
     await settings.update({ autoPostWritePipeline: 'off' })
     const llm = mockLlm('')
     const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
@@ -205,7 +213,9 @@ describe('WriteService.syncChapterAfterWrite', () => {
     const flow = (service as unknown as { flow: any }).flow
     const memSpy = vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(FIXED_EXTRACTION)
     const result = await service.syncChapterAfterWrite(projectId, 5, '正文')
-    expect(result).toBeNull()
+    expect(result).not.toBeNull()
+    expect(result!.extraction.newPlotPoints).toEqual([])
+    expect(result!.memory.applied.plotPoints).toBe(0)
     expect(memSpy).not.toHaveBeenCalled()
     memSpy.mockRestore()
   })

@@ -1,24 +1,8 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
-import ChapterListPage from './ChapterListPage'
-import ChapterEditor from './ChapterEditor'
-import CharacterManagerPage from './CharacterManagerPage'
-import MemoryCenterPage from './MemoryCenterPage'
-import MemoryEntityPage from './MemoryEntityPage'
-import ForeshadowingBoard from './ForeshadowingBoard'
-import TrackingPage from './TrackingPage'
-import RelationshipPage from './RelationshipPage'
-import SettingsPage from './SettingsPage'
-import OutlinePage from './OutlinePage'
-import RhythmChartPage from './RhythmChartPage'
-import FigurePage from './FigurePage'
-import StyleProfilePage from './StyleProfilePage'
-import TeardownPage from './TeardownPage'
-import CoverPage from './CoverPage'
-import ScanPage from './ScanPage'
 import type { Diagnostic, MemoryEntityType, ProjectMeta } from '../../shared/types'
 import {
   loadPendingSyncQueue,
@@ -29,6 +13,25 @@ import {
   PENDING_SYNC_CHANGED_EVENT
 } from '../../shared/post-write-sync-session'
 import { getLocalStorage } from '../../main/data/rewrite-persistence'
+
+// 除首屏项目列表外，页面全部懒加载：Electron 本地磁盘加载 chunk 几乎无感，
+// 换来主 chunk 大幅瘦身（编辑器/设置页/关系图谱等重页面不再拖慢启动解析）。
+const ChapterListPage = lazy(() => import('./ChapterListPage'))
+const ChapterEditor = lazy(() => import('./ChapterEditor'))
+const CharacterManagerPage = lazy(() => import('./CharacterManagerPage'))
+const MemoryCenterPage = lazy(() => import('./MemoryCenterPage'))
+const MemoryEntityPage = lazy(() => import('./MemoryEntityPage'))
+const ForeshadowingBoard = lazy(() => import('./ForeshadowingBoard'))
+const TrackingPage = lazy(() => import('./TrackingPage'))
+const RelationshipPage = lazy(() => import('./RelationshipPage'))
+const SettingsPage = lazy(() => import('./SettingsPage'))
+const OutlinePage = lazy(() => import('./OutlinePage'))
+const RhythmChartPage = lazy(() => import('./RhythmChartPage'))
+const FigurePage = lazy(() => import('./FigurePage'))
+const StyleProfilePage = lazy(() => import('./StyleProfilePage'))
+const TeardownPage = lazy(() => import('./TeardownPage'))
+const CoverPage = lazy(() => import('./CoverPage'))
+const ScanPage = lazy(() => import('./ScanPage'))
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -435,6 +438,7 @@ export default function App() {
             </div>
           ) : null}
 
+          <Suspense fallback={<p className="empty">页面加载中…</p>}>
           {view.kind === 'projects' ? (
             <ErrorBoundary>
               <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
@@ -566,6 +570,7 @@ export default function App() {
               <CoverPage projectId={view.projectId} />
             </ErrorBoundary>
           ) : null}
+          </Suspense>
         </div>
       </main>
 

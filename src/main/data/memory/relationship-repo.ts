@@ -22,7 +22,7 @@ export class RelationshipRepo {
 
     // 主源：枚举 记忆/关系/*.md
     const dir = join(this.projectDir, '记忆', '关系')
-    let files: string[] = []
+    let files: string[]
     try {
       files = await fs.readdir(dir)
     } catch {
@@ -157,7 +157,7 @@ export class RelationshipRepo {
     aId: string,
     bId: string
   ): Promise<string | null> {
-    let files: string[] = []
+    let files: string[]
     try {
       files = await fs.readdir(dir)
     } catch {

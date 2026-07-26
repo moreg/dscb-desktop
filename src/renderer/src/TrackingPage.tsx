@@ -54,6 +54,7 @@ export default function TrackingPage({ projectId, onOpenForeshadowings }: Props)
 
   useEffect(() => {
     refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 每次渲染都是新引用
   }, [projectId])
 
   const onSync = async () => {

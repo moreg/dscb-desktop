@@ -33,7 +33,7 @@ import {
 import { evaluateChapterSelfCheck } from './chapter-self-check'
 import { extractPowerBoundaryBullets } from './power-boundary'
 import { readText, parseDoc } from './skill-format/md-parser'
-import { parseForeshadowReceipt, isForeshadowMatch } from '../../shared/parsers'
+import { isForeshadowMatch } from '../../shared/parsers'
 import { DeslopService } from './deslop/deslop-service'
 import type {
   AuditReport,
@@ -414,11 +414,11 @@ export class WriteService {
       assertNovelProse(full)
       return full
     } catch (err) {
-      if (metaHit) throw new Error(LLM_AGENT_META_ERROR)
+      if (metaHit) throw new Error(LLM_AGENT_META_ERROR, { cause: err })
       // abort 可能被映射成 LLM_ABORTED；若因旁白触发则统一成 META
       const msg = err instanceof Error ? err.message : String(err)
       if (msg === 'LLM_ABORTED' && isEarlyAgentNarration(accumulated)) {
-        throw new Error(LLM_AGENT_META_ERROR)
+        throw new Error(LLM_AGENT_META_ERROR, { cause: err })
       }
       throw err
     } finally {
@@ -2960,7 +2960,7 @@ function renderRequirementChecklist(text: string): string {
 
   return normalized
     .map((line) => {
-      const cleaned = line.replace(/^[\-\*\d\.\)\s、]+/, '').trim()
+      const cleaned = line.replace(/^[-*\d.)\s、]+/, '').trim()
       return `- ${cleaned || line}`
     })
     .join('\n')

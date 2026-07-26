@@ -173,9 +173,9 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             <button className="btn btn-ghost" onClick={() => setShowConfig(true)}>
               ⚙ 图像配置
               {config?.hasKey ? (
-                <span style={{ marginLeft: 6, color: '#16a34a' }}>●已配置</span>
+                <span style={{ marginLeft: 6, color: 'var(--success)' }}>●已配置</span>
               ) : (
-                <span style={{ marginLeft: 6, color: '#dc2626' }}>●未配置</span>
+                <span style={{ marginLeft: 6, color: 'var(--danger)' }}>●未配置</span>
               )}
             </button>
           </div>
@@ -184,7 +184,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
 
       {config && !config.hasKey ? (
         <div className="placeholder" style={{ marginTop: 16 }}>
-          <p style={{ margin: '0 0 12px', fontSize: 14, color: '#dc2626' }}>
+          <p style={{ margin: '0 0 12px', fontSize: 14, color: 'var(--danger)' }}>
             图像生成 API 未配置。封面生成需要 OpenAI Images API 或兼容代理的 Key（gpt-image-2）。
           </p>
           <button className="btn btn-primary" onClick={() => setShowConfig(true)}>
@@ -270,9 +270,9 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
                 padding: '2px 10px',
                 height: 24,
                 borderRadius: 12,
-                background: 'linear-gradient(135deg, #f3e8ff 0%, #e0e7ff 100%)',
-                color: '#6d28d9',
-                border: '1px solid #c4b5fd',
+                background: 'var(--accent-soft)',
+                color: 'var(--accent)',
+                border: '1px solid var(--line-strong)',
                 cursor: generatingPrompt ? 'wait' : 'pointer',
                 opacity: generatingPrompt ? 0.7 : 1,
                 display: 'flex',
@@ -300,7 +300,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             rows={2}
           />
         </div>
-        {error ? <p className="diag-msg" style={{ color: '#dc2626' }}>{error}</p> : null}
+        {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button
             className="btn btn-primary"
@@ -368,7 +368,7 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
         style={{
           width: '100%',
           aspectRatio: '3 / 4',
-          background: '#f0f0f0',
+          background: 'var(--surface-2)',
           borderRadius: 6,
           overflow: 'hidden',
           display: 'flex',
@@ -463,7 +463,7 @@ function CoverConfigDialog({
             placeholder="gpt-image-2"
           />
         </div>
-        {error ? <p className="diag-msg" style={{ color: '#dc2626' }}>{error}</p> : null}
+        {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
           <button className="btn btn-ghost" onClick={onClose}>
             取消

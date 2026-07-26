@@ -11,7 +11,7 @@
  * 算法与原脚本一致，确保检测行为可溯源。
  */
 
-import type { DeslopFinding, DeslopGate, DeslopSeverity } from '../../../shared/types'
+import type { DeslopFinding, DeslopSeverity } from '../../../shared/types'
 import { TOXIC_PATTERNS, FLATTENED_LEVEL1, PARALLELISM_PATTERNS, SUBLIMATION_PATTERNS, PSYCH_TELL_PATTERNS } from './banned-words'
 
 const STOP_CHARS = new Set(['。', '！', '？', '!', '?', '\n'])

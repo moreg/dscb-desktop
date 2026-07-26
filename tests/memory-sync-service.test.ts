@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtemp, mkdir, writeFile, readFile, readdir, utimes, unlink, stat } from 'fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, unlink, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { MemorySyncService } from '../src/main/data/memory/sync-service'

@@ -16,6 +16,7 @@ import type {
   ChapterMeta,
   CreateRelationshipInput
 } from '../../shared/types'
+import { useStreamAborter } from './hooks/useStreamAborter'
 
 interface Props {
   projectId: string
@@ -118,9 +119,9 @@ function seedPositions(nodes: Node[]) {
 }
 
 /** Helper to get node ID from edge source/target which can be string or Node object (mutated by d3) */
-function getEdgeNodeId(val: any): string {
+function getEdgeNodeId(val: unknown): string {
   if (val && typeof val === 'object' && 'id' in val) {
-    return val.id
+    return String((val as { id: unknown }).id)
   }
   return String(val)
 }
@@ -163,6 +164,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   const [relSuggestions, setRelSuggestions] = useState<RelSuggestion[]>([])
   const [showRelPanel, setShowRelPanel] = useState(false)
   const relDetectRef = useRef(0)
+  const trackStream = useStreamAborter()
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const simRef = useRef<Simulation<Node, Edge> | null>(null)
@@ -305,11 +307,13 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
     const mine = ++relDetectRef.current
     let buffer = ''
     try {
-      const result = await window.api.detectRelationshipsStream(projectId, (token, done) => {
-        if (relDetectRef.current !== mine) return
-        if (token) buffer += token
-        if (done) setDetectingRels(false)
-      })
+      const result = await trackStream(
+        window.api.detectRelationshipsStream(projectId, (token, done) => {
+          if (relDetectRef.current !== mine) return
+          if (token) buffer += token
+          if (done) setDetectingRels(false)
+        })
+      )
       if (relDetectRef.current !== mine) return
       if (!result.ok) {
         setDetectingRels(false)
@@ -361,7 +365,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
     refresh()
   }
 
-  const nameOf = (id: any) => {
+  const nameOf = (id: unknown) => {
     const strId = getEdgeNodeId(id)
     return characters.find((c) => c.id === strId)?.name ?? '（已删除）'
   }

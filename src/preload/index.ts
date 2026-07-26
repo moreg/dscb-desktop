@@ -21,14 +21,11 @@ import type {
   ProviderConfig,
   RhythmEvaluation,
   ChapterFlowResult,
-  ListProvidersResult,
   FeatureCategory,
   FeatureRoutingEntry,
   CreateStyleProfileInput,
   UpdateStyleProfileInput,
-  TeardownEntry,
   StartTeardownInput,
-  TeardownRouteResult,
   TeardownLengthKind,
   TeardownProgressInfo,
   TeardownFileNode,
@@ -56,14 +53,14 @@ const api = {
     ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
   watchProject: (projectId: string) => ipcRenderer.invoke('projects:watch', projectId) as Promise<boolean>,
   stopWatchProject: () => ipcRenderer.invoke('projects:stopWatch') as Promise<boolean>,
-  listStyleProfiles: (projectId: string) => ipcRenderer.invoke('styles:list', projectId),
-  createStyleProfile: (projectId: string, input: CreateStyleProfileInput) =>
-    ipcRenderer.invoke('styles:create', { projectId, input }),
-  updateStyleProfile: (projectId: string, styleProfileId: string, patch: UpdateStyleProfileInput) =>
-    ipcRenderer.invoke('styles:update', { projectId, styleProfileId, patch }),
-  deleteStyleProfile: (projectId: string, styleProfileId: string) =>
-    ipcRenderer.invoke('styles:delete', { projectId, styleProfileId }),
-  extractStyleProfile: (projectId: string, sampleText: string, name?: string) =>
+  listStyleProfiles: () => ipcRenderer.invoke('styles:list'),
+  createStyleProfile: (input: CreateStyleProfileInput) =>
+    ipcRenderer.invoke('styles:create', { input }),
+  updateStyleProfile: (styleProfileId: string, patch: UpdateStyleProfileInput) =>
+    ipcRenderer.invoke('styles:update', { styleProfileId, patch }),
+  deleteStyleProfile: (styleProfileId: string) =>
+    ipcRenderer.invoke('styles:delete', { styleProfileId }),
+  extractStyleProfile: (projectId: string | undefined, sampleText: string, name?: string) =>
     ipcRenderer.invoke('styles:extract', { projectId, sampleText, name }),
   setProjectDefaultStyleProfile: (projectId: string, styleProfileId: string | null) =>
     ipcRenderer.invoke('projects:setDefaultStyleProfile', { projectId, styleProfileId }),
@@ -352,9 +349,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:reviewChapter', { projectId, chapterNumber, content, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   answerChapterQuestionStream: (
     projectId: string,
@@ -372,7 +376,7 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:answerChapterQuestion', {
         projectId,
         chapterNumber,
@@ -381,7 +385,14 @@ const api = {
         history,
         requestId
       })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   detectCastStream: (
     projectId: string,
@@ -396,9 +407,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:detectCast', { projectId, chapterNumber, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   detectRelationshipsStream: (
     projectId: string,
@@ -412,9 +430,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:detectRelationships', { projectId, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   checkOutlineStream: (
     projectId: string,
@@ -431,9 +456,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:checkOutline', { projectId, chapterNumber, outline, content, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   extractMemoryStream: (
     projectId: string,
@@ -448,9 +480,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:extractMemory', { projectId, chapterNumber, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   applyMemory: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
@@ -546,9 +585,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   applyRhythmEvaluation: (projectId: string, evaluation: RhythmEvaluation) =>
     ipcRenderer.invoke('write:applyRhythmEvaluation', { projectId, evaluation }),
@@ -565,9 +611,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('llm:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('write:generateFigure', { projectId, chapterNumber, requestId })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   saveFigure: (projectId: string, fileName: string, html: string) =>
     ipcRenderer.invoke('write:saveFigure', { projectId, fileName, html }),
@@ -818,9 +871,16 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('scan:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('scan:analyze', { report, platform, requestId })
-      .finally(() => ipcRenderer.removeListener('scan:token', handler as never))
+      .finally(() => ipcRenderer.removeListener('scan:token', handler as never)) as Promise<{
+      ok: boolean
+      error?: string
+    }>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
 
   /* ---- 去 AI 味润色（story-deslop）---- */
@@ -840,9 +900,13 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('deslop:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('deslop:run', { projectId, text, levelOverride, requestId })
       .finally(() => ipcRenderer.removeListener('deslop:token', handler as never)) as Promise<DeslopResult>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
   getDeslopWhitelist: (projectId: string) =>
     ipcRenderer.invoke('deslop:getWhitelist', projectId) as Promise<string[]>,
@@ -868,9 +932,13 @@ const api = {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
     ipcRenderer.on('deslopRules:token', handler as never)
-    return ipcRenderer
+    const result = ipcRenderer
       .invoke('deslop:editRulesStream', { instruction, requestId })
       .finally(() => ipcRenderer.removeListener('deslopRules:token', handler as never)) as Promise<string>
+    return Object.assign(result, {
+      requestId,
+      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+    })
   },
 
   /* ---- 封面生成（story-cover）---- */

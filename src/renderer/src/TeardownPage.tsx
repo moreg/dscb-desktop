@@ -539,7 +539,7 @@ function NewTeardownDialog({
           </>
         )}
 
-        {error ? <p className="diag-msg" style={{ color: '#dc2626' }}>{error}</p> : null}
+        {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
 
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
           <button className="btn btn-ghost" onClick={onClose}>

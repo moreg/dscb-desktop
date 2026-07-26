@@ -127,7 +127,7 @@ describe('WriteService', () => {
 
     const service = new WriteService(ps, mockLlm('正文'))
     // mock extractEndingState to return suspense
-    ;(service as any).flow = {
+    ;(service as unknown as { flow: unknown }).flow = {
       extractEndingState: async () => ({
         chapterNumber: 1,
         characterPositions: [{ name: '林远', location: '山门', action: '收剑' }],

@@ -10,7 +10,13 @@ import { registerCollectionIpc } from './register-collection'
 import type {
   MemoryEntityType,
   CreateMemoryEntityInput,
-  UpdateMemoryEntityInput
+  UpdateMemoryEntityInput,
+  CreateCharacterInput,
+  UpdateCharacterInput,
+  CreateRelationshipInput,
+  UpdateRelationshipInput,
+  CreateForeshadowingInput,
+  UpdateForeshadowingInput
 } from '../../shared/types'
 import type { ProjectService } from '../data/project-service'
 
@@ -19,7 +25,7 @@ export function registerMemoryIpc(
   entityService: MemoryEntityService,
   projectService: ProjectService
 ): void {
-  registerCollectionIpc('memory:character', {
+  registerCollectionIpc<CreateCharacterInput, UpdateCharacterInput>('memory:character', {
     list: (pid) => service.listCharacters(pid),
     get: (pid, id) => service.getCharacter(pid, id),
     create: (pid, input) => service.createCharacter(pid, input),
@@ -27,14 +33,14 @@ export function registerMemoryIpc(
     delete: (pid, id) => service.deleteCharacter(pid, id)
   })
 
-  registerCollectionIpc('memory:relationship', {
+  registerCollectionIpc<CreateRelationshipInput, UpdateRelationshipInput>('memory:relationship', {
     list: (pid) => service.listRelationships(pid),
     create: (pid, input) => service.createRelationship(pid, input),
     update: (pid, id, patch) => service.updateRelationship(pid, id, patch),
     delete: (pid, id) => service.deleteRelationship(pid, id)
   })
 
-  registerCollectionIpc('memory:foreshadowing', {
+  registerCollectionIpc<CreateForeshadowingInput, UpdateForeshadowingInput>('memory:foreshadowing', {
     list: (pid) => service.listForeshadowings(pid),
     create: (pid, input) => service.createForeshadowing(pid, input),
     update: (pid, id, patch) => service.updateForeshadowing(pid, id, patch),
@@ -108,7 +114,7 @@ export function registerMemoryIpc(
       }
 
       // 慢速路径：枚举目录，用 mtime 缓存避免重复读未变文件
-      let files: string[] = []
+      let files: string[]
       try {
         files = await fs.readdir(root)
       } catch {

@@ -80,7 +80,12 @@ export class DetailedOutlineMdRepo {
         if (!titleFromFile) titleFromFile = extractTitleFromH1Variant(doc.h1Title)
         fullBody = doc.body
         // 构造一个虚拟章号块标题供 parseChapterBlock 使用
-        chSec = { title: `第 ${fileNameChapter} 章${titleFromFile ? '：' + titleFromFile : ''}`, body: doc.body }
+        chSec = {
+          level: 2,
+          startLine: 0,
+          title: `第 ${fileNameChapter} 章${titleFromFile ? '：' + titleFromFile : ''}`,
+          body: doc.body
+        }
       } else {
         fileNameChapter = fileNameChapter ?? parseChapterNumber(chSec.title)
         if (fileNameChapter == null) return []

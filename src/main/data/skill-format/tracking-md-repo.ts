@@ -1,6 +1,5 @@
 import { join } from 'path'
 import { readText, parseDoc, parseTable } from './md-parser'
-import type { VolumeOutline } from '../../../shared/types'
 
 /**
  * 写作前的追踪上下文（来自 `追踪/` 目录）。

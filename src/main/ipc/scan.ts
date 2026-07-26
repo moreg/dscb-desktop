@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { ScanService } from '../data/scan/scan-service'
+import { beginStream, endStream } from '../data/stream-abort-registry'
 import { safeHandle, safeSend } from './safe-handle'
 import { validateInput } from './validation'
 
@@ -69,7 +70,13 @@ export function registerScanIpc(scanService: ScanService): void {
             done: false
           })
         }
-        await scanService.analyzeRank(validated.report, validated.platform, send)
+        // 登记进流取消注册表：渲染端切换报告/卸载时可 abortStream(requestId) 打断
+        const signal = beginStream(validated.requestId)
+        try {
+          await scanService.analyzeRank(validated.report, validated.platform, send, signal)
+        } finally {
+          endStream(validated.requestId)
+        }
         safeSend(win, 'scan:token', {
           requestId: validated.requestId,
           token: '',

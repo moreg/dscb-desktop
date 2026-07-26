@@ -180,7 +180,7 @@ export class SettingsWriter {
         return false
       }
 
-      let next = text
+      let next: string
       if (p.target === 'geography' || (p.target === 'worldview' && p.fileName === '地理')) {
         const chLabel = `第 ${Math.max(1, chapterNumber || 1)} 章`
         next = appendTableRow(

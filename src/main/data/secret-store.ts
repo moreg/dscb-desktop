@@ -147,7 +147,7 @@ export class SecretStore {
       parsed = JSON.parse(json)
     } catch (err) {
       // 解密失败 / JSON 损坏 → 视为不兼容，提示用户重新配置
-      throw new Error('SCHEMA_INVALID: providers.enc is corrupted or unreadable')
+      throw new Error('SCHEMA_INVALID: providers.enc is corrupted or unreadable', { cause: err })
     }
     if (isNewShape(parsed)) return parsed
     // 旧 schema：尝试迁移

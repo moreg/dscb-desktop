@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'fs'
-import { join, relative, sep } from 'path'
+import { sep } from 'path'
 import type { BrowserWindow } from 'electron'
 import { safeSend } from '../ipc/safe-handle'
 

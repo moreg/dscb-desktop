@@ -1,5 +1,5 @@
 import { promises as fs } from 'fs'
-import { join, relative, resolve, sep } from 'path'
+import { join, relative, resolve } from 'path'
 import {
   readText,
   parseDoc,
@@ -9,7 +9,7 @@ import {
   fieldToStr
 } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
-import { listMdFilesDeep, safeFileName, charId } from './entity-helpers'
+import { listMdFilesDeep, safeFileName } from './entity-helpers'
 import { parseTimelineTable, indexTimelineColumns } from './timeline-repo'
 
 export interface SyncReport {

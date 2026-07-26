@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import { migrateProjectV3ToV4, type MigrationReport } from '../src/main/data/memory/migration-v3-to-v4'
+import { migrateProjectV3ToV4 } from '../src/main/data/memory/migration-v3-to-v4'
 
 // 构造老版 v3 项目（带 记忆系统/ 与 chapters/）
 async function setupV3Project(root: string): Promise<string> {

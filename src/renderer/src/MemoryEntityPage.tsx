@@ -87,7 +87,7 @@ const CONFIG: Record<MemoryEntityType, TypeConfig> = {
       { key: 'notes', label: '详情', multi: true }
     ],
     emptyHint: '尚无剧情点。',
-    renderExtra: (e, ctx) => {
+    renderExtra: (e) => {
       const notes = e.notes ?? ''
       const personHits = [...notes.matchAll(/@(\S+)/g)].map((m) => m[1])
       const fTagHits = [...notes.matchAll(/#伏笔\s*[:：]?\s*(\S+)/g)].map((m) => m[1])
@@ -139,6 +139,7 @@ export default function MemoryEntityPage({ projectId, type, label, onOpenChapter
   useEffect(() => {
     refresh()
     refreshChapters()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId/type 触发；refresh 系函数每次渲染都是新引用
   }, [projectId, type])
 
   const remove = async (e: MemoryEntity) => {

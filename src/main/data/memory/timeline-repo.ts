@@ -1,5 +1,5 @@
 import { join } from 'path'
-import { readText, parseDoc, parseTable, parseBoldFields } from '../skill-format/md-parser'
+import { readText, parseDoc, parseTable } from '../skill-format/md-parser'
 import { hashName } from './entity-helpers'
 import type { MemoryEntity } from '../../../shared/types'
 

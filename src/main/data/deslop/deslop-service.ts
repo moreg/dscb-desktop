@@ -50,6 +50,8 @@ export interface DeslopOptions {
   styleContext?: DeslopStyleContext
   /** 透传到 LLM 调用的 meta（用量统计/归属），缺省 = 仅 feature:deslop */
   meta?: Record<string, unknown>
+  /** 用户取消信号：透传到每一遍 LLM 改写/清理调用 */
+  signal?: AbortSignal
 }
 
 /**
@@ -175,7 +177,8 @@ export class DeslopService {
           systemPrompt: effectiveSystemPrompt,
           maxTokens: 12288,
           meta: { feature: `deslop:pass${passNum}`, ...opts.meta },
-          onToken: emit
+          onToken: emit,
+          signal: opts.signal
         })
         let rewritten = extractRewritten(llmOutput)
         const passChanges = extractChangeSummary(llmOutput)
@@ -279,7 +282,7 @@ export class DeslopService {
     passNum: number,
     level: DeslopLevel,
     effectiveSystemPrompt: string,
-    opts: Pick<DeslopOptions, 'styleContext' | 'textOverrides' | 'bannedWords' | 'whitelist' | 'meta'>,
+    opts: Pick<DeslopOptions, 'styleContext' | 'textOverrides' | 'bannedWords' | 'whitelist' | 'meta' | 'signal'>,
     emit: (t: string) => void
   ): Promise<{ text: string; changes: string[] }> {
     const MAX_CLEANUP_ROUNDS = 2
@@ -308,7 +311,8 @@ export class DeslopService {
         systemPrompt: effectiveSystemPrompt,
         maxTokens: 12288,
         meta: { feature: `deslop:cleanup:pass${passNum}:${round}`, ...opts.meta },
-        onToken: emit
+        onToken: emit,
+        signal: opts.signal
       })
       let cleanupRewritten = extractRewritten(cleanupOutput)
       const cleanupChanges = extractChangeSummary(cleanupOutput)

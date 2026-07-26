@@ -26,7 +26,7 @@ export class WorldviewRepo {
 
     // Fallback：枚举 设定/世界观/*.md（不含子目录）
     const dir = join(this.projectDir, '设定', '世界观')
-    let files: string[] = []
+    let files: string[]
     try {
       files = await fs.readdir(dir)
     } catch {

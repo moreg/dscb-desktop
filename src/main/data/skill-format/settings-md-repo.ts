@@ -96,7 +96,7 @@ export function isPlaceholderSettingBody(body: string): boolean {
 
   if (lines.length === 0) return true
 
-  let joined = lines
+  const joined = lines
     .join('\n')
     .replace(/\*\*/g, '')
     .replace(/^[-*]\s+/gm, '')

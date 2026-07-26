@@ -393,10 +393,11 @@ export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 
  * 可取消的流式 IPC 句柄：可 await 完成结果，也可用 requestId / abort 中途打断。
  * （Promise 上挂 requestId、abort，兼容现有 `const r = await api.xxxStream(...)` 写法）
  */
-export type StreamHandle = Promise<{ ok: boolean; error?: string }> & {
+export type StreamHandleOf<T> = Promise<T> & {
   requestId: string
   abort: () => Promise<{ ok: boolean }>
 }
+export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
@@ -412,16 +413,17 @@ export interface RendererApi {
   stopWatchProject: () => Promise<boolean>
   /** 订阅项目文件变更事件（外部编辑器改源文件时推送）。返回取消订阅函数。 */
   onProjectFilesChanged: (cb: (e: { projectId: string; kind: FileChangeKind }) => void) => () => void
-  listStyleProfiles: (projectId: string) => Promise<StyleProfile[]>
-  createStyleProfile: (projectId: string, input: CreateStyleProfileInput) => Promise<StyleProfile>
+  /* ---- 文风库：全局资产，与拆文库一样不按项目隔离，故这些通道不接受 projectId ---- */
+  listStyleProfiles: () => Promise<StyleProfile[]>
+  createStyleProfile: (input: CreateStyleProfileInput) => Promise<StyleProfile>
   updateStyleProfile: (
-    projectId: string,
     styleProfileId: string,
     patch: UpdateStyleProfileInput
   ) => Promise<StyleProfile>
-  deleteStyleProfile: (projectId: string, styleProfileId: string) => Promise<void>
+  deleteStyleProfile: (styleProfileId: string) => Promise<void>
+  /** 提取是唯一用到项目的通道：拿项目名/题材做提示词，并记进用量统计 */
   extractStyleProfile: (
-    projectId: string,
+    projectId: string | undefined,
     sampleText: string,
     name?: string
   ) => Promise<StyleAnalysisResult>
@@ -637,7 +639,7 @@ export interface RendererApi {
     chapterNumber: number,
     content: string | undefined,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   answerChapterQuestionStream: (
     projectId: string,
     chapterNumber: number,
@@ -645,29 +647,29 @@ export interface RendererApi {
     question: string,
     history: { role: 'user' | 'assistant'; text: string }[],
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   detectCastStream: (
     projectId: string,
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   detectRelationshipsStream: (
     projectId: string,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   checkOutlineStream: (
     projectId: string,
     chapterNumber: number,
     outline: string,
     content: string,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   /** 记忆提取（流式）：从正文提取新增角色/地点/情节/伏笔/状态变化 */
   extractMemoryStream: (
     projectId: string,
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
   /**
@@ -753,7 +755,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   /** 节奏回填：把评估值写回节奏图谱.html */
   applyRhythmEvaluation: (
     projectId: string,
@@ -764,7 +766,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: boolean; error?: string }>
+  ) => StreamHandle
   /** 保存图解 HTML 到 图解/ 目录 */
   saveFigure: (
     projectId: string,
@@ -893,7 +895,7 @@ export interface RendererApi {
     text: string,
     levelOverride: DeslopLevel | undefined,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<DeslopResult>
+  ) => StreamHandleOf<DeslopResult>
   /** 读取项目级去 AI 味白名单 */
   getDeslopWhitelist: (projectId: string) => Promise<string[]>
   /** 写入项目级去 AI 味白名单 */
@@ -909,7 +911,7 @@ export interface RendererApi {
   editDeslopRulesStream: (
     instruction: string,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<string>
+  ) => StreamHandleOf<string>
   /* ---- 封面生成（story-cover）---- */
   /** 生成封面（调图像 API），返回封面文件信息 */
   generateCover: (input: GenerateCoverInput) => Promise<CoverFile>
@@ -928,12 +930,12 @@ export interface RendererApi {
   listScanReports: () => Promise<ScanReportSummary[]>
   /** 读取单份扫榜报告内容 */
   readScanReport: (fileName: string) => Promise<string | null>
-  /** LLM 分析榜单 + 产出选题决策（流式） */
+  /** LLM 分析榜单 + 产出选题决策（流式，可经 StreamHandle 取消） */
   analyzeRankStream: (
     report: string,
     platform: string,
     onToken: (token: string, done: boolean) => void
-  ) => Promise<{ ok: true }>
+  ) => StreamHandle
   /** 删除扫榜报告 */
   deleteScanReport: (fileName: string) => Promise<void>
 }
@@ -1138,8 +1140,8 @@ export interface Relationship {
 }
 
 export interface CreateRelationshipInput {
-  characterAId: string
-  characterBId: string
+  characterAId?: string
+  characterBId?: string
   /** v4 友好字段：可直接传名字，由 repo 哈希成 id（与 aId/bId 二选一） */
   characterAName?: string
   characterBName?: string

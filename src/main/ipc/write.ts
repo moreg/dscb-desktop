@@ -265,14 +265,20 @@ export function registerWriteIpc(service: WriteService): void {
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.reviewChapterStream(payload.projectId, payload.chapterNumber, payload.content, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.reviewChapterStream(payload.projectId, payload.chapterNumber, payload.content, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -316,21 +322,27 @@ export function registerWriteIpc(service: WriteService): void {
           }),
           payload
         )
-        await service.answerChapterQuestionStream(
-          validated.projectId,
-          validated.chapterNumber,
-          validated.content,
-          validated.question,
-          validated.history,
-          {
-            onToken: (token) =>
-              safeSend(win, 'llm:token', {
-                requestId: validated.requestId,
-                token,
-                done: false
-              })
-          }
-        )
+        const signal = beginStream(validated.requestId)
+        try {
+          await service.answerChapterQuestionStream(
+            validated.projectId,
+            validated.chapterNumber,
+            validated.content,
+            validated.question,
+            validated.history,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: validated.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+        } finally {
+          endStream(validated.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -344,14 +356,20 @@ export function registerWriteIpc(service: WriteService): void {
     async (e, payload: { projectId: string; chapterNumber: number; requestId: string }) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.detectCastStream(payload.projectId, payload.chapterNumber, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.detectCastStream(payload.projectId, payload.chapterNumber, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -365,14 +383,20 @@ export function registerWriteIpc(service: WriteService): void {
     async (e, payload: { projectId: string; requestId: string }) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.detectRelationshipsStream(payload.projectId, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.detectRelationshipsStream(payload.projectId, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -395,20 +419,26 @@ export function registerWriteIpc(service: WriteService): void {
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.checkOutlineStream(
-          payload.projectId,
-          payload.chapterNumber,
-          payload.outline,
-          payload.content,
-          {
-            onToken: (token) =>
-              safeSend(win, 'llm:token', {
-                requestId: payload.requestId,
-                token,
-                done: false
-              })
-          }
-        )
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.checkOutlineStream(
+            payload.projectId,
+            payload.chapterNumber,
+            payload.outline,
+            payload.content,
+            {
+              signal,
+              onToken: (token) =>
+                safeSend(win, 'llm:token', {
+                  requestId: payload.requestId,
+                  token,
+                  done: false
+                })
+            }
+          )
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -425,14 +455,20 @@ export function registerWriteIpc(service: WriteService): void {
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.extractMemoryStream(payload.projectId, payload.chapterNumber, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.extractMemoryStream(payload.projectId, payload.chapterNumber, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -644,14 +680,20 @@ export function registerWriteIpc(service: WriteService): void {
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.evaluateRhythmStream(payload.projectId, payload.chapterNumber, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.evaluateRhythmStream(payload.projectId, payload.chapterNumber, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {
@@ -675,14 +717,20 @@ export function registerWriteIpc(service: WriteService): void {
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        await service.generateFigureStream(payload.projectId, payload.chapterNumber, {
-          onToken: (token) =>
-            safeSend(win, 'llm:token', {
-              requestId: payload.requestId,
-              token,
-              done: false
-            })
-        })
+        const signal = beginStream(payload.requestId)
+        try {
+          await service.generateFigureStream(payload.projectId, payload.chapterNumber, {
+            signal,
+            onToken: (token) =>
+              safeSend(win, 'llm:token', {
+                requestId: payload.requestId,
+                token,
+                done: false
+              })
+          })
+        } finally {
+          endStream(payload.requestId)
+        }
         safeSend(win, 'llm:token', { requestId: payload.requestId, token: '', done: true })
         return { ok: true }
       } catch (err) {

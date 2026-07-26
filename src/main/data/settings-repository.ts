@@ -683,7 +683,7 @@ export class SettingsRepository {
           }
           baseUrl = trimmed
         } catch (err) {
-          throw new Error(`图像 API baseUrl 非法：${(err as Error).message}`)
+          throw new Error(`图像 API baseUrl 非法：${(err as Error).message}`, { cause: err })
         }
       }
     }

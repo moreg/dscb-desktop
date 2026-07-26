@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // mock child_process.spawn，模拟 codex app-server 子进程行为
-const { EventEmitter } = require('events')
+import { EventEmitter } from 'events'
 
 interface FakeChild extends EventEmitter {
   stdin: {

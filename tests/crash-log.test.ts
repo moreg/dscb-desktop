@@ -3,14 +3,13 @@ import {
   loadCrashLog,
   recordCrash,
   clearCrashLog,
-  formatCrashLog,
-  type StorageLike
+  formatCrashLog
 } from '../src/renderer/src/crash-log'
 
 function makeStorage(): {
-  getItem: any
-  setItem: any
-  removeItem: any
+  getItem: (k: string) => string | null
+  setItem: (k: string, v: string) => void
+  removeItem: (k: string) => void
   data: Map<string, string>
 } {
   const data = new Map<string, string>()

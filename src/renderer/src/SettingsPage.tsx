@@ -36,6 +36,7 @@ import {
   type WritingRequirementTemplate
 } from '../../shared/writing-requirement-templates'
 import FeatureRoutingForm from './FeatureRoutingForm'
+import { useStreamAborter } from './hooks/useStreamAborter'
 
 interface Props {
   onBack?: () => void
@@ -291,6 +292,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
   const [deslopEditing, setDeslopEditing] = useState(false)
   const [deslopEditPreview, setDeslopEditPreview] = useState('')
   const deslopEditGenRef = useRef(0)
+  const trackStream = useStreamAborter()
   const refreshAiHighFreq = () => void window.api.getAiHighFreqConfig().then(setAiHighFreq)
   // 审稿规则：检查项清单（含默认信息）+ 当前配置（开关/阈值/词表本地草稿）
   const [reviewSections, setReviewSections] = useState<ReviewCheckSectionView[]>([])
@@ -564,6 +566,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
       setPomoFocus(cfg.focus)
       setPomoBreak(cfg.brk)
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时加载一次；refreshWritingTemplates 每次渲染都是新引用
   }, [])
 
   useEffect(() => {
@@ -1825,7 +1828,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                       setDeslopEditPreview('')
                       let accumulated = ''
                       try {
-                        await window.api.editDeslopRulesStream(
+                        await trackStream(window.api.editDeslopRulesStream(
                           deslopEditInstruction.trim(),
                           (token, done) => {
                             if (deslopEditGenRef.current !== myGen) return
@@ -1835,7 +1838,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                             }
                             if (done) setDeslopEditing(false)
                           }
-                        )
+                        ))
                         // 防竞态：若被新请求取代则不应用
                         if (deslopEditGenRef.current !== myGen) return
                         // 解析 AI 输出，拆分填回各分节 + 禁用词；保留 preview 供用户核对 AI 全貌
@@ -2629,7 +2632,7 @@ function ProviderRow({
           : provider.protocol === 'codex'
             ? 'rgba(16,163,127,0.12)'
             : provider.protocol === 'grok'
-              ? 'rgba(26,26,26,0.1)'
+              ? 'var(--surface-3)'
               : 'var(--surface-2)',
     color:
       provider.protocol === 'anthropic'
@@ -2639,7 +2642,7 @@ function ProviderRow({
           : provider.protocol === 'codex'
             ? '#10a37f'
             : provider.protocol === 'grok'
-              ? '#1a1a1a'
+              ? 'var(--ink)'
               : 'var(--ink-3)',
     flexShrink: 0
   }

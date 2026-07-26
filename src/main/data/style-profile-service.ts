@@ -3,6 +3,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import type { GenerateOptions, LlmService } from './llm-service'
 import { ProjectService } from './project-service'
+import { ProjectRepository } from './project-repository'
 import { StyleProfileRepository } from './style-profile-repository'
 import type {
   CreateStyleProfileInput,
@@ -26,15 +27,13 @@ export class StyleProfileService {
     this.repo = new StyleProfileRepository(filePath)
   }
 
-  async list(projectId?: string | null): Promise<StyleProfile[]> {
-    const repo = await this.getRepo(projectId)
-    const data = await repo.read()
+  async list(): Promise<StyleProfile[]> {
+    const data = await this.repo.read()
     return data.items
   }
 
-  async create(projectId: string, input: CreateStyleProfileInput): Promise<StyleProfile> {
-    const repo = await this.getRepo(projectId)
-    const data = await repo.read()
+  async create(input: CreateStyleProfileInput): Promise<StyleProfile> {
+    const data = await this.repo.read()
     const now = new Date().toISOString()
     const profile: StyleProfile = {
       id: randomUUID(),
@@ -58,17 +57,15 @@ export class StyleProfileService {
       updatedAt: now
     }
     data.items.push(profile)
-    await repo.write(data)
+    await this.repo.write(data)
     return profile
   }
 
   async update(
-    projectId: string,
     styleProfileId: string,
     patch: UpdateStyleProfileInput
   ): Promise<StyleProfile> {
-    const repo = await this.getRepo(projectId)
-    const data = await repo.read()
+    const data = await this.repo.read()
     const index = data.items.findIndex((item) => item.id === styleProfileId)
     if (index < 0) throw new Error(`STYLE_PROFILE_NOT_FOUND: ${styleProfileId}`)
     const current = data.items[index]
@@ -132,32 +129,50 @@ export class StyleProfileService {
       updatedAt: new Date().toISOString()
     }
     data.items[index] = next
-    await repo.write(data)
+    await this.repo.write(data)
     return next
   }
 
-  async delete(projectId: string | null | undefined, styleProfileId: string): Promise<void> {
-    const repo = await this.getRepo(projectId)
-    const data = await repo.read()
+  async delete(styleProfileId: string): Promise<void> {
+    const data = await this.repo.read()
     const nextItems = data.items.filter((item) => item.id !== styleProfileId)
     if (nextItems.length === data.items.length) {
       throw new Error(`STYLE_PROFILE_NOT_FOUND: ${styleProfileId}`)
     }
     data.items = nextItems
-    await repo.write(data)
+    await this.repo.write(data)
+    await this.clearDanglingDefaults(styleProfileId)
+  }
 
-    if (projectId) {
-      const project = await this.projectService.getProjectData(projectId)
-      if (project.defaultStyleProfileId === styleProfileId) {
-        await this.projectService.updateProjectData(projectId, {
-          defaultStyleProfileId: undefined
-        })
+  /**
+   * 文风库是全局共享的，任何项目都可能把刚删除的文风设为默认，
+   * 因此删除后要扫描全部项目清理悬空引用（否则该项目会静默按"无文风"续写）。
+   *
+   * 筛选阶段只读 project.json（defaultStyleProfileId 的唯一来源），不走 getProjectData——
+   * 后者还会读取并解析整份 大纲.md，长篇动辄几百 KB，对这里纯属浪费。各项目互不共享文件，
+   * 故并发读；命中后才付出完整读改写的代价，通常只有 0~1 个项目命中。
+   * 单个项目读写失败不阻断其余清理——文风本身已经删除成功。
+   */
+  private async clearDanglingDefaults(styleProfileId: string): Promise<void> {
+    const projects = await this.projectService.listProjects().catch(() => [])
+    const affected = await Promise.all(
+      projects.map(async ({ id, path }) => {
+        const persisted = await new ProjectRepository(path).read().catch(() => null)
+        return persisted?.defaultStyleProfileId === styleProfileId ? id : null
+      })
+    )
+    for (const id of affected) {
+      if (!id) continue
+      try {
+        await this.projectService.updateProjectData(id, { defaultStyleProfileId: undefined })
+      } catch {
+        // 项目损坏或已被移除：跳过，不影响其他项目
       }
     }
   }
 
   async extract(
-    projectId: string | null | undefined,
+    projectId: string | undefined,
     sampleText: string,
     name?: string,
     opts: GenerateOptions = {}
@@ -169,24 +184,15 @@ export class StyleProfileService {
     const prompt = buildStyleExtractPrompt(projectName, genre, normalizedSample, name)
     const raw = await this.llm.generateStream(prompt, {
       ...opts,
-      meta: { feature: 'styleExtract', projectId: projectId ?? undefined }
+      meta: { feature: 'styleExtract', projectId }
     })
     return parseStyleAnalysisResult(raw)
   }
 
-  async getById(projectId: string, styleProfileId?: string | null): Promise<StyleProfile | null> {
+  async getById(styleProfileId?: string | null): Promise<StyleProfile | null> {
     if (!styleProfileId) return null
-    const items = await this.list(projectId)
+    const items = await this.list()
     return items.find((item) => item.id === styleProfileId) ?? null
-  }
-
-  /**
-   * 获取文风仓库。当前文风为全局共享（所有项目共用同一 styles.json），
-   * projectId 仅用于 delete/extract 的项目元数据联动（如清除默认文风引用），不影响仓库选择。
-   * 若未来需要按项目隔离文风，可在此处按 projectId 返回不同的 repository。
-   */
-  private async getRepo(_projectId?: string | null): Promise<StyleProfileRepository> {
-    return this.repo
   }
 }
 

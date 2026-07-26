@@ -6,10 +6,10 @@ import type {
   BatchProgress,
   ChapterFlowResult,
   ProjectData,
-  StyleProfile,
   TeardownEntry
 } from '../../shared/types'
 import { dedupeForbiddenViolations } from './audit-dedupe'
+import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 
 interface Props {
   projectId: string
@@ -103,6 +103,7 @@ export default function ChapterListPage({
       if (e.kind === 'characters') refreshCharacters()
     })
     return off
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 系函数每次渲染都是新引用
   }, [projectId])
 
   const charName = (id: string) => characters.find((c) => c.id === id)?.name ?? '?'
@@ -423,8 +424,7 @@ function BatchWriteDialog({
   const [lastResult, setLastResult] = useState<ChapterFlowResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [streamingText, setStreamingText] = useState('')
-  const [projectData, setProjectData] = useState<ProjectData | null>(null)
-  const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
+  const { projectData, styleProfiles } = useProjectStyleData(projectId)
   const [styleProfileId, setStyleProfileId] = useState<string | null>(null)
 
   const status = progress?.status ?? 'pending'
@@ -443,8 +443,6 @@ function BatchWriteDialog({
   const isPaused = status === 'paused'
 
   useEffect(() => {
-    void window.api.getProject(projectId).then(setProjectData)
-    void window.api.listStyleProfiles(projectId).then(setStyleProfiles)
     setStyleProfileId(null)
   }, [projectId])
 

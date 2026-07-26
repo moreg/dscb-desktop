@@ -2,7 +2,9 @@ import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 
 export function safeHandle(
   channel: string,
-  // IPC boundary: argument types are provided by each handler
+  // IPC 边界：参数类型由各 handler 自行声明。any[] 是刻意的——unknown[] 会因逆变
+  // 拒绝所有带具体参数类型的 handler。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler: (event: IpcMainInvokeEvent, ...args: any[]) => unknown
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
@@ -12,8 +14,9 @@ export function safeHandle(
       // 仅记录 message + name，避免错误对象中可能包含的敏感字段（路径/token 片段等）泄漏到主进程日志
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
       console.error(`[ipc:${channel}]`, message)
-      // 抛出脱敏后的错误，避免原始 err.stack（含主进程绝对路径）经 IPC 序列化回传渲染进程
-      throw new Error(message)
+      // 抛出脱敏后的错误，避免原始 err.stack（含主进程绝对路径）经 IPC 序列化回传渲染进程。
+      // cause 仅存在于主进程侧（Electron invoke 拒绝只序列化 message），不会随 IPC 泄漏。
+      throw new Error(message, { cause: err })
     }
   })
 }

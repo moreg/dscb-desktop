@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs'
 import { createHash } from 'crypto'
 import { join } from 'path'
-import { readText, parseDoc, parseBoldFields, type FieldValue } from '../skill-format/md-parser'
+import { parseDoc, parseBoldFields, type FieldValue } from '../skill-format/md-parser'
 
 /**
  * 用 SHA1 前 12 个十六进制字符生成确定性 id，避免 31 倍多项式哈希在中文短名下的碰撞。

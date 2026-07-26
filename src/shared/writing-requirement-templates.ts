@@ -76,7 +76,7 @@ export function normalizeWritingRequirementLines(text?: string | null): string[]
   const seen = new Set<string>()
   if (!text) return []
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim().replace(/^[\-\*\d\.\)\s、]+/, '').trim()
+    const line = raw.trim().replace(/^[-*\d.)\s、]+/, '').trim()
     if (!line || seen.has(line)) continue
     seen.add(line)
     out.push(line)

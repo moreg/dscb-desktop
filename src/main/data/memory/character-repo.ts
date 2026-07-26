@@ -34,7 +34,7 @@ export class CharacterRepo {
 
     // Fallback：设定/角色/*.md（仅补充未在主源出现的人物）
     const rolesDir = join(this.projectDir, '设定', '角色')
-    let files: string[] = []
+    let files: string[]
     try {
       files = await fs.readdir(rolesDir)
     } catch {

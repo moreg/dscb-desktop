@@ -16,7 +16,14 @@ const PAD_B = 76
 const PLOT_W = VB_W - PAD_L - PAD_R
 const PLOT_H = VB_H - PAD_T - PAD_B
 
-const CLIMAX_COLORS = ['#95a5a6', '#3498db', '#f39c12', '#e74c3c', '#8e44ad', '#c0392b']
+const CLIMAX_COLORS = [
+  'var(--ink-4)',
+  'var(--inkstone)',
+  'var(--warning)',
+  'var(--accent)',
+  'var(--vermilion-2)',
+  'var(--vermilion)'
+]
 const CLIMAX_LABELS = ['无爽点', '小打脸', '中打脸', '大高潮', '卷中决战', '卷终决战']
 
 function climaxIdx(c: number): number {
@@ -168,7 +175,7 @@ export default function RhythmChart({ data, volumes, onSelectChapter }: Props) {
                 key={i}
                 d={d}
                 fill="none"
-                stroke={seg.actualized ? '#2c3e50' : '#95a5a6'}
+                stroke={seg.actualized ? 'var(--ink)' : 'var(--ink-4)'}
                 strokeWidth={seg.actualized ? 2 : 1.5}
                 strokeLinejoin="round"
                 strokeLinecap="round"
@@ -188,7 +195,7 @@ export default function RhythmChart({ data, volumes, onSelectChapter }: Props) {
                 cx={xOf(e.chapter)}
                 cy={yOf(e.emotion)}
                 r={e.climax >= 3 ? 4 : 3}
-                fill={filled ? color : '#fff'}
+                fill={filled ? color : 'var(--surface)'}
                 stroke={color}
                 strokeWidth={1.5}
                 style={{ cursor: 'pointer' }}

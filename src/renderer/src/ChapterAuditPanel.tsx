@@ -1,12 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AuditReport, AuditViolation, ChapterReviewReport, WriteAuditMode } from '../../shared/types'
 import { violationKey, pruneHumanizeMap } from '../../main/data/chapter-audit'
 import {
   addDismissedKey,
   auditIgnoredStorageKey,
   clearDismissedKeys,
-  loadDismissedKeys,
-  removeDismissedKey
+  loadDismissedKeys
 } from '../../shared/dismissed-keys'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { isReviewKey } from '../../shared/review-suggestions'
@@ -343,17 +342,16 @@ export default function ChapterAuditPanel({
     setIgnoredKeys(addDismissedKey(auditIgnoreStoreKey, key))
   }
 
-  const handleRestoreViolation = (key: string) => {
-    setIgnoredKeys(removeDismissedKey(auditIgnoreStoreKey, key))
-  }
-
-  const isIgnored = (v: AuditViolation) => ignoredKeys.has(violationKey(v))
+  const isIgnored = useCallback(
+    (v: AuditViolation) => ignoredKeys.has(violationKey(v)),
+    [ignoredKeys]
+  )
 
   // 合并算法审稿（report.violations）+ LLM 深度审稿（deepReviewFindings）
   // 过滤掉已忽略的违例
   const grouped = useMemo(
     () => groupViolations([...(report?.violations ?? []), ...deepReviewFindings].filter(v => !isIgnored(v))),
-    [report, deepReviewFindings, ignoredKeys]
+    [report, deepReviewFindings, isIgnored]
   )
 
   // offset → 行号映射：一次遍历 draft 预计算，避免每条违例都 substring().split('\n')（O(n²)）

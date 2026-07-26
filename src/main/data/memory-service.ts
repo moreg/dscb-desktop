@@ -15,8 +15,6 @@ import type {
   UpdateRelationshipInput
 } from '../../shared/types'
 
-const NOT_IMPLEMENTED = '该操作需 Phase 3 支持，当前为只读阶段。'
-
 /**
  * 记忆服务（v4）：
  * - 角色 → CharacterRepo（记忆/人物/*.md，fallback 设定/角色/*.md）

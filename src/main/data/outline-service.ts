@@ -243,7 +243,7 @@ export class OutlineService {
     const folder = join(dir, '细纲')
     await fs.mkdir(folder, { recursive: true })
     const file = join(folder, `第${padded}卷.md`)
-    let text = ''
+    let text: string
     try {
       text = await fs.readFile(file, 'utf-8')
     } catch (err) {

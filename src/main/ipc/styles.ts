@@ -50,60 +50,43 @@ export function registerStyleIpc(
   styleService: StyleProfileService,
   projectService: ProjectService
 ): void {
-  safeHandle('styles:list', async (_e, projectId: string) => {
-    const validated = validateInput(projectIdSchema, projectId)
-    return styleService.list(validated)
+  // 文风库是全局资产（同拆文库），增删改查一律不按项目隔离，故这四个通道不接受 projectId。
+  safeHandle('styles:list', async () => styleService.list())
+
+  safeHandle('styles:create', async (_e, payload: { input: unknown }) => {
+    const validated = validateInput(z.object({ input: createStyleProfileSchema }), payload)
+    return styleService.create(validated.input)
   })
 
   safeHandle(
-    'styles:create',
-    async (_e, payload: { projectId: string; input: unknown }) => {
-      const validated = validateInput(
-        z.object({
-          projectId: projectIdSchema,
-          input: createStyleProfileSchema
-        }),
-        payload
-      )
-      return styleService.create(validated.projectId, validated.input)
-    }
-  )
-
-  safeHandle(
     'styles:update',
-    async (_e, payload: { projectId: string; styleProfileId: string; patch: unknown }) => {
+    async (_e, payload: { styleProfileId: string; patch: unknown }) => {
       const validated = validateInput(
         z.object({
-          projectId: projectIdSchema,
           styleProfileId: styleProfileIdSchema,
           patch: updateStyleProfileSchema
         }),
         payload
       )
-      return styleService.update(validated.projectId, validated.styleProfileId, validated.patch)
+      return styleService.update(validated.styleProfileId, validated.patch)
     }
   )
 
-  safeHandle(
-    'styles:delete',
-    async (_e, payload: { projectId: string; styleProfileId: string }) => {
-      const validated = validateInput(
-        z.object({
-          projectId: projectIdSchema,
-          styleProfileId: styleProfileIdSchema
-        }),
-        payload
-      )
-      return styleService.delete(validated.projectId, validated.styleProfileId)
-    }
-  )
+  safeHandle('styles:delete', async (_e, payload: { styleProfileId: string }) => {
+    const validated = validateInput(
+      z.object({ styleProfileId: styleProfileIdSchema }),
+      payload
+    )
+    return styleService.delete(validated.styleProfileId)
+  })
 
+  // 唯一真正用到项目的通道：取项目名/题材写进提示词，并把用量记到该项目名下。
   safeHandle(
     'styles:extract',
-    async (_e, payload: { projectId: string; sampleText: string; name?: string }) => {
+    async (_e, payload: { projectId?: string; sampleText: string; name?: string }) => {
       const validated = validateInput(
         z.object({
-          projectId: projectIdSchema,
+          projectId: projectIdSchema.optional(),
           sampleText: styleSampleSchema,
           name: styleNameSchema.optional()
         }),
@@ -157,7 +140,7 @@ export function registerStyleIpc(
         return out
       } catch (err) {
         console.error('[selectTextFile] Failed to read file:', err)
-        throw new Error('文件读取失败，请确保文件是 UTF-8 编码的文本文件')
+        throw new Error('文件读取失败，请确保文件是 UTF-8 编码的文本文件', { cause: err })
       }
     }
   )

@@ -9,7 +9,6 @@ import type {
   PrevEndingState,
   SelfCheckCategory,
   SelfCheckItemResult,
-  SelfCheckVerdict,
   SettingsEvolutionEntry
 } from '../../shared/types'
 import type { SettingsContext } from './skill-format/settings-md-repo'
@@ -422,7 +421,7 @@ function uniqueStrings(arr: string[]): string[] {
 export function extractKeywords(text: string): string[] {
   const raw = text
     .replace(/[「」『』""'']/g, '')
-    .replace(/[，。！？、；：,.!?;:\-—…（）()【】\[\]\s]/g, ' ')
+    .replace(/[，。！？、；：,.!?;:\-—…（）()【】[\]\s]/g, ' ')
     .trim()
   if (!raw) return []
 

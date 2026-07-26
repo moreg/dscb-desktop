@@ -27,8 +27,6 @@ export interface ParsedDoc {
 }
 
 const H1 = /^# (.+?)\s*$/
-const H2 = /^## (.+?)\s*$/
-const H3 = /^### (.+?)\s*$/
 
 /** 解析整篇文档：拆出版本头 + H1 标题 + 所有 H2 节 */
 export function parseDoc(text: string): ParsedDoc {

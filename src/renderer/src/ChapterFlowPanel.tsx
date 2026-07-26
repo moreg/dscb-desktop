@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
   AuditReport,
@@ -35,13 +35,13 @@ import {
   loadDismissedKeys,
   outlineAppliedStorageKey,
   outlineDiffStableKey,
-  outlineIgnoredStorageKey,
-  saveDismissedKeys
+  outlineIgnoredStorageKey
 } from '../../shared/dismissed-keys'
 import type { RewriteEntry } from '../../main/data/rewrite-history'
 import type { PostWriteSyncPhase } from '../../shared/post-write-sync'
 import { formatSyncErrorHint } from '../../shared/post-write-sync'
 import ChapterAuditPanel from './ChapterAuditPanel'
+import { useStreamAborter } from './hooks/useStreamAborter'
 import ChapterSelfCheckPanel from './ChapterSelfCheckPanel'
 
 /** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
@@ -163,7 +163,6 @@ export default function ChapterFlowPanel(props: Props) {
     auditReport,
     onClose,
     onApplyRewrite,
-    onApplyRewriteBatch,
     onJumpToOffset,
     onRunAudit,
     onUndoRewrite,
@@ -192,6 +191,7 @@ export default function ChapterFlowPanel(props: Props) {
     undoAutoSyncLoading
   } = props
 
+  const trackStream = useStreamAborter()
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
   const [outlineError, setOutlineError] = useState('')
@@ -339,7 +339,7 @@ export default function ChapterFlowPanel(props: Props) {
     setOutlineApplyError('')
     let buffer = ''
     try {
-      const r = await window.api.checkOutlineStream(
+      const r = await trackStream(window.api.checkOutlineStream(
         projectId,
         chapterNumber,
         '',
@@ -348,7 +348,7 @@ export default function ChapterFlowPanel(props: Props) {
           if (token) buffer += token
           if (done) setOutlineChecking(false)
         }
-      )
+      ))
       if (!r.ok) {
         setOutlineError(friendlyFlowError(r.error ?? '对照失败'))
         setOutlineChecking(false)
@@ -380,10 +380,13 @@ export default function ChapterFlowPanel(props: Props) {
     }
   }
 
-  const isOutlineResolved = (d: OutlineDiffItem): boolean => {
-    const k = outlineDiffStableKey(d)
-    return outlineIgnoredKeys.has(k) || outlineAppliedKeys.has(k)
-  }
+  const isOutlineResolved = useCallback(
+    (d: OutlineDiffItem): boolean => {
+      const k = outlineDiffStableKey(d)
+      return outlineIgnoredKeys.has(k) || outlineAppliedKeys.has(k)
+    },
+    [outlineIgnoredKeys, outlineAppliedKeys]
+  )
 
   const loadCurrentOutline = async (): Promise<DetailedOutlineItem | null> => {
     const items = await window.api.listDetailedOutline(projectId)
@@ -498,14 +501,14 @@ export default function ChapterFlowPanel(props: Props) {
     setNewForeshadowingResult(null)
     let buffer = ''
     try {
-      const r = await window.api.extractMemoryStream(
+      const r = await trackStream(window.api.extractMemoryStream(
         projectId,
         chapterNumber,
         (token, done) => {
           if (token) buffer += token
           if (done) setMemoryExtracting(false)
         }
-      )
+      ))
       if (!r.ok) {
         setMemoryError(r.error ?? '提取失败')
         setMemoryExtracting(false)
@@ -651,10 +654,12 @@ export default function ChapterFlowPanel(props: Props) {
     setRhythmResult(null)
     let buffer = ''
     try {
-      const r = await window.api.evaluateRhythmStream(projectId, chapterNumber, (token, done) => {
-        if (token) buffer += token
-        if (done) setRhythmEvaluating(false)
-      })
+      const r = await trackStream(
+        window.api.evaluateRhythmStream(projectId, chapterNumber, (token, done) => {
+          if (token) buffer += token
+          if (done) setRhythmEvaluating(false)
+        })
+      )
       if (!r.ok) {
         setRhythmError(r.error ?? '评估失败')
         setRhythmEvaluating(false)
@@ -697,10 +702,12 @@ export default function ChapterFlowPanel(props: Props) {
     setFigureSaved('')
     let buffer = ''
     try {
-      const r = await window.api.generateFigureStream(projectId, chapterNumber, (token, done) => {
-        if (token) buffer += token
-        if (done) setFigureGenerating(false)
-      })
+      const r = await trackStream(
+        window.api.generateFigureStream(projectId, chapterNumber, (token, done) => {
+          if (token) buffer += token
+          if (done) setFigureGenerating(false)
+        })
+      )
       if (!r.ok) {
         setFigureError(r.error ?? '生成失败')
         setFigureGenerating(false)
@@ -746,7 +753,7 @@ export default function ChapterFlowPanel(props: Props) {
       if (isOutlineResolved(d)) s.add(i)
     })
     return s
-  }, [outlineDiff, outlineIgnoredKeys, outlineAppliedKeys])
+  }, [outlineDiff, isOutlineResolved])
 
   const outlineEffectivePassed = useMemo(() => {
     if (!outlineDiff) return true
@@ -761,7 +768,7 @@ export default function ChapterFlowPanel(props: Props) {
         isRecommendedOutlineUpdate(d) &&
         !needsConfirmOutlineUpdate(d)
     ).length
-  }, [outlineDiff, outlineIgnoredKeys, outlineAppliedKeys])
+  }, [outlineDiff, isOutlineResolved])
 
   const pendingOutlineCount = useMemo(() => {
     if (!outlineDiff) return 0

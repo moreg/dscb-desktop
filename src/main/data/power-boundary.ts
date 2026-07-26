@@ -19,7 +19,7 @@ export function extractPowerBoundaryBullets(
   const bullets: string[] = []
   const seen = new Set<string>()
   const push = (raw: string) => {
-    let t = raw
+    const t = raw
       .replace(/^[-*•]\s*/, '')
       .replace(/\*\*/g, '')
       .replace(/\s+/g, ' ')

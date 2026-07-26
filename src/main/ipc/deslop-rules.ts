@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { IpcMainInvokeEvent } from 'electron'
 import { SettingsRepository } from '../data/settings-repository'
 import { LlmService } from '../data/llm-service'
+import { beginStream, endStream } from '../data/stream-abort-registry'
 import { safeHandle, safeSend } from './safe-handle'
 import { validateInput } from './validation'
 import type { DeslopRulesBundle } from '../../shared/types'
@@ -122,11 +123,18 @@ export function registerDeslopRulesIpc(
             done: false
           })
         }
-        const output = await llmService.generateStream(prompt, {
-          maxTokens: 8192,
-          meta: { feature: 'deslop:editRules' },
-          onToken: send
-        })
+        const signal = beginStream(validated.requestId)
+        let output: string
+        try {
+          output = await llmService.generateStream(prompt, {
+            maxTokens: 8192,
+            meta: { feature: 'deslop:editRules' },
+            onToken: send,
+            signal
+          })
+        } finally {
+          endStream(validated.requestId)
+        }
         safeSend(win, 'deslopRules:token', {
           requestId: validated.requestId,
           token: '',

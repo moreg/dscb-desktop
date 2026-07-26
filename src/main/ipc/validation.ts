@@ -60,7 +60,8 @@ export function validateInput<T>(schema: z.ZodSchema<T>, input: unknown): T {
       throw new Error(
         `IPC_INPUT_INVALID: ${err.issues
           .map((issue) => issue.path.join('.') + ': ' + issue.message)
-          .join(', ')}`
+          .join(', ')}`,
+        { cause: err }
       )
     }
     throw err

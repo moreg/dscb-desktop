@@ -61,6 +61,7 @@ export default function CharacterManagerPage({ projectId, onOpenChapter }: Props
     const onFocus = () => refreshChapters()
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 系函数每次渲染都是新引用
   }, [projectId])
 
   const startEdit = (c: Character) =>

@@ -282,7 +282,7 @@ export class LlmService {
    *   不传则保持原有行为：走 feature 路由 + activeId 解析（向后兼容全局测试按钮）。
    */
   async ping(providerId?: string): Promise<PingResult> {
-    let p: ProviderConfig | null = null
+    let p: ProviderConfig | null
     if (providerId) {
       const cfg = await this.secret.read()
       p = cfg.providers.find((x) => x.id === providerId) ?? null
@@ -439,8 +439,10 @@ export class LlmService {
       } catch (err) {
         if (isAbortError(err)) {
           // 用户取消 vs 超时：combined signal 时优先认用户 signal
-          if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
-          throw new Error(hasReceivedTokens ? 'LLM_OUTPUT_TRUNCATED' : 'LLM_TIMEOUT')
+          if (opts.signal?.aborted) throw new Error('LLM_ABORTED', { cause: err })
+          throw new Error(hasReceivedTokens ? 'LLM_OUTPUT_TRUNCATED' : 'LLM_TIMEOUT', {
+            cause: err
+          })
         }
         if (!hasReceivedTokens && isRetryableStreamError(err) && attempt < MAX_RETRIES) {
           console.warn(`[llm-service] Stream error (${(err as Error).message}), retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
@@ -448,7 +450,7 @@ export class LlmService {
           continue
         }
         if (hasReceivedTokens && isRetryableStreamError(err)) {
-          throw new Error('LLM_OUTPUT_TRUNCATED')
+          throw new Error('LLM_OUTPUT_TRUNCATED', { cause: err })
         }
         throw err
       }

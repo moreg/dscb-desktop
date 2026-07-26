@@ -16,6 +16,18 @@ describe('StyleProfileRepository', () => {
     await expect(repo.read()).resolves.toEqual({ schemaVersion: 1, items: [] })
   })
 
+  it('does not leak mutations of one empty read into the next', async () => {
+    const repoA = new StyleProfileRepository(dir)
+    const first = await repoA.read()
+    // 模拟 StyleProfileService.create：直接就地 push 进读到的对象
+    first.items.push({ id: 'ghost' } as unknown as (typeof first.items)[number])
+
+    const otherDir = await mkdtemp(path.join(tmpdir(), 'aw-style-repo-b-'))
+    const repoB = new StyleProfileRepository(otherDir)
+    await expect(repoB.read()).resolves.toEqual({ schemaVersion: 1, items: [] })
+    await expect(repoA.read()).resolves.toEqual({ schemaVersion: 1, items: [] })
+  })
+
   it('writes and reads styles.json', async () => {
     const repo = new StyleProfileRepository(dir)
     const payload = {

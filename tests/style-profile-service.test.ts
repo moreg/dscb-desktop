@@ -7,6 +7,7 @@ import { ProjectService } from '../src/main/data/project-service'
 import { StyleProfileService, parseStyleAnalysisResult } from '../src/main/data/style-profile-service'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
+import { makeStyleInput } from './helpers/style-fixtures'
 
 const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
@@ -74,52 +75,44 @@ describe('StyleProfileService', () => {
     await expect(service.extract(projectId, '太短了')).rejects.toThrow(/STYLE_SAMPLE_TOO_SHORT/)
   })
 
-  it('deleting the default style clears project defaultStyleProfileId', async () => {
+  it('deleting a style clears defaults across every project that referenced it', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    const created = await service.create(projectId, {
-      name: '默认风格',
-      sourceType: 'sampleText',
-      sampleText: 'a'.repeat(500),
-      identifiedStyle: '冷峻',
-      sentencePatterns: ['短句'],
-      vocabularyPreferences: ['克制'],
-      punctuationAndRhythm: ['停顿多'],
-      narrativePerspective: ['第三人称'],
-      tone: ['冷静'],
-      narrativeTemplates: ['冲突先行'],
-      styleConstraints: ['用短句推进'],
-      characterConstraints: ['保持冷静'],
-      plotConstraints: ['避免金手指'],
-      stylePrompt: '保持冷峻。'
-    })
+    const other = await projectService.create({ name: '另一本书', genre: '玄幻' })
+    const created = await service.create(makeStyleInput('共享风格'))
     await projectService.updateProjectData(projectId, { defaultStyleProfileId: created.id })
+    await projectService.updateProjectData(other.id, { defaultStyleProfileId: created.id })
 
-    await service.delete(projectId, created.id)
+    // 文风库是全局的：删除一张卡要清掉所有项目的悬空默认引用，而不只是"当前"项目
+    await service.delete(created.id)
 
-    const project = await projectService.getProjectData(projectId)
-    expect(project.defaultStyleProfileId).toBeUndefined()
+    expect((await projectService.getProjectData(projectId)).defaultStyleProfileId).toBeUndefined()
+    expect((await projectService.getProjectData(other.id)).defaultStyleProfileId).toBeUndefined()
+  })
+
+  it('deleting a style leaves unrelated project defaults untouched', async () => {
+    const service = new StyleProfileService(projectService, mockLlm('{}'))
+    const keep = await service.create(makeStyleInput('保留'))
+    const drop = await service.create(makeStyleInput('删除'))
+    await projectService.updateProjectData(projectId, { defaultStyleProfileId: keep.id })
+
+    await service.delete(drop.id)
+
+    expect((await projectService.getProjectData(projectId)).defaultStyleProfileId).toBe(keep.id)
   })
 
   it('update patches single field and preserves others', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    const created = await service.create(projectId, {
-      name: '原名',
-      sourceType: 'sampleText',
-      sampleText: 'a'.repeat(500),
-      identifiedStyle: '冷峻',
-      sentencePatterns: ['短句'],
-      vocabularyPreferences: ['克制'],
-      punctuationAndRhythm: ['停顿多'],
-      narrativePerspective: ['第三人称'],
-      tone: ['冷静'],
-      narrativeTemplates: ['冲突先行'],
-      styleConstraints: ['用短句推进'],
-      characterConstraints: ['保持冷静'],
-      plotConstraints: ['避免金手指'],
-      stylePrompt: '保持冷峻。'
-    })
+    const created = await service.create(
+      makeStyleInput('原名', {
+        identifiedStyle: '冷峻',
+        styleConstraints: ['用短句推进'],
+        characterConstraints: ['保持冷静'],
+        plotConstraints: ['避免金手指'],
+        stylePrompt: '保持冷峻。'
+      })
+    )
 
-    const updated = await service.update(projectId, created.id, { name: '新名' })
+    const updated = await service.update(created.id, { name: '新名' })
     expect(updated.name).toBe('新名')
     expect(updated.identifiedStyle).toBe('冷峻')
     expect(updated.styleConstraints).toEqual(['用短句推进'])
@@ -131,24 +124,16 @@ describe('StyleProfileService', () => {
 
   it('update can replace three constraint buckets atomically', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    const created = await service.create(projectId, {
-      name: '测试',
-      sourceType: 'sampleText',
-      sampleText: 'a'.repeat(500),
-      identifiedStyle: '冷峻',
-      sentencePatterns: ['短句'],
-      vocabularyPreferences: ['克制'],
-      punctuationAndRhythm: ['停顿多'],
-      narrativePerspective: ['第三人称'],
-      tone: ['冷静'],
-      narrativeTemplates: ['冲突先行'],
-      styleConstraints: ['用短句推进'],
-      characterConstraints: ['保持冷静'],
-      plotConstraints: ['避免金手指'],
-      stylePrompt: '保持冷峻。'
-    })
+    const created = await service.create(
+      makeStyleInput('测试', {
+        sentencePatterns: ['短句'],
+        styleConstraints: ['用短句推进'],
+        characterConstraints: ['保持冷静'],
+        plotConstraints: ['避免金手指']
+      })
+    )
 
-    const updated = await service.update(projectId, created.id, {
+    const updated = await service.update(created.id, {
       styleConstraints: ['保持现实质感', '对话口语化', '节奏紧张-缓和交替'],
       characterConstraints: ['主角保持冷静', '避免冗长内心独白'],
       plotConstraints: ['避免金手指', '穿插过去闪回'],
@@ -167,24 +152,9 @@ describe('StyleProfileService', () => {
 
   it('update normalizes whitespace and filters empty strings in arrays', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    const created = await service.create(projectId, {
-      name: '测试',
-      sourceType: 'sampleText',
-      sampleText: 'a'.repeat(500),
-      identifiedStyle: '冷峻',
-      sentencePatterns: ['短句'],
-      vocabularyPreferences: ['克制'],
-      punctuationAndRhythm: ['停顿多'],
-      narrativePerspective: ['第三人称'],
-      tone: ['冷静'],
-      narrativeTemplates: ['冲突先行'],
-      styleConstraints: [],
-      characterConstraints: [],
-      plotConstraints: [],
-      stylePrompt: '保持冷峻。'
-    })
+    const created = await service.create(makeStyleInput('测试', { styleConstraints: [] }))
 
-    const updated = await service.update(projectId, created.id, {
+    const updated = await service.update(created.id, {
       styleConstraints: ['  保留 ', '', '  ', ' 也保留 '],
       name: '  前后空格  '
     })
@@ -194,32 +164,15 @@ describe('StyleProfileService', () => {
 
   it('update throws STYLE_UPDATE_EMPTY_PATCH when no field provided', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    const created = await service.create(projectId, {
-      name: '测试',
-      sourceType: 'sampleText',
-      sampleText: 'a'.repeat(500),
-      identifiedStyle: '冷峻',
-      sentencePatterns: [],
-      vocabularyPreferences: [],
-      punctuationAndRhythm: [],
-      narrativePerspective: [],
-      tone: [],
-      narrativeTemplates: [],
-      styleConstraints: [],
-      characterConstraints: [],
-      plotConstraints: [],
-      stylePrompt: '保持冷峻。'
-    })
-    await expect(service.update(projectId, created.id, {})).rejects.toThrow(
-      /STYLE_UPDATE_EMPTY_PATCH/
-    )
+    const created = await service.create(makeStyleInput('测试'))
+    await expect(service.update(created.id, {})).rejects.toThrow(/STYLE_UPDATE_EMPTY_PATCH/)
   })
 
   it('update throws STYLE_PROFILE_NOT_FOUND for unknown id', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
-    await expect(
-      service.update(projectId, 'non-existent', { name: 'x' })
-    ).rejects.toThrow(/STYLE_PROFILE_NOT_FOUND/)
+    await expect(service.update('non-existent', { name: 'x' })).rejects.toThrow(
+      /STYLE_PROFILE_NOT_FOUND/
+    )
   })
 })
 

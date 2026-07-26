@@ -16,8 +16,6 @@ import type {
   Character,
   Foreshadowing,
   MemoryEntity,
-  ProjectData,
-  StyleProfile,
   WriteStyleSelection
 } from '../../shared/types'
 import {
@@ -43,7 +41,6 @@ import {
   getLocalStorage
 } from '../../main/data/rewrite-persistence'
 import {
-  formatTokens,
   formatCost,
   formatRelativeTime,
   evaluateCostAlert,
@@ -51,12 +48,14 @@ import {
   DEFAULT_COST_THRESHOLDS,
   type CostAlertLevel
 } from '../../main/data/usage-summary'
-import type { UsageSummary, CostAlertConfig, UsageRecord } from '../../shared/types'
+import type { UsageSummary, CostAlertConfig } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type { DetailedOutlineItem, DeslopScanReport, DeslopResult } from '../../shared/types'
 import { findFirstDiffWindow, listChangeHunks, summarizeTextDiff } from '../../shared/text-diff'
 import { buildForeshadowingReminders, type ForeshadowingReminderItem } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
+import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
+import { useStreamAborter } from './hooks/useStreamAborter'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { parseForeshadowReceipt } from '../../shared/parsers'
@@ -410,8 +409,8 @@ export default function ChapterEditor({
     [chapterOutline?.writingRequirementTemplateId, writingRequirementTemplates]
   )
 
-  const [projectData, setProjectData] = useState<ProjectData | null>(null)
-  const [styleProfiles, setStyleProfiles] = useState<StyleProfile[]>([])
+  const { projectData, styleProfiles } = useProjectStyleData(projectId)
+  const trackStream = useStreamAborter()
   const [styleSelection, setStyleSelection] = useState<WriteStyleSelection>({
     mode: 'projectDefault',
     styleProfileId: null
@@ -440,8 +439,6 @@ export default function ChapterEditor({
   const [findResults, setFindResults] = useState<number[]>([])
   const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
-  const [reviewing, setReviewing] = useState(false)
-  const [reviewText, setReviewText] = useState('')
   const [showContinueDialog, setShowContinueDialog] = useState(false)
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
@@ -548,9 +545,6 @@ export default function ChapterEditor({
    */
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [toolbarMoreOpen, setToolbarMoreOpen] = useState(false)
-  // P16-C：点击趋势图某一天 → 显示当天 LLM 调用详情
-  const [dayDetail, setDayDetail] = useState<{ date: string; records: UsageRecord[] } | null>(null)
-  const [dayDetailLoading, setDayDetailLoading] = useState(false)
   // P12-C：用量预警（默认阈值；可后续接设置项做用户自定义）
   // P13-C + P14-C：从 settings 加载 costAlert config（用户在 SettingsPage 设置）
   const [costAlertConfig, setCostAlertConfig] = useState<CostAlertConfig>({
@@ -580,28 +574,12 @@ export default function ChapterEditor({
       }
     })
   }
-  /**
-   * P16-C：点击趋势图某一天 → 拉取当天所有 LLM 调用记录。
-   * 复用现有 popover 展示（节省模态框），用户可点 ✕ 关闭。
-   */
-  const loadDayDetail = async (date: string) => {
-    setDayDetailLoading(true)
-    setDayDetail({ date, records: [] }) // 占位（loading 状态）
-    try {
-      const records = await window.api.getUsageDayDetail(date)
-      setDayDetail({ date, records })
-    } catch {
-      setDayDetail({ date, records: [] })
-    } finally {
-      setDayDetailLoading(false)
-    }
-  }
 
   /**
    * P6-C：撤销失败时显示的 toast 提示。
    * 简单实现：3 秒后自动消失。type 区分 warning（黄色）/ error（朱红）。
    */
-  const [undoToast, setUndoToast] = useState<{ message: string; type: 'warning' | 'error' | 'info' } | null>(null)
+  const [undoToast, setUndoToast] = useState<{ message: string; type: 'warning' | 'error' | 'info' | 'success' } | null>(null)
   useEffect(() => {
     if (!undoToast) return
     const id = setTimeout(() => setUndoToast(null), 3000)
@@ -666,7 +644,6 @@ export default function ChapterEditor({
    */
   const undoRewriteByKey = async (violationKey: string) => {
     let popped: RewriteEntry | null = null
-    let poppedIdx = -1
     setRewriteHistory((s) => {
       const idx = findEntryByViolationKey(s, violationKey)
       if (idx < 0) {
@@ -674,7 +651,6 @@ export default function ChapterEditor({
         return s
       }
       popped = s[idx]
-      poppedIdx = idx
       return [...s.slice(0, idx), ...s.slice(idx + 1)]
     })
     if (!popped) {
@@ -750,7 +726,6 @@ export default function ChapterEditor({
     // 给 setDraft 一点时间生效再重跑（react 18 batching）
     setTimeout(() => void reAudit(), 0)
   }
-  const reviewRef = useRef(0)
   const castRef = useRef(0)
   const genRef = useRef(0)
   const askRef = useRef(0)
@@ -791,10 +766,6 @@ export default function ChapterEditor({
   const refreshMemory = () => {
     void window.api.listForeshadowings(projectId).then(setForeshadowings)
     void window.api.listMemoryEntities(projectId, 'location').then(setLocations)
-  }
-  const refreshProjectStyleData = () => {
-    void window.api.getProject(projectId).then(setProjectData)
-    void window.api.listStyleProfiles(projectId).then(setStyleProfiles)
   }
   const refreshWritingRequirementTemplates = () => {
     if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
@@ -868,7 +839,8 @@ export default function ChapterEditor({
     refreshCharacters()
     refreshMemory()
     refreshChapterOutline()
-    refreshProjectStyleData()
+    // 项目元数据与全局文风列表只随 projectId 变化，由 useProjectStyleData 自己管，
+    // 不必挂在切章上——那会让每次切章都重读并解析整份 大纲.md。
     refreshWritingRequirementTemplates()
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
     setAutoSyncSeed(null)
@@ -915,6 +887,7 @@ export default function ChapterEditor({
       syncHistoryRef.current = []
       setSyncHistoryDepth(0)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 切章重载 effect：刻意只随 projectId/chapterNumber 触发
   }, [projectId, chapterNumber])
 
   // 订阅外部文件变更：细纲/节奏图谱变 → 刷新本章 meta（标题/情绪/爽点等）。
@@ -1020,6 +993,7 @@ export default function ChapterEditor({
   // P10-A：加载用量统计（页面打开时 + 切章时刷新）
   useEffect(() => {
     refreshUsage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refreshUsage 每次渲染都是新引用
   }, [projectId])
 
   useEffect(() => {
@@ -1327,6 +1301,7 @@ export default function ChapterEditor({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // 闭包依赖 rewriteHistory.length + redoStack.length + reAudit/undoLastRewrite/redoLastRewrite；
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 函数引用每次渲染都变，依赖已用其读取的状态表达
   }, [dirty, draft, rewriteHistory.length, redoStack.length, saveAndClearDraft, saving])
 
   // P19-A：离开页面/切章前提醒未保存内容
@@ -1360,10 +1335,9 @@ export default function ChapterEditor({
 
   const save = async () => {
     // 保存前自动跑一次检查；strict 模式下若 error > 0 弹窗确认
-    let preAudit: AuditReport | null = null
     if (writeAuditMode === 'strict') {
       try {
-        preAudit = await window.api.auditChapter(projectId, draft)
+        const preAudit = await window.api.auditChapter(projectId, draft)
         setAutoAudit(preAudit)
         if (preAudit.counts.error > 0) {
           const proceed = window.confirm(
@@ -1380,8 +1354,7 @@ export default function ChapterEditor({
     } else {
       // soft 模式：保存前静默跑一次，刷新 audit 面板即可
       try {
-        preAudit = await window.api.auditChapter(projectId, draft)
-        setAutoAudit(preAudit)
+        setAutoAudit(await window.api.auditChapter(projectId, draft))
       } catch {
         // skip
       }
@@ -1475,7 +1448,6 @@ export default function ChapterEditor({
     preStreamDraftRef.current = initialDraft
     setFlowPanelOpen(false)
     setAutoAudit(null)
-    setReviewText('')
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
@@ -1778,7 +1750,6 @@ export default function ChapterEditor({
     userAbortedRef.current = false
     setFlowPanelOpen(false)
     setAutoAudit(null)
-    setReviewText('')
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
@@ -1929,7 +1900,7 @@ export default function ChapterEditor({
     const myAsk = ++askRef.current
     let assistantText = ''
     try {
-      const result = await window.api.answerChapterQuestionStream(
+      const result = await trackStream(window.api.answerChapterQuestionStream(
         projectId,
         chapterNumber,
         draft,
@@ -1951,7 +1922,7 @@ export default function ChapterEditor({
             refreshUsage()
           }
         }
-      )
+      ))
       if (askRef.current !== myAsk) return
       if (!result.ok) {
         setAsking(false)
@@ -2610,10 +2581,12 @@ export default function ChapterEditor({
     setDeslopLog('')
     setDeslopResult(null)
     try {
-      const result = await window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
-        if (token) setDeslopLog((l) => l + token)
-        if (done) setDeslopRunning(false)
-      })
+      const result = await trackStream(
+        window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
+          if (token) setDeslopLog((l) => l + token)
+          if (done) setDeslopRunning(false)
+        })
+      )
       setDeslopResult(result)
     } catch (err) {
       setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError((err as Error).message)}` })
@@ -2643,7 +2616,7 @@ export default function ChapterEditor({
     const myCast = ++castRef.current
     let buffer = ''
     try {
-      const result = await window.api.detectCastStream(
+      const result = await trackStream(window.api.detectCastStream(
         projectId,
         chapterNumber,
         (token, done) => {
@@ -2651,7 +2624,7 @@ export default function ChapterEditor({
           if (token) buffer += token
           if (done) setDetecting(false)
         }
-      )
+      ))
       if (castRef.current !== myCast) return
       if (!result.ok) {
         setDetecting(false)
@@ -2699,7 +2672,7 @@ export default function ChapterEditor({
     }
   }
 
-  const appearing = data?.meta.appearingCharacters ?? []
+  const appearing = useMemo(() => data?.meta.appearingCharacters ?? [], [data])
   const appearingSet = useMemo(() => new Set(appearing), [appearing])
 
   const toggleCast = async (id: string) => {
@@ -2737,7 +2710,8 @@ export default function ChapterEditor({
   // 合成清脆的声音通知（双音符 chime）
   const playPomoChime = () => {
     try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const ctx = new (window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
       const playNote = (freq: number, start: number, duration: number) => {
         const osc = ctx.createOscillator()
         const gain = ctx.createGain()
@@ -2787,6 +2761,7 @@ export default function ChapterEditor({
       })
     }, 1000)
     return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- triggerPomoNotification 每次渲染都是新引用，计时器只随 pomo 状态重建
   }, [pomoRunning, pomoMode, pomoFocus, pomoBreak])
 
   const pomoToggle = () => setPomoRunning((r) => !r)
@@ -4139,7 +4114,7 @@ export default function ChapterEditor({
                       key={i}
                       className={`hl ${seg.hl.kind}`}
                       title={`${seg.hl.label} · ${seg.text}`}
-                      onClick={(e) => onPreviewClick(seg.hl!.kind as any, seg.text, e)}
+                      onClick={(e) => onPreviewClick(seg.hl!.kind as 'char' | 'foreshadow' | 'location', seg.text, e)}
                     >
                       {seg.text}
                     </span>
@@ -4489,7 +4464,7 @@ export default function ChapterEditor({
                             <div style={{ marginLeft: 12 }}>
                               {items.slice(0, 20).map((f, i) => (
                                 <div key={i} className="diag-item" style={{ padding: '4px 0' }}>
-                                  <span style={{ color: f.severity === 'blocking' ? '#dc2626' : '#d97706', fontWeight: 600 }}>
+                                  <span style={{ color: f.severity === 'blocking' ? 'var(--danger)' : 'var(--warning)', fontWeight: 600 }}>
                                     {f.severity}
                                   </span>
                                   <span className="diag-msg" style={{ marginLeft: 8 }}>第{f.line}行 {f.excerpt}</span>
@@ -4545,14 +4520,14 @@ export default function ChapterEditor({
                   const isPhase = /Phase [0-9]/.test(line)
                   if (isPass) {
                     return (
-                      <span key={i} style={{ color: '#a6e3a1', fontWeight: 700 }}>
+                      <span key={i} style={{ color: 'var(--success)', fontWeight: 700 }}>
                         {line}{'\n'}
                       </span>
                     )
                   }
                   if (isPhase) {
                     return (
-                      <span key={i} style={{ color: '#89b4fa', fontWeight: 600 }}>
+                      <span key={i} style={{ color: 'var(--inkstone)', fontWeight: 600 }}>
                         {line}{'\n'}
                       </span>
                     )
@@ -4617,7 +4592,7 @@ export default function ChapterEditor({
                             <strong style={{ fontSize: 12, color: 'var(--vermilion)' }}>改写前</strong>
                             <pre
                               style={{
-                                background: 'rgba(220, 38, 38, 0.06)',
+                                background: 'var(--danger-soft)',
                                 padding: 10,
                                 borderRadius: 6,
                                 maxHeight: 200,
@@ -4635,7 +4610,7 @@ export default function ChapterEditor({
                             <strong style={{ fontSize: 12, color: 'var(--success, #16a34a)' }}>改写后</strong>
                             <pre
                               style={{
-                                background: 'rgba(22, 163, 74, 0.06)',
+                                background: 'var(--success-soft)',
                                 padding: 10,
                                 borderRadius: 6,
                                 maxHeight: 200,
@@ -4743,7 +4718,7 @@ export default function ChapterEditor({
                 </div>
 
                 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length > 0 ? (
-                  <p className="diag-msg" style={{ color: '#dc2626', marginTop: 8 }}>
+                  <p className="diag-msg" style={{ color: 'var(--danger)', marginTop: 8 }}>
                     ⚠ 复扫仍剩 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length} 处 blocking，建议人工复核
                   </p>
                 ) : null}
@@ -5775,7 +5750,7 @@ function AskChatDialog({
                     padding: '12px 16px',
                     borderRadius: 12,
                     background: isUser ? 'var(--accent)' : 'var(--surface)',
-                    color: isUser ? '#fff' : 'var(--ink)',
+                    color: isUser ? 'var(--surface)' : 'var(--ink)',
                     border: isUser ? 'none' : '1px solid var(--line)',
                     fontSize: 14,
                     lineHeight: 1.6,

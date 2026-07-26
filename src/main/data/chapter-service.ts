@@ -1,4 +1,3 @@
-import { join } from 'path'
 import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo';
@@ -12,8 +11,7 @@ import { CHAPTER_NAME_MAX_LEN, sanitizeChapterName } from '../../shared/parsers'
 import type {
   ChapterMeta,
   ChapterContent,
-  ChapterDetail,
-  Character
+  ChapterDetail
 } from '../../shared/types'
 import type { RhythmEntry } from '../../shared/types'
 

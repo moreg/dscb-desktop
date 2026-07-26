@@ -3,7 +3,6 @@ import {
   loadStats,
   saveStats,
   accumulateDelta,
-  lastNDays,
   summarizeWeekly,
   heatLevel,
   getLocalStorage,

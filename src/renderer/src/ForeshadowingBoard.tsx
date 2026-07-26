@@ -41,6 +41,7 @@ export default function ForeshadowingBoard({ projectId, onOpenChapter }: Props) 
   useEffect(() => {
     refresh()
     refreshChapters()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 系函数每次渲染都是新引用
   }, [projectId])
 
   const totalChapters = chapters.length

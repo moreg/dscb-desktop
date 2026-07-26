@@ -70,7 +70,7 @@ export default function FeatureRoutingForm({
       style={{
         marginTop: 14,
         padding: 14,
-        background: 'var(--surface-1, rgba(0,0,0,0.03))',
+        background: 'var(--surface-2)',
         borderRadius: 8
       }}
     >

@@ -92,7 +92,7 @@ export class OutlineMdRepo {
 /** 从卷文件内容提取章节范围（H1 或 卷核心 section 中的「章节范围」字段） */
 function extractChapterRangeFromVolumeFile(
   text: string,
-  volumeNumber: number
+  _volumeNumber: number
 ): { start: number; end: number } | null {
   // 从 H1 `# 卷纲：第N卷 卷名（第X-Y章）` 提取
   const h1Match = text.match(/第\s*(\d+)\s*[-–—]\s*(\d+)\s*章/)

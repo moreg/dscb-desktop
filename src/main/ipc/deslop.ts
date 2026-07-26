@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { DeslopService } from '../data/deslop/deslop-service'
+import { beginStream, endStream } from '../data/stream-abort-registry'
 import { ProjectService } from '../data/project-service'
 import { StyleProfileService } from '../data/style-profile-service'
 import { SettingsRepository } from '../data/settings-repository'
@@ -79,15 +80,22 @@ export function registerDeslopIpc(
             done: false
           })
         }
-        const result = await deslopService.deslop(validated.text, {
-          levelOverride: validated.levelOverride,
-          onToken: send,
-          whitelist,
-          bannedWords,
-          textOverrides,
-          styleContext,
-          meta: { projectId: validated.projectId }
-        })
+        const signal = beginStream(validated.requestId)
+        let result: Awaited<ReturnType<typeof deslopService.deslop>>
+        try {
+          result = await deslopService.deslop(validated.text, {
+            levelOverride: validated.levelOverride,
+            onToken: send,
+            whitelist,
+            bannedWords,
+            textOverrides,
+            styleContext,
+            meta: { projectId: validated.projectId },
+            signal
+          })
+        } finally {
+          endStream(validated.requestId)
+        }
         safeSend(win, 'deslop:token', {
           requestId: validated.requestId,
           token: '',
@@ -151,7 +159,7 @@ async function resolveStyleContext(
 ): Promise<DeslopStyleContext | undefined> {
   try {
     const project = await projectService.getProjectData(projectId)
-    const profile = await styleProfileService.getById(projectId, project.defaultStyleProfileId ?? null)
+    const profile = await styleProfileService.getById(project.defaultStyleProfileId ?? null)
     const genre = project.genre ?? '通用'
     if (!profile) return { genre }
     return {

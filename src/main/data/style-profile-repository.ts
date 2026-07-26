@@ -7,9 +7,13 @@ interface StyleProfileFile {
   items: StyleProfile[]
 }
 
-const EMPTY_FILE: StyleProfileFile = {
-  schemaVersion: 1,
-  items: []
+/**
+ * 每次调用返回全新对象。绝不能共用一个模块级常量：文件缺失时 readJson 会把 fallback
+ * 原样返回，调用方（StyleProfileService.create 的 items.push）随后就地修改它，
+ * 会把已删除/已保存的文风泄漏给之后所有"文件不存在"的读取。
+ */
+function emptyFile(): StyleProfileFile {
+  return { schemaVersion: 1, items: [] }
 }
 
 export class StyleProfileRepository {
@@ -24,7 +28,7 @@ export class StyleProfileRepository {
   }
 
   async read(): Promise<StyleProfileFile> {
-    return readJson(this.filePath, EMPTY_FILE)
+    return readJson(this.filePath, emptyFile())
   }
 
   async write(data: StyleProfileFile): Promise<void> {

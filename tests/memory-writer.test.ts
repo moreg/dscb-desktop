@@ -6,7 +6,6 @@ import { MemoryWriter } from '../src/main/data/memory-writer'
 import { CharacterRepo } from '../src/main/data/memory/character-repo'
 import { LocationRepo } from '../src/main/data/memory/location-repo'
 import { ItemRepo } from '../src/main/data/memory/item-repo'
-import { PlotPointRepo } from '../src/main/data/memory/plot-point-repo'
 import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
 import type { MemoryExtraction } from '../src/shared/types'
 

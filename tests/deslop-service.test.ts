@@ -9,7 +9,7 @@ import {
   DESLOP_SYSTEM_PROMPT,
   numberLines
 } from '../src/main/data/skill-prompts/deslop/anti-ai-methods'
-import type { DeslopLevel, DeslopFinding } from '../src/shared/types'
+import type { DeslopFinding } from '../src/shared/types'
 
 describe('gatesForLevel 分级 → Gate 范围', () => {
   it('轻度只过 Gate A + B', () => {

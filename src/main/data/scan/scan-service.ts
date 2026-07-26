@@ -7,14 +7,12 @@ import type { Scraper } from './scrapers/types'
 import {
   renderScanReport,
   buildReportFileName,
-  assessDataQuality,
   PLATFORM_LABELS
 } from './scan-renderer'
 import { buildBuiltinKnowledgeMarkdown } from './builtin-knowledge'
 import {
   SCAN_ANALYZE_SYSTEM_PROMPT,
-  buildTopicDecisionPrompt,
-  buildBuiltinTopicPrompt
+  buildTopicDecisionPrompt
 } from '../skill-prompts/scan/topic-decision'
 import { writeTextAtomic } from '../atomic'
 import type {
@@ -30,9 +28,8 @@ import type {
 /** 扫榜输出目录（全局，跨项目共享的市场洞察） */
 const SCAN_OUTPUT_DIR = 'scan-output'
 
-/** 长篇/短篇平台判定 */
+/** 长篇平台判定（其余平台按短篇处理） */
 const LONG_PLATFORMS: ScanPlatform[] = ['qidian', 'fanqie', 'jjwxc', 'qimao', 'ciweimao']
-const SHORT_PLATFORMS: ScanPlatform[] = ['dz', 'heiyan', 'zhihu']
 
 /**
  * 扫榜服务（编排 Phase 1 采集 + 报告落盘；Phase 4 选题决策由 analyzeRankStream 单独触发）。
@@ -96,14 +93,16 @@ export class ScanService {
   async analyzeRank(
     report: string,
     platform: string,
-    onToken?: (token: string) => void
+    onToken?: (token: string) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const prompt = buildTopicDecisionPrompt(report, platform)
     await this.llm.generateStream(prompt, {
       systemPrompt: SCAN_ANALYZE_SYSTEM_PROMPT,
       maxTokens: 8192,
       meta: { feature: 'scan' },
-      onToken
+      onToken,
+      signal
     })
   }
 

@@ -453,7 +453,7 @@ describe('apply/undo/redo roundtrip (P7-A 集成场景)', () => {
     expect(redo).toHaveLength(1)
 
     // 新 apply：必须清空 redo
-    hist = pushEntry(hist, 'B', 'b', 2000)
+    pushEntry(hist, 'B', 'b', 2000)
     redo = clearRedoStack()
     expect(redo).toHaveLength(0) // 新 apply 后无法 redo 旧路径
   })

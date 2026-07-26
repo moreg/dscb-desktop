@@ -10,7 +10,11 @@ import {
   type DailyStats
 } from '../src/renderer/src/writing-stats'
 
-function makeStorage(): { getItem: any; setItem: any; data: Map<string, string> } {
+function makeStorage(): {
+  getItem: (k: string) => string | null
+  setItem: (k: string, v: string) => void
+  data: Map<string, string>
+} {
   const data = new Map<string, string>()
   return {
     data,

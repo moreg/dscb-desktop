@@ -13,3 +13,6 @@ restore_preload.js
 # 本地 agent 技能配置（含绝对路径，勿提交）
 .agents/
 .zcode/
+
+# Claude Code 本地配置（含个人权限设置，勿提交）
+.claude/settings.local.json

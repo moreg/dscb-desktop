@@ -47,7 +47,6 @@ import type {
   TeardownEntry,
   TeardownFileNode,
   TeardownFileContent,
-  TeardownLengthKind,
   TeardownLongProgress,
   TeardownProgressInfo,
   TeardownRouteResult,
@@ -145,7 +144,7 @@ export class TeardownService {
     if (!input.rawText.trim()) throw new Error('原文不能为空')
 
     const wordCount = countWords(input.rawText)
-    let route = input.lengthKindOverride
+    const route = input.lengthKindOverride
       ? { lengthKind: input.lengthKindOverride, isGrayZone: false }
       : routeByWordCount(wordCount)
 
@@ -238,9 +237,9 @@ export class TeardownService {
     if (!doneSet.has(5)) {
       progress = await this.runStage5(progress, cb)
     }
-    // Stage 6：文风
+    // Stage 6：文风（末段，返回的 progress 不再有后续消费方）
     if (!doneSet.has(6)) {
-      progress = await this.runStage6(progress, rawText, cb)
+      await this.runStage6(progress, rawText, cb)
     }
     this.emit(cb, '\n\n🎉 长篇全量拆解完成。\n')
   }
@@ -554,9 +553,9 @@ export class TeardownService {
     if (!doneSet.has(5)) {
       meta = await this.runShortStage5(meta, rawText, cb)
     }
-    // Stage 6
+    // Stage 6（末段，返回的 meta 不再有后续消费方）
     if (!doneSet.has(6)) {
-      meta = await this.runShortStage6(meta, cb)
+      await this.runShortStage6(meta, cb)
     }
     this.emit(cb, '\n\n🎉 短篇拆解完成。\n')
   }

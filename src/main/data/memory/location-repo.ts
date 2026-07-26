@@ -2,7 +2,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import { readText, parseDoc, parseBoldFields, stripNumberPrefix, fieldToStr } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
-import { listMdFilesDeep, safeFileName, extractEntityNameFromDoc, fieldToJoinedString, sanitizeForFileName, hashName } from './entity-helpers'
+import { listMdFilesDeep, safeFileName, extractEntityNameFromDoc, sanitizeForFileName, hashName } from './entity-helpers'
 import type { MemoryEntity, CreateMemoryEntityInput, UpdateMemoryEntityInput } from '../../../shared/types'
 
 /**
@@ -159,7 +159,7 @@ export class LocationRepo {
     return Object.keys(out).length ? out : undefined
   }
 
-  private serializeEntity(input: { name: string; category?: string; notes?: string; customFields?: Record<string, string | string[]> }, now: string): string {
+  private serializeEntity(input: { name: string; category?: string; notes?: string; customFields?: Record<string, string | string[]> }, _now: string): string {
     const lines: string[] = [`# ${input.name}`, '']
     if (input.notes) lines.push('## 描述', '', input.notes, '')
     lines.push('## 字段', '')

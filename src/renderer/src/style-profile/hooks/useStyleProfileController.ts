@@ -53,7 +53,6 @@ export interface UseStyleProfileController {
 }
 
 export function useStyleProfileController(projectId?: string): UseStyleProfileController {
-  const styleScopeId = projectId ?? ''
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [profiles, setProfiles] = useState<StyleProfile[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -71,14 +70,20 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
 
   const refresh = () => {
     if (projectId) {
-      void window.api.getProject(projectId).then(setProjectData)
+      void window.api
+        .getProject(projectId)
+        .then(setProjectData)
+        .catch(() => setProjectData(null))
     } else {
       setProjectData(null)
     }
-    void window.api.listStyleProfiles(styleScopeId).then((items) => {
-      setProfiles(items)
-      setSelectedId((current) => current ?? items[0]?.id ?? null)
-    })
+    void window.api
+      .listStyleProfiles()
+      .then((items) => {
+        setProfiles(items)
+        setSelectedId((current) => current ?? items[0]?.id ?? null)
+      })
+      .catch((err) => setMessage(`文风库读取失败：${(err as Error).message}`))
   }
 
   useEffect(() => {
@@ -89,6 +94,7 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
     setMessage(null)
     setSelectedFileNames([])
     setEditingDraft(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 每次渲染都是新引用
   }, [projectId])
 
   const selected = useMemo(
@@ -101,7 +107,7 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
     setMessage(null)
     try {
       const result = await window.api.extractStyleProfile(
-        styleScopeId,
+        projectId,
         sampleText,
         draftName.trim() || undefined
       )
@@ -145,7 +151,7 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
         sampleText,
         ...analysis
       }
-      const profile = await window.api.createStyleProfile(styleScopeId, input)
+      const profile = await window.api.createStyleProfile(input)
       refresh()
       setSelectedId(profile.id)
       setDraftName('')
@@ -165,7 +171,7 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
     setRenaming(true)
     setMessage(null)
     try {
-      const updated = await window.api.updateStyleProfile(styleScopeId, selected.id, {
+      const updated = await window.api.updateStyleProfile(selected.id, {
         name: draftName.trim()
       })
       refresh()
@@ -183,10 +189,15 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
       title: '删除文风卡',
       message: `确定删除「${profile.name}」？删除后无法恢复。`,
       onConfirm: async () => {
-        await window.api.deleteStyleProfile(styleScopeId, profile.id)
-        refresh()
-        setSelectedId((current) => (current === profile.id ? null : current))
-        setConfirmDialog(null)
+        try {
+          await window.api.deleteStyleProfile(profile.id)
+          refresh()
+          setSelectedId((current) => (current === profile.id ? null : current))
+        } catch (err) {
+          setMessage(`删除失败：${(err as Error).message}`)
+        } finally {
+          setConfirmDialog(null)
+        }
       }
     })
   }
@@ -195,8 +206,12 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
 
   const onSetDefault = async (styleProfileId: string | null) => {
     if (!projectId) return
-    await window.api.setProjectDefaultStyleProfile(projectId, styleProfileId)
-    refresh()
+    try {
+      await window.api.setProjectDefaultStyleProfile(projectId, styleProfileId)
+      refresh()
+    } catch (err) {
+      setMessage(`设置默认文风失败：${(err as Error).message}`)
+    }
   }
 
   const onStartEdit = () => {
@@ -235,7 +250,7 @@ export function useStyleProfileController(projectId?: string): UseStyleProfileCo
         setEditingDraft(null)
         return
       }
-      const updated = await window.api.updateStyleProfile(styleScopeId, editingDraft.id, patch)
+      const updated = await window.api.updateStyleProfile(editingDraft.id, patch)
       refresh()
       setSelectedId(updated.id)
       setEditingDraft(null)

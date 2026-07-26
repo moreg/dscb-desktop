@@ -161,7 +161,6 @@ describe('chapter-audit (zh-humanizer rules 1-16)', () => {
   })
 
   it('rule 6: flags three-part enumeration', () => {
-    const content = makeValidContent() + '\n\n他看了一眼，又看一眼。'
     // 三段式需要 X、X、X 模式
     const content2 = makeValidContent() + '\n\n厅里摆设整齐、装饰华丽、灯火通明。'
     const report = auditChapter(content2)
@@ -213,9 +212,6 @@ describe('chapter-audit (genre-aware exceptions)', () => {
   it('provides genre-specific replacement suggestion', () => {
     const content = makeValidContent() + '\n\n她嘴角带了点弧度。'
     const report = auditChapter(content, { genre: '现代都市' })
-    const hit = report.violations.find(
-      (v) => v.category === 'forbidden_word' && v.word === '嘴角带了点弧度'
-    )
     // 命中"嘴角_上扬变体"模式后，suggestion 查 urban 表
     const cornerHit = report.violations.find(
       (v) => v.category === 'forbidden_word' && v.wordCategory === '表情动作模板'

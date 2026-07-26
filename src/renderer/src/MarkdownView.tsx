@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react'
+import { memo, useMemo, type ReactNode } from 'react'
 
 export interface MdSection {
   title: string
@@ -84,7 +84,7 @@ function renderBody(body: string): ReactNode[] {
   const blocks: ReactNode[] = []
   let i = 0
   let key = 0
-  let inFence = false
+  const inFence = false
 
   while (i < lines.length) {
     const line = lines[i]
@@ -120,7 +120,25 @@ function renderBody(body: string): ReactNode[] {
       continue
     }
 
-    // H3 / H4 子标题
+    // H1 / H2 / H3 / H4 子标题
+    if (/^# /.test(line)) {
+      blocks.push(
+        <h3 key={key++} className="md-h1">
+          {line.replace(/^#\s*/, '')}
+        </h3>
+      )
+      i++
+      continue
+    }
+    if (/^## /.test(line)) {
+      blocks.push(
+        <h4 key={key++} className="md-h2">
+          {line.replace(/^##\s*/, '')}
+        </h4>
+      )
+      i++
+      continue
+    }
     if (/^#### /.test(line)) {
       blocks.push(
         <h5 key={key++} className="md-h4">
@@ -208,7 +226,25 @@ function renderBody(body: string): ReactNode[] {
   return blocks
 }
 
-export default function MarkdownView({ sections, skipTitles }: Props) {
+/**
+ * 按节记忆化，且按 title/body 的值比较而非引用比较：
+ * renderBody 是逐行正则的全文解析，成本随文本线性增长。流式输出场景
+ * （如扫榜决策）父组件每次 flush 都重渲染，若不在这里挡住，未变化的
+ * 长文 section（如整份榜单报告）会被逐次重复解析。
+ */
+const MdSectionView = memo(
+  function MdSectionView({ section }: { section: MdSection }) {
+    return (
+      <section className="md-section">
+        {section.title ? <h3 className="md-section-title">{section.title}</h3> : null}
+        {renderBody(section.body)}
+      </section>
+    )
+  },
+  (prev, next) => prev.section.title === next.section.title && prev.section.body === next.section.body
+)
+
+function MarkdownView({ sections, skipTitles }: Props) {
   const skip = useMemo(() => new Set((skipTitles ?? []).map((t) => t.trim())), [skipTitles])
   const visible = sections.filter((s) => !skip.has(s.title.trim()))
   if (visible.length === 0) {
@@ -217,11 +253,10 @@ export default function MarkdownView({ sections, skipTitles }: Props) {
   return (
     <div className="markdown-view">
       {visible.map((sec, i) => (
-        <section key={i} className="md-section">
-          {sec.title ? <h3 className="md-section-title">{sec.title}</h3> : null}
-          {renderBody(sec.body)}
-        </section>
+        <MdSectionView key={i} section={sec} />
       ))}
     </div>
   )
 }
+
+export default memo(MarkdownView)

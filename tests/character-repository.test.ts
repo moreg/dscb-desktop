@@ -27,6 +27,8 @@ describe('CharacterRepository', () => {
 
   it('updates fields and bumps updatedAt', async () => {
     const c = await repo.create({ name: '林远' })
+    // updatedAt 是毫秒级 ISO 串，create/update 同毫秒内完成时会相同 → 隔开一拍
+    await new Promise((r) => setTimeout(r, 5))
     const updated = await repo.update(c.id, { personality: '坚毅' })
     expect(updated.personality).toBe('坚毅')
     expect(updated.updatedAt).not.toBe(c.updatedAt)

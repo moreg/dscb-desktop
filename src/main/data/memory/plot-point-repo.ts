@@ -130,7 +130,7 @@ export class PlotPointRepo {
 
     // 2) 细纲补洞：只 readdir 一次，按文件名过滤目标章
     const outlineDir = join(this.projectDir, '细纲')
-    let outlineFiles: string[] = []
+    let outlineFiles: string[]
     try {
       outlineFiles = await fs.readdir(outlineDir)
     } catch {
@@ -214,7 +214,7 @@ export class PlotPointRepo {
 
     // Fallback：细纲/细纲_第NNN章_*.md
     const dir = join(this.projectDir, '细纲')
-    let files: string[] = []
+    let files: string[]
     try {
       files = await fs.readdir(dir)
     } catch {
