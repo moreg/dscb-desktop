@@ -607,12 +607,70 @@ function BatchWriteDialog({
             setStreamingText((prev) => prev + token)
           }
         },
-        requestId
+        requestId,
+        // 透传整批进度，否则续跑会把 total 缩成剩余章数、completed 清空，进度倒退
+        {
+          fromChapter: progress.fromChapter,
+          total: progress.total,
+          completed: progress.completed
+        }
       )
       if (res.ok && res.progress) {
         setProgress(res.progress)
       } else if (!res.ok) {
         setError(res.error ?? '继续批量续写失败')
+      }
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setRunning(false)
+      setStopping(false)
+      setStreamingText('')
+      batchRequestIdRef.current = null
+    }
+  }
+
+  /**
+   * 失败后重试**当前**这一章（而不是像 resumeBatch 那样跳到下一章）。
+   * 点 ⏹ 停止 也会落到 failed，此前这个状态下一个按钮都没有，整批就此卡死；
+   * 而错误提示还写着「可点继续重试当前章」，指向一个不存在的按钮。
+   */
+  const retryBatch = async () => {
+    if (!progress) return
+    setRunning(true)
+    setStopping(false)
+    setError(null)
+    setStreamingText('')
+    const requestId = crypto.randomUUID()
+    batchRequestIdRef.current = requestId
+    try {
+      const res = await window.api.generateBatch(
+        projectId,
+        progress.currentChapter,
+        progress.toChapter,
+        styleProfileId,
+        (chapter, result) => {
+          setLastResult(result)
+          onChapterCompleted()
+          setStreamingText('')
+        },
+        (token, done) => {
+          if (!done && token) {
+            setStreamingText((prev) => prev + token)
+          }
+        },
+        requestId,
+        // 沿用整批进度：重试不该把已完成章数清零
+        {
+          fromChapter: progress.fromChapter,
+          total: progress.total,
+          completed: progress.completed
+        }
+      )
+      if (res.ok && res.progress) {
+        setProgress(res.progress)
+      } else if (!res.ok) {
+        setError(res.error ?? '重试当前章失败')
       }
     } catch (err) {
       setError((err as Error).message)
@@ -727,7 +785,9 @@ function BatchWriteDialog({
             ) : null}
             {progress.error ? (
               <div className="batch-progress-error">
-                {progress.error.includes('LLM_ABORTED') ? '已停止生成（可点「继续」重试当前章）' : progress.error}
+                {progress.error.includes('LLM_ABORTED')
+                  ? `已停止生成（可点「重试第 ${progress.currentChapter} 章」继续）`
+                  : progress.error}
               </div>
             ) : null}
             {progress.completed.length > 0 ? (
@@ -811,6 +871,15 @@ function BatchWriteDialog({
           ) : isPaused ? (
             <button className="btn btn-primary" onClick={resumeBatch} disabled={running}>
               {running ? '生成中…' : '继续下一章'}
+            </button>
+          ) : status === 'failed' ? (
+            <button
+              className="btn btn-primary"
+              onClick={retryBatch}
+              disabled={running}
+              title="重新生成失败的这一章；已完成的章节保留"
+            >
+              {running ? '生成中…' : `重试第 ${progress?.currentChapter ?? ''} 章`}
             </button>
           ) : null}
         </div>

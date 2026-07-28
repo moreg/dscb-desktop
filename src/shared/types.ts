@@ -782,7 +782,9 @@ export interface RendererApi {
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void,
-    requestId?: string
+    requestId?: string,
+    /** 整批进度：失败后「重试当前章」回传，避免进度从头计数 */
+    batchState?: { fromChapter: number; total: number; completed: number[] }
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
@@ -792,7 +794,9 @@ export interface RendererApi {
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void,
-    requestId?: string
+    requestId?: string,
+    /** 上一次 BatchProgress 的整批进度，用于续跑时延续计数而不是从剩余段重新计 */
+    batchState?: { fromChapter: number; total: number; completed: number[] }
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   getUsageSummary: () => Promise<UsageSummary>
   /** P16-C：按日期获取 LLM 调用详情（点击趋势图某天柱状图） */
@@ -2195,26 +2199,25 @@ export interface DeslopScanReport {
   findings: DeslopFinding[]
   /** 各 severity 计数 */
   counts: { blocking: number; advisory: number }
-  /** 6 项量化指标（用于 Phase 2 分级） */
+  /** 量化指标（用于 Phase 2 分级） */
   metrics: DeslopMetrics
   /** 字数 */
   wordCount: number
 }
 
-/** 去 AI 味 6 项量化指标（Phase 2 分级依据） */
+/**
+ * 去 AI 味量化指标（Phase 2 分级依据）。
+ *
+ * 只保留 classify() 真正读取的两项。此前还算过 psychWordDensity / dialogueTagDensity /
+ * avgSentencesPerParagraph / repetitionDensity 四项，但既不参与分级也不在 UI 展示，
+ * 且 dialogueTagDensity 的正则 /[说道问道喊叫笑]道/ 连"道道"都会命中——一并删除。
+ * 具体问题由 findings 逐条呈现，不需要这些聚合数字。
+ */
 export interface DeslopMetrics {
   /** 禁用词密度（命中数 / 千字） */
   bannedWordDensity: number
   /** 连续排比命中数 */
   parallelismCount: number
-  /** 心理词占比（心中/心头/感到 等命中数 / 千字） */
-  psychWordDensity: number
-  /** 对话标签密度（"道/说" 占对话比例） */
-  dialogueTagDensity: number
-  /** 平均段落句数 */
-  avgSentencesPerParagraph: number
-  /** 重复描写密度（复读命中数 / 千字） */
-  repetitionDensity: number
 }
 
 /** 去 AI 味严重度分级（Phase 2 产出） */

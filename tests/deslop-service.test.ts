@@ -5,6 +5,8 @@ import {
   buildDeslopPrompt,
   extractRewritten,
   extractChangeSummary,
+  expandGatesForFindings,
+  passesForGates,
   GATE_METHODS,
   DESLOP_SYSTEM_PROMPT,
   numberLines
@@ -251,5 +253,62 @@ describe('extractChangeSummary 解析改动说明', () => {
     const plain = extractChangeSummary('【改写后】\nx\n\n【改动说明】\n第1行｜原句：仿佛 → 改后：好像')
     expect(plain.length).toBe(1)
     expect(plain[0]).toContain('仿佛')
+  })
+})
+
+describe('去 AI 味 prompt 内部一致性', () => {
+  /** 取「改写后不得出现"…"」引号里的清单，按 / 拆成词 */
+  const extractBannedList = (prompt: string): string[] => {
+    const m = /改写后不得出现"([^"]+)"/.exec(prompt)
+    return m ? m[1].split('/') : []
+  }
+
+  const finding: DeslopFinding = {
+    line: 1,
+    column: 1,
+    type: 'banned-word',
+    severity: 'advisory',
+    gate: 'A',
+    message: '',
+    excerpt: '仿佛',
+    word: '仿佛'
+  }
+
+  it('题材允许保留的虚词不出现在「改写后不得出现」清单里', () => {
+    const prompt = buildDeslopPrompt('仿佛被抽空了力气。', 'mild', [finding], ['A'], {
+      genre: '古风/仙侠'
+    })
+    expect(prompt).toMatch(/该题材允许保留的虚词[^\n]*仿佛/)
+    // 同一份 prompt 不得再把"仿佛"列进禁用清单，否则模型收到互相矛盾的指令
+    const banned = extractBannedList(prompt)
+    expect(banned).not.toContain('仿佛')
+    expect(banned).not.toContain('一丝')
+    expect(banned).not.toContain('一抹')
+    expect(banned).toContain('嘴角勾起')
+  })
+
+  it('无题材语境时禁用清单保持完整', () => {
+    const banned = extractBannedList(buildDeslopPrompt('仿佛被抽空了力气。', 'mild', [finding], ['A']))
+    expect(banned).toContain('仿佛')
+    expect(banned).toContain('缓缓')
+  })
+})
+
+describe('expandGatesForFindings / passesForGates', () => {
+  it('把命中 blocking 的 Gate 并入分级范围并保持 A-G 顺序', () => {
+    expect(expandGatesForFindings(['A', 'B'], ['G', 'F'])).toEqual(['A', 'B', 'F', 'G'])
+    expect(expandGatesForFindings(['A', 'B'], [])).toEqual(['A', 'B'])
+  })
+
+  it('Pass 序号由 Gate 范围推导', () => {
+    expect(passesForGates(['A', 'B'])).toEqual([1])
+    expect(passesForGates(['A', 'B', 'C', 'D'])).toEqual([1, 2])
+    expect(passesForGates(['A', 'B', 'G'])).toEqual([1, 3])
+  })
+
+  it('无扩展时与 passesForLevel 等价', () => {
+    for (const level of ['mild', 'moderate', 'severe'] as const) {
+      expect(passesForGates(gatesForLevel(level))).toEqual(passesForLevel(level))
+    }
   })
 })

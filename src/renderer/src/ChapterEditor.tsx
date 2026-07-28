@@ -104,6 +104,7 @@ import {
 } from '../../shared/cast-presence'
 import {
   formatChapterProse,
+  joinContinuation,
   needsChapterProseFormat
 } from '../../shared/format-chapter-prose'
 
@@ -882,6 +883,14 @@ export default function ChapterEditor({
     setPostWriteSync(null)
     setSkipMemoryOnAutoSyncAll(false)
     setFlowSyncTrigger(0)
+    // 质检报告属于旧章正文，必须跟着切章作废。
+    // ChapterFlowPanel 会清掉自己那些状态（见其 [projectId, chapterNumber] effect），
+    // 但 auditReport 是这里传下去的 prop，它清不掉。留着的话面板会顶着新章号显示旧章
+    // 违例，且「应用/全部应用」仍可点——违例多是「嘴角勾起」这类高频套路短语，在新章
+    // 里照样能匹配上，于是旧章的改写被塞进新章的句子，无声改坏正文。
+    setAutoAudit(null)
+    // 同理：续写完成时面板是自动弹开的（见 aiGenerate），切章后不该继续开着展示旧结果
+    setFlowPanelOpen(false)
     // 切章：从 localStorage 恢复撤销栈 + 失败队列
     try {
       const storage = getLocalStorage()
@@ -1565,7 +1574,7 @@ export default function ChapterEditor({
             finalDraft += token
             // 终态后忽略迟到 token，避免冲掉 await 路径的格式化结果
             if (!editorFinalized) {
-              setDraft(initialDraft + finalDraft, { preserveCaret: false })
+              setDraft(joinContinuation(initialDraft, finalDraft), { preserveCaret: false })
             }
           }
           if (done) {
@@ -1577,7 +1586,7 @@ export default function ChapterEditor({
             if (receipt) {
               // 仅在 await 尚未终态化时写草稿；终态由 await 统一 strip + 格式化
               if (!editorFinalized) {
-                setDraft(initialDraft + stripped, { preserveCaret: false })
+                setDraft(joinContinuation(initialDraft, stripped), { preserveCaret: false })
               }
               window.api.applyForeshadowReceipt(targetProjectId, targetChapter, receipt)
                 .then(res => {
@@ -1617,7 +1626,7 @@ export default function ChapterEditor({
       // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
         const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
-        const fullContent = initialDraft + (receipt ? stripped : finalDraft)
+        const fullContent = joinContinuation(initialDraft, receipt ? stripped : finalDraft)
         const formatted = formatDraftProse(fullContent, {
           silent: true,
           recordHistory: true
@@ -2029,14 +2038,24 @@ export default function ChapterEditor({
     setAsking(false)
   }
 
-  /** 续写后的自动质检：失败静默，不阻断；中途切走则丢弃结果。 */
+  /**
+   * 续写后的自动质检：失败不阻断续写，但要让用户知道跑没跑。
+   * 以前是 catch 静默——质检挂掉时面板上干脆没有质检区，
+   * 和「本章很干净」长得一模一样，用户会以为已经查过了。
+   * 中途切走（genRef 变化）则丢弃结果。
+   */
   const runPostGenerateAudit = async (myGen: number, finalDraft: string) => {
     try {
       const report = await window.api.auditChapter(projectId, finalDraft)
       if (genRef.current !== myGen) return
       setAutoAudit(report)
-    } catch {
-      // 质检失败不阻断
+    } catch (err) {
+      if (genRef.current !== myGen) return
+      setAutoAudit(null)
+      setUndoToast({
+        message: `自动质检未跑成功（${(err as Error)?.message ?? '未知错误'}）；正文已写入，可在流程面板点「重新质检」`,
+        type: 'warning'
+      })
     }
   }
 

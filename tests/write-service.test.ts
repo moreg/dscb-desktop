@@ -620,7 +620,7 @@ describe('WriteService', () => {
       spy.mockRestore()
     })
 
-    it('persists generated content to ProseRepo on each chapter', async () => {
+    it('persists generated content in skill format so ProseRepo can read it back', async () => {
       const service = new WriteService(ps, mockLlm(''))
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
@@ -628,12 +628,90 @@ describe('WriteService', () => {
 
       await service.generateChaptersBatch(projectId, 1, 1, () => {})
 
-      // 验证正文已写入 ProseRepo（正文/NNN.md，NNN 为章号零填充 3 位）
+      // 回归：批量续写必须写成技能格式 `正文/第NNN章 标题.md`。
+      // 早先直接 ProseRepo.write(ch, content) 缺 title，落到旧格式 001.md，
+      // 而 read() 优先技能格式——该章只要在编辑器存过一次，批量结果就永远读不回来。
       const dir = await ps.resolveDir(projectId)
-      const prosePath = path.join(dir, '正文', '001.md')
-      const { readFile } = await import('fs/promises')
-      const saved = await readFile(prosePath, 'utf-8')
-      expect(saved).toBe('第1章的正文内容')
+      const { readdir } = await import('fs/promises')
+      const files = await readdir(path.join(dir, '正文'))
+      expect(files.some((f) => f.startsWith('第001章') && f.endsWith('.md'))).toBe(true)
+      expect(files).not.toContain('001.md')
+
+      // 最关键的一条：写完之后读得回来
+      const readBack = await new ProseRepo(dir).read(1)
+      expect(readBack).toBe('第1章的正文内容')
+      spy.mockRestore()
+    })
+
+    it('批量续写不会被同章已有的技能格式正文遮蔽（回归：旧格式写入被 read 忽略）', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '正文'), { recursive: true })
+      // 模拟该章此前在编辑器保存过（技能格式）
+      await writeFile(path.join(dir, '正文', '第001章 旧标题.md'), '旧的正文', 'utf-8')
+
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章的新正文`))
+
+      await service.generateChaptersBatch(projectId, 1, 1, () => {})
+
+      expect(await new ProseRepo(dir).read(1)).toBe('第1章的新正文')
+      spy.mockRestore()
+    })
+
+    it('落盘失败时仍把正文回传给 UI，不让一整章 LLM 产出随异常消失', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const flowSpy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章的正文内容`))
+      // 模拟磁盘写失败（文件被占用 / 无权限 / 节奏图谱写失败）
+      const saveSpy = vi
+        .spyOn(
+          (service as unknown as { chapterService: { updateContent: unknown } }).chapterService,
+          'updateContent' as never
+        )
+        .mockRejectedValue(new Error('EBUSY: resource busy or locked'))
+
+      const delivered: Array<{ chapter: number; content: string }> = []
+      const progress = await service.generateChaptersBatch(projectId, 1, 2, (chapter, result) =>
+        delivered.push({ chapter, content: result.content })
+      )
+
+      // 关键：正文必须已经送到 UI 手上
+      expect(delivered).toEqual([{ chapter: 1, content: '第1章的正文内容' }])
+      expect(progress.status).toBe('failed')
+      expect(progress.error).toContain('保存失败')
+      expect(progress.error).toContain('EBUSY')
+      // 没存成就不算完成
+      expect(progress.completed).toEqual([])
+      flowSpy.mockRestore()
+      saveSpy.mockRestore()
+    })
+
+    it('resume 透传 batchState 时进度按整批统计，不从剩余段重新计数', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      // 整批 1-3，第 1 章已完成，现在续跑
+      const progress = await service.resumeChaptersBatch(
+        projectId,
+        1,
+        3,
+        () => {},
+        null,
+        {},
+        { fromChapter: 1, total: 3, completed: [1] }
+      )
+
+      expect(progress.status).toBe('paused')
+      expect(progress.total).toBe(3)
+      expect(progress.fromChapter).toBe(1)
+      expect(progress.completed).toEqual([1, 2])
+      expect(progress.current).toBe(2)
       spy.mockRestore()
     })
   })

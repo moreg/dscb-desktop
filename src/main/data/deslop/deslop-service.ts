@@ -4,13 +4,14 @@ import { LlmService } from '../llm-service'
 import { scanAiPatterns } from './check-ai-patterns'
 import { scanDegeneration } from './check-degeneration'
 import { normalizePunctuation, countPunctuationIssues } from './normalize-punctuation'
-import { ALL_BANNED_WORDS, PSYCH_WORDS, PARALLELISM_PATTERNS } from './banned-words'
+import { ALL_BANNED_WORDS, PARALLELISM_PATTERNS } from './banned-words'
 import {
   DESLOP_SYSTEM_PROMPT,
   buildDeslopPrompt,
   buildCleanupPrompt,
   gatesForLevel,
-  passesForLevel,
+  expandGatesForFindings,
+  passesForGates,
   PASS_GATE_MAP,
   extractRewritten,
   extractChangeSummary
@@ -73,25 +74,35 @@ export class DeslopService {
      Phase 1：扫描（确定性，不调 LLM）
      ========================================================= */
 
-  /** @param whitelist 项目级豁免词（IPC 层按 projectId 解析后传入） */
+  /**
+   * @param whitelist 项目级豁免词（IPC 层按 projectId 解析后传入）
+   * @param isTail 本段是否是全文结尾（分块改写时只有最后一块是）。
+   *   false 时不按「章末」升级 Gate F 升华句，也不做截断检测——否则每个分块的
+   *   末尾都会被误判成章末/被截断。缺省 true（整篇扫描）。
+   */
   async scan(
     text: string,
-    opts: { whitelist?: Set<string>; bannedWords?: string[] } = {}
+    opts: { whitelist?: Set<string>; bannedWords?: string[]; isTail?: boolean } = {}
   ): Promise<DeslopScanReport> {
-    const aiFindings = scanAiPatterns(text, { whitelist: opts.whitelist, bannedWords: opts.bannedWords })
-    const degenFindings = scanDegeneration(text)
+    const isTail = opts.isTail ?? true
+    const aiFindings = scanAiPatterns(text, {
+      whitelist: opts.whitelist,
+      bannedWords: opts.bannedWords,
+      isTail
+    })
+    const degenFindings = scanDegeneration(text, { isTail })
     const findings = [...aiFindings, ...degenFindings]
     const counts = {
       blocking: findings.filter((f) => f.severity === 'blocking').length,
       advisory: findings.filter((f) => f.severity === 'advisory').length
     }
     const wordCount = countWords(text)
-    const metrics = this.computeMetrics(text, findings, wordCount)
+    const metrics = this.computeMetrics(findings, wordCount)
     return { findings, counts, metrics, wordCount }
   }
 
   /* =========================================================
-     Phase 2：诊断分级（6 项指标 → level）
+     Phase 2：诊断分级
      ========================================================= */
 
   classify(metrics: DeslopMetrics, counts: { blocking: number; advisory: number }): DeslopLevel {
@@ -112,25 +123,125 @@ export class DeslopService {
      Phase 3 + 3.5 + 4：润色（编排）
      ========================================================= */
 
-  async deslop(
+  /**
+   * 分块编排：正文不超长时直接跑一遍完整流程；超长时按段落切块逐块处理再合并。
+   *
+   * 单次 LLM 调用要吐出「改写后正文 +【改动说明】」，超过 tokensForDeslop 的上限就会被截断，
+   * 截断结果又会被 acceptRewrite 拒绝——表现为「长文点了润色什么都没发生」。切块是唯一出路。
+   */
+  async deslop(text: string, opts: DeslopOptions = {}): Promise<DeslopResult> {
+    const emit = (t: string): void => opts.onToken?.(t)
+    const chunks = splitForDeslop(text)
+    if (chunks.length <= 1) return this.deslopChunk(text, opts, true)
+
+    // 长文一跑就是几十次 LLM 调用，先把规模摆出来，用户可以立刻点停止
+    emit(
+      `\n📚 正文 ${countWords(text)} 字，超出单次改写上限（${CHUNK_MAX_WORDS} 字），` +
+        `按段落边界切成 ${chunks.length} 块依次处理。\n` +
+        `   规模预估：每块最多 ${MAX_LLM_CALLS_PER_CHUNK} 次 LLM 调用（3 遍 × 每遍最多 1 改写 + 2 清理），` +
+        `本次最多 ${chunks.length * MAX_LLM_CALLS_PER_CHUNK} 次。随时可点「停止」。\n`
+    )
+    // 切块以行为最小单位（行内切会把一句台词劈开），所以单行本身超长时切不动。
+    // 不静默：这种块几乎必然被模型截断、进而被 acceptRewrite 拒绝，得让用户知道为什么白跑。
+    const oversized = chunks.filter((c) => countWords(c.text) > CHUNK_MAX_WORDS)
+    if (oversized.length > 0) {
+      emit(
+        `   ⚠️ 其中 ${oversized.length} 块含超长单行（最大 ${Math.max(...oversized.map((c) => countWords(c.text)))} 字），` +
+          `切块以行为单位切不开。这些块可能超出模型单次输出上限而被拒绝，建议先在对应位置手动分段。\n`
+      )
+    }
+
+    const results: DeslopResult[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i]
+      emit(
+        `\n══════ 第 ${i + 1}/${chunks.length} 块（原文第 ${c.startLine} 行起，${countWords(c.text)} 字）══════\n`
+      )
+      try {
+        // 只有最后一块是真正的全文结尾：其余块不按「章末」升级 Gate F、不做截断检测
+        results.push(await this.deslopChunk(c.text, opts, i === chunks.length - 1))
+      } catch (err) {
+        if (!isUserAbort(err)) throw err
+        // 用户取消：已完成的块不能白跑。未处理的块按原文补齐后照常返回，
+        // 结果仍要用户在 diff 面板点「应用」才落盘，不会偷偷写入半成品。
+        emit(
+          `\n🛑 已取消：保留前 ${i} 块的改写结果，其余 ${chunks.length - i} 块保持原文。\n` +
+            `   仍需在下方确认改动后点「应用」才会写回正文。\n`
+        )
+        for (let j = i; j < chunks.length; j++) {
+          results.push(await this.unchangedChunkResult(chunks[j].text, opts, j === chunks.length - 1))
+        }
+        return mergeChunkResults(text, chunks, results)
+      }
+    }
+    const merged = mergeChunkResults(text, chunks, results)
+    emit(
+      `\n📊 分块合并完成：${merged.beforeWords} -> ${merged.afterWords} 字，` +
+        `改动 ${merged.changeSummary.length} 条，剩余问题 ${merged.remainingFindings.length} 处\n`
+    )
+    return merged
+  }
+
+  /**
+   * 取消后未处理的块：正文原样，但仍照实扫描一遍。
+   * 不扫的话合并报告里「剩余问题」会漏掉这些块，看起来像已经改干净了。
+   */
+  private async unchangedChunkResult(
     text: string,
-    opts: DeslopOptions = {}
+    opts: DeslopOptions,
+    isTail: boolean
+  ): Promise<DeslopResult> {
+    const scan = await this.scan(text, {
+      whitelist: opts.whitelist,
+      bannedWords: opts.bannedWords,
+      isTail
+    })
+    const words = countWords(text)
+    return {
+      rewritten: text,
+      processedGates: [],
+      beforeWords: words,
+      afterWords: words,
+      deleteRatio: 0,
+      remainingFindings: scan.findings,
+      changeSummary: []
+    }
+  }
+
+  /**
+   * 单块改写（Phase 1-4 完整流程）。
+   * @param isTail 本块是否是全文结尾；影响 Gate F 章末升级与截断检测
+   */
+  private async deslopChunk(
+    text: string,
+    opts: DeslopOptions,
+    isTail: boolean
   ): Promise<DeslopResult> {
     const beforeWords = countWords(text)
 
     // Phase 1 扫描（用户配置的禁用词表优先，否则内置默认）
     const report = await this.scan(text, {
       whitelist: opts.whitelist,
-      bannedWords: opts.bannedWords
+      bannedWords: opts.bannedWords,
+      isTail
     })
 
     // Phase 2 分级
     const level = opts.levelOverride ?? this.classify(report.metrics, report.counts)
-    const gates = gatesForLevel(level)
-    const passes = passesForLevel(level)
+    const baseGates = gatesForLevel(level)
+    // 分级决定"改多狠"（删除比例上限），不决定"哪些问题配被修"：
+    // 只含章末升华（F）或工程词泄漏（G）的正文会判为 mild，若不扩展就一次 LLM 都不调，
+    // 正文原样返回却报"仍剩 N 处 blocking"；对话标签单一化（E，只产 advisory）则永远没人管。
+    // 没命中的 Gate 在下面的 Pass 循环里本来就会跳过，所以扩展不会凭空多调 LLM。
+    const gates = expandGatesForFindings(baseGates, report.findings.map((f) => f.gate))
+    const passes = passesForGates(gates)
     const emit = (t: string): void => opts.onToken?.(t)
     emit(`\n🔍 Phase 1-2：扫描完成，诊断为${levelName(level)}（blocking ${report.counts.blocking} / advisory ${report.counts.advisory}）\n`)
     emit(`   总处理 Gate：${gates.join(' ')} | 三遍法：${passes.length} 遍\n`)
+    const extraGates = gates.filter((g) => !baseGates.includes(g))
+    if (extraGates.length > 0) {
+      emit(`   ⬆️ Gate ${extraGates.join(' ')} 有命中，已加入本次处理范围（超出${levelName(level)}默认范围）\n`)
+    }
     if (opts.styleContext?.genre || opts.styleContext?.style) {
       const bits: string[] = []
       if (opts.styleContext.genre) bits.push(`题材=${opts.styleContext.genre}`)
@@ -159,7 +270,8 @@ export class DeslopService {
         // 本遍开始时扫描当前文本，过滤出该遍 Gate 范围内的命中 finding
         const passScan = await this.scan(finalText, {
           whitelist: opts.whitelist,
-          bannedWords: opts.bannedWords
+          bannedWords: opts.bannedWords,
+          isTail
         })
         const passFindings = passScan.findings.filter((f) => passGates.includes(f.gate))
         if (passFindings.length === 0) {
@@ -175,12 +287,22 @@ export class DeslopService {
         })
         const llmOutput = await this.llm.generateStream(prompt, {
           systemPrompt: effectiveSystemPrompt,
-          maxTokens: 12288,
+          maxTokens: tokensForDeslop(finalText),
           meta: { feature: `deslop:pass${passNum}`, ...opts.meta },
           onToken: emit,
           signal: opts.signal
         })
         let rewritten = extractRewritten(llmOutput)
+
+        // 可用性护栏：寒暄/拒答/截断的输出一律不落到正文，保留改写前文本继续下一遍
+        const verdict = acceptRewrite(finalText, llmOutput, rewritten, level)
+        if (!verdict.ok) {
+          emit(`\n   ⛔ 本遍改写结果被拒绝（${verdict.reason}），保留改写前正文。\n`)
+          allChangeSummary.push(`- [已拒绝] Pass${passNum} 改写结果不可用：${verdict.reason}`)
+          lastReport = passScan
+          continue
+        }
+
         const passChanges = extractChangeSummary(llmOutput)
         if (passChanges.length > 0) {
           allChangeSummary.push(...passChanges)
@@ -221,19 +343,27 @@ export class DeslopService {
           level,
           effectiveSystemPrompt,
           opts,
-          emit
+          emit,
+          isTail
         )
         finalText = cleaned.text
         if (cleaned.changes.length > 0) {
           allChangeSummary.push(...cleaned.changes)
         }
 
-        // 记录最后一次复扫结果（供 Phase 4 报告）
-        lastReport = await this.scan(finalText, { bannedWords: opts.bannedWords })
+        // 记录最后一次复扫结果（供 Phase 4 报告）——必须带 whitelist，否则豁免词会以"剩余问题"回到报告里
+        lastReport = await this.scan(finalText, {
+          whitelist: opts.whitelist,
+          bannedWords: opts.bannedWords,
+          isTail
+        })
       }
     } else {
       emit(`\n✔️ 无 AI 味问题，跳过改写。\n`)
     }
+
+    // extractRewritten 会 trim；把原文首尾空白还回去，否则分块时块边界的空行会被吃掉
+    finalText = restoreEdgeWhitespace(text, finalText)
 
     // Phase 4：报告
     // LLM 常漏写【改动说明】或格式不规范 → 文本已变但 changeSummary 为空。
@@ -283,14 +413,19 @@ export class DeslopService {
     level: DeslopLevel,
     effectiveSystemPrompt: string,
     opts: Pick<DeslopOptions, 'styleContext' | 'textOverrides' | 'bannedWords' | 'whitelist' | 'meta' | 'signal'>,
-    emit: (t: string) => void
+    emit: (t: string) => void,
+    isTail: boolean
   ): Promise<{ text: string; changes: string[] }> {
     const MAX_CLEANUP_ROUNDS = 2
     let result = text
     let round = 0
     const changes: string[] = []
     // 复扫，只看本遍 Gate 范围内的 blocking
-    let scan = await this.scan(result, { whitelist: opts.whitelist, bannedWords: opts.bannedWords })
+    let scan = await this.scan(result, {
+      whitelist: opts.whitelist,
+      bannedWords: opts.bannedWords,
+      isTail
+    })
     let remaining = scan.findings.filter((f) => f.severity === 'blocking' && passGates.includes(f.gate))
     if (remaining.length === 0) {
       emit(`   ✔️ 本遍复扫无 blocking 残留，跳过二次清理。\n`)
@@ -309,12 +444,18 @@ export class DeslopService {
       )
       const cleanupOutput = await this.llm.generateStream(cleanupPrompt, {
         systemPrompt: effectiveSystemPrompt,
-        maxTokens: 12288,
+        maxTokens: tokensForDeslop(result),
         meta: { feature: `deslop:cleanup:pass${passNum}:${round}`, ...opts.meta },
         onToken: emit,
         signal: opts.signal
       })
       let cleanupRewritten = extractRewritten(cleanupOutput)
+      const verdict = acceptRewrite(result, cleanupOutput, cleanupRewritten, level)
+      if (!verdict.ok) {
+        emit(`   ⛔ 第 ${round} 轮清理结果被拒绝（${verdict.reason}），保留上一版正文并停止清理。\n`)
+        changes.push(`- [已拒绝] Pass${passNum} 第 ${round} 轮清理结果不可用：${verdict.reason}`)
+        break
+      }
       const cleanupChanges = extractChangeSummary(cleanupOutput)
       if (cleanupChanges.length > 0) {
         changes.push(...cleanupChanges)
@@ -331,7 +472,11 @@ export class DeslopService {
       const reNorm = normalizePunctuation(cleanupRewritten)
       result = reNorm.text
       // 复扫判断是否还需下一轮
-      scan = await this.scan(result, { whitelist: opts.whitelist, bannedWords: opts.bannedWords })
+      scan = await this.scan(result, {
+        whitelist: opts.whitelist,
+        bannedWords: opts.bannedWords,
+        isTail
+      })
       remaining = scan.findings.filter((f) => f.severity === 'blocking' && passGates.includes(f.gate))
     }
     if (remaining.length > 0) {
@@ -346,65 +491,13 @@ export class DeslopService {
      私有：指标计算 + 白名单
      ========================================================= */
 
-  private computeMetrics(
-    text: string,
-    findings: DeslopFinding[],
-    wordCount: number
-  ): DeslopMetrics {
-    const perKilo = (n: number): number => (wordCount > 0 ? (n / wordCount) * 1000 : 0)
-
-    // 禁用词密度（banned-word 类 finding 数 / 千字）
+  /** 只算 classify() 真正读的两项；其余问题由 findings 逐条呈现，不需要聚合数字 */
+  private computeMetrics(findings: DeslopFinding[], wordCount: number): DeslopMetrics {
     const bannedHits = findings.filter((f) => f.type === 'banned-word').length
-    // 排比命中数
-    const parallelismCount = findings.filter((f) => f.type === 'parallelism').length
-    // 心理词密度
-    const psychHits = this.countOccurrences(text, PSYCH_WORDS)
-    // 重复描写密度（repetition 类）
-    const repHits = findings.filter((f) => f.type === 'repetition').length
-    // 对话标签密度（"道/说" 占比）
-    const dialogueTagDensity = this.computeDialogueTagDensity(text)
-    // 平均段落句数
-    const avgSentencesPerParagraph = this.computeAvgSentencesPerParagraph(text)
-
     return {
-      bannedWordDensity: perKilo(bannedHits),
-      parallelismCount,
-      psychWordDensity: perKilo(psychHits),
-      dialogueTagDensity,
-      avgSentencesPerParagraph,
-      repetitionDensity: perKilo(repHits)
+      bannedWordDensity: wordCount > 0 ? (bannedHits / wordCount) * 1000 : 0,
+      parallelismCount: findings.filter((f) => f.type === 'parallelism').length
     }
-  }
-
-  private countOccurrences(text: string, words: string[]): number {
-    let n = 0
-    for (const w of words) {
-      let idx = text.indexOf(w)
-      while (idx !== -1) {
-        n += 1
-        idx = text.indexOf(w, idx + w.length)
-      }
-    }
-    return n
-  }
-
-  private computeDialogueTagDensity(text: string): number {
-    // "X道" / "X说" 占对话相关行的比例（简化估算）
-    const tagMatches = text.match(/[说道问道喊叫笑]道/g) ?? []
-    const sayMatches = text.match(/[^说道]{1,3}说[^道]/g) ?? []
-    const dialogueLines = text.split('\n').filter((l) => /[""「」''']/.test(l)).length
-    if (dialogueLines === 0) return 0
-    return ((tagMatches.length + sayMatches.length) / dialogueLines) * 100
-  }
-
-  private computeAvgSentencesPerParagraph(text: string): number {
-    const paragraphs = text.split(/\n\s*\n/).filter((p) => p.trim())
-    if (paragraphs.length === 0) return 0
-    let totalSentences = 0
-    for (const p of paragraphs) {
-      totalSentences += p.split(/[。！？!?]/).filter((s) => s.trim()).length
-    }
-    return totalSentences / paragraphs.length
   }
 
   /** 读取/写入项目级白名单（IPC 层用） */
@@ -426,6 +519,233 @@ export class DeslopService {
     const content = words.filter((w) => w.trim()).join('\n') + '\n'
     await fs.writeFile(path, content, 'utf-8')
   }
+}
+
+/**
+ * 单块最大字数。超过就切块——tokensForDeslop 在此之上会顶到 DESLOP_MAX_MAX_TOKENS，
+ * 输出装不下「正文 +【改动说明】」必被截断。
+ * 取 10000 是为了让正常章节（上限 MAX_TARGET_WORDS = 8000 字）永远走单块路径，行为不变；
+ * 只有文本模式里粘进来的超长内容才会被切。
+ */
+export const CHUNK_MAX_WORDS = 10_000
+
+/**
+ * 单块最坏情况下的 LLM 调用数：3 遍 × 每遍（1 次改写 + 最多 2 轮二次清理）。
+ * 只用于开跑前给用户报规模，不参与任何控制流。
+ */
+const MAX_LLM_CALLS_PER_CHUNK = 9
+
+/** 用户主动取消（llm-service 在 opts.signal 已 abort 时抛 LLM_ABORTED），区别于超时/截断 */
+function isUserAbort(err: unknown): boolean {
+  return err instanceof Error && err.message === 'LLM_ABORTED'
+}
+
+/** 一个待改写分块：正文 + 它在原文里的起始行号（1-based），用于把行号引用还原成全局 */
+export interface DeslopChunk {
+  text: string
+  startLine: number
+}
+
+/**
+ * 按行切块，优先在空行（段落边界）断开，绝不从行中间切断——
+ * 对话独立成行，从行内切会把一句台词劈成两块。
+ */
+export function splitForDeslop(text: string, maxWords = CHUNK_MAX_WORDS): DeslopChunk[] {
+  if (countWords(text) <= maxWords) return [{ text, startLine: 1 }]
+
+  // 只按 '\n' 切、用 '\n' 拼回：'\r' 留在行尾，未改写的块能逐字还原
+  const lines = text.split('\n')
+  const chunks: DeslopChunk[] = []
+  let buf: string[] = []
+  let bufWords = 0
+  let startLine = 1
+
+  for (const line of lines) {
+    const w = countWords(line)
+    if (bufWords > 0 && bufWords + w > maxWords) {
+      // 回看最近的空行作为段落边界；只回退最后 20%，避免切出极小的块
+      let cut = buf.length
+      const minCut = Math.floor(buf.length * 0.8)
+      for (let i = buf.length - 1; i >= minCut; i--) {
+        if (buf[i].trim() === '') {
+          cut = i
+          break
+        }
+      }
+      const head = buf.slice(0, cut)
+      const tail = buf.slice(cut)
+      chunks.push({ text: head.join('\n'), startLine })
+      startLine += head.length
+      buf = tail
+      bufWords = tail.reduce((n, l) => n + countWords(l), 0)
+    }
+    buf.push(line)
+    bufWords += w
+  }
+  if (buf.length > 0) chunks.push({ text: buf.join('\n'), startLine })
+  return chunks
+}
+
+/**
+ * 合并分块结果：拼回正文、把块内行号还原成全文行号、按 A-G 顺序合并 Gate。
+ *
+ * 两种行号用两个不同的偏移，别混：
+ * - **changeSummary 的「第N行」**：LLM 引用的是它收到的**原文**行号 → 按 chunk.startLine 偏移。
+ * - **remainingFindings 的 line**：扫的是**改写后**文本 → 必须按已拼接的改写结果累计行数偏移。
+ *   用原文行号会在前面的块行数变了之后整体错位（改写压行时甚至指到文本末尾之外）。
+ *
+ * 自动 diff 兜底产生的「第N段」是块内段号，无法换算成全文段号，
+ * 因此给每条改动说明都加「[第i/N块]」前缀标明范围。
+ */
+export function mergeChunkResults(
+  original: string,
+  chunks: DeslopChunk[],
+  results: DeslopResult[]
+): DeslopResult {
+  const gateSet = new Set<string>()
+  const changeSummary: string[] = []
+  const remainingFindings: DeslopFinding[] = []
+
+  // 边拼边记：每块正文在合并结果里的起始行号（1-based）
+  let acc = ''
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]
+    if (i > 0) acc += '\n'
+    const startLineInMerged = acc.split('\n').length
+    acc += r.rewritten
+
+    for (const g of r.processedGates) gateSet.add(g)
+    for (const c of r.changeSummary) {
+      changeSummary.push(tagChunkSummary(c, i + 1, results.length, chunks[i].startLine - 1))
+    }
+    for (const f of r.remainingFindings) {
+      remainingFindings.push({ ...f, line: f.line + startLineInMerged - 1 })
+    }
+  }
+  const rewritten = acc
+
+  const beforeWords = countWords(original)
+  const afterWords = countWords(rewritten)
+  return {
+    rewritten,
+    processedGates: expandGatesForFindings([], gateSet) as DeslopResult['processedGates'],
+    beforeWords,
+    afterWords,
+    deleteRatio: beforeWords > 0 ? 1 - afterWords / beforeWords : 0,
+    remainingFindings,
+    changeSummary
+  }
+}
+
+/**
+ * 把原文首尾的空白（换行）原样还给改写结果。
+ *
+ * extractRewritten 会 trim 掉 LLM 输出的首尾空白，分块时这会吃掉块边界上的空行——
+ * 两个自然段被悄悄并成一段。非分块路径同样受益：用户正文末尾的换行不再被吞。
+ */
+function restoreEdgeWhitespace(original: string, rewritten: string): string {
+  if (original === rewritten) return rewritten
+  const lead = /^\s*/.exec(original)?.[0] ?? ''
+  const trail = /\s*$/.exec(original)?.[0] ?? ''
+  return lead + rewritten.replace(/^\s+/, '').replace(/\s+$/, '') + trail
+}
+
+/** 把一条块内改动说明的「第N行」加上偏移，并标注它属于第几块 */
+function tagChunkSummary(entry: string, index: number, total: number, lineOffset: number): string {
+  const shifted = entry.replace(/第(\d+)行/g, (_m, n: string) => `第${Number(n) + lineOffset}行`)
+  const body = shifted.replace(/^-\s*/, '')
+  return `- [第${index}/${total}块] ${body}`
+}
+
+/** 改写调用的 token 下限（短章节沿用原值，保证行为不变） */
+const DESLOP_MIN_MAX_TOKENS = 12288
+/** token 上限，防止有人把整本书粘进来时算出荒唐的请求值 */
+const DESLOP_MAX_MAX_TOKENS = 32768
+
+/**
+ * 按待改写正文长度反算本次生成的 token 上限。
+ *
+ * 输出 = 改写后正文（≈ 原文长度，删除比例上限 35%）+【改动说明】（逐条引用原句/改后，
+ * 命中密集时能和正文同量级）。中文 1 字 ≈ 1.7 token（与 write-service.tokensForWords 同口径），
+ * 再乘 1.6 给改动说明留额度。
+ *
+ * 原先固定 12288：2500 字章节够用，5000 字以上必被截断。截断输出会被 acceptRewrite 拒绝，
+ * 对用户表现为「长章节点了润色什么都没发生」。
+ */
+function tokensForDeslop(text: string): number {
+  const needed = Math.ceil(countWords(text) * 1.7 * 1.6)
+  return Math.min(DESLOP_MAX_MAX_TOKENS, Math.max(DESLOP_MIN_MAX_TOKENS, needed))
+}
+
+/** LLM 把「寒暄开场白」当正文返回的常见开头（仅在缺 【改写后】 标记时检查） */
+const CHATTER_HEAD_RE =
+  /^(好的|好[，,]|明白了?|收到|当然|没问题|以下是|下面是|这是(改写|修改)|我(来|将|会)|遵命|抱歉|很抱歉|对不起)/
+
+/**
+ * 拒答/元信息泄漏。只在「原文没有、改写后凭空冒出来」时判定，
+ * 因为 AI 伴侣/系统流题材里「作为一个人工智能」可能是合法台词
+ * （check-degeneration 的 findPlaceholders 对对话行也做了同样豁免）。
+ */
+const REFUSAL_RE =
+  /(作为(一个)?(AI|人工智能|语言模型))|我无法(继续|完成|提供|帮)|抱歉[，,]?我(不能|无法)/
+
+/** 超出删除比例上限后再放宽的容差（LLM 自己算的比例常有偏差，留 10 个百分点） */
+const DELETE_RATIO_TOLERANCE = 0.1
+
+/**
+ * 比例护栏的最小样本长度（字）。
+ * 短片段（humanizeSegment 传来的命中句、几行对话）删掉一行就轻松超过 25%，
+ * 按比例判会把合法改写全拒掉；短文本只用下面的「灾难性截断」兜底。
+ */
+const RATIO_GUARD_MIN_WORDS = 120
+
+/** 任何长度都适用的灾难性截断阈值：留存不足原文四成一律拒绝 */
+const CATASTROPHIC_KEEP_RATIO = 0.4
+
+/**
+ * 判断一遍改写/清理的输出能否落到正文。
+ *
+ * 拒绝三类不可用输出（拒绝时调用方保留改写前文本）：
+ * 1. 空结果
+ * 2. 缺【改写后】标记且整段像寒暄/拒答——extractRewritten 此时会原样返回整个回复，
+ *    直接采用会把"好的，我来帮你改写："写进章节正文
+ * 3. 删除比例超过该分级上限 + 容差——多为输出被 maxTokens 截断，采用会造成正文丢失
+ */
+function acceptRewrite(
+  before: string,
+  llmOutput: string,
+  candidate: string,
+  level: DeslopLevel
+): { ok: true } | { ok: false; reason: string } {
+  const text = candidate.trim()
+  if (!text) return { ok: false, reason: '改写结果为空' }
+
+  const hasMarker = /【改写后】/.test(llmOutput)
+  if (REFUSAL_RE.test(text) && !REFUSAL_RE.test(before)) {
+    return { ok: false, reason: '结果含拒答/元信息' }
+  }
+  if (!hasMarker && CHATTER_HEAD_RE.test(text)) {
+    return { ok: false, reason: '缺【改写后】标记且开头像寒暄，疑似非正文' }
+  }
+
+  const beforeWords = countWords(before)
+  if (beforeWords > 0) {
+    const keepRatio = countWords(text) / beforeWords
+    if (keepRatio < CATASTROPHIC_KEEP_RATIO) {
+      return {
+        ok: false,
+        reason: `只剩原文 ${(keepRatio * 100).toFixed(1)}%，疑似输出被截断`
+      }
+    }
+    const limit = deleteLimitPct(level) / 100 + DELETE_RATIO_TOLERANCE
+    if (beforeWords >= RATIO_GUARD_MIN_WORDS && 1 - keepRatio > limit) {
+      return {
+        ok: false,
+        reason: `删除比例 ${((1 - keepRatio) * 100).toFixed(1)}% 超上限 ${(limit * 100).toFixed(0)}%`
+      }
+    }
+  }
+  return { ok: true }
 }
 
 function levelName(level: DeslopLevel): string {

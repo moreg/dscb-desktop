@@ -58,12 +58,19 @@ interface ContentLine {
   lineNo: number
 }
 
-export function scanDegeneration(input: string): DeslopFinding[] {
+/**
+ * @param isTail 本段是否是全文结尾。分块改写的非末块传 false 以跳过截断检测——
+ *   否则每个分块的末行都会被当成"正文末尾无终止标点"而误报 blocking。缺省 true。
+ */
+export function scanDegeneration(
+  input: string,
+  opts: { isTail?: boolean } = {}
+): DeslopFinding[] {
   const lines = input.split(/\r?\n/)
   const content = collectContent(lines)
   const findings: DeslopFinding[] = []
   findings.push(...findRepetition(content))
-  findings.push(...findTruncation(content))
+  if (opts.isTail ?? true) findings.push(...findTruncation(content))
   findings.push(...findPlaceholders(content))
   findings.push(...findMetaLeak(content))
   findings.sort((a, b) => a.line - b.line || a.column - b.column)

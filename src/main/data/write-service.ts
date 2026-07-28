@@ -78,6 +78,20 @@ import {
   LLM_AGENT_META_ERROR
 } from './agent-meta-detect'
 
+/**
+ * 批量续写的跨段状态。
+ * 「继续下一章」会以新的 [fromChapter+1, toChapter] 区间重新进入 generateChaptersBatch，
+ * 若不透传这些字段，total 会缩水成剩余章数、completed 会被清空，UI 进度倒退。
+ */
+export interface BatchState {
+  /** 整批的起始章号 */
+  fromChapter: number
+  /** 整批的章节总数 */
+  total: number
+  /** 整批已完成的章号 */
+  completed: number[]
+}
+
 export interface ChapterPrompt {
   system: string
   user: string
@@ -126,6 +140,29 @@ const ASK_ADJACENT_RANGE = 2
  * 正文追问：每篇相邻章正文的最大字符数，防止 ±2 章叠加后 token 爆炸。
  */
 const ASK_ADJACENT_MAX_CHARS = 10_000
+
+/**
+ * 续写时注入「本章已写正文前部」的最大字符数。
+ * 反复点续写会让前部单调增长，每轮全量重发；这里只保留开头（防重复写）与
+ * 结尾（保衔接），中间省略。
+ */
+const EXISTING_TEXT_MAX_CHARS = 6000
+/** 超限时保留的开头字符数（其余额度留给结尾）。 */
+const EXISTING_TEXT_HEAD_CHARS = 2000
+
+/**
+ * 续写「继续展开」模式的最小增量字数。
+ * 剩余额度低于此值时不再强行加码，转入收尾模式（补完剩余剧情点并收束本章）。
+ *
+ * 注意这与 MIN_TARGET_WORDS(800) 是两个维度：后者约束「整章」目标字数的解析下限，
+ * 这里约束「本次续写还要再写多少」。续写增量本就该允许比整章下限小，两者不必对齐。
+ */
+const CONTINUE_MIN_WORDS = 500
+/** 续写收尾模式的建议字数（只求收束，不求篇幅）。 */
+const CONTINUE_FINISH_WORDS = 300
+
+/** 上一章结尾状态缓存条数上限。 */
+const ENDING_STATE_CACHE_MAX = 16
 
 /**
  * 从细纲「字数预估」文本解析出整数目标字数。
@@ -189,7 +226,8 @@ export class WriteService {
       styleProfileId ?? project.defaultStyleProfileId ?? null
     )
 
-    const ctx = await this.loadChapterContext(dir, chapterNumber)
+    // prevEndingState 只有写正文用得上，这里显式要
+    const ctx = await this.loadChapterContext(dir, chapterNumber, { needEndingState: true })
 
     const overrides = this.settings
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
@@ -199,12 +237,24 @@ export class WriteService {
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
 
     const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
-    
-    let targetWords = parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
+
+    const chapterTargetWords = parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
+    let targetWords = chapterTargetWords
+    /**
+     * 续写模式：
+     * - extend：本章篇幅还差得多，按剩余额度继续展开
+     * - finish：篇幅已达标（或只差一点），转为收尾——补完剩余剧情点并收束，不再强行拉长
+     */
+    let continueMode: 'extend' | 'finish' | undefined
     if (existingText && existingText.trim()) {
-      const existingWordCount = existingText.trim().length
-      // Calculate remaining words to write, ensuring a minimum of 500 words for continuation
-      targetWords = Math.max(500, targetWords - existingWordCount)
+      const remaining = chapterTargetWords - existingText.trim().length
+      if (remaining >= CONTINUE_MIN_WORDS) {
+        continueMode = 'extend'
+        targetWords = remaining
+      } else {
+        continueMode = 'finish'
+        targetWords = CONTINUE_FINISH_WORDS
+      }
     }
 
     const user = renderUserPrompt({
@@ -226,7 +276,8 @@ export class WriteService {
       chapterNumber,
       targetWords,
       tempContext,
-      existingText
+      existingText,
+      continueMode
     })
 
     return { system, user, targetWords }
@@ -826,6 +877,11 @@ export class WriteService {
   /**
    * 写后自检：轻量加载（细纲/伏笔/设定/上章正文尾），**不**走 loadChapterContext，
    * **不**调用 extractEndingState（避免二次 LLM）。纯算法验正文。
+   *
+   * 上章结尾状态改为「只读缓存」：写本章时 buildChapterPrompt 刚提取过同一份，
+   * 命中就白拿，从而真正跑上「上章悬念/上章未完成/人物位置」三项连续性检查
+   * （此前恒为 undefined，这三项根本不会出现在报告里，counts/ok 是在更小的集合上算的，
+   * 「自检通过」比看起来要弱）。未命中仍降级跳过，不会为此多打一次 LLM。
    */
   async selfCheckChapter(
     projectId: string,
@@ -853,8 +909,8 @@ export class WriteService {
       return evaluateChapterSelfCheck({
         chapterNumber,
         content,
-        // 轻量路径：不调 LLM 结构化结尾；有 prevTail 时仍可做「对接」弱检查
-        prevEndingState: undefined,
+        // 只读缓存：命中则连续性三项照常检查，未命中退回 undefined（跳过），不打 LLM
+        prevEndingState: prevTail ? this.peekEndingState(dir, chapterNumber, prevTail) : undefined,
         prevTail,
         plotSummary: detail?.plotSummary,
         hook: detail?.hook,
@@ -1422,6 +1478,15 @@ export class WriteService {
     opts: GenerateOptions = {}
   ): Promise<ChapterFlowResult> {
     const dir = await this.projectService.resolveDir(projectId)
+    /**
+     * 步骤 3-7 的 LLM 调用同样要吃「停止」信号，否则用户在正文写完、流程跑到一半时
+     * 点停止，按钮会卡在「停止中…」，后台还要把剩下 4-5 次调用全跑完。
+     * 只透传 signal，不透传 onToken——那些步骤的 JSON 输出不该刷进编辑器。
+     */
+    const flowOpts = (feature: string): GenerateOptions => ({
+      signal: opts.signal,
+      meta: { feature, projectId, chapterNumber }
+    })
 
     // 1. 生成正文（流式 token 由 opts.onToken 推送）
     onProgress('generating')
@@ -1489,7 +1554,7 @@ export class WriteService {
           outlineText,
           content,
           chapterNumber,
-          { meta: { feature: 'batchOutline', projectId } }
+          flowOpts('batchOutline')
         )
         outlineDiff = parseOutlineDiffJson(outlineRaw, chapterNumber)
       } catch (err) {
@@ -1517,7 +1582,7 @@ export class WriteService {
         content,
         chapterNumber,
         knownCharacters,
-        { meta: { feature: 'batchMemory', projectId } }
+        flowOpts('batchMemory')
       )
       memory = parseMemoryExtractionJson(memRaw, chapterNumber)
     } catch (err) {
@@ -1549,7 +1614,7 @@ export class WriteService {
         content,
         chapterNumber,
         expectedEmotion,
-        { meta: { feature: 'batchRhythm', projectId } }
+        flowOpts('batchRhythm')
       )
       rhythm = parseRhythmEvaluationJson(rhythmRaw, chapterNumber, expectedEmotion)
     } catch (err) {
@@ -1569,9 +1634,11 @@ export class WriteService {
       reason: '未执行'
     }
     try {
-      const figRaw = await this.flow.generateFigureStream(content, chapterNumber, {
-        meta: { feature: 'batchFigure', projectId }
-      })
+      const figRaw = await this.flow.generateFigureStream(
+        content,
+        chapterNumber,
+        flowOpts('batchFigure')
+      )
       figure = parseFigureDraftJson(figRaw, chapterNumber)
     } catch (err) {
       console.warn('[runFullFlowForChapter] Failed to generate figure:', err)
@@ -1586,9 +1653,12 @@ export class WriteService {
         const rules = await this.settings.getReviewRules()
         if (rules.enabled && rules.autoDeepReview) {
           onProgress('deepReview')
-          deepReview = await this.runDeepReview(projectId, content, chapterNumber, {
-            meta: { feature: 'batchDeepReview', projectId }
-          })
+          deepReview = await this.runDeepReview(
+            projectId,
+            content,
+            chapterNumber,
+            flowOpts('batchDeepReview')
+          )
         }
       } catch (err) {
         console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
@@ -1614,6 +1684,9 @@ export class WriteService {
    * 批量续写：从 fromChapter 到 toChapter 逐章生成。
    * 每章完成后暂停（status='paused'），等用户确认后由 UI 调 resumeBatch 继续。
    * onChapterComplete 在每章完成时回调（用于推送结果到 UI）。
+   *
+   * batchState 由 resume 透传：不传时按 [fromChapter, toChapter] 自成一批统计进度；
+   * 传了则沿用整批的 total/completed/起始章，避免续跑时进度从头计数。
    */
   async generateChaptersBatch(
     projectId: string,
@@ -1621,13 +1694,14 @@ export class WriteService {
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {}
+    maybeOpts: GenerateOptions = {},
+    batchState?: BatchState
   ): Promise<BatchProgress> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const total = toChapter - fromChapter + 1
-    const completed: number[] = []
-    const dir = await this.projectService.resolveDir(projectId)
-    const proseRepo = new ProseRepo(dir)
+    const batchFrom = batchState?.fromChapter ?? fromChapter
+    const total = batchState?.total ?? toChapter - fromChapter + 1
+    // 已完成章沿用整批记录；去重防止用户重复点「继续」时同一章被计两次
+    const completed: number[] = Array.from(new Set(batchState?.completed ?? []))
 
     for (let ch = fromChapter; ch <= toChapter; ch++) {
       try {
@@ -1642,17 +1716,36 @@ export class WriteService {
             styleProfileId
           } as GenerateOptions
         )
-        // 保存正文
-        await proseRepo.write(ch, result.content)
-        completed.push(ch)
+        // 保存正文：必须走 ChapterService，它会带上章节标题写成技能格式
+        // `正文/第NNN章 标题.md` 并 markActualized。直接 ProseRepo.write(ch, content)
+        // 会因缺 title 落到旧格式 NNN.md，而读取优先技能格式——该章一旦在编辑器
+        // 存过，批量生成的正文就再也读不回来。
+        try {
+          await this.chapterService.updateContent(projectId, ch, result.content)
+        } catch (err) {
+          // 落盘失败（文件被占用/无权限/节奏图谱写失败）时，正文已经烧掉一整次 LLM 了，
+          // 不能跟着异常一起丢：先把结果回传给 UI，用户可在编辑器里手动保存。
+          onChapterComplete(ch, result)
+          return {
+            total,
+            current: completed.length,
+            currentChapter: ch,
+            fromChapter: batchFrom,
+            toChapter,
+            status: 'failed',
+            completed,
+            error: `第 ${ch} 章正文已生成，但保存失败：${(err as Error).message}（内容已回传，可在编辑器中手动保存）`
+          }
+        }
+        if (!completed.includes(ch)) completed.push(ch)
         onChapterComplete(ch, result)
         // 暂停等用户确认（除非已是最后一章）
         if (ch < toChapter) {
           return {
             total,
-            current: ch - fromChapter + 1,
+            current: completed.length,
             currentChapter: ch,
-            fromChapter,
+            fromChapter: batchFrom,
             toChapter,
             status: 'paused',
             pauseReason: '等待用户确认后继续下一章',
@@ -1662,9 +1755,9 @@ export class WriteService {
       } catch (err) {
         return {
           total,
-          current: ch - fromChapter + 1,
+          current: completed.length,
           currentChapter: ch,
-          fromChapter,
+          fromChapter: batchFrom,
           toChapter,
           status: 'failed',
           completed,
@@ -1674,9 +1767,9 @@ export class WriteService {
     }
     return {
       total,
-      current: total,
+      current: completed.length,
       currentChapter: toChapter,
-      fromChapter,
+      fromChapter: batchFrom,
       toChapter,
       status: 'completed',
       completed
@@ -1686,6 +1779,7 @@ export class WriteService {
   /**
    * 继续批量续写：从 fromChapter 的下一章开始，到 toChapter。
    * 用于用户确认 paused 状态后继续。
+   * batchState 来自上一次返回的 BatchProgress，用于延续整批进度计数。
    */
   async resumeChaptersBatch(
     projectId: string,
@@ -1693,7 +1787,8 @@ export class WriteService {
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {}
+    maybeOpts: GenerateOptions = {},
+    batchState?: BatchState
   ): Promise<BatchProgress> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     return this.generateChaptersBatch(
@@ -1702,7 +1797,8 @@ export class WriteService {
       toChapter,
       onChapterComplete,
       styleProfileId,
-      opts
+      opts,
+      batchState
     )
   }
 
@@ -2067,7 +2163,8 @@ export class WriteService {
    */
   private async loadChapterContext(
     dir: string,
-    chapterNumber: number
+    chapterNumber: number,
+    opts?: { needEndingState?: boolean }
   ): Promise<ChapterContext> {
     // 本章细纲：优先 md，回退 JSON
     let detail: ChapterDetail | undefined
@@ -2210,14 +2307,11 @@ export class WriteService {
     }
 
     // 上一章结尾状态结构化提取（Phase 12 Task 1）
+    // 这是一次完整 LLM 调用，只有写正文的 renderUserPrompt 用得到；
+    // 「按要求重写 / 出建议 / 追问」都不读它，故默认不跑（见 needEndingState）。
     let prevEndingState: PrevEndingState | undefined
-    if (prevTail) {
-      try {
-        prevEndingState = await this.flow.extractEndingState(prevTail, chapterNumber - 1)
-      } catch (err) {
-        console.warn('[loadChapterContext] Failed to extract ending state:', err)
-        // skip：用原文尾段兜底
-      }
+    if (opts?.needEndingState && prevTail) {
+      prevEndingState = await this.getEndingStateCached(dir, chapterNumber, prevTail)
     }
 
     // 追踪目录（角色状态/时间线/进度摘要/问题记录）
@@ -2275,6 +2369,55 @@ export class WriteService {
   }
 
   /**
+   * extractEndingState 结果缓存。
+   * 上一章正文尾在同一章反复续写/重试期间不会变，但每次 buildChapterPrompt 都会
+   * 重新提取一次（一次完整 LLM 调用 + 数秒首字延迟）。按「上一章尾文本」缓存即可，
+   * 上一章被改动后 key 自然失效。失败不缓存，下次仍会重试。
+   */
+  private readonly endingStateCache = new Map<string, PrevEndingState>()
+
+  private endingStateKey(dir: string, chapterNumber: number, prevTail: string): string {
+    return dir + '::' + chapterNumber + '::' + prevTail
+  }
+
+  /**
+   * 只读缓存，未命中返回 undefined，**绝不**触发 LLM。
+   * 供写后自检使用：写本章正文时刚提取过同一份上章结尾状态，这里直接白拿；
+   * 拿不到就维持原降级行为（跳过那几项连续性检查），不额外花 token。
+   */
+  private peekEndingState(
+    dir: string,
+    chapterNumber: number,
+    prevTail: string
+  ): PrevEndingState | undefined {
+    return this.endingStateCache.get(this.endingStateKey(dir, chapterNumber, prevTail))
+  }
+
+  private async getEndingStateCached(
+    dir: string,
+    chapterNumber: number,
+    prevTail: string
+  ): Promise<PrevEndingState | undefined> {
+    const key = this.endingStateKey(dir, chapterNumber, prevTail)
+    const hit = this.endingStateCache.get(key)
+    if (hit) return hit
+    try {
+      const state = await this.flow.extractEndingState(prevTail, chapterNumber - 1)
+      // 上限很小：同一会话里也就在几章之间来回切
+      if (this.endingStateCache.size >= ENDING_STATE_CACHE_MAX) {
+        const oldest = this.endingStateCache.keys().next().value
+        if (oldest !== undefined) this.endingStateCache.delete(oldest)
+      }
+      this.endingStateCache.set(key, state)
+      return state
+    } catch (err) {
+      console.warn('[loadChapterContext] Failed to extract ending state:', err)
+      // skip：用原文尾段兜底
+      return undefined
+    }
+  }
+
+  /**
    * 加载卷纲文件（大纲/第N卷_卷名.md），返回 H2 节列表。
    * 用于注入卷级情绪弧线、爽点节奏、伏笔规划等强约束素材。
    */
@@ -2321,6 +2464,19 @@ interface ChapterContext {
   recentPlotSummaries: PlotChapterSummary[]
 }
 
+/**
+ * 截断续写时注入的「本章已写正文前部」。
+ * 保留开头（模型据此避免重复已写情节）与结尾（衔接靠这段），中间省略并标注省略字数，
+ * 避免反复续写时把整章前部一轮轮全量重发。
+ */
+function clipExistingText(s: string): string {
+  if (s.length <= EXISTING_TEXT_MAX_CHARS) return s
+  const head = s.slice(0, EXISTING_TEXT_HEAD_CHARS)
+  const tailPart = s.slice(-(EXISTING_TEXT_MAX_CHARS - EXISTING_TEXT_HEAD_CHARS))
+  const omitted = s.length - head.length - tailPart.length
+  return `${head}\n\n……（此处省略本章中段 ${omitted} 字，情节已发生，不要重写）……\n\n${tailPart}`
+}
+
 /** 取尾部 n 字符（按字符数，不按字节） */
 function tail(s: string, n: number): string {
   if (s.length <= n) return s
@@ -2345,10 +2501,19 @@ interface RenderInput {
   /** 中程记忆：本章之前最近若干章剧情摘要 */
   recentPlotSummaries?: PlotChapterSummary[]
   chapterNumber: number
-  /** 本章目标字数（用于强约束 LLM 写够）。 */
+  /**
+   * 本次要写的目标字数（用于强约束 LLM 写够）。
+   * 续写时是「还要再写多少」，不是整章字数。
+   */
   targetWords: number
   tempContext?: string
   existingText?: string
+  /**
+   * 续写模式；有 existingText 时才设置。
+   * - extend：继续展开剩余剧情
+   * - finish：篇幅已达标，只补完剩余剧情点并收束本章
+   */
+  continueMode?: 'extend' | 'finish'
 }
 
 interface AdjustRenderInput {
@@ -2597,9 +2762,9 @@ function renderUserPrompt(input: RenderInput): string {
   // 6.1 本章已写正文前部（用于续写衔接）
   if (input.existingText && input.existingText.trim()) {
     parts.push('---')
-    parts.push('**【本章已写正文前部】**（这部分是你已经写出来的正文内容）：')
+    parts.push('**【本章已写正文前部】**（这部分是本章已经写好的正文，**不要重写、不要复述**）：')
     parts.push('```')
-    parts.push(input.existingText.trim())
+    parts.push(clipExistingText(input.existingText.trim()))
     parts.push('```')
   }
 
@@ -2610,8 +2775,19 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
   if (input.existingText && input.existingText.trim()) {
+    const common =
+      '请保持文风、人称视角（如第一人称或第三人称）、语气风格及叙事逻辑与前部完全一致，承接前文的情节向下发展，不要重复前部已有的内容或情节。**只输出新写的后续正文**，不要重复前部任何一句，开头不需要任何问候或承接词。'
+    if (input.continueMode === 'finish') {
+      parts.push(
+        `**本章篇幅已经写够了，现在请收尾**：接续上面的【本章已写正文前部】，把本章细纲里还没落实的剧情点补完，然后收束本章，**约 ${input.targetWords} 字即可，不要为了凑字数拉长**。${common}`
+      )
+    } else {
+      parts.push(
+        `**请接续上面的【本章已写正文前部】继续写本章后续正文，本次继续写不少于 ${input.targetWords} 字**（这是硬性下限）。${common}`
+      )
+    }
     parts.push(
-      `**请接续上面的【本章已写正文前部】继续续写本章后续正文，预计继续写不少于 ${input.targetWords} 字**（这是硬性下限）。请保持文风、人称视角（如第一人称或第三人称）、语气风格及叙事逻辑与前部完全一致，承接前文的情节向下发展，不要重复前部已有的内容或情节，直接输出后续正文内容，开头不需要任何问候或承接词。`
+      '**若本次已把本章细纲的剧情点全部写完，就在本次输出里把本章收束掉**：章末必须以"对话"或"事件"结尾，禁止总结式旁白收尾；剧情点还没写完则不要强行收尾。'
     )
   } else {
     parts.push(
@@ -3354,28 +3530,50 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
 function renderChapterSelfCheck(input: RenderInput): string[] {
   const checks: string[] = []
   const ch = input.chapterNumber
+  /**
+   * 续写模式下本章开头已由用户/前几轮写好，这里要写的是章中/章末。
+   * 「开头对接上一章」这类检查项对续写无意义（还会误导模型回头重写开头），
+   * 改成对接【本章已写正文前部】的末尾状态。
+   */
+  const isContinuation = Boolean(input.existingText && input.existingText.trim())
+  const joinPoint = isContinuation ? '【本章已写正文前部】末尾' : '上章正文末尾'
 
   // —— 1. 上章衔接 ——
+  // 续写时只改措辞、不整条删掉：写后自检仍会验这些项，
+  // 删了就等于让模型对着没见过的要求挨判。各项的判定范围见 chapter-self-check.ts：
+  // - 上章悬念 / 人物位置：只看正文开头（续写时开头是既有的，故改为「若前部未回应则本次补上」）
+  // - 上章未完成：看**全章**，续写这一轮照样在判定范围内，必须原样保留
   const prev = input.prevEndingState
   if (prev?.suspense?.trim()) {
     checks.push(
-      `□ **上章悬念**：本章必须回应或延续——${clipCheck(prev.suspense, 140)}`
+      isContinuation
+        ? `□ **上章悬念**：若【本章已写正文前部】尚未回应，本次必须回应或延续——${clipCheck(prev.suspense, 140)}`
+        : `□ **上章悬念**：本章必须回应或延续——${clipCheck(prev.suspense, 140)}`
     )
   }
   if (prev?.unfinished?.length) {
     for (const u of prev.unfinished.slice(0, 5)) {
       if (!u?.trim()) continue
-      checks.push(`□ **上章未完成**：${clipCheck(u, 120)}`)
+      checks.push(
+        isContinuation
+          ? `□ **上章未完成**：整章（含已写前部）必须处理，前部没处理就在本次处理——${clipCheck(u, 120)}`
+          : `□ **上章未完成**：${clipCheck(u, 120)}`
+      )
     }
   }
-  if (prev?.characterPositions?.length) {
+  if (isContinuation) {
+    checks.push(
+      `□ **接续点连续**：新写的第一句紧接${joinPoint}的时间/地点/人物状态，不瞬移、不跳场、不重开一段`
+    )
+    checks.push('□ **不重复前部**：新写内容没有复述或改写【本章已写正文前部】里已发生的情节')
+  } else if (prev?.characterPositions?.length) {
     const pos = prev.characterPositions
       .slice(0, 4)
       .map((p) => `${p.name}在${p.location}`)
       .join('；')
     if (pos) checks.push(`□ **人物位置连续**：开头不瞬移——${clipCheck(pos, 120)}`)
   }
-  if (input.prevTail?.trim() && !prev?.suspense) {
+  if (input.prevTail?.trim() && !prev?.suspense && !isContinuation) {
     checks.push('□ **上章结尾对接**：开头时间/地点/人物状态与上章正文末尾一致')
   }
 
@@ -3430,7 +3628,11 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
   // —— 5. 全局禁止 ——
   checks.push('□ **未抢写下一章/卷末大事件**：不提前完成后续核心反转')
   checks.push('□ **人设与状态连续**：实力/立场/道具与「当前状态快照」不矛盾')
-  checks.push('□ **章末形态**：以对话或事件收束，禁止总结式旁白收尾')
+  checks.push(
+    isContinuation
+      ? '□ **章末形态**：若本次已写完本章剧情点，则以对话或事件收束，禁止总结式旁白收尾；未写完则自然停在推进中'
+      : '□ **章末形态**：以对话或事件收束，禁止总结式旁白收尾'
+  )
 
   const parts: string[] = []
   parts.push('---')

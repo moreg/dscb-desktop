@@ -28,7 +28,7 @@ export const DESLOP_SYSTEM_PROMPT = `你是一名专业的中文小说文字编�
 1. **改味优先，不当改错**：只改"怎么说"（表达方式），不改"说什么"（情节/人设/信息）。
 2. **保留创作意图**：不能删除伏笔、钩子、角色特征、关键信息或必要转折。遇到冲突改为降 AI 重写或标注 [需复核]。
 3. **删除比例上限**：轻度 ≤15% / 中度 ≤25% / 重度 ≤35%。超过时分段输出并标记，不得整段删除。
-4. **替换语感对齐项目**：若本次提供了题材/文风（见下方"风格语境"段），替换词和句式必须符合该题材与文风；未提供时按通则：都市口语化、玄幻可稍文雅、悬疑克制留白。题材词（如玄幻里的"仿佛"）若符合该题材语感，可保留并在改动说明里说明。
+4. **替换语感对齐项目**：若本次提供了题材/文风（见下方"风格语境"段），替换词和句式必须符合该题材与文风；未提供时按通则：都市口语化、玄幻可稍文雅、悬疑克制留白。哪些题材虚词可以保留，以"风格语境"段列出的清单为准（该清单优先于铁律 10 的通用禁用清单）；保留时须在改动说明里写明原因。
 5. **Show Don't Tell**：优先用动作、停顿、可见反应、身体反应代替抽象解释和心理描写。
 6. **自然、克制、有生活质感**：请以自然、克制、有生活质感的中文进行创作，避免使用模板化、泛滥的“AI味”描写和情绪填充词。不要频繁使用“顿了顿、停了停、愣了愣、怔了怔、抿了抿唇、深吸一口气、眸色一暗、嘴角勾起一抹弧度、心头一震、眼底闪过一丝”等套路表达。
 7. **不要为了表现情绪而机械插入动作**：优先通过具体行为、环境变化、对话间的留白、人物的选择和语句节奏来呈现心理活动。例如，不直接写“他顿了顿”，而根据情境写出他放下杯子、看向窗外、删掉输入框里的话，或干脆省略动作，让对白本身承担张力。避免“动作＋说话”的死板单一结构。
@@ -43,6 +43,7 @@ export const DESLOP_SYSTEM_PROMPT = `你是一名专业的中文小说文字编�
    - 句式套路："不是A，而是B" / "，带着一丝X" / "声音不大，却带着X的力量" / "他/她知道……" / 章末"他不知道的是……"
    - 升华句式：这一刻，他终于明白 / 这就是X的意义
    替换思路：用具体动作、身体反应、可见细节、短句断句代替。改写后若仍含上述表达，视为未完成改味，须再次降 AI 直至干净。
+   唯一例外：本次任务"风格语境"段若明确列出了该题材允许保留的虚词，那几个词不受本条约束（但仍需克制，同一段不得重复出现）。除该清单外，本条一律生效。
 11. **三条替换通路**（处理不同对象的 AI 味，按情况选其一）：
    - 抽象→具体：情绪词换成动作/身体反应（"愤怒"→"攥紧拳头"）
    - 静态描述→可观察变化：把静态描写改成变化过程（"天空很暗"→"天色压下来，街灯先亮了"）
@@ -69,7 +70,7 @@ export function gatesForLevel(level: DeslopLevel): string[] {
     case 'mild':
       return ['A', 'B'] // Pass 1
     case 'moderate':
-      return ['A', 'B', 'C', 'D'] // Pass 1 + 2（去 G，G 留给 severe 的 Pass 3）
+      return ['A', 'B', 'C', 'D'] // Pass 1 + Pass 2 的 C/D（E/F/G 留给 severe）
     case 'severe':
       return ['A', 'B', 'C', 'D', 'E', 'F', 'G'] // 全 Pass
   }
@@ -96,6 +97,66 @@ export function passesForLevel(level: DeslopLevel): number[] {
     case 'severe':
       return [1, 2, 3]
   }
+}
+
+/** Gate 的固定顺序（用于把集合还原成稳定顺序的数组） */
+const GATE_ORDER = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+
+/**
+ * 把分级 Gate 范围扩展到「覆盖所有命中的 Gate」（不分 blocking / advisory）。
+ *
+ * 分级决定"改多狠"（删除比例上限），不决定"哪些问题配被修"。
+ * 若不扩展：只含章末升华（Gate F）或工程词泄漏（Gate G）的正文会被判为 mild → 范围只有 A/B →
+ * 一次 LLM 都不调，正文原样返回，末尾却报"复扫后仍剩 N 处 blocking"，用户点了润色等于没点；
+ * 对话标签单一化（Gate E，只产 advisory）则会一直躺在扫描面板里没人管。
+ *
+ * 没有命中的 Gate 在 Pass 循环里本来就会跳过，所以扩展不会凭空多调 LLM。
+ *
+ * @param baseGates gatesForLevel(level) 的结果
+ * @param hitGates 扫描结果里所有 finding 所在的 Gate
+ */
+export function expandGatesForFindings(
+  baseGates: string[],
+  hitGates: Iterable<string>
+): string[] {
+  const set = new Set([...baseGates, ...hitGates])
+  return GATE_ORDER.filter((g) => set.has(g))
+}
+
+/** 给定 Gate 范围，返回需要跑的 Pass 序号（该 Pass 的 Gate 与范围有交集才跑） */
+export function passesForGates(gates: string[]): number[] {
+  return Object.keys(PASS_GATE_MAP)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .filter((p) => PASS_GATE_MAP[p].some((g) => gates.includes(g)))
+}
+
+/**
+ * 改写后禁止重新引入的高频 AI 表达（铁律 10 的浓缩版，注入每次改写 prompt）。
+ * 与题材允许清单（GenreVoice.allowedHedges）求差后渲染，避免"允许保留 X"与"不得出现 X"自相矛盾。
+ */
+const REINTRODUCTION_BAN_LIST = [
+  '仿佛', '犹如', '宛若', '一丝', '一抹', '缓缓', '微微', '轻轻', '淡淡',
+  '不禁', '不由得', '眼中闪过', '嘴角勾起', '心中涌起', '深吸一口气',
+  '不是A而是B', '，带着一丝X', '这一刻他终于明白'
+]
+
+/** 取该题材允许保留的虚词集合（无题材/无档案时为空集） */
+function allowedHedgesFor(styleContext?: DeslopStyleContext): Set<string> {
+  const genre = styleContext?.genre
+  if (!genre || genre === '通用') return new Set()
+  return new Set(resolveGenreVoice(genre).allowedHedges ?? [])
+}
+
+/** 渲染「改写后不得引入新 AI 味」这一条，题材允许保留的虚词从清单中剔除 */
+function buildReintroductionBanLine(styleContext?: DeslopStyleContext): string {
+  const allowed = allowedHedgesFor(styleContext)
+  const words = REINTRODUCTION_BAN_LIST.filter((w) => !allowed.has(w))
+  const exception =
+    allowed.size > 0
+      ? `本清单已剔除本题材允许保留的虚词（${Array.from(allowed).join('、')}），那几个词可按"风格语境"段的许可克制使用。`
+      : ''
+  return `- **改写后不得引入新的 AI 味**：禁止用另一种 AI 套路替换原套路。改写后不得出现"${words.join('/')}"等高频 AI 表达。${exception}改后仍含上述表达视为未完成，须再次降 AI 直至干净。`
 }
 
 /** buildDeslopPrompt / buildCleanupPrompt 的可选项：用户配置的 Gate 方法覆盖 + 禁用词表 */
@@ -156,8 +217,8 @@ export function buildDeslopPrompt(
 - 命中的 Gate 逐项改写，未命中的保持原样
 - 删除比例不得超过 ${Math.round(maxDeleteRatio * 100)}%；超时分段输出标记 [需复核]，不得整段删
 - 保留伏笔/钩子/角色特征/关键信息/必要转折
-- 替换语感必须对齐下方"风格语境"段；与该题材语感相符的词（如玄幻的"仿佛"）可保留并在改动说明里说明原因
-- **改写后不得引入新的 AI 味**：禁止用另一种 AI 套路替换原套路。改写后不得出现"仿佛/犹如/宛若/一丝/一抹/缓缓/微微/轻轻/淡淡/不禁/不由得/眼中闪过/嘴角勾起/心中涌起/深吸一口气/不是A而是B/，带着一丝X/这一刻他终于明白"等高频 AI 表达。改后仍含上述表达视为未完成，须再次降 AI 直至干净。
+- 替换语感必须对齐下方"风格语境"段；该段若列出了允许保留的虚词，以那份清单为准，保留时在改动说明里写明原因
+${buildReintroductionBanLine(styleContext)}
 
 ${styleSection}
 ${bannedWordsSection}### 本次处理的 Gate 及改写方法
@@ -222,7 +283,7 @@ export function buildCleanupPrompt(
 ### 改写原则
 - **语言锁定**：保持中文，禁止把中文改成英文或「他→He」类替换
 - 只改下方命中的残留 finding，未命中部分必须与原文逐字一致，不得改动
-- 改写后不得引入新的 AI 味（禁用词清单见系统 prompt）
+${buildReintroductionBanLine(styleContext)}
 - 保留伏笔/钩子/角色特征/关键信息/必要转折
 - 替换语感对齐下方"风格语境"段
 
@@ -273,7 +334,9 @@ function buildStyleSection(styleContext?: DeslopStyleContext): string {
     // 解析题材对应的语感档案，注入语气词和替换示例，让改写对齐题材而非套通用模板
     const voice = resolveGenreVoice(styleContext!.genre)
     if (voice.allowedHedges?.length) {
-      lines.push(`- 该题材允许保留的虚词：${voice.allowedHedges.join('、')}`)
+      lines.push(
+        `- 该题材允许保留的虚词（不受"改写后不得引入新 AI 味"清单约束，但仍需克制：同一段不得重复出现，能删则删）：${voice.allowedHedges.join('、')}`
+      )
     }
     if (voice.suggestedParticles?.length) {
       lines.push(`- 建议主动使用的题材语气词（替换现代通腔）：${voice.suggestedParticles.join('、')}`)

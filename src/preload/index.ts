@@ -632,7 +632,9 @@ const api = {
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void,
     // 调用方可自带 requestId，配合 abortStream(requestId) 实现「停止批量续写」
-    externalRequestId?: string
+    externalRequestId?: string,
+    /** 整批进度：失败后「重试当前章」回传，避免进度从头计数 */
+    batchState?: { fromChapter: number; total: number; completed: number[] }
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -659,7 +661,8 @@ const api = {
         fromChapter,
         toChapter,
         styleProfileId,
-        requestId
+        requestId,
+        batchState
       })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
@@ -673,7 +676,9 @@ const api = {
     styleProfileId: string | null | undefined,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
     onToken?: (token: string, done: boolean) => void,
-    externalRequestId?: string
+    externalRequestId?: string,
+    /** 上一次 BatchProgress 的整批进度，用于续跑时延续计数而不是从头计 */
+    batchState?: { fromChapter: number; total: number; completed: number[] }
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -700,7 +705,8 @@ const api = {
         fromChapter,
         toChapter,
         styleProfileId,
-        requestId
+        requestId,
+        batchState
       })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)

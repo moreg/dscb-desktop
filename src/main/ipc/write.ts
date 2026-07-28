@@ -8,7 +8,13 @@ import type {
   RhythmEvaluation,
   SettingsApplyResult
 } from '../../shared/types'
-import { validateInput, projectIdSchema, chapterNumberSchema, chapterContentSchema } from './validation'
+import {
+  validateInput,
+  projectIdSchema,
+  chapterNumberSchema,
+  chapterContentSchema,
+  batchStateSchema
+} from './validation'
 import { z } from 'zod'
 
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
@@ -756,6 +762,7 @@ export function registerWriteIpc(service: WriteService): void {
         toChapter: number
         styleProfileId?: string | null
         requestId: string
+        batchState?: { fromChapter: number; total: number; completed: number[] }
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
@@ -766,7 +773,9 @@ export function registerWriteIpc(service: WriteService): void {
             fromChapter: chapterNumberSchema,
             toChapter: chapterNumberSchema,
             styleProfileId: styleProfileIdSchema,
-            requestId: z.string().min(1)
+            requestId: z.string().min(1),
+            // 整批进度：失败后「重试当前章」带上它，避免进度从头计数
+            batchState: batchStateSchema
           }),
           payload
         )
@@ -794,7 +803,8 @@ export function registerWriteIpc(service: WriteService): void {
                   token,
                   done: false
                 })
-            }
+            },
+            validated.batchState
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
           return { ok: true, progress }
@@ -817,6 +827,7 @@ export function registerWriteIpc(service: WriteService): void {
         toChapter: number
         styleProfileId?: string | null
         requestId: string
+        batchState?: { fromChapter: number; total: number; completed: number[] }
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
@@ -827,7 +838,9 @@ export function registerWriteIpc(service: WriteService): void {
             fromChapter: chapterNumberSchema,
             toChapter: chapterNumberSchema,
             styleProfileId: styleProfileIdSchema,
-            requestId: z.string().min(1)
+            requestId: z.string().min(1),
+            // 整批进度（续跑时由 UI 回传上一次的 BatchProgress）
+            batchState: batchStateSchema
           }),
           payload
         )
@@ -853,7 +866,8 @@ export function registerWriteIpc(service: WriteService): void {
                   token,
                   done: false
                 })
-            }
+            },
+            validated.batchState
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
           return { ok: true, progress }

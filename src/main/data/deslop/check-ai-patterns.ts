@@ -36,6 +36,12 @@ export interface ScanOptions {
   whitelist?: Set<string>
   /** 用户配置的禁用词表（覆盖内置 FLATTENED_LEVEL1）；缺省 = 用内置默认 */
   bannedWords?: string[]
+  /**
+   * 本段是否是全文结尾。分块改写时只有最后一块为 true。
+   * false 时 Gate F 升华句不按「章末」升级为 blocking——否则每块末尾都会被当成章末。
+   * 缺省 true（整篇扫描）。
+   */
+  isTail?: boolean
 }
 
 /**
@@ -65,7 +71,7 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
   findings.push(...scanParallelism(proseLines))
 
   // 6. Gate F 结尾升华（章末段落降级 blocking）
-  findings.push(...scanSublimation(proseLines))
+  findings.push(...scanSublimation(proseLines, opts.isTail ?? true))
 
   // 7. Gate C 心理描写外化（告诉而非展示）
   findings.push(...scanPsychTell(proseLines))
@@ -436,8 +442,10 @@ function scanParallelism(proseLines: ProseLine[]): DeslopFinding[] {
 /**
  * 扫描升华句式（"他终于明白""这一刻，""这就是X的意义"等）。
  * 章末段落（最后 2 行）命中降级为 blocking--升华句在结尾最有害。
+ *
+ * @param isTail 本段是否真的是全文结尾；分块改写的非末块传 false，否则每块末尾都会被当成章末
  */
-function scanSublimation(proseLines: ProseLine[]): DeslopFinding[] {
+function scanSublimation(proseLines: ProseLine[], isTail: boolean): DeslopFinding[] {
   if (proseLines.length === 0) return []
   const findings: DeslopFinding[] = []
   // 章末 = 最后 2 个非空正文行
@@ -449,7 +457,7 @@ function scanSublimation(proseLines: ProseLine[]): DeslopFinding[] {
       const globalRe = new RegExp(re.source, 'g')
       let m: RegExpExecArray | null
       while ((m = globalRe.exec(text)) !== null) {
-        const isEnding = lineNo >= secondLastLineNo
+        const isEnding = isTail && lineNo >= secondLastLineNo
         findings.push({
           line: lineNo,
           column: m.index + 1,

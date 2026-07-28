@@ -13,6 +13,19 @@ export const projectNameSchema = z.string().min(1).max(255)
 export const chapterNumberSchema = z.number().int().positive()
 export const chapterContentSchema = z.string().max(500_000) // 合理上限
 
+/**
+ * 批量续写的整批进度。
+ * 「继续下一章」/「重试当前章」由 UI 回传上一次的 BatchProgress，
+ * 让进度按整批统计，而不是按剩余区间从头计数。
+ */
+export const batchStateSchema = z
+  .object({
+    fromChapter: chapterNumberSchema,
+    total: z.number().int().min(1),
+    completed: z.array(chapterNumberSchema).max(10_000)
+  })
+  .optional()
+
 // 草稿操作
 export const saveDraftInputSchema = z.object({
   projectId: projectIdSchema,
