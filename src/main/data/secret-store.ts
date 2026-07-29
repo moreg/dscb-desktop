@@ -18,9 +18,10 @@ const providerConfigSchema = z.object({
   baseUrl: z.string().max(2048),
   model: z.string().max(255),
   apiKey: z.string().max(1000),
-  protocol: z.enum(['openai', 'anthropic', 'antigravity', 'codex', 'grok']).optional(),
+  protocol: z.enum(['openai', 'openai-responses', 'anthropic', 'antigravity', 'codex', 'grok']).optional(),
   homepage: z.string().max(2048).optional(),
-  temperature: z.number().min(0).max(2).optional()
+  temperature: z.number().min(0).max(2).optional(),
+  reasoningEffort: z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
 })
 
 const featureRoutingEntrySchema = z.object({

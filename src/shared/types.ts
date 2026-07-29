@@ -24,7 +24,16 @@ export interface CreateProjectInput {
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
-export type ProviderProtocol = 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok'
+export type ProviderProtocol =
+  | 'openai'
+  | 'openai-responses'
+  | 'anthropic'
+  | 'antigravity'
+  | 'codex'
+  | 'grok'
+
+/** OpenAI Responses API 的 GPT 推理预算档位。 */
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /**
  * 连通测试统一返回结构：
@@ -70,6 +79,11 @@ export interface ProviderConfig {
    * main 端写入前会 clamp 到 [0,2]
    */
   temperature?: number
+  /**
+   * 仅 `openai-responses` 使用：GPT reasoning 模型的思考强度。
+   * 与 temperature 独立；Responses 请求不会透传 temperature。
+   */
+  reasoningEffort?: ReasoningEffort
 }
 
 /** 列表接口返回的脱敏 provider —— 永不返回明文 apiKey */
@@ -564,6 +578,9 @@ export interface RendererApi {
   listAntigravityModels: () => Promise<string[]>
   /** 列出 codex CLI 可用模型（读 config.toml，供 codex provider 的模型选择） */
   listCodexModels: () => Promise<string[]>
+  /** 读取/更新 Codex CLI 全局思考强度（写入 ~/.codex/config.toml）。 */
+  getCodexReasoningEffort: () => Promise<ReasoningEffort>
+  setCodexReasoningEffort: (effort: ReasoningEffort) => Promise<ReasoningEffort>
   /** 列出 grok CLI 可用模型（`grok models`，供 grok provider 的模型选择） */
   listGrokModels: () => Promise<string[]>
   listProviders: () => Promise<ListProvidersResult>

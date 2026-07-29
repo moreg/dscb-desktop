@@ -36,7 +36,7 @@ export interface UsageInfo {
   totalTokens: number
 }
 
-function protocolOf(p: ProviderConfig): 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok' {
+function protocolOf(p: ProviderConfig): 'openai' | 'openai-responses' | 'anthropic' | 'antigravity' | 'codex' | 'grok' {
   return p.protocol ?? 'openai'
 }
 
@@ -101,12 +101,17 @@ const CLI_PROSE_ONLY_PREAMBLE =
  * feature 标识 -> 功能大类 映射。
  * 用于按任务类型路由到不同 provider（见 resolveProvider）。
  * 匹配规则：先精确命中，未命中再按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）。
- * 前缀仍未列出的 feature（如 'other'、'deslop:editRules'）无对应大类 -> 回退 activeId。
+ * 前缀仍未列出的 feature（如 'other'）无对应大类 -> 回退 activeId。
+ *
+ * 注意：写后自动记忆同步 feature 为 autoMemorySync，必须归入 auxiliary，
+ * 否则会回退 activeId（常见为正文 Codex），与设置页「辅助提取」分配不一致。
  */
 const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 正文生成
   chapter: 'chapter',
   'chapter-adjust': 'chapter',
+  // 按要求重写 · 先出方案（与改写同属正文类）
+  'chapter-adjust-plan': 'chapter',
   // 审稿质检
   review: 'review',
   deepReview: 'review',
@@ -126,15 +131,22 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   styleExtract: 'opening',
   // ChapterEditor 正文区 AI 起名：章名风格与大纲一致，复用 opening 路由
   'chapter-name': 'opening',
-  // 辅助提取
+  // 辅助提取（手动提取 + 写后自动同步 + 批量 + 图解/拆书/扫描）
   endingState: 'auxiliary',
   memoryExtract: 'auxiliary',
+  autoMemorySync: 'auxiliary',
   figureGen: 'auxiliary',
   batchMemory: 'auxiliary',
   batchFigure: 'auxiliary',
   teardown: 'auxiliary',
   scan: 'auxiliary',
   ask: 'ask'
+}
+
+/** 解析 feature 所属功能大类；未映射返回 undefined（调用方回退 activeId）。导出供单测。 */
+export function featureCategoryOf(feature?: string): FeatureCategory | undefined {
+  if (!feature) return undefined
+  return FEATURE_TO_CATEGORY[feature] ?? FEATURE_TO_CATEGORY[feature.split(':')[0]]
 }
 
 /**
@@ -163,6 +175,7 @@ const LLM_STREAM_TIMEOUT_MS = 120_000
 const LONG_TIMEOUT_FEATURES = new Set([
   'chapter',
   'chapter-adjust',
+  'chapter-adjust-plan',
   'outlineCheck',
   'review',
   'deepReview',
@@ -171,6 +184,7 @@ const LONG_TIMEOUT_FEATURES = new Set([
   'batchRhythm',
   'ask',
   'memoryExtract',
+  'autoMemorySync',
   'figureGen',
   'batchMemory',
   'batchFigure',
@@ -203,6 +217,7 @@ export function resolveStreamTimeoutMs(opts: GenerateOptions): number {
 
 function endpointOf(p: ProviderConfig): string {
   const base = p.baseUrl.replace(/\/+$/, '')
+  if (protocolOf(p) === 'openai-responses') return `${base}/responses`
   if (protocolOf(p) === 'anthropic') {
     // Anthropic Messages API：baseUrl 结尾应为不带 /v1 的根，统一补 /v1/messages
     const hasV1 = base.endsWith('/v1')
@@ -263,9 +278,7 @@ export class LlmService {
   private async resolveProvider(feature?: string): Promise<ProviderConfig | null> {
     const cfg = await this.secret.read()
     // 精确匹配优先；未命中时按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）
-    const category = feature
-      ? FEATURE_TO_CATEGORY[feature] ?? FEATURE_TO_CATEGORY[feature.split(':')[0]]
-      : undefined
+    const category = featureCategoryOf(feature)
     const routing = category ? cfg.featureRouting?.[category] : undefined
     const routed = routing ? cfg.providers.find((x) => x.id === routing.providerId) : undefined
     if (routed) {
@@ -421,7 +434,9 @@ export class LlmService {
         const { full, usage } =
           proto === 'anthropic'
             ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
-            : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
+            : proto === 'openai-responses'
+              ? await parseResponsesSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
+              : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
 
         if (this.usage && usage) {
           try {
@@ -634,6 +649,23 @@ function buildStreamRequest(
   const cap = maxTokens && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS
   // 采样温度：仅在 provider 显式配置时透传，否则走模型默认
   const hasTemp = typeof p.temperature === 'number' && Number.isFinite(p.temperature)
+  if (protocolOf(p) === 'openai-responses') {
+    const input: Array<{ role: string; content: string }> = []
+    if (hasSystem) input.push({ role: 'developer', content: systemPrompt as string })
+    input.push({ role: 'user', content: prompt })
+    init.headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${p.apiKey}`
+    }
+    init.body = JSON.stringify({
+      model: p.model,
+      input,
+      max_output_tokens: cap,
+      stream: true,
+      reasoning: { effort: p.reasoningEffort ?? 'medium' }
+    })
+    return { url, init }
+  }
   if (protocolOf(p) === 'anthropic') {
     init.headers = anthropicHeaders(p.apiKey)
     const body: Record<string, unknown> = {
@@ -736,6 +768,56 @@ async function parseOpenAiSse(
   if (!usage) {
     const out = Math.ceil(full.length / 1.5)
     usage = { inputTokens: 0, outputTokens: out, totalTokens: out }
+  }
+  return { full, usage }
+}
+
+/** Responses API 流：正文增量为 `response.output_text.delta`，终态事件携带 usage。 */
+async function parseResponsesSse(
+  body: ReadableStream<Uint8Array>,
+  onToken?: (t: string) => void
+): Promise<{ full: string; usage: UsageInfo | null }> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let full = ''
+  let usage: UsageInfo | null = null
+  let incomplete = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split(/\r?\n\r?\n/)
+    buffer = events.pop() ?? ''
+    for (const event of events) {
+      const dataLine = event.split(/\r?\n/).find((line) => line.startsWith('data:'))
+      if (!dataLine) continue
+      const data = dataLine.slice(5).trim()
+      if (!data || data === '[DONE]') continue
+      try {
+        const json = JSON.parse(data) as Record<string, unknown>
+        if (json.type === 'response.output_text.delta' && typeof json.delta === 'string') {
+          full += json.delta
+          if (full.length > MAX_RESPONSE_CHARS) throw new Error('LLM_RESPONSE_TOO_LARGE')
+          onToken?.(json.delta)
+        }
+        if (json.type === 'response.incomplete') incomplete = true
+        const response = json.response as Record<string, unknown> | undefined
+        const u = response?.usage as Record<string, unknown> | undefined
+        if (u) {
+          const inputTokens = Number(u.input_tokens ?? 0) || 0
+          const outputTokens = Number(u.output_tokens ?? 0) || 0
+          usage = { inputTokens, outputTokens, totalTokens: Number(u.total_tokens ?? inputTokens + outputTokens) || inputTokens + outputTokens }
+        }
+      } catch (err) {
+        console.warn('[llm-service] Failed to parse Responses SSE chunk:', data.substring(0, 100), err)
+      }
+    }
+  }
+  if (incomplete) throw new Error('LLM_OUTPUT_TRUNCATED')
+  if (!usage) {
+    const outputTokens = Math.ceil(full.length / 1.5)
+    usage = { inputTokens: 0, outputTokens, totalTokens: outputTokens }
   }
   return { full, usage }
 }

@@ -172,6 +172,10 @@ const api = {
     ipcRenderer.invoke('llm:listAntigravityModels') as Promise<string[]>,
   listCodexModels: () =>
     ipcRenderer.invoke('llm:listCodexModels') as Promise<string[]>,
+  getCodexReasoningEffort: () =>
+    ipcRenderer.invoke('llm:getCodexReasoningEffort'),
+  setCodexReasoningEffort: (effort: import('../shared/types').ReasoningEffort) =>
+    ipcRenderer.invoke('llm:setCodexReasoningEffort', effort),
   listGrokModels: () =>
     ipcRenderer.invoke('llm:listGrokModels') as Promise<string[]>,
   listProviders: () => ipcRenderer.invoke('llm:listProviders'),

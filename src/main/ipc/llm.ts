@@ -5,6 +5,7 @@ import { SecretStore } from '../data/secret-store'
 import { listAntigravityModels } from '../data/antigravity-runner'
 import { listCodexModels } from '../data/codex-runner'
 import { listGrokModels } from '../data/grok-runner'
+import { getCodexReasoningEffort, setCodexReasoningEffort } from '../data/codex-config'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../../shared/types'
 
@@ -57,8 +58,9 @@ function sanitizeProvider(input: unknown): ProviderConfig {
   const apiKeyRaw = typeof o.apiKey === 'string' ? o.apiKey : ''
   const homepage = typeof o.homepage === 'string' ? o.homepage.trim() : undefined
   const protocolRaw = o.protocol
-  const protocol: 'openai' | 'anthropic' | 'antigravity' | 'codex' | 'grok' =
+  const protocol: 'openai' | 'openai-responses' | 'anthropic' | 'antigravity' | 'codex' | 'grok' =
     protocolRaw === 'anthropic' ? 'anthropic'
+    : protocolRaw === 'openai-responses' ? 'openai-responses'
     : protocolRaw === 'antigravity' ? 'antigravity'
     : protocolRaw === 'codex' ? 'codex'
     : protocolRaw === 'grok' ? 'grok'
@@ -122,7 +124,20 @@ function sanitizeProvider(input: unknown): ProviderConfig {
     apiKey: apiKeyRaw,
     protocol,
     ...(homepage ? { homepage } : {}),
-    ...(temperature !== undefined ? { temperature } : {})
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(protocol === 'openai-responses'
+      ? {
+          reasoningEffort:
+            o.reasoningEffort === 'none' ||
+            o.reasoningEffort === 'low' ||
+            o.reasoningEffort === 'medium' ||
+            o.reasoningEffort === 'high' ||
+            o.reasoningEffort === 'xhigh' ||
+            o.reasoningEffort === 'max'
+              ? o.reasoningEffort
+              : 'medium'
+        }
+      : {})
   }
   return out
 }
@@ -244,6 +259,18 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   // 列出 codex 可用模型（读 config.toml，供前端做模型选择）
   safeHandle('llm:listCodexModels', async (): Promise<string[]> => {
     return listCodexModels()
+  })
+
+  safeHandle('llm:getCodexReasoningEffort', async () => getCodexReasoningEffort())
+
+  safeHandle('llm:setCodexReasoningEffort', async (_e, effort: unknown) => {
+    if (
+      effort !== 'none' && effort !== 'low' && effort !== 'medium' &&
+      effort !== 'high' && effort !== 'xhigh' && effort !== 'max'
+    ) {
+      throw new Error('CODEX_REASONING_EFFORT_INVALID')
+    }
+    return setCodexReasoningEffort(effort)
   })
 
   // 列出 grok 可用模型（`grok models`，供前端做模型选择）

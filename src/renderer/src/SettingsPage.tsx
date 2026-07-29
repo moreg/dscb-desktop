@@ -4,6 +4,7 @@ import type {
   ListProvidersResult,
   ProviderSummary,
   ProviderProtocol,
+  ReasoningEffort,
   ProjectUsage,
   ChapterUsage,
   ChapterRuleSectionView,
@@ -37,6 +38,7 @@ import {
 } from '../../shared/writing-requirement-templates'
 import FeatureRoutingForm from './FeatureRoutingForm'
 import { useStreamAborter } from './hooks/useStreamAborter'
+import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
 
 interface Props {
   onBack?: () => void
@@ -763,10 +765,12 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
               {/* 功能模型分配 */}
               {providers.providers.length > 0 ? (
                 <FeatureRoutingForm
-                  key={JSON.stringify(providers.featureRouting)}
                   providers={providers.providers}
                   routing={providers.featureRouting}
-                  onSaved={refreshProviders}
+                  onSaved={() => {
+                    refreshProviders()
+                    setMsg({ kind: 'ok', text: '功能模型路由已保存' })
+                  }}
                 />
               ) : null}
 
@@ -2510,6 +2514,11 @@ function ProviderRow({
   const [tempDraft, setTempDraft] = useState<number | null>(
     typeof provider.temperature === 'number' ? provider.temperature : null
   )
+  const [reasoningDraft, setReasoningDraft] = useState(provider.reasoningEffort ?? 'medium')
+  const [codexEffort, setCodexEffort] = useState<ProviderSummary['reasoningEffort']>('medium')
+  const [codexEffortSaving, setCodexEffortSaving] = useState(false)
+  const [agyModels, setAgyModels] = useState<string[]>([])
+  const [agySelectedModel, setAgySelectedModel] = useState(provider.model)
   const [savedHint, setSavedHint] = useState(false)
   // 卡片级连通测试：每张卡片独立的 loading + 结果，多卡片可并发不互阻塞
   const [testing, setTesting] = useState(false)
@@ -2520,6 +2529,78 @@ function ProviderRow({
   useEffect(() => {
     setTempDraft(typeof provider.temperature === 'number' ? provider.temperature : null)
   }, [provider.id, provider.temperature])
+  useEffect(() => {
+    setReasoningDraft(provider.reasoningEffort ?? 'medium')
+  }, [provider.id, provider.reasoningEffort])
+  useEffect(() => {
+    setAgySelectedModel(provider.model)
+  }, [provider.id, provider.model])
+  useEffect(() => {
+    if (provider.protocol !== 'codex') return
+    let cancelled = false
+    void window.api.getCodexReasoningEffort().then((effort) => {
+      if (!cancelled) setCodexEffort(effort)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [provider.protocol])
+  useEffect(() => {
+    if (provider.protocol !== 'antigravity') return
+    let cancelled = false
+    void window.api.listAntigravityModels().then((models) => {
+      if (!cancelled) setAgyModels(models)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [provider.protocol])
+
+  const persistReasoning = async (reasoningEffort: ProviderSummary['reasoningEffort']) => {
+    if (!reasoningEffort) return
+    setReasoningDraft(reasoningEffort)
+    try {
+      await window.api.upsertProvider({
+        id: provider.id,
+        label: provider.label,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKey: '',
+        protocol: provider.protocol,
+        reasoningEffort
+      })
+      setSavedHint(true)
+      setTimeout(() => setSavedHint(false), 1200)
+    } catch {
+      setReasoningDraft(provider.reasoningEffort ?? 'medium')
+    }
+  }
+
+  const persistCodexEffort = async (effort: ProviderSummary['reasoningEffort']) => {
+    if (!effort) return
+    setCodexEffort(effort)
+    setCodexEffortSaving(true)
+    try {
+      await window.api.setCodexReasoningEffort(effort)
+      setSavedHint(true)
+      setTimeout(() => setSavedHint(false), 1200)
+    } catch {
+      const current: ReasoningEffort = await window.api
+        .getCodexReasoningEffort()
+        .catch((): ReasoningEffort => 'medium')
+      setCodexEffort(current)
+    } finally {
+      setCodexEffortSaving(false)
+    }
+  }
+
+  const persistAgyModel = async (model: string) => {
+    const previous = agySelectedModel
+    setAgySelectedModel(model)
+    try {
+      await window.api.upsertProvider({ ...provider, apiKey: '', model })
+      setSavedHint(true)
+      setTimeout(() => setSavedHint(false), 1200)
+    } catch {
+      setAgySelectedModel(previous)
+    }
+  }
   // 卸载时清掉待写的定时器，避免内存泄漏与卸载后写盘
   useEffect(() => {
     return () => {
@@ -2614,7 +2695,9 @@ function ProviderRow({
   }
 
   const protocolLabel =
-    provider.protocol === 'anthropic'
+    provider.protocol === 'openai-responses'
+      ? 'OpenAI Responses'
+      : provider.protocol === 'anthropic'
       ? 'Anthropic'
       : provider.protocol === 'antigravity'
         ? 'Antigravity (agy)'
@@ -2625,7 +2708,9 @@ function ProviderRow({
             : 'OpenAI'
   const protocolChipStyle: CSSProperties = {
     background:
-      provider.protocol === 'anthropic'
+      provider.protocol === 'openai-responses'
+        ? 'rgba(16,163,127,0.12)'
+        : provider.protocol === 'anthropic'
         ? 'var(--inkstone-soft)'
         : provider.protocol === 'antigravity'
           ? 'var(--vermilion-soft, rgba(229,57,53,0.12))'
@@ -2635,7 +2720,9 @@ function ProviderRow({
               ? 'var(--surface-3)'
               : 'var(--surface-2)',
     color:
-      provider.protocol === 'anthropic'
+      provider.protocol === 'openai-responses'
+        ? '#10a37f'
+        : provider.protocol === 'anthropic'
         ? 'var(--inkstone)'
         : provider.protocol === 'antigravity'
           ? 'var(--vermilion, #e53935)'
@@ -2647,7 +2734,9 @@ function ProviderRow({
     flexShrink: 0
   }
   const metaText =
-    provider.protocol === 'antigravity'
+    provider.protocol === 'openai-responses'
+      ? `${provider.baseUrl || '(未填 baseUrl)'} · Responses API · ${provider.model || '(未填 model)'}`
+      : provider.protocol === 'antigravity'
       ? `本机 agy CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'agy 默认模型'}`
       : provider.protocol === 'codex'
         ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
@@ -2727,8 +2816,69 @@ function ProviderRow({
         {metaText}
       </div>
 
-      {/* 模型强度（采样温度）：拖动/键盘/点击统一走防抖 onChange，400ms 后写盘 */}
-      <div
+      {provider.protocol === 'openai-responses' ? (
+        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>思考强度</span>
+          <select
+            className="select"
+            value={reasoningDraft}
+            onChange={(e) => persistReasoning(e.target.value as ProviderSummary['reasoningEffort'])}
+            aria-label="思考强度（GPT reasoning effort）"
+            style={{ width: 130 }}
+          >
+            {['none', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => (
+              <option key={effort} value={effort}>{effort}</option>
+            ))}
+          </select>
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>GPT 推理预算；与温度无关</span>
+          {savedHint ? <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>✓ 已保存</span> : null}
+        </div>
+      ) : provider.protocol === 'codex' ? (
+        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>全局思考强度</span>
+          <select
+            className="select"
+            value={codexEffort}
+            onChange={(e) => void persistCodexEffort(e.target.value as ProviderSummary['reasoningEffort'])}
+            disabled={codexEffortSaving}
+            aria-label="Codex CLI 全局思考强度"
+            style={{ width: 130 }}
+          >
+            {['none', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => (
+              <option key={effort} value={effort}>{effort}</option>
+            ))}
+          </select>
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>写入 ~/.codex/config.toml，影响本机所有 Codex 任务</span>
+          {savedHint ? <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>✓ 已保存</span> : null}
+        </div>
+      ) : provider.protocol === 'antigravity' ? (
+        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>Gemini 模型档位</span>
+          {antigravityTierVariants(agySelectedModel, agyModels).length > 0 ? (
+            <select
+              className="select"
+              value={agySelectedModel}
+              onChange={(e) => void persistAgyModel(e.target.value)}
+              aria-label="Gemini 模型档位"
+              style={{ width: 210 }}
+            >
+              {antigravityTierVariants(agySelectedModel, agyModels).map((model) => (
+                <option key={model} value={model}>{model.match(/\((Low|Medium|High)\)$/)?.[1]}</option>
+              ))}
+            </select>
+          ) : (
+            <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>当前模型没有可切换的 Low / Medium / High 档位</span>
+          )}
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>正文建议 High；实际切换 agy 模型</span>
+          {savedHint ? <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>✓ 已保存</span> : null}
+        </div>
+      ) : provider.protocol === 'grok' ? (
+        <div style={{ marginTop: 12, fontSize: 12, color: 'var(--ink-3)' }}>
+          此 CLI provider 不接收温度或应用内“思考强度”。如需控制 GPT 推理预算，请新建并在“正文生成”路由中选择
+          <strong style={{ marginLeft: 4 }}>OpenAI Responses API（官方）</strong> provider。
+        </div>
+      ) : (
+        <div
         style={{
           marginTop: 12,
           display: 'flex',
@@ -2781,7 +2931,8 @@ function ProviderRow({
             ✓ 已保存
           </span>
         )}
-      </div>
+        </div>
+      )}
 
       {/* 连通结果单独一行，避免和按钮挤在一起 */}
       {testResult && (
@@ -2809,6 +2960,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [model, setModel] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
+  const [reasoningEffort, setReasoningEffort] = useState<ProviderSummary['reasoningEffort']>('medium')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // CLI 协议的模型列表（切到对应协议时懒加载）
@@ -2825,6 +2977,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const isAg = protocol === 'antigravity'
   const isCodex = protocol === 'codex'
   const isGrok = protocol === 'grok'
+  const isResponses = protocol === 'openai-responses'
   const isCli = isAg || isCodex || isGrok
 
   /** Codex 模型 slug → 展示名（与 main CODEX_MODEL_LABELS 对齐） */
@@ -2909,7 +3062,9 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     if (p === 'antigravity') return m && m !== 'default' ? `Google · ${m}` : 'Google (agy)'
     if (p === 'grok') return m && m !== 'default' ? `Grok · ${m}` : 'Grok'
     if (p === 'anthropic') return m ? `Anthropic · ${m}` : 'Anthropic'
-    return m ? `OpenAI · ${m}` : 'OpenAI 兼容'
+    return p === 'openai-responses'
+      ? m ? `OpenAI Responses · ${m}` : 'OpenAI Responses'
+      : m ? `OpenAI · ${m}` : 'OpenAI 兼容'
   }
 
   const submit = async () => {
@@ -2940,7 +3095,8 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         baseUrl: isCli ? '' : baseUrl.trim().replace(/\/+$/, ''),
         model: isCli ? model.trim() || 'default' : model.trim(),
         apiKey: isCli ? '' : apiKey.trim(),
-        protocol
+        protocol,
+        ...(isResponses ? { reasoningEffort } : {})
       })
       setLabel('')
       setApiKey('')
@@ -2990,10 +3146,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                   'Google (agy)',
                   'Grok',
                   'Anthropic',
+                  'OpenAI Responses',
                   'OpenAI 兼容'
                 ]
                 // 仅在空或仍是「上一次协议的默认名」时自动改名，避免覆盖用户手填
-                if (!prev.trim() || prevDefaults.includes(prev.trim()) || /^Codex · |^Google · |^Grok · |^Anthropic · |^OpenAI · /.test(prev)) {
+                if (!prev.trim() || prevDefaults.includes(prev.trim()) || /^Codex · |^Google · |^Grok · |^Anthropic · |^OpenAI(?: Responses)? · /.test(prev)) {
                   return defaultLabelFor(next, '')
                 }
                 return prev
@@ -3001,6 +3158,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             }}
           >
             <option value="openai">OpenAI 兼容</option>
+            <option value="openai-responses">OpenAI Responses API（官方）</option>
             <option value="anthropic">Anthropic</option>
             <option value="antigravity">Antigravity (agy CLI)</option>
             <option value="codex">Codex (codex CLI)</option>
@@ -3255,6 +3413,16 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
           />
         </div>
       )}
+
+      {isResponses ? (
+        <div className="field" style={{ marginBottom: 10 }}>
+          <label htmlFor="np-reasoning-effort">思考强度</label>
+          <select id="np-reasoning-effort" className="select" value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ProviderSummary['reasoningEffort'])}>
+            {['none', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+          </select>
+          <div className="meta" style={{ marginTop: 4 }}>仅传给 OpenAI Responses API 的 GPT reasoning 模型；默认 medium，不使用温度。</div>
+        </div>
+      ) : null}
 
       <div className="row" style={{ gap: 8 }}>
         <button

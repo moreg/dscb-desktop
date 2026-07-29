@@ -367,6 +367,56 @@ describe('LlmService', () => {
     fetchSpy.mockRestore()
   })
 
+  it('Responses API streams text deltas with reasoning effort and omits temperature', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-responses-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [{
+        id: 'p', label: 'OpenAI Responses', baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5.6-sol', apiKey: 'sk-test', protocol: 'openai-responses',
+        reasoningEffort: 'high', temperature: 0.8
+      }]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody([
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"你好"}\n\n',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}\n\n'
+      ])
+    } as never)
+    const tokens: string[] = []
+    await svc.generateStream('hi', { systemPrompt: 'sys', onToken: (t) => tokens.push(t) })
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(url).toBe('https://api.openai.com/v1/responses')
+    expect(tokens.join('')).toBe('你好')
+    expect(body.reasoning).toEqual({ effort: 'high' })
+    expect(body.temperature).toBeUndefined()
+    expect(body.max_output_tokens).toBe(8192)
+    expect(body.input).toEqual([
+      { role: 'developer', content: 'sys' },
+      { role: 'user', content: 'hi' }
+    ])
+    fetchSpy.mockRestore()
+  })
+
+  it('Responses API defaults reasoning effort to medium', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-responses-default-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [{ id: 'p', label: 'OpenAI Responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-sol', apiKey: 'sk-test', protocol: 'openai-responses' }]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, body: sseBody(['data: [DONE]\n\n']) } as never)
+    await svc.generateStream('hi')
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string).reasoning).toEqual({ effort: 'medium' })
+    fetchSpy.mockRestore()
+  })
+
   it('Anthropic: temperature from provider is sent in request body', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-anttemp-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
@@ -574,6 +624,60 @@ describe('LlmService feature routing', () => {
     await svc.generateStream('hi', { meta: { feature: 'deslop:cleanup:1' } })
     const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://human.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it('autoMemorySync / memoryExtract route to auxiliary (not activeId/chapter Codex)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-mem-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_codex',
+      providers: [
+        {
+          id: 'p_codex',
+          label: 'Codex',
+          baseUrl: 'https://codex.example.com/v1',
+          model: 'gpt-5.6-sol',
+          apiKey: 'k1'
+        },
+        {
+          id: 'p_aux',
+          label: 'kimi',
+          baseUrl: 'https://kimi.example.com/v1',
+          model: 'kimi-k3',
+          apiKey: 'k2'
+        }
+      ],
+      featureRouting: {
+        chapter: { providerId: 'p_codex' },
+        ask: { providerId: 'p_codex' },
+        auxiliary: { providerId: 'p_aux' }
+      }
+    })
+    const svc = new LlmService(s)
+    // 每次调用需要新的 ReadableStream，不能复用同一 body
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      ({
+        ok: true,
+        body: sseBody(['data: [DONE]\n\n'])
+      }) as never
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'autoMemorySync' } })
+    expect((fetchSpy.mock.calls[0] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'memoryExtract' } })
+    expect((fetchSpy.mock.calls[1] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    expect((fetchSpy.mock.calls[2] as [string])[0]).toBe(
+      'https://codex.example.com/v1/chat/completions'
+    )
+
     fetchSpy.mockRestore()
   })
 })

@@ -144,6 +144,17 @@ describe('registerLlmIpc handlers', () => {
     expect(cfg.providers[0].protocol).toBe('anthropic')
   })
 
+  it('llm:upsertProvider stores Responses protocol and defaults reasoning effort to medium', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_resp', label: 'OpenAI Responses', baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.6-sol', apiKey: TEST_API_KEY, protocol: 'openai-responses'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].protocol).toBe('openai-responses')
+    expect(cfg.providers[0].reasoningEffort).toBe('medium')
+  })
+
   it('llm:upsertProvider defaults protocol to openai when omitted', async () => {
     const handler = handlers.get('llm:upsertProvider')
     await handler!(null, {

@@ -16,6 +16,8 @@ import type {
   Character,
   Foreshadowing,
   MemoryEntity,
+  ProviderSummary,
+  ReasoningEffort,
   WriteStyleSelection
 } from '../../shared/types'
 import {
@@ -107,6 +109,7 @@ import {
   joinContinuation,
   needsChapterProseFormat
 } from '../../shared/format-chapter-prose'
+import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
 
 interface Props {
   projectId: string
@@ -206,6 +209,8 @@ export default function ChapterEditor({
   onNavigateChapter
 }: Props) {
   const [data, setData] = useState<ChapterContent | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadTick, setReloadTick] = useState(0)
 
   // 侧边栏拖拽宽度调整逻辑
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -340,6 +345,31 @@ export default function ChapterEditor({
 
     setDraftState(next)
   }, [])
+
+  /**
+   * 首次打开章节时的竞态修复：
+   * load effect 在 getChapter 回包里会 setData + setDraft，但此时若仍走 `if (!data)`
+   * 的「展卷中…」分支，textarea 尚未挂载，setDraft 只能写入 draftRef/state、写不到 DOM。
+   * 随后 textarea 以 defaultValue 挂载；若不同步就会出现「列表有字数、编辑器空白」。
+   * layout 阶段在壳子就绪后把 draftRef 灌进非受控 textarea。
+   */
+  useLayoutEffect(() => {
+    if (!data) return
+    const el = textareaRef.current
+    if (!el) return
+    const next = draftRef.current
+    if (el.value === next) return
+    pinScrollToRef.current = null
+    editorRestoringRef.current = true
+    el.value = next
+    el.scrollTop = 0
+    editorScrollTopRef.current = 0
+    if (lineGutterInnerRef.current) {
+      lineGutterInnerRef.current.style.transform = 'translateY(0px)'
+    }
+    editorRestoringRef.current = false
+  }, [data, chapterNumber, reloadTick])
+
   const [showLineNumbers, setShowLineNumbers] = useState(() => {
     return localStorage.getItem('ai-writer:show-line-numbers') !== 'false'
   })
@@ -351,6 +381,75 @@ export default function ChapterEditor({
   const [saving, setSaving] = useState(false)
 
   const [generating, setGenerating] = useState(false)
+  /** 正文生成（chapter 路由）实际使用的 provider，供续写前显示/调整强度。 */
+  const [chapterProvider, setChapterProvider] = useState<ProviderSummary | null>(null)
+  const [chapterStrengthSaving, setChapterStrengthSaving] = useState(false)
+  const [codexGlobalEffort, setCodexGlobalEffort] = useState<ReasoningEffort>('medium')
+  const [chapterAgyModels, setChapterAgyModels] = useState<string[]>([])
+
+  const refreshChapterProvider = useCallback(async () => {
+    try {
+      const cfg = await window.api.listProviders()
+      const routedId = cfg.featureRouting?.chapter?.providerId
+      const provider = cfg.providers.find((provider) => provider.id === routedId) ??
+          cfg.providers.find((provider) => provider.id === cfg.activeId) ??
+          null
+      setChapterProvider(provider)
+      if (provider?.protocol === 'codex') {
+        setCodexGlobalEffort(await window.api.getCodexReasoningEffort())
+      }
+      if (provider?.protocol === 'antigravity') {
+        try {
+          setChapterAgyModels(await window.api.listAntigravityModels())
+        } catch {
+          setChapterAgyModels([])
+        }
+      } else {
+        setChapterAgyModels([])
+      }
+    } catch {
+      setChapterProvider(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshChapterProvider()
+  }, [refreshChapterProvider])
+
+  const updateChapterStrength = async (value: string) => {
+    if (!chapterProvider) return
+    setChapterStrengthSaving(true)
+    try {
+      if (chapterProvider.protocol === 'codex') {
+        const effort = value as ReasoningEffort
+        await window.api.setCodexReasoningEffort(effort)
+        setCodexGlobalEffort(effort)
+      } else if (chapterProvider.protocol === 'openai-responses') {
+        await window.api.upsertProvider({
+          ...chapterProvider,
+          apiKey: '',
+          reasoningEffort: value as ReasoningEffort
+        })
+      } else if (chapterProvider.protocol === 'antigravity') {
+        await window.api.upsertProvider({
+          ...chapterProvider,
+          apiKey: '',
+          model: value
+        })
+      } else {
+        await window.api.upsertProvider({
+          ...chapterProvider,
+          apiKey: '',
+          temperature: Number(value)
+        })
+      }
+      await refreshChapterProvider()
+    } catch (err) {
+      setAlertInfo({ message: `保存模型强度失败：${(err as Error).message || '请重试'}` })
+    } finally {
+      setChapterStrengthSaving(false)
+    }
+  }
   const [characters, setCharacters] = useState<Character[]>([])
   const [showCast, setShowCast] = useState(false)
   const [savingCast, setSavingCast] = useState(false)
@@ -858,13 +957,21 @@ export default function ChapterEditor({
     // 代际守卫：快速连切两章时，慢的旧回包若晚到会覆盖新章内容——
     // 编辑器显示 A 章正文而保存目标是 B 章，Ctrl+S 即串章覆盖
     const loadEpoch = sessionEpochRef.current
-    void window.api.getChapter(projectId, chapterNumber).then((c) => {
-      if (sessionEpochRef.current !== loadEpoch) return
-      setData(c)
-      setDraft(c.content, { captureScroll: false })
-      setDirty(false)
-      setSessionStartWords(c.meta.wordCount)
-    })
+    setLoadError(null)
+    void window.api
+      .getChapter(projectId, chapterNumber)
+      .then((c) => {
+        if (sessionEpochRef.current !== loadEpoch) return
+        setData(c)
+        setDraft(c.content, { captureScroll: false })
+        setDirty(false)
+        setSessionStartWords(c.meta.wordCount)
+      })
+      .catch((err) => {
+        if (sessionEpochRef.current !== loadEpoch) return
+        console.error('[ChapterEditor] getChapter failed', err)
+        setLoadError(err instanceof Error ? err.message : String(err))
+      })
     void window.api.getChapterWordSummary(projectId).then((res) => {
       if (res) {
         const sorted = res.chapters.map((c) => ({ chapterNumber: c.chapterNumber, title: c.title }))
@@ -933,8 +1040,8 @@ export default function ChapterEditor({
       syncHistoryRef.current = []
       setSyncHistoryDepth(0)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 切章重载 effect：刻意只随 projectId/chapterNumber 触发
-  }, [projectId, chapterNumber])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 切章重载 effect：刻意只随 projectId/chapterNumber/reloadTick 触发
+  }, [projectId, chapterNumber, reloadTick])
 
   // 订阅外部文件变更：细纲/节奏图谱变 → 刷新本章 meta（标题/情绪/爽点等）。
   // 仅当用户无未保存正文输入（!dirty）时刷新，避免覆盖正在编辑的内容。
@@ -943,11 +1050,17 @@ export default function ChapterEditor({
       if (e.projectId !== projectId) return
       if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'progress') return
       if (dirty) return // 用户有未保存输入，跳过，保存后会重新读盘
-      void window.api.getChapter(projectId, chapterNumber).then((c) => {
-        setData(c)
-        setDraft(c.content, { captureScroll: false })
-        setSessionStartWords(c.meta.wordCount)
-      })
+      void window.api
+        .getChapter(projectId, chapterNumber)
+        .then((c) => {
+          setData(c)
+          setDraft(c.content, { captureScroll: false })
+          setSessionStartWords(c.meta.wordCount)
+        })
+        .catch((err) => {
+          // 后台刷新失败：已加载内容仍在，无需清空，仅记录以便排查
+          console.error('[ChapterEditor] background refresh getChapter failed', err)
+        })
     })
     return off
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3399,7 +3512,17 @@ export default function ChapterEditor({
     setNameCandidate(null)
   }
 
-  if (!data) return <p className="empty">展卷中…</p>
+  if (!data) {
+    if (loadError) {
+      return (
+        <div className="empty" style={{ padding: 24 }}>
+          <p>本章加载失败：{loadError}</p>
+          <button onClick={() => setReloadTick((t) => t + 1)}>重试</button>
+        </div>
+      )
+    }
+    return <p className="empty">展卷中…</p>
+  }
 
   const STATUS_FULL: Record<ChapterStatus, string> = {
     outline: '待写',
@@ -3591,6 +3714,112 @@ export default function ChapterEditor({
 
       {/* 操作工具栏 */}
       <div className="editor-toolbar">
+        {chapterProvider ? (
+          <div
+            className="row"
+            style={{ gap: 6, alignItems: 'center', paddingRight: 4 }}
+            title="这里调整的是「正文生成」当前路由所用 provider；保存后会用于本章接下来的续写与按要求重写。"
+          >
+            <span className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+              正文模型：{chapterProvider.model || '默认'}
+            </span>
+            {chapterProvider.protocol === 'openai-responses' ? (
+              <>
+                <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                  思考强度
+                </label>
+                <select
+                  className="select"
+                  style={{ width: 94, padding: '3px 5px', fontSize: 12 }}
+                  value={chapterProvider.reasoningEffort ?? 'medium'}
+                  onChange={(e) => void updateChapterStrength(e.target.value)}
+                  disabled={chapterStrengthSaving || generating || adjusting}
+                  aria-label="正文生成思考强度"
+                >
+                  {(['none', 'low', 'medium', 'high', 'xhigh', 'max'] as ReasoningEffort[]).map((effort) => (
+                    <option key={effort} value={effort}>{effort}</option>
+                  ))}
+                </select>
+                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                  建议本章：medium
+                </span>
+              </>
+            ) : chapterProvider.protocol === 'codex' ? (
+              <>
+                <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                  全局思考强度
+                </label>
+                <select
+                  className="select"
+                  style={{ width: 94, padding: '3px 5px', fontSize: 12 }}
+                  value={codexGlobalEffort}
+                  onChange={(e) => void updateChapterStrength(e.target.value)}
+                  disabled={chapterStrengthSaving || generating || adjusting}
+                  aria-label="Codex CLI 全局思考强度"
+                >
+                  {(['none', 'low', 'medium', 'high', 'xhigh', 'max'] as ReasoningEffort[]).map((effort) => (
+                    <option key={effort} value={effort}>{effort}</option>
+                  ))}
+                </select>
+                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                  建议本章：medium
+                </span>
+              </>
+            ) : chapterProvider.protocol === 'antigravity' ? (
+              <>
+                <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                  Gemini 档位
+                </label>
+                {antigravityTierVariants(chapterProvider.model, chapterAgyModels).length > 0 ? (
+                  <select
+                    className="select"
+                    style={{ width: 88, padding: '3px 5px', fontSize: 12 }}
+                    value={chapterProvider.model}
+                    onChange={(e) => void updateChapterStrength(e.target.value)}
+                    disabled={chapterStrengthSaving || generating || adjusting}
+                    aria-label="正文生成 Gemini 模型档位"
+                  >
+                    {antigravityTierVariants(chapterProvider.model, chapterAgyModels).map((model) => (
+                      <option key={model} value={model}>{model.match(/\((Low|Medium|High)\)$/)?.[1]}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                    无可切换档位
+                  </span>
+                )}
+                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                  建议本章：High（切换实际 Gemini 模型）
+                </span>
+              </>
+            ) : chapterProvider.protocol === 'openai' || chapterProvider.protocol === 'anthropic' ? (
+              <>
+                <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                  温度
+                </label>
+                <select
+                  className="select"
+                  style={{ width: 72, padding: '3px 5px', fontSize: 12 }}
+                  value={String(chapterProvider.temperature ?? 0.8)}
+                  onChange={(e) => void updateChapterStrength(e.target.value)}
+                  disabled={chapterStrengthSaving || generating || adjusting}
+                  aria-label="正文生成温度"
+                >
+                  {[0.5, 0.6, 0.7, 0.8, 0.9, 1.0].map((temperature) => (
+                    <option key={temperature} value={temperature}>{temperature.toFixed(1)}</option>
+                  ))}
+                </select>
+                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                  建议本章：0.8
+                </span>
+              </>
+            ) : (
+              <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                此 provider 不支持在应用内调节强度
+              </span>
+            )}
+          </div>
+        ) : null}
         <button
           className="btn btn-sm"
           onClick={saveAndClearDraft}
@@ -4257,7 +4486,9 @@ export default function ChapterEditor({
           className="editor-text"
           // 非受控：禁止 value={draft}。用户输入只改 state，浏览器自管滚动/光标；
           // 切章/续写/撤销等程序化改写由 setDraft 写 DOM。
-          defaultValue=""
+          // 首次挂载时用当前 draft：从「展卷中…」切到编辑器时 getChapter 已写入 draft，
+          // 若写死 defaultValue="" 会留下空白正文（见上方 useLayoutEffect 注释）。
+          defaultValue={draft}
           // 流式生成期间锁定输入：每个 token 都会整体覆写 el.value，
           // 此时用户手打的内容会被下一个 token 无提示冲掉
           readOnly={generating || adjusting}

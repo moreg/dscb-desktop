@@ -127,6 +127,12 @@ export class WriteFlowService {
     knownCharacters: string[],
     opts: GenerateOptions = {}
   ): Promise<string> {
+    // 超长正文整段塞进 prompt 会挤占输出预算，模型易以 finish_reason=length 截断 JSON。
+    // 与节奏评估类似做尾部截断；记忆更偏「本章新增」，保留前部+尾部更稳。
+    const body =
+      content.length > 12_000
+        ? `${content.slice(0, 8_000)}\n…（中部略）\n${content.slice(-3_000)}`
+        : content
     const prompt = [
       `请从下面的小说正文中提取本章新增的记忆信息。`,
       ``,
@@ -147,13 +153,15 @@ export class WriteFlowService {
       `  fileName 如「力量体系」「金手指」「青帮」；op: append_h2|append_bullet；confidence: high|medium|low`,
       `  例：新境界、金手指新规则、新势力名、常驻地理。题材定位/核心卖点不要放这里。`,
       `- settingsSuggestions: [{ topic, reason, suggestedPath }]（仅建议手改底稿，如题材定位；可空）`,
-      `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。`,
+      `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。字段值尽量简短，避免冗长复述正文。`,
       ``,
       `------ 第 ${chapterNumber} 章正文 ------`,
-      content
+      body
     ].join('\n')
     return this.llm.generateStream(prompt, {
       ...opts,
+      // 默认 8192 对「多数组 JSON」在部分模型上仍会被 max_tokens 截断；提取单独抬高
+      maxTokens: opts.maxTokens ?? 12_288,
       meta: { feature: 'memoryExtract', ...opts.meta }
     })
   }

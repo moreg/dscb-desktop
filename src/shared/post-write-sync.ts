@@ -198,10 +198,29 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
   }
 }
 
+/** 写后同步错误码 → 短中文（状态条 / 记忆面板共用） */
+export function friendlySyncError(err: string): string {
+  const e = err.trim()
+  if (!e) return '同步失败'
+  if (e === 'LLM_OUTPUT_TRUNCATED' || /output.?truncated/i.test(e)) {
+    return '模型输出被截断，请点「补跑同步」重试'
+  }
+  if (e === 'LLM_TIMEOUT' || /aborted due to timeout/i.test(e)) {
+    return '同步超时，请重试'
+  }
+  if (e === 'LLM_RATE_LIMIT') return '请求过于频繁，请稍后再试'
+  if (e === 'LLM_ABORTED') return '已取消'
+  if (e === 'LLM_AUTH_FAILED' || e === 'NO_KEY' || e === 'LLM_NOT_CONFIGURED') {
+    return '模型未配置或鉴权失败'
+  }
+  if (e.startsWith('LLM_REQUEST_FAILED')) return '模型请求失败'
+  return e.length > 60 ? `${e.slice(0, 60)}…` : e
+}
+
 /** 失败时用于状态条的短错误文案 */
 export function formatSyncErrorHint(errors: string[], max = 2): string {
   if (errors.length === 0) return ''
-  const shown = errors.slice(0, max).map((e) => (e.length > 60 ? `${e.slice(0, 60)}…` : e))
+  const shown = errors.slice(0, max).map((e) => friendlySyncError(e))
   const more = errors.length > max ? ` 等 ${errors.length} 条` : ''
   return shown.join('；') + more
 }

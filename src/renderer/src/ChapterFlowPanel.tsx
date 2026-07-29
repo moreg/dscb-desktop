@@ -51,6 +51,9 @@ function friendlyFlowError(err: string): string {
   if (e === 'LLM_TIMEOUT' || /aborted due to timeout/i.test(e)) {
     return '请求超时（正文较长或模型响应慢）。已放宽超时，请重试；若仍失败可换更快模型或缩短本章字数。'
   }
+  if (e === 'LLM_OUTPUT_TRUNCATED' || /output.?truncated/i.test(e)) {
+    return '模型输出被截断（未完整返回 JSON）。请点「提取记忆」或「补跑同步」重试；若反复出现，可换输出上限更高的模型。'
+  }
   if (e === 'LLM_RATE_LIMIT') return '请求过于频繁，请稍后再试'
   if (e === 'LLM_AUTH_FAILED' || e === 'NO_KEY' || e === 'LLM_NOT_CONFIGURED') {
     return '模型未配置或鉴权失败，请到设置检查 API Key / 功能模型分配（审稿质检）'
@@ -907,7 +910,9 @@ export default function ChapterFlowPanel(props: Props) {
     const allErrors = [
       ...(autoSyncSeed.memory.errors ?? []),
       ...(autoSyncSeed.settings.errors ?? [])
-    ].filter(Boolean)
+    ]
+      .filter(Boolean)
+      .map((msg) => friendlyFlowError(msg))
     const appliedTotal =
       (autoSyncSeed.memory.applied?.stateChanges ?? 0) +
       (autoSyncSeed.memory.applied?.plotPoints ?? 0) +
