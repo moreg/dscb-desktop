@@ -29,6 +29,7 @@ const OutlinePage = lazy(() => import('./OutlinePage'))
 const RhythmChartPage = lazy(() => import('./RhythmChartPage'))
 const FigurePage = lazy(() => import('./FigurePage'))
 const StyleProfilePage = lazy(() => import('./StyleProfilePage'))
+const CoverLearningLibraryPage = lazy(() => import('./CoverLearningLibraryPage'))
 const TeardownPage = lazy(() => import('./TeardownPage'))
 const CoverPage = lazy(() => import('./CoverPage'))
 const ScanPage = lazy(() => import('./ScanPage'))
@@ -55,6 +56,7 @@ type View =
   | { kind: 'rhythm'; projectId: string }
   | { kind: 'figures'; projectId: string }
   | { kind: 'styles' }
+  | { kind: 'coverLearningLibrary' }
   | { kind: 'covers'; projectId: string }
   | { kind: 'settings'; tab?: string }
 
@@ -106,6 +108,7 @@ function isNavActive(view: View, kind: string, projectId: string | null): boolea
   if (kind === 'teardown') return view.kind === 'teardown'
   if (kind === 'inspiration') return view.kind === 'inspiration'
   if (kind === 'styles') return view.kind === 'styles'
+  if (kind === 'coverLearningLibrary') return view.kind === 'coverLearningLibrary'
   if (!projectId) return false
   if (kind === 'chapters') return view.kind === 'chapters' || view.kind === 'editor'
   if (kind === 'projectInfo') return view.kind === 'projectInfo'
@@ -280,6 +283,8 @@ export default function App() {
               ? 'tracking-wide'
               : view.kind === 'inspiration'
                 ? 'inspiration-wide'
+                : view.kind === 'covers'
+                  ? 'cover-wide'
               : ''
   }`
 
@@ -330,6 +335,13 @@ export default function App() {
           >
             <span className="icon">✒</span>
             文风库
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'coverLearningLibrary' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'coverLearningLibrary' })}
+          >
+            <span className="icon">🗃</span>
+            学习库
           </button>
 
           {currentProjectId ? (
@@ -653,6 +665,10 @@ export default function App() {
           ) : view.kind === 'styles' ? (
             <ErrorBoundary>
               <StyleProfilePage projectId={currentProjectId || undefined} />
+            </ErrorBoundary>
+          ) : view.kind === 'coverLearningLibrary' ? (
+            <ErrorBoundary>
+              <CoverLearningLibraryPage />
             </ErrorBoundary>
           ) : view.kind === 'covers' ? (
             <ErrorBoundary>

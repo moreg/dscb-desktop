@@ -1,9 +1,15 @@
 import { CharacterRepository } from './character-repository'
-import { buildCoverPrompt, inferGenre } from './skill-prompts/cover/cover-styles'
+import {
+  buildCoverPrompt,
+  COVER_STYLE_PRESETS,
+  inferGenre,
+  type CoverStyleDefinition
+} from './skill-prompts/cover/cover-styles'
 import type { ChapterService } from './chapter-service'
 import type { LlmService } from './llm-service'
 import type { OutlineService } from './outline-service'
 import type { ProjectService } from './project-service'
+import type { CoverLearningLibraryService } from './cover-learning-library'
 import type {
   Character,
   CoverComposition,
@@ -113,7 +119,8 @@ export class CoverPromptService {
     private readonly projectService: ProjectService,
     private readonly llm: LlmService,
     private readonly outlineService: OutlineService,
-    private readonly chapterService: ChapterService
+    private readonly chapterService: ChapterService,
+    private readonly learningLibrary?: CoverLearningLibraryService
   ) {}
 
   /**
@@ -136,7 +143,11 @@ export class CoverPromptService {
       )
     }
 
-    const instruction = this.buildExtractionPrompt(material.blocks.join('\n\n'), input)
+    const loadedLibrary = this.learningLibrary ? await this.learningLibrary.load() : undefined
+    const explicitStyle = input.stylePreset && input.stylePreset !== 'auto'
+      ? loadedLibrary?.library.styles[input.stylePreset] ?? COVER_STYLE_PRESETS[input.stylePreset]
+      : undefined
+    const instruction = this.buildExtractionPrompt(material.blocks.join('\n\n'), input, explicitStyle)
     const raw = await this.llm.generateStream(instruction, {
       signal,
       meta: { feature: 'coverPrompt', projectId: input.projectId },
@@ -157,11 +168,16 @@ export class CoverPromptService {
         : inferGenre(input.bookName || material.bookName))
 
     // 构图：用户锁定 > 模型判定 > closeup 兜底
-    const composition =
-      input.compositionOverride ??
-      (COMPOSITIONS.includes(parsed.composition as CoverComposition)
-        ? (parsed.composition as CoverComposition)
-        : 'closeup')
+    const learned = loadedLibrary && this.learningLibrary
+      ? this.learningLibrary.resolveStyle(loadedLibrary.library, input.stylePreset, genre)
+      : undefined
+    const selectedPreset = learned?.definition ?? explicitStyle
+    const composition = selectedPreset?.noPeople
+      ? 'scene'
+      : input.compositionOverride ??
+        (COMPOSITIONS.includes(parsed.composition as CoverComposition)
+          ? (parsed.composition as CoverComposition)
+          : 'closeup')
 
     const prompt = buildCoverPrompt({
       bookName: input.bookName,
@@ -169,6 +185,10 @@ export class CoverPromptService {
       platform: input.platform,
       genre,
       composition,
+      stylePreset: input.stylePreset,
+      learningPreset: learned?.definition,
+      learningRules: loadedLibrary?.library.globalRules,
+      typography: input.typography,
       styleHint: cleanField(parsed.styleHintZh),
       scene: {
         characterDesc: cleanField(parsed.characterDesc),
@@ -298,10 +318,20 @@ export class CoverPromptService {
    * 构建提炼指令。要求严格 JSON —— 画面字段用英文（直接进图像模型），
    * summary/styleHint 用中文（给用户看和改）。
    */
-  private buildExtractionPrompt(material: string, input: ExtractCoverPromptInput): string {
+  private buildExtractionPrompt(
+    material: string,
+    input: ExtractCoverPromptInput,
+    learnedStyle?: CoverStyleDefinition
+  ): string {
     const genreLine = input.genreOverride
       ? `题材已由用户锁定为 "${input.genreOverride}"，genre 字段原样返回该值。`
       : `从下列题材中选最贴切的一个填入 genre：${GENRES.join(' / ')}。`
+    const selectedStyle = learnedStyle ?? (input.stylePreset && input.stylePreset !== 'auto'
+      ? COVER_STYLE_PRESETS[input.stylePreset]
+      : undefined)
+    const styleLine = selectedStyle
+      ? `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 色彩、光线和画面组织必须符合该风格，不要另选画风。`
+      : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
 
     return `你是中文网文封面美术指导。请阅读下面这本小说的资料，提炼出**这本书专属**的封面画面要素。
 
@@ -314,15 +344,16 @@ ${input.extraHint?.trim() ? `【作者额外要求】\n${input.extraHint.trim()}
 
 【约束】
 1. ${genreLine}
-2. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。
-3. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段用**英文**书写（它们会直接送进图像模型），每项一句话，具体到可画出来的程度。
+2. ${styleLine}
+3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。${selectedStyle?.noPeople ? '当前风格要求无人物，composition 必须返回 scene，characterDesc 必须留空。' : ''}
+4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段用**英文**书写（它们会直接送进图像模型），每项一句话，具体到可画出来的程度。
    - characterDesc：年龄、性别、发型、服饰材质与颜色、神态、手持物。
    - backgroundDesc：具体地点与环境细节，不要只写 "fantasy world"。
    - keyProps：这本书的标志性道具或符号，没有就留空字符串。
    - composition 选 scene 时，characterDesc 留空字符串。
-4. styleHintZh 用**中文**，逗号分隔的短语，概括风格取向，供作者在界面上继续微调。例："偏暗黑系，冷色调，主角黑衣断刀，背景残破城墙"。
-5. summaryZh 用**中文**，一句话描述这张封面画的是什么。
-6. 画面里不要出现书名、作者名以外的文字。
+5. styleHintZh 用**中文**，逗号分隔的短语，概括风格取向，供作者在界面上继续微调。例："偏暗黑系，冷色调，主角黑衣断刀，背景残破城墙"。
+6. summaryZh 用**中文**，一句话描述这张封面画的是什么。
+7. 画面里不要出现书名、作者名以外的文字。
 
 【输出】
 只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释：

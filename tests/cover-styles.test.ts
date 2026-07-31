@@ -2,13 +2,14 @@ import { describe, it, expect } from 'vitest'
 import {
   inferGenre,
   buildCoverPrompt,
+  COVER_STYLE_PRESETS,
   PLATFORM_STYLES,
   GENRE_STYLES,
   COMPOSITION_DESC,
   GENRE_RULES
 } from '../src/main/data/skill-prompts/cover/cover-styles'
 import { CoverService } from '../src/main/data/cover-service'
-import type { CoverGenre, CoverPlatform } from '../src/shared/types'
+import type { CoverGenre, CoverPlatform, CoverStylePreset } from '../src/shared/types'
 
 describe('inferGenre 书名题材推断', () => {
   it('仙侠关键词命中', () => {
@@ -91,7 +92,7 @@ describe('PLATFORM_STYLES 平台风格完整', () => {
 
   it('番茄有上传尺寸 600x800', () => {
     expect(PLATFORM_STYLES.fanqie.uploadSize).toBe('600x800')
-    expect(PLATFORM_STYLES.fanqie.ratio).toBe('3:4')
+    expect(PLATFORM_STYLES.fanqie.ratio).toBe('9:16')
   })
 
   it('其他平台无固定上传尺寸', () => {
@@ -128,6 +129,125 @@ describe('GENRE_STYLES 题材风格完整', () => {
     for (const g of genres) {
       expect(GENRE_STYLES[g].authorFont).toContain('small')
     }
+  })
+})
+
+describe('COVER_STYLE_PRESETS 番茄封面风格库', () => {
+  const presets: Exclude<CoverStylePreset, 'auto'>[] = [
+    'fanqie_impact',
+    'ancient_romance',
+    'ink_minimal',
+    'dark_suspense',
+    'urban_cinematic',
+    'anime_light',
+    'retro_period',
+    'epic_fantasy',
+    'concept_symbol',
+    'glamour_romance',
+    'cute_doodle',
+    'warm_period_life',
+    'rural_healing',
+    'male_power_type',
+    'folk_horror',
+    'war_spy_epic',
+    'game_neon',
+    'western_adventure',
+    'minimal_typographic'
+  ]
+
+  it('19 种风格字段完整', () => {
+    for (const key of presets) {
+      const style = COVER_STYLE_PRESETS[key]
+      expect(style.label).toBeTruthy()
+      expect(style.description).toBeTruthy()
+      expect(style.prompt.length).toBeGreaterThan(40)
+      expect(style.colorPalette).toBeTruthy()
+      expect(style.lighting).toBeTruthy()
+      expect(style.titleFont).toBeTruthy()
+      expect(style.authorFont).toBeTruthy()
+      expect(style.titlePosition).toBeTruthy()
+      expect(style.titleEffect).toBeTruthy()
+      expect(style.authorPosition).toBeTruthy()
+    }
+  })
+
+  it('文字设计会覆盖书名与作者名的字体、位置和特效', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '长夜无声',
+      authorName: '余烬',
+      platform: 'fanqie',
+      genre: 'mystery',
+      composition: 'scene',
+      stylePreset: 'dark_suspense',
+      typography: {
+        titleFont: 'brush',
+        titlePosition: 'vertical_right',
+        titleEffect: 'ink',
+        authorFont: 'seal',
+        authorPosition: 'vertical_side'
+      }
+    })
+    expect(prompt).toContain('expressive hand-brushed Chinese calligraphy')
+    expect(prompt).toContain('vertically from top to bottom along the right side')
+    expect(prompt).toContain('authentic dry-brush ink texture')
+    expect(prompt).toContain('traditional Chinese seal-script inspired lettering')
+    expect(prompt).toContain('set vertically near the outer side of the title')
+    expect(prompt).toContain('render the exact Simplified Chinese characters once only')
+  })
+
+  it('选择风格后写入风格锁、配色和字体', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '夜航人',
+      authorName: '无灯',
+      platform: 'fanqie',
+      genre: 'mystery',
+      composition: 'closeup',
+      stylePreset: 'dark_suspense'
+    })
+    expect(prompt).toContain('Selected visual style lock (暗黑悬疑电影)')
+    expect(prompt).toContain(COVER_STYLE_PRESETS.dark_suspense.prompt)
+    expect(prompt).toContain(COVER_STYLE_PRESETS.dark_suspense.colorPalette)
+    expect(prompt).toContain(COVER_STYLE_PRESETS.dark_suspense.titleFont)
+    expect(prompt).toContain(COVER_STYLE_PRESETS.dark_suspense.titlePosition ?? '')
+    expect(prompt).toContain(COVER_STYLE_PRESETS.dark_suspense.titleEffect ?? '')
+    expect(prompt).not.toContain('character portrait dominating frame')
+  })
+
+  it('深度样本风格会写入各自的题材视觉规则', () => {
+    const cases: Array<[CoverStylePreset, string]> = [
+      ['glamour_romance', 'editorial fashion styling'],
+      ['cute_doodle', 'hand-drawn doodle characters'],
+      ['rural_healing', 'seasonal crops'],
+      ['male_power_type', 'title designed for tiny thumbnail recognition'],
+      ['folk_horror', 'red coffin'],
+      ['war_spy_epic', 'historically grounded clothing and equipment'],
+      ['game_neon', 'controlled neon UI accents']
+    ]
+    for (const [stylePreset, expected] of cases) {
+      const prompt = buildCoverPrompt({
+        bookName: '测试书名',
+        authorName: '测试作者',
+        platform: 'fanqie',
+        genre: 'urban',
+        composition: 'closeup',
+        stylePreset
+      })
+      expect(prompt).toContain(expected)
+    }
+  })
+
+  it('无人物概念符号会强制使用纯场景并省略人物', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '倒计时',
+      authorName: '零点',
+      platform: 'fanqie',
+      genre: 'mystery',
+      composition: 'closeup',
+      stylePreset: 'concept_symbol',
+      scene: { characterDesc: 'a detective in a black coat' }
+    })
+    expect(prompt).toContain('no human figure as main subject')
+    expect(prompt).not.toContain('a detective in a black coat')
   })
 })
 
@@ -225,15 +345,15 @@ describe('buildCoverPrompt 完整提示词构建', () => {
     expect(prompt).toContain('add snow background')
   })
 
-  it('比例随平台变化（番茄 3:4 / 起点 2:3）', () => {
+  it('所有平台的主封面默认使用 9:16', () => {
     const fanqiePrompt = buildCoverPrompt({
       bookName: 't', authorName: 'a', platform: 'fanqie', genre: 'urban', composition: 'closeup'
     })
     const qidianPrompt = buildCoverPrompt({
       bookName: 't', authorName: 'a', platform: 'qidian', genre: 'urban', composition: 'closeup'
     })
-    expect(fanqiePrompt).toContain('3:4')
-    expect(qidianPrompt).toContain('2:3')
+    expect(fanqiePrompt).toContain('9:16')
+    expect(qidianPrompt).toContain('9:16')
   })
 })
 

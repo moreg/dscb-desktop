@@ -21,6 +21,7 @@ import { DeslopService } from './data/deslop/deslop-service'
 import { ImageService } from './data/image-service'
 import { CoverService } from './data/cover-service'
 import { CoverPromptService } from './data/cover-prompt-service'
+import { CoverLearningLibraryService } from './data/cover-learning-library'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
@@ -195,14 +196,20 @@ if (!hasSingleInstanceLock) {
   // 提示词提炼走文本模型（auxiliary 路由），与出图的图像 API 相互独立：
   // 没配图像 Key 也能先把提示词调好，且可用 codex/grok 这类免 Key 的 CLI provider。
   const imageService = new ImageService(settings)
-  const coverService = new CoverService(projectService, imageService)
+  const coverLearningLibrary = new CoverLearningLibraryService(
+    settings,
+    join(userData, 'cover-learning-library')
+  )
+  await coverLearningLibrary.initialize()
+  const coverService = new CoverService(projectService, imageService, coverLearningLibrary)
   const coverPromptService = new CoverPromptService(
     projectService,
     llmService,
     outlineService,
-    chapterService
+    chapterService,
+    coverLearningLibrary
   )
-  registerCoverIpc(coverService, settings, coverPromptService)
+  registerCoverIpc(coverService, settings, coverPromptService, coverLearningLibrary)
 
   // 扫榜（story-long-scan / story-short-scan）—— 采集 + 选题决策
   const scanService = new ScanService(userData, llmService)

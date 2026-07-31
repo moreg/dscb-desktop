@@ -969,6 +969,14 @@ export interface RendererApi {
   getCoverImageConfig: () => Promise<CoverImageConfigSummary>
   /** 保存图像生成 API 配置 */
   setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) => Promise<CoverImageConfigSummary>
+  /** 读取本地封面学习库状态；生成提示词时会从该文件重新加载 */
+  getCoverLearningLibrary: () => Promise<CoverLearningLibrarySummary>
+  /** 修改封面学习库目录，并在新目录中初始化学习库 */
+  setCoverLearningLibraryDirectory: (directory: string) => Promise<CoverLearningLibrarySummary>
+  /** 选择本地封面学习库目录 */
+  chooseCoverLearningLibraryDirectory: () => Promise<CoverLearningLibrarySummary | null>
+  /** 选择封面文件夹并学习；取消选择时返回 null */
+  chooseAndLearnCoverFolder: () => Promise<CoverLearningRunResult | null>
   /* ---- 扫榜（story-long-scan / story-short-scan）---- */
   /** 采集某平台榜单（确定性，不调 LLM），返回榜单 markdown + 结构化条目 */
   scanRank: (input: ScanRankInput) => Promise<ScanResult>
@@ -2328,6 +2336,86 @@ export type CoverGenre =
 export type CoverComposition = 'closeup' | 'fullbody' | 'scene' | 'duo'
 
 /**
+ * 封面视觉风格。题材决定“画什么”，构图决定“怎么摆”，本字段决定“用什么视觉语言”。
+ * 其中 fanqie_* 系列来自番茄榜单封面的共性提炼，不对应或复刻任何具体作品。
+ */
+export type CoverStylePreset =
+  | 'auto'
+  | 'fanqie_impact'
+  | 'ancient_romance'
+  | 'ink_minimal'
+  | 'dark_suspense'
+  | 'urban_cinematic'
+  | 'anime_light'
+  | 'retro_period'
+  | 'epic_fantasy'
+  | 'concept_symbol'
+  | 'glamour_romance'
+  | 'cute_doodle'
+  | 'warm_period_life'
+  | 'rural_healing'
+  | 'male_power_type'
+  | 'folk_horror'
+  | 'war_spy_epic'
+  | 'game_neon'
+  | 'western_adventure'
+  | 'minimal_typographic'
+
+/** 封面书名字体设计 */
+export type CoverTitleFontStyle =
+  | 'auto'
+  | 'impact'
+  | 'brush'
+  | 'elegant'
+  | 'modern'
+  | 'suspense'
+  | 'anime'
+  | 'retro'
+
+/** 书名版面位置 */
+export type CoverTitlePosition =
+  | 'auto'
+  | 'top'
+  | 'center'
+  | 'lower_third'
+  | 'vertical_left'
+  | 'vertical_right'
+
+/** 书名文字特效 */
+export type CoverTitleEffect =
+  | 'auto'
+  | 'flat'
+  | 'outline_shadow'
+  | 'metallic'
+  | 'ink'
+  | 'glow'
+  | 'embossed'
+
+/** 作者名字体设计 */
+export type CoverAuthorFontStyle =
+  | 'auto'
+  | 'sans'
+  | 'serif'
+  | 'seal'
+  | 'handwritten'
+  | 'metallic'
+
+/** 作者名版面位置 */
+export type CoverAuthorPosition =
+  | 'auto'
+  | 'bottom_center'
+  | 'bottom_right'
+  | 'vertical_side'
+
+export interface CoverTypographyOptions {
+  titleFont?: CoverTitleFontStyle
+  titlePosition?: CoverTitlePosition
+  titleEffect?: CoverTitleEffect
+  authorFont?: CoverAuthorFontStyle
+  authorPosition?: CoverAuthorPosition
+}
+
+/**
  * 从小说内容提炼出的画面要素。
  * 逐字段覆盖 GENRE_STYLES 的通用模板——不填的字段仍回退题材默认值，
  * 所以每本书的封面不再是同一个「白衣剑客站在云海上」。
@@ -2363,6 +2451,10 @@ export interface GenerateCoverInput {
   genreOverride?: CoverGenre
   /** 构图变体（默认 closeup） */
   composition?: CoverComposition
+  /** 视觉风格（默认 auto，按平台与题材自动组合） */
+  stylePreset?: CoverStylePreset
+  /** 书名与作者名的字体、位置和文字特效 */
+  typography?: CoverTypographyOptions
   /** 风格偏好补充（可选，追加到 prompt） */
   styleHint?: string
   /**
@@ -2402,6 +2494,10 @@ export interface ExtractCoverPromptInput {
   genreOverride?: CoverGenre
   /** 用户已锁定的构图；给了就不让模型再判 */
   compositionOverride?: CoverComposition
+  /** 用户选择的视觉风格；提炼内容时必须保持这一风格 */
+  stylePreset?: CoverStylePreset
+  /** 书名与作者名的字体、位置和文字特效 */
+  typography?: CoverTypographyOptions
   /** 用户额外诉求（中文自由文本，如「主角要女性」「不要人物只要场景」） */
   extraHint?: string
 }
@@ -2440,6 +2536,35 @@ export interface CoverImageConfigSummary {
   keyMasked: string
   baseUrl: string
   model: string
+}
+
+/** 本地封面学习库的可见状态。 */
+export interface CoverLearningLibrarySummary {
+  directory: string
+  filePath: string
+  status: 'ready' | 'fallback'
+  styleCount: number
+  sampleCount: number
+  categoryCount: number
+  updatedAt: string
+  /** 通过文件夹学习功能建立了内容指纹的样本数。 */
+  trackedSampleCount: number
+  learningRunCount: number
+  lastLearnedAt?: string
+  error?: string
+}
+
+/** 一次本地封面文件夹学习的结果。 */
+export interface CoverLearningRunResult {
+  directory: string
+  scanned: number
+  learned: number
+  duplicates: number
+  failed: number
+  startedAt: string
+  completedAt: string
+  observations: string[]
+  summary: CoverLearningLibrarySummary
 }
 
 /* ==========================================================

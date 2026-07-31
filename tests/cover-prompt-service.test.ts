@@ -292,6 +292,53 @@ describe('CoverPromptService.extract', () => {
     expect(generateStream.mock.calls[0][0]).toContain('主角改成女性')
   })
 
+  it('选择的封面风格同时约束提炼模型和最终生图提示词', async () => {
+    const { service, generateStream } = makeService({
+      llmResponse: JSON.stringify({
+        genre: 'mystery',
+        composition: 'scene',
+        backgroundDesc: 'an empty interrogation room',
+        colorPalette: 'charcoal and blood red',
+        lighting: 'a single overhead light',
+        summaryZh: '空审讯室中的断刀'
+      })
+    })
+    const draft = await service.extract({ ...input, stylePreset: 'dark_suspense' })
+    const extractionPrompt = generateStream.mock.calls[0][0] as string
+    expect(extractionPrompt).toContain('视觉风格已锁定为“暗黑悬疑电影”')
+    expect(draft.prompt).toContain('Selected visual style lock (暗黑悬疑电影)')
+  })
+
+  it('提炼内容后仍保留用户选择的文字排版', async () => {
+    const { service } = makeService({
+      llmResponse: '{"genre":"xianxia","composition":"fullbody","characterDesc":"a blade master"}'
+    })
+    const draft = await service.extract({
+      ...input,
+      typography: {
+        titleFont: 'impact',
+        titlePosition: 'lower_third',
+        titleEffect: 'metallic',
+        authorFont: 'serif',
+        authorPosition: 'bottom_right'
+      }
+    })
+    expect(draft.prompt).toContain('oversized ultra-bold stacked Chinese display lettering')
+    expect(draft.prompt).toContain('across the lower third')
+    expect(draft.prompt).toContain('metallic gold or silver material')
+    expect(draft.prompt).toContain('small refined Chinese Song-style serif lettering')
+    expect(draft.prompt).toContain('at the lower right inside the safe area')
+  })
+
+  it('无人物概念风格即使模型返回人物构图也强制改为 scene', async () => {
+    const { service } = makeService({
+      llmResponse: '{"genre":"mystery","composition":"closeup","characterDesc":"a detective"}'
+    })
+    const draft = await service.extract({ ...input, stylePreset: 'concept_symbol' })
+    expect(draft.composition).toBe('scene')
+    expect(draft.prompt).not.toContain('a detective')
+  })
+
   it('下发 JSON Schema 供支持结构化输出的 provider 强约束', async () => {
     const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
     await service.extract(input)

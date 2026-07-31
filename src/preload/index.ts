@@ -43,6 +43,8 @@ import type {
   CoverFile,
   CoverImageConfigSummary,
   CoverImageConfigInput,
+  CoverLearningLibrarySummary,
+  CoverLearningRunResult,
   ReviewRulesConfig
 } from '../shared/types'
 
@@ -983,6 +985,14 @@ const api = {
     ipcRenderer.invoke('cover:getConfig') as Promise<CoverImageConfigSummary>,
   setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) =>
     ipcRenderer.invoke('cover:setConfig', cfg) as Promise<CoverImageConfigSummary>,
+  getCoverLearningLibrary: () =>
+    ipcRenderer.invoke('cover:getLearningLibrary') as Promise<CoverLearningLibrarySummary>,
+  setCoverLearningLibraryDirectory: (directory: string) =>
+    ipcRenderer.invoke('cover:setLearningLibraryDirectory', directory) as Promise<CoverLearningLibrarySummary>,
+  chooseCoverLearningLibraryDirectory: () =>
+    ipcRenderer.invoke('cover:chooseLearningLibraryDirectory') as Promise<CoverLearningLibrarySummary | null>,
+  chooseAndLearnCoverFolder: () =>
+    ipcRenderer.invoke('cover:chooseAndLearnFolder') as Promise<CoverLearningRunResult | null>,
 
   onProjectFilesChanged: (
     cb: (e: { projectId: string; kind: 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' }) => void

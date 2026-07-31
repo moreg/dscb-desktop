@@ -2,6 +2,7 @@ import { promises as fs } from 'fs'
 import { join, resolve, sep } from 'path'
 import { ImageService } from './image-service'
 import { ProjectService } from './project-service'
+import type { CoverLearningLibraryService } from './cover-learning-library'
 import {
   inferGenre,
   buildCoverPrompt,
@@ -10,18 +11,21 @@ import {
 import type {
   CoverFile,
   CoverGenre,
-  CoverPlatform,
   GenerateCoverInput
 } from '../../shared/types'
 
 const COVER_DIR = '封面'
+/** 图像接口普遍支持的竖图尺寸；生成后再居中裁成精确的 9:16。 */
+export const COVER_GENERATION_SIZE = '1024x1536'
+/** 由 1024×1536 横向居中裁切得到，不放大、不拉伸。 */
+export const DEFAULT_COVER_OUTPUT_SIZE = '864x1536'
 
 /**
  * 封面生成服务（编排 Step 1-4）。
  *
  * Step 1-1.5：题材判定（书名关键词推断）
  * Step 2：构建英文提示词（文字层 + 风格层 + 画面层）
- * Step 3：调 ImageService 出图 + 落盘（自增版本号）+ 保存 prompt 副本
+ * Step 3：调 ImageService 出图 + 无拉伸裁成默认 9:16 + 落盘（自增版本号）+ 保存 prompt 副本
  * Step 3.5：平台上传尺寸居中裁剪（番茄 600×800）
  *
  * 产物结构（项目目录下）：
@@ -34,7 +38,8 @@ const COVER_DIR = '封面'
 export class CoverService {
   constructor(
     private readonly projectService: ProjectService,
-    private readonly image: ImageService
+    private readonly image: ImageService,
+    private readonly learningLibrary?: CoverLearningLibraryService
   ) {}
 
   /**
@@ -56,7 +61,32 @@ export class CoverService {
       platform: input.platform,
       genre,
       composition: input.composition ?? 'closeup',
+      stylePreset: input.stylePreset,
+      typography: input.typography,
       styleHint: input.styleHint
+    })
+  }
+
+  /** 实际生成链路使用：每次从磁盘重新读取学习库。 */
+  async resolvePromptWithLibrary(input: GenerateCoverInput): Promise<string> {
+    const override = input.promptOverride?.trim()
+    if (override) return override
+    if (!this.learningLibrary) return this.resolvePrompt(input)
+
+    const genre: CoverGenre = input.genreOverride ?? inferGenre(input.bookName)
+    const { library } = await this.learningLibrary.load()
+    const learned = this.learningLibrary.resolveStyle(library, input.stylePreset, genre)
+    return buildCoverPrompt({
+      bookName: input.bookName,
+      authorName: input.authorName,
+      platform: input.platform,
+      genre,
+      composition: input.composition ?? 'closeup',
+      stylePreset: learned.key,
+      typography: input.typography,
+      styleHint: input.styleHint,
+      learningPreset: learned.definition,
+      learningRules: library.globalRules
     })
   }
 
@@ -66,16 +96,15 @@ export class CoverService {
     const platform = PLATFORM_STYLES[input.platform]
 
     // Step 2：确定提示词（手改优先）
-    const prompt = this.resolvePrompt(input)
+    const prompt = await this.resolvePromptWithLibrary(input)
 
     // Step 3：出图（参考图路径需校验在项目目录内 + 图片扩展名，防任意文件读取外传）
-    const size = this.sizeForPlatform(input.platform)
     const safeRefPath = input.refImagePath
       ? await this.validateRefImagePath(input.projectId, input.refImagePath)
       : undefined
     const b64 = safeRefPath
-      ? await this.image.edit(prompt, size, safeRefPath)
-      : await this.image.generate(prompt, size)
+      ? await this.image.edit(prompt, COVER_GENERATION_SIZE, safeRefPath)
+      : await this.image.generate(prompt, COVER_GENERATION_SIZE)
 
     // 落盘（原子自增版本号：用独占创建确保并发不覆盖）
     const dir = await this.resolveCoverDir(input.projectId)
@@ -83,6 +112,7 @@ export class CoverService {
     const fileName = fullPath.split(sep).pop() ?? '封面.png'
     const pngBuffer = Buffer.from(b64, 'base64')
     await fs.writeFile(fullPath, pngBuffer)
+    await this.cropToUploadSize(fullPath, fullPath, DEFAULT_COVER_OUTPUT_SIZE)
 
     // 保存提示词副本（迭代微调用）
     await fs.writeFile(join(dir, `封面_v${version}.prompt.txt`), prompt, 'utf-8')
@@ -240,11 +270,6 @@ export class CoverService {
     } catch {
       return 1
     }
-  }
-
-  /** 平台出图尺寸（番茄 3:4，其他 2:3） */
-  private sizeForPlatform(platform: CoverPlatform): string {
-    return platform === 'fanqie' ? '768x1024' : '1024x1536'
   }
 
   /** 从 prompt.txt 第一行推断题材（简化：扫 tag 关键词） */

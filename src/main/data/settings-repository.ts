@@ -55,6 +55,8 @@ export interface PricingConfig {
 
 export interface AppSettings {
   projectsRoot?: string
+  /** 本地封面学习库目录；未配置时使用 userData/cover-learning-library。 */
+  coverLearningLibraryDir?: string
   theme?: ThemeMode
   pricing?: Partial<PricingConfig>
   /** 每日写作字数目标 */
@@ -630,6 +632,19 @@ export class SettingsRepository {
   async getProjectsRoot(fallback: string): Promise<string> {
     const settings = await this.get()
     return settings.projectsRoot ?? fallback
+  }
+
+  async getCoverLearningLibraryDir(fallback: string): Promise<string> {
+    const settings = await this.get()
+    const configured = settings.coverLearningLibraryDir?.trim()
+    return configured || fallback
+  }
+
+  async setCoverLearningLibraryDir(directory: string): Promise<string> {
+    const normalized = directory.trim()
+    if (!normalized) throw new Error('学习库目录不能为空')
+    await this.update({ coverLearningLibraryDir: normalized })
+    return normalized
   }
 
   async getTheme(): Promise<ThemeMode> {

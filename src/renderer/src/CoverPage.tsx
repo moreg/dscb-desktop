@@ -5,17 +5,24 @@ import type {
   CoverImageConfigSummary,
   CoverPlatform,
   CoverComposition,
+  CoverStylePreset,
+  CoverTypographyOptions,
+  CoverTitleFontStyle,
+  CoverTitlePosition,
+  CoverTitleEffect,
+  CoverAuthorFontStyle,
+  CoverAuthorPosition,
   GenerateCoverInput
 } from '../../shared/types'
 
 const PLATFORM_OPTIONS: { value: CoverPlatform; label: string }[] = [
-  { value: 'fanqie', label: '番茄小说（3:4）' },
-  { value: 'qidian', label: '起点（2:3）' },
-  { value: 'jjwxc', label: '晋江（2:3）' },
-  { value: 'zhihu', label: '知乎盐言（2:3）' },
-  { value: 'qimao', label: '七猫（2:3）' },
-  { value: 'ciweimao', label: '刺猬猫（2:3）' },
-  { value: 'other', label: '其他（2:3）' }
+  { value: 'fanqie', label: '番茄小说（默认 9:16）' },
+  { value: 'qidian', label: '起点（默认 9:16）' },
+  { value: 'jjwxc', label: '晋江（默认 9:16）' },
+  { value: 'zhihu', label: '知乎盐言（默认 9:16）' },
+  { value: 'qimao', label: '七猫（默认 9:16）' },
+  { value: 'ciweimao', label: '刺猬猫（默认 9:16）' },
+  { value: 'other', label: '其他（默认 9:16）' }
 ]
 
 const GENRE_OPTIONS: { value: CoverGenre; label: string }[] = [
@@ -36,6 +43,180 @@ const COMPOSITION_OPTIONS: { value: CoverComposition; label: string }[] = [
   { value: 'fullbody', label: '全身动态' },
   { value: 'scene', label: '纯场景/氛围' },
   { value: 'duo', label: '双人（言情）' }
+]
+
+const STYLE_PRESET_OPTIONS: Array<{
+  value: CoverStylePreset
+  label: string
+  description: string
+  swatch: string
+}> = [
+  {
+    value: 'auto',
+    label: '智能匹配',
+    description: '按平台、题材和小说内容自动选择视觉表达',
+    swatch: 'linear-gradient(135deg, #24364b, #d7a24a, #f2e7d2)'
+  },
+  {
+    value: 'fanqie_impact',
+    label: '高饱和爽文海报',
+    description: '强对比、主体醒目、超大标题，适合脑洞与逆袭',
+    swatch: 'linear-gradient(135deg, #ff5a2a, #ffc400 52%, #1167d8)'
+  },
+  {
+    value: 'ancient_romance',
+    label: '古风人物言情',
+    description: '古装人物、红金华服与情绪关系',
+    swatch: 'linear-gradient(135deg, #611016, #d13a32 52%, #d9ad58)'
+  },
+  {
+    value: 'ink_minimal',
+    label: '国风水墨留白',
+    description: '宣纸、水墨山水、花枝与书法标题',
+    swatch: 'linear-gradient(135deg, #f3ead6, #c7c1a8 55%, #27302d)'
+  },
+  {
+    value: 'dark_suspense',
+    label: '暗黑悬疑电影',
+    description: '低照度、强阴影与局部红色警示',
+    swatch: 'linear-gradient(135deg, #080b12, #253b51 65%, #a10f1a)'
+  },
+  {
+    value: 'urban_cinematic',
+    label: '都市电影感',
+    description: '写实人物、城市空间与高级电影光影',
+    swatch: 'linear-gradient(135deg, #17293d, #436f8e 55%, #d99b55)'
+  },
+  {
+    value: 'anime_light',
+    label: '二次元轻小说',
+    description: '角色立绘、明亮配色和图形贴纸感',
+    swatch: 'linear-gradient(135deg, #49c8ff, #f47cc2 55%, #8b68e8)'
+  },
+  {
+    value: 'retro_period',
+    label: '年代复古宣传画',
+    description: '旧海报质感、年代建筑与暖色印刷色',
+    swatch: 'linear-gradient(135deg, #a83428, #d1a64b 52%, #52776d)'
+  },
+  {
+    value: 'epic_fantasy',
+    label: '玄幻史诗大片',
+    description: '宏大世界、英雄主体与克制能量特效',
+    swatch: 'linear-gradient(135deg, #111833, #4d3480 52%, #d89d39)'
+  },
+  {
+    value: 'concept_symbol',
+    label: '无人物概念符号',
+    description: '用关键物、徽记或空间表达故事核心',
+    swatch: 'linear-gradient(135deg, #161513, #655542 58%, #dfd0ad)'
+  },
+  {
+    value: 'glamour_romance',
+    label: '女频精致人像',
+    description: '柔光人像、时尚质感与装饰字，适合现言豪门',
+    swatch: 'linear-gradient(135deg, #f5d9d3, #a33d56 55%, #d8b16b)'
+  },
+  {
+    value: 'cute_doodle',
+    label: '沙雕简笔脑洞',
+    description: '白底手绘、表情包角色与超大手写标题',
+    swatch: 'linear-gradient(135deg, #fffdf5, #f05038 62%, #ffd43b)'
+  },
+  {
+    value: 'warm_period_life',
+    label: '年代生活群像',
+    description: '年代服装、家庭群像与温暖金色日光',
+    swatch: 'linear-gradient(135deg, #53664b, #d4a15e 55%, #9e3e31)'
+  },
+  {
+    value: 'rural_healing',
+    label: '田园种田治愈',
+    description: '乡野、作物、美食和有烟火气的日常生活',
+    swatch: 'linear-gradient(135deg, #759447, #e4bd63 58%, #bd5b36)'
+  },
+  {
+    value: 'male_power_type',
+    label: '男频强字效爽文',
+    description: '英雄主体、强透视和粗黑堆叠标题',
+    swatch: 'linear-gradient(135deg, #10151e, #ef6b25 52%, #1b7acb)'
+  },
+  {
+    value: 'folk_horror',
+    label: '中式民俗灵异',
+    description: '纸扎、棺木、古宅和红黑禁忌物',
+    swatch: 'linear-gradient(135deg, #100c0b, #8e1118 58%, #b49154)'
+  },
+  {
+    value: 'war_spy_epic',
+    label: '战争谍战纪实',
+    description: '战场、列车、密信与孤胆行动人物',
+    swatch: 'linear-gradient(135deg, #30352f, #ae6d35 58%, #d4c09b)'
+  },
+  {
+    value: 'game_neon',
+    label: '游戏科幻霓虹',
+    description: '全身角色、技能光效与蓝橙游戏标题',
+    swatch: 'linear-gradient(135deg, #071b37, #087fd3 52%, #ff7832)'
+  },
+  {
+    value: 'western_adventure',
+    label: '西幻冒险轻快',
+    description: '异世界角色、城镇、工坊与冒险道具',
+    swatch: 'linear-gradient(135deg, #e8d5a9, #57a4c8 55%, #a34d36)'
+  },
+  {
+    value: 'minimal_typographic',
+    label: '纯字极简概念',
+    description: '用书名排版、色块和单一符号完成封面',
+    swatch: 'linear-gradient(135deg, #f3eee3 48%, #c42e25 49%, #171717 72%)'
+  }
+]
+
+const TITLE_FONT_OPTIONS: Array<{ value: CoverTitleFontStyle; label: string }> = [
+  { value: 'auto', label: '跟随封面风格' },
+  { value: 'impact', label: '粗黑堆叠大字' },
+  { value: 'brush', label: '国风毛笔书法' },
+  { value: 'elegant', label: '雅致宋体/楷体' },
+  { value: 'modern', label: '现代几何黑体' },
+  { value: 'suspense', label: '悬疑窄体锐字' },
+  { value: 'anime', label: '二次元描边字' },
+  { value: 'retro', label: '年代复古印刷字' }
+]
+
+const TITLE_POSITION_OPTIONS: Array<{ value: CoverTitlePosition; label: string }> = [
+  { value: 'auto', label: '自动布局' },
+  { value: 'top', label: '顶部横排' },
+  { value: 'center', label: '中央主视觉' },
+  { value: 'lower_third', label: '下三分之一横排' },
+  { value: 'vertical_left', label: '左侧竖排' },
+  { value: 'vertical_right', label: '右侧竖排' }
+]
+
+const TITLE_EFFECT_OPTIONS: Array<{ value: CoverTitleEffect; label: string }> = [
+  { value: 'auto', label: '跟随封面风格' },
+  { value: 'flat', label: '纯色平面' },
+  { value: 'outline_shadow', label: '描边立体阴影' },
+  { value: 'metallic', label: '金属金/银质感' },
+  { value: 'ink', label: '水墨飞白' },
+  { value: 'glow', label: '克制发光' },
+  { value: 'embossed', label: '浮雕刻字' }
+]
+
+const AUTHOR_FONT_OPTIONS: Array<{ value: CoverAuthorFontStyle; label: string }> = [
+  { value: 'auto', label: '跟随封面风格' },
+  { value: 'sans', label: '简洁现代黑体' },
+  { value: 'serif', label: '雅致宋体' },
+  { value: 'seal', label: '印章/篆刻感' },
+  { value: 'handwritten', label: '自然手写体' },
+  { value: 'metallic', label: '纤细金属字' }
+]
+
+const AUTHOR_POSITION_OPTIONS: Array<{ value: CoverAuthorPosition; label: string }> = [
+  { value: 'auto', label: '自动布局' },
+  { value: 'bottom_center', label: '底部居中' },
+  { value: 'bottom_right', label: '右下角' },
+  { value: 'vertical_side', label: '标题侧边竖排' }
 ]
 
 const GENRE_LABELS: Record<CoverGenre, string> = {
@@ -87,6 +268,14 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const [platform, setPlatform] = useState<CoverPlatform>('fanqie')
   const [genreOverride, setGenreOverride] = useState<CoverGenre | ''>('')
   const [composition, setComposition] = useState<CoverComposition>('closeup')
+  const [stylePreset, setStylePreset] = useState<CoverStylePreset>('fanqie_impact')
+  const [typography, setTypography] = useState<CoverTypographyOptions>({
+    titleFont: 'auto',
+    titlePosition: 'auto',
+    titleEffect: 'auto',
+    authorFont: 'auto',
+    authorPosition: 'auto'
+  })
   const [extraHint, setExtraHint] = useState('')
 
   /**
@@ -153,11 +342,31 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       authorName: trimmedAuthor,
       platform,
       composition,
+      stylePreset,
+      typography,
       ...(genreOverride ? { genreOverride } : {}),
       ...overrides
     }),
-    [projectId, trimmedBook, trimmedAuthor, platform, composition, genreOverride]
+    [projectId, trimmedBook, trimmedAuthor, platform, composition, stylePreset, typography, genreOverride]
   )
+
+  const selectStylePreset = (next: CoverStylePreset): void => {
+    setStylePreset(next)
+    if (next === 'concept_symbol') setComposition('scene')
+    setSummary('')
+    setSources([])
+    // 风格卡片就是一次明确的“按当前选择重生成模板提示词”操作。
+    setPromptDirty(false)
+    setError('')
+  }
+
+  const updateTypography = (patch: Partial<CoverTypographyOptions>): void => {
+    setTypography((current) => ({ ...current, ...patch }))
+    setSummary('')
+    setSources([])
+    setPromptDirty(false)
+    setError('')
+  }
 
   // 未手改时跟随表单重拼提示词；手改后不再自动覆盖，改由「重置」显式放弃编辑
   useEffect(() => {
@@ -180,8 +389,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   }, [promptDirty, canBuild, buildInput, platform])
 
   /**
-   * 手改过的提示词里写死了当时平台的比例（如 "portrait 3:4 ratio"），
-   * 之后改平台只会改出图尺寸，提示词里的比例不会跟着变 —— 两者打架会画歪。
+   * 手改过的提示词里也包含平台风格。之后改平台不会覆盖手改内容，
+   * 因此提醒用户重置提示词，避免新平台和旧风格互相冲突。
    */
   const platformStale = promptDirty && promptPlatform !== null && promptPlatform !== platform
 
@@ -195,7 +404,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       return
     }
     if (!config?.hasKey) {
-      setError('请先配置图像生成 API（点右上「图像配置」）')
+      setError('请先配置图像生成 API（点右上「封面配置」）')
       return
     }
     setGenerating(true)
@@ -232,6 +441,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
         bookName: trimmedBook,
         authorName: trimmedAuthor,
         platform,
+        stylePreset,
+        typography,
         ...(genreOverride ? { genreOverride } : {}),
         ...(extraHint.trim() ? { extraHint: extraHint.trim() } : {})
       })
@@ -279,7 +490,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-ghost" onClick={() => setShowConfig(true)}>
-              ⚙ 图像配置
+              ⚙ 封面配置
               {config?.hasKey ? (
                 <span style={{ marginLeft: 6, color: 'var(--success)' }}>●已配置</span>
               ) : (
@@ -371,6 +582,99 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             </select>
           </div>
         </div>
+        <div className="field cover-style-field">
+          <label>
+            封面风格
+            <span className="meta" style={{ marginLeft: 6 }}>
+              已分析番茄 23 个题材、138 张榜单封面的共性，不复刻具体作品
+            </span>
+          </label>
+          <div className="cover-style-grid" role="radiogroup" aria-label="封面风格">
+            {STYLE_PRESET_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={stylePreset === option.value}
+                className={`cover-style-card ${stylePreset === option.value ? 'active' : ''}`}
+                onClick={() => selectStylePreset(option.value)}
+              >
+                <span className="cover-style-swatch" style={{ background: option.swatch }} aria-hidden />
+                <span className="cover-style-copy">
+                  <strong>{option.label}</strong>
+                  <small>{option.description}</small>
+                </span>
+                <span className="cover-style-check" aria-hidden>{stylePreset === option.value ? '✓' : ''}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="cover-typography-panel">
+          <div className="cover-typography-head">
+            <div>
+              <strong>文字设计</strong>
+              <span>分别控制小说书名与作者名的字体、位置和效果</span>
+            </div>
+            <span className="chip chip-muted">文字只出现一次 · 保持安全边距</span>
+          </div>
+          <div className="cover-typography-grid">
+            <div className="field">
+              <label htmlFor="cover-title-font">书名字体</label>
+              <select
+                id="cover-title-font"
+                className="select"
+                value={typography.titleFont ?? 'auto'}
+                onChange={(event) => updateTypography({ titleFont: event.target.value as CoverTitleFontStyle })}
+              >
+                {TITLE_FONT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="cover-title-position">书名位置</label>
+              <select
+                id="cover-title-position"
+                className="select"
+                value={typography.titlePosition ?? 'auto'}
+                onChange={(event) => updateTypography({ titlePosition: event.target.value as CoverTitlePosition })}
+              >
+                {TITLE_POSITION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="cover-title-effect">书名效果</label>
+              <select
+                id="cover-title-effect"
+                className="select"
+                value={typography.titleEffect ?? 'auto'}
+                onChange={(event) => updateTypography({ titleEffect: event.target.value as CoverTitleEffect })}
+              >
+                {TITLE_EFFECT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="cover-author-font">作者名字体</label>
+              <select
+                id="cover-author-font"
+                className="select"
+                value={typography.authorFont ?? 'auto'}
+                onChange={(event) => updateTypography({ authorFont: event.target.value as CoverAuthorFontStyle })}
+              >
+                {AUTHOR_FONT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="cover-author-position">作者名位置</label>
+              <select
+                id="cover-author-position"
+                className="select"
+                value={typography.authorPosition ?? 'auto'}
+                onChange={(event) => updateTypography({ authorPosition: event.target.value as CoverAuthorPosition })}
+              >
+                {AUTHOR_POSITION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
         {/* 唯一的提示词事实来源：框里是什么，就原样送给图像模型 */}
         <div className="field" style={{ marginBottom: 4 }}>
           <label
@@ -407,7 +711,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
                     提炼中…
                   </>
                 ) : (
-                  '✦ 从小说内容提炼'
+                  '✦ 从小说内容生成提示词'
                 )}
               </button>
               <button
@@ -444,7 +748,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
           {platformStale ? (
             <p className="meta" style={{ margin: '6px 0 0', color: 'var(--danger)' }}>
               平台已改为「{PLATFORM_OPTIONS.find((o) => o.value === platform)?.label}」，
-              但提示词里的比例还是改平台之前的。点「重置」重拼，或手动改掉里面的 ratio。
+              但提示词还是上一个平台的风格。点「重置」重新生成，或直接手动调整。
             </p>
           ) : null}
           {summary ? (
@@ -537,7 +841,7 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
       <div
         style={{
           width: '100%',
-          aspectRatio: '3 / 4',
+          aspectRatio: cover.isUploadSize ? '3 / 4' : '9 / 16',
           background: 'var(--surface-2)',
           borderRadius: 6,
           overflow: 'hidden',
@@ -601,7 +905,7 @@ function CoverConfigDialog({
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
-        <h3>图像生成 API 配置</h3>
+        <h3>封面配置</h3>
         <p className="meta" style={{ marginTop: 4 }}>
           封面生成调用 OpenAI Images API（gpt-image-2）或兼容代理。独立于文本 LLM provider。
         </p>

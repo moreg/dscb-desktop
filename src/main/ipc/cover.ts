@@ -1,7 +1,9 @@
 import { z } from 'zod'
+import { dialog } from 'electron'
 import { CoverService } from '../data/cover-service'
 import { CoverPromptService } from '../data/cover-prompt-service'
 import { SettingsRepository } from '../data/settings-repository'
+import { CoverLearningLibraryService } from '../data/cover-learning-library'
 import { safeHandle } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 
@@ -29,6 +31,35 @@ const genreSchema = z.enum([
   'light_novel'
 ])
 const compositionSchema = z.enum(['closeup', 'fullbody', 'scene', 'duo'])
+const stylePresetSchema = z.enum([
+  'auto',
+  'fanqie_impact',
+  'ancient_romance',
+  'ink_minimal',
+  'dark_suspense',
+  'urban_cinematic',
+  'anime_light',
+  'retro_period',
+  'epic_fantasy',
+  'concept_symbol',
+  'glamour_romance',
+  'cute_doodle',
+  'warm_period_life',
+  'rural_healing',
+  'male_power_type',
+  'folk_horror',
+  'war_spy_epic',
+  'game_neon',
+  'western_adventure',
+  'minimal_typographic'
+])
+const typographySchema = z.object({
+  titleFont: z.enum(['auto', 'impact', 'brush', 'elegant', 'modern', 'suspense', 'anime', 'retro']).optional(),
+  titlePosition: z.enum(['auto', 'top', 'center', 'lower_third', 'vertical_left', 'vertical_right']).optional(),
+  titleEffect: z.enum(['auto', 'flat', 'outline_shadow', 'metallic', 'ink', 'glow', 'embossed']).optional(),
+  authorFont: z.enum(['auto', 'sans', 'serif', 'seal', 'handwritten', 'metallic']).optional(),
+  authorPosition: z.enum(['auto', 'bottom_center', 'bottom_right', 'vertical_side']).optional()
+})
 
 const generateCoverSchema = z.object({
   projectId: projectIdSchema,
@@ -37,6 +68,8 @@ const generateCoverSchema = z.object({
   platform: platformSchema,
   genreOverride: genreSchema.optional(),
   composition: compositionSchema.optional(),
+  stylePreset: stylePresetSchema.optional(),
+  typography: typographySchema.optional(),
   styleHint: z.string().max(500).optional(),
   // 手改后的整段提示词。8000 字符远超模板拼装长度，又低于图像 API 的上限
   promptOverride: z.string().max(8000).optional(),
@@ -50,6 +83,8 @@ const extractCoverPromptSchema = z.object({
   platform: platformSchema,
   genreOverride: genreSchema.optional(),
   compositionOverride: compositionSchema.optional(),
+  stylePreset: stylePresetSchema.optional(),
+  typography: typographySchema.optional(),
   extraHint: z.string().max(500).optional()
 })
 
@@ -62,7 +97,8 @@ const fileNameSchema = z
 export function registerCoverIpc(
   coverService: CoverService,
   settings: SettingsRepository,
-  coverPromptService: CoverPromptService
+  coverPromptService: CoverPromptService,
+  learningLibrary: CoverLearningLibraryService
 ): void {
   /* 从小说内容提炼封面提示词（只调文本模型，不出图） */
   safeHandle('cover:extractPrompt', async (_e, input: unknown) => {
@@ -74,7 +110,7 @@ export function registerCoverIpc(
   safeHandle('cover:buildPrompt', async (_e, input: unknown) => {
     const validated = validateInput(generateCoverSchema, input)
     // 重置的语义就是丢掉手改，所以这里显式忽略 promptOverride
-    return coverService.resolvePrompt({ ...validated, promptOverride: undefined })
+    return coverService.resolvePromptWithLibrary({ ...validated, promptOverride: undefined })
   })
 
   /* 生成封面 */
@@ -123,4 +159,34 @@ export function registerCoverIpc(
       return settings.setCoverImageConfig(validated)
     }
   )
+
+  safeHandle('cover:getLearningLibrary', async () => learningLibrary.initialize())
+
+  safeHandle('cover:setLearningLibraryDirectory', async (_e, directory: unknown) => {
+    const validated = validateInput(
+      z.string().trim().min(1).max(2000).refine((value) => /^[a-zA-Z]:[\\/]|^\\\\/.test(value), '学习库必须使用本地绝对路径'),
+      directory
+    )
+    return learningLibrary.setDirectory(validated)
+  })
+
+  safeHandle('cover:chooseLearningLibraryDirectory', async () => {
+    const current = await learningLibrary.initialize()
+    const result = await dialog.showOpenDialog({
+      title: '选择封面学习库保存位置',
+      defaultPath: current.directory,
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return learningLibrary.setDirectory(result.filePaths[0])
+  })
+
+  safeHandle('cover:chooseAndLearnFolder', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择要学习的封面文件夹',
+      properties: ['openDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return learningLibrary.learnFolder(result.filePaths[0])
+  })
 }
