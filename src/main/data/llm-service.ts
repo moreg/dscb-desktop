@@ -28,6 +28,15 @@ export interface GenerateOptions {
    * - 中文约 1 字 ≈ 1.5~2 token，章节目标字数需换算后留足空间，否则会被物理截断
    */
   maxTokens?: number
+
+  /**
+   * 期望输出的 JSON Schema（结构化提取用，如封面画面要素）。
+   *
+   * 目前只有 grok CLI 会真正下发给服务端强约束（`--json-schema`）；
+   * 其余 provider 忽略此字段，仍靠提示词里的「只输出 JSON」约定。
+   * 因此**调用方的提示词必须始终自带 JSON 格式要求**，schema 只是叠加的保险。
+   */
+  jsonSchema?: object
 }
 
 export interface UsageInfo {
@@ -103,8 +112,8 @@ const CLI_PROSE_ONLY_PREAMBLE =
  * 匹配规则：先精确命中，未命中再按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）。
  * 前缀仍未列出的 feature（如 'other'）无对应大类 -> 回退 activeId。
  *
- * 注意：写后自动记忆同步 feature 为 autoMemorySync，必须归入 auxiliary，
- * 否则会回退 activeId（常见为正文 Codex），与设置页「辅助提取」分配不一致。
+ * 续写流程面板中的 AI 后处理统一归入 auxiliary：细纲对照、记忆提取、
+ * 写后自动同步、节奏评估和图解生成始终使用同一 provider/模型。
  */
 const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 正文生成
@@ -115,10 +124,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 审稿质检
   review: 'review',
   deepReview: 'review',
-  outlineCheck: 'review',
-  rhythmEval: 'review',
   batchDeepReview: 'review',
-  batchRhythm: 'review',
   // 去AI味改写
   humanize: 'humanize',
   deslop: 'humanize',
@@ -131,15 +137,20 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   styleExtract: 'opening',
   // ChapterEditor 正文区 AI 起名：章名风格与大纲一致，复用 opening 路由
   'chapter-name': 'opening',
-  // 辅助提取（手动提取 + 写后自动同步 + 批量 + 图解/拆书/扫描）
+  // 续写后处理（面板内所有 AI 步骤统一使用一个模型）+ 其它辅助提取
   endingState: 'auxiliary',
+  outlineCheck: 'auxiliary',
   memoryExtract: 'auxiliary',
   autoMemorySync: 'auxiliary',
+  rhythmEval: 'auxiliary',
   figureGen: 'auxiliary',
   batchMemory: 'auxiliary',
+  batchRhythm: 'auxiliary',
   batchFigure: 'auxiliary',
   teardown: 'auxiliary',
   scan: 'auxiliary',
+  // 封面提示词提炼：读大纲/人物卡/正文，属分析类，与其它辅助提取同一 provider
+  coverPrompt: 'auxiliary',
   ask: 'ask'
 }
 
@@ -189,7 +200,9 @@ const LONG_TIMEOUT_FEATURES = new Set([
   'batchMemory',
   'batchFigure',
   'humanize',
-  'deslop'
+  'deslop',
+  // 封面提炼会塞进大纲 + 人物卡 + 一段正文，走 CLI provider 时常超 2 分钟
+  'coverPrompt'
 ])
 
 /**
@@ -375,6 +388,8 @@ export class LlmService {
   }
 
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
+    // 调用前已取消：立刻退出，避免再开一轮 CLI/HTTP
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
     const p = await this.resolveProvider(opts.meta?.feature)
     if (!p) throw new Error('LLM_NOT_CONFIGURED')
     const proto = protocolOf(p)
@@ -570,15 +585,18 @@ export class LlmService {
       opts.systemPrompt && opts.systemPrompt.trim()
         ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
         : prompt
-    // grok-runner 也会在 prompt 文件头加约束；此处再叠一层保证与其它 CLI 一致
-    const merged = CLI_PROSE_ONLY_PREAMBLE + body
+    // grok-runner 也会在 prompt 文件头加约束；此处再叠一层保证与其它 CLI 一致。
+    // 结构化模式除外：「只输出成品文本」会和 JSON Schema 输出直接冲突，
+    // 该模式下由 runner 自己的 JSON_ONLY_PREAMBLE 负责禁工具/禁旁白。
+    const merged = opts.jsonSchema ? body : CLI_PROSE_ONLY_PREAMBLE + body
 
     const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runGrok(merged, {
       model: p.model && p.model !== 'default' ? p.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
-      signal: opts.signal
+      signal: opts.signal,
+      ...(opts.jsonSchema ? { jsonSchema: opts.jsonSchema } : {})
     })
 
     if (this.usage && usage) {
@@ -603,6 +621,24 @@ export class LlmService {
 
 function buildPingRequest(p: ProviderConfig): { url: string; init: RequestInit } {
   const url = endpointOf(p)
+  if (protocolOf(p) === 'openai-responses') {
+    return {
+      url,
+      init: {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${p.apiKey}`
+        },
+        body: JSON.stringify({
+          model: p.model,
+          input: 'hi',
+          max_output_tokens: 16,
+          stream: false
+        })
+      }
+    }
+  }
   if (protocolOf(p) === 'anthropic') {
     return {
       url,

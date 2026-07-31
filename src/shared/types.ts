@@ -3,6 +3,7 @@ import type { WritingRequirementTemplate } from './writing-requirement-templates
 export interface ProjectMeta {
   id: string
   name: string
+  description?: string
   path: string
   genre?: string
   createdAt: string
@@ -17,13 +18,14 @@ export interface Library {
 export interface CreateProjectInput {
   id?: string
   name: string
+  description?: string
   path: string
   genre?: string
 }
 
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
-/** 单个 LLM provider 配置。统一走 OpenAI Chat Completions 兼容协议。 */
+/** 单个 LLM provider 配置。支持三种 HTTP API 接入方式及本地 CLI。 */
 export type ProviderProtocol =
   | 'openai'
   | 'openai-responses'
@@ -62,6 +64,7 @@ export interface ProviderConfig {
   /**
    * 请求协议：
    * - 'openai'（默认）：POST {baseUrl}/chat/completions，Authorization: Bearer
+   * - 'openai-responses'：POST {baseUrl}/responses，Authorization: Bearer
    * - 'anthropic'：POST {baseUrl}/v1/messages，x-api-key + anthropic-version
    * - 'antigravity'：调用本机 agy CLI（`agy -p` 子进程），用 Google 登录态，不走 HTTP。
    *   此时 baseUrl 可空（占位符即可）、apiKey 可空（靠本机 OAuth 登录）、
@@ -415,10 +418,25 @@ export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
+  /** Open a project in its own window, or focus it when already open. */
+  openProjectWindow: (projectId: string) => Promise<{
+    ok: boolean
+    focusedExisting: boolean
+  }>
+  /** Bind the calling window to one project; null releases it back to the library. */
+  bindProjectWindow: (projectId: string | null) => Promise<{
+    ok: boolean
+    focusedExisting: boolean
+  }>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
   scanProjects: () => Promise<ProjectMeta[]>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
+  /** 更新小说名称和简介；不改项目目录，避免破坏工作区路径。 */
+  updateProjectInfo: (
+    projectId: string,
+    info: { name: string; description?: string }
+  ) => Promise<ProjectData>
   /** 设置项目的对标书列表（拆文库中的书名，写作时召回方法论） */
   setBenchmarkBooks: (projectId: string, books: string[]) => Promise<string[]>
   /** 进入项目视图时启动文件监听（主进程 fs.watch 项目目录） */
@@ -937,6 +955,10 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void
   ) => StreamHandleOf<string>
   /* ---- 封面生成（story-cover）---- */
+  /** 读大纲/人物卡/正文，用文本模型提炼封面画面要素（不出图，走 auxiliary 路由） */
+  extractCoverPrompt: (input: ExtractCoverPromptInput) => Promise<CoverPromptDraft>
+  /** 按平台/题材模板拼一份提示词（纯函数，不调任何 API）——填初值 / 重置用 */
+  buildCoverPrompt: (input: GenerateCoverInput) => Promise<string>
   /** 生成封面（调图像 API），返回封面文件信息 */
   generateCover: (input: GenerateCoverInput) => Promise<CoverFile>
   /** 列出项目内已有封面 */
@@ -2305,6 +2327,28 @@ export type CoverGenre =
 /** 构图变体 */
 export type CoverComposition = 'closeup' | 'fullbody' | 'scene' | 'duo'
 
+/**
+ * 从小说内容提炼出的画面要素。
+ * 逐字段覆盖 GENRE_STYLES 的通用模板——不填的字段仍回退题材默认值，
+ * 所以每本书的封面不再是同一个「白衣剑客站在云海上」。
+ * 各字段用英文（直接进图像模型 prompt）。
+ *
+ * 仅存在于主进程内部：CoverPromptService 拿它拼出完整提示词后就丢弃，
+ * 界面上暴露的是拼好的整段提示词（见 CoverPromptDraft.prompt）。
+ */
+export interface CoverScene {
+  /** 主体人物：外貌 / 服饰 / 神态 / 手持物 */
+  characterDesc?: string
+  /** 背景场景 */
+  backgroundDesc?: string
+  /** 色彩基调 */
+  colorPalette?: string
+  /** 光效与氛围 */
+  lighting?: string
+  /** 标志性道具 / 符号（如「一柄断裂的青铜剑」「悬浮的星舰残骸」） */
+  keyProps?: string
+}
+
 /** 封面输入 */
 export interface GenerateCoverInput {
   /** 项目 id（封面存到项目目录下） */
@@ -2321,8 +2365,45 @@ export interface GenerateCoverInput {
   composition?: CoverComposition
   /** 风格偏好补充（可选，追加到 prompt） */
   styleHint?: string
+  /**
+   * 用户在界面上手改过的完整提示词。给了就**原样**送进图像模型，
+   * 不再按平台/题材模板拼装 —— 界面上那个可编辑提示词框即是唯一事实来源。
+   * 空白时回退模板拼装。
+   */
+  promptOverride?: string
   /** 参考图本地路径（设置后走图生图） */
   refImagePath?: string
+}
+
+/** 封面提示词提炼结果（「✦ 从小说内容提炼」的产物） */
+export interface CoverPromptDraft {
+  /** 组装好的完整英文提示词，直接填进界面上的可编辑框 */
+  prompt: string
+  /** 模型判定的题材（回填下拉框） */
+  genre: CoverGenre
+  /** 模型判定的构图（回填下拉框） */
+  composition: CoverComposition
+  /** 一句话画面概述（中文，仅供用户确认提炼是否跑偏） */
+  summary: string
+  /** 实际读到的素材来源，让用户知道信息够不够（如「大纲」「人物卡 3 张」「第 1 章正文」） */
+  sources: string[]
+}
+
+/** 提炼封面提示词的入参 */
+export interface ExtractCoverPromptInput {
+  projectId: string
+  /** 书名（进提示词的文字层） */
+  bookName: string
+  /** 作者名（进提示词的文字层） */
+  authorName: string
+  /** 目标平台（影响构图/风格建议与比例） */
+  platform: CoverPlatform
+  /** 用户已锁定的题材；给了就不让模型再判 */
+  genreOverride?: CoverGenre
+  /** 用户已锁定的构图；给了就不让模型再判 */
+  compositionOverride?: CoverComposition
+  /** 用户额外诉求（中文自由文本，如「主角要女性」「不要人物只要场景」） */
+  extraHint?: string
 }
 
 /** 封面文件信息（落盘后） */

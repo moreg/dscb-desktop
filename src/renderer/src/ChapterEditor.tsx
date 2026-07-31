@@ -854,8 +854,11 @@ export default function ChapterEditor({
    */
   const askHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const deslopHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  /** 去 AI 味代数：点「停止」或重新开跑时 +1，丢弃过期 token/结果 */
+  const deslopGenRef = useRef(0)
   const castHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const abortSideStreams = (): void => {
+    deslopGenRef.current += 1
     for (const ref of [askHandleRef, deslopHandleRef, castHandleRef]) {
       void ref.current?.abort().catch(() => undefined)
       ref.current = null
@@ -2801,37 +2804,50 @@ export default function ChapterEditor({
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
+    // 新一轮润色：作废上一次「停止」后的残留回调/结果
+    const myGen = ++deslopGenRef.current
     setDeslopRunning(true)
     setDeslopLog('')
     setDeslopResult(null)
     const myEpoch = sessionEpochRef.current
     try {
       const handle = window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
+        // 已停止 / 切章：丢弃迟到的 token，避免日志继续刷、按钮回「润色中」
+        if (deslopGenRef.current !== myGen) return
         if (sessionEpochRef.current !== myEpoch) return
         if (token) setDeslopLog((l) => l + token)
         if (done) setDeslopRunning(false)
       })
       deslopHandleRef.current = handle
       const result = await trackStream(handle)
+      if (deslopGenRef.current !== myGen) return
       if (sessionEpochRef.current !== myEpoch) return
       setDeslopResult(result)
     } catch (err) {
       // 切章 / 用户点停止导致的 abort 不弹错误框
+      if (deslopGenRef.current !== myGen) return
       if (sessionEpochRef.current !== myEpoch) return
       const msg = (err as Error).message ?? ''
       if (!msg.includes('LLM_ABORTED')) {
         setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError(msg)}` })
       }
     } finally {
-      deslopHandleRef.current = null
-      if (sessionEpochRef.current === myEpoch) setDeslopRunning(false)
+      if (deslopGenRef.current === myGen) {
+        deslopHandleRef.current = null
+        if (sessionEpochRef.current === myEpoch) setDeslopRunning(false)
+      }
     }
   }
 
   /** 停止进行中的去 AI 味润色（保留已生成日志，不产出结果） */
   const stopDeslop = (): void => {
-    void deslopHandleRef.current?.abort().catch(() => undefined)
+    // 先作废本轮：后续 token / 完成回调一律丢弃
+    deslopGenRef.current += 1
+    const handle = deslopHandleRef.current
+    deslopHandleRef.current = null
+    void handle?.abort().catch(() => undefined)
     setDeslopRunning(false)
+    setDeslopLog((l) => (l ? `${l}\n\n🛑 已停止润色（不产出结果）\n` : '🛑 已停止润色\n'))
   }
 
   /** 应用去 AI 味结果到正文 */

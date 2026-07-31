@@ -37,21 +37,36 @@ export class CoverService {
     private readonly image: ImageService
   ) {}
 
+  /**
+   * 解析本次出图实际使用的提示词。
+   *
+   * 用户手改过（promptOverride）就**原样**用，一个字不加 —— 界面上那个可编辑框
+   * 是唯一事实来源，否则「所见 ≠ 所发」。空白时按平台/题材模板拼装。
+   *
+   * 界面拿这个方法给编辑框填初值，出图也走它，所以两者永远一致。
+   */
+  resolvePrompt(input: GenerateCoverInput): string {
+    const override = input.promptOverride?.trim()
+    if (override) return override
+
+    const genre: CoverGenre = input.genreOverride ?? inferGenre(input.bookName)
+    return buildCoverPrompt({
+      bookName: input.bookName,
+      authorName: input.authorName,
+      platform: input.platform,
+      genre,
+      composition: input.composition ?? 'closeup',
+      styleHint: input.styleHint
+    })
+  }
+
   async generate(input: GenerateCoverInput): Promise<CoverFile> {
     // Step 1.5：题材判定
     const genre: CoverGenre = input.genreOverride ?? inferGenre(input.bookName)
     const platform = PLATFORM_STYLES[input.platform]
 
-    // Step 2：构建提示词
-    const composition = input.composition ?? 'closeup'
-    const prompt = buildCoverPrompt({
-      bookName: input.bookName,
-      authorName: input.authorName,
-      platform: input.platform,
-      genre,
-      composition,
-      styleHint: input.styleHint
-    })
+    // Step 2：确定提示词（手改优先）
+    const prompt = this.resolvePrompt(input)
 
     // Step 3：出图（参考图路径需校验在项目目录内 + 图片扩展名，防任意文件读取外传）
     const size = this.sizeForPlatform(input.platform)

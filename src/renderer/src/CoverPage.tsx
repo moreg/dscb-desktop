@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type {
   CoverFile,
   CoverGenre,
@@ -51,6 +51,24 @@ const GENRE_LABELS: Record<CoverGenre, string> = {
   light_novel: '轻小说'
 }
 
+/** 把主进程抛回的错误码翻成人话（safeHandle 会带 "Error: " 前缀） */
+function describeError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  if (raw.includes('COVER_PROMPT_NO_MATERIAL')) {
+    return '这本书还没有简介、大纲、人物卡或正文，先写一点再来提炼。'
+  }
+  if (raw.includes('COVER_PROMPT_PARSE_FAILED')) {
+    return '模型没有按要求返回 JSON。重试一次，或在设置里给「辅助提取」换一个更稳的模型。'
+  }
+  if (raw.includes('LLM_NOT_CONFIGURED')) {
+    return '还没有可用的文本模型。到全局设置里配置 API Key，或接入 codex / grok CLI。'
+  }
+  if (raw.includes('LLM_TIMEOUT')) {
+    return '提炼超时。素材较多时可先精简大纲，或换一个更快的模型。'
+  }
+  return raw.replace(/^Error:\s*/, '')
+}
+
 interface Props {
   projectId: string
 }
@@ -60,7 +78,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const [config, setConfig] = useState<CoverImageConfigSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
-  const [generatingPrompt, setGeneratingPrompt] = useState(false)
+  const [extracting, setExtracting] = useState(false)
   const [error, setError] = useState('')
 
   // 表单
@@ -69,7 +87,18 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const [platform, setPlatform] = useState<CoverPlatform>('fanqie')
   const [genreOverride, setGenreOverride] = useState<CoverGenre | ''>('')
   const [composition, setComposition] = useState<CoverComposition>('closeup')
-  const [styleHint, setStyleHint] = useState('')
+  const [extraHint, setExtraHint] = useState('')
+
+  /**
+   * 唯一的提示词事实来源：框里是什么，就原样送给图像模型。
+   * 未手改时跟随上方表单自动重拼；手改后停止自动覆盖（否则会吞掉用户的编辑）。
+   */
+  const [prompt, setPrompt] = useState('')
+  const [promptDirty, setPromptDirty] = useState(false)
+  /** 拼出当前提示词时用的平台，用于提示「改了平台但提示词没跟着变」 */
+  const [promptPlatform, setPromptPlatform] = useState<CoverPlatform | null>(null)
+  const [summary, setSummary] = useState('')
+  const [sources, setSources] = useState<string[]>([])
 
   // 配置弹窗
   const [showConfig, setShowConfig] = useState(false)
@@ -92,9 +121,77 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
     void refresh()
   }, [refresh])
 
+  // 书名默认取项目名，省得每次手打；用户改过就不再覆盖
+  const bookNamePrefilled = useRef(false)
+  useEffect(() => {
+    bookNamePrefilled.current = false
+    let active = true
+    void window.api
+      .getProject(projectId)
+      .then((project) => {
+        if (!active || bookNamePrefilled.current || !project?.name) return
+        bookNamePrefilled.current = true
+        setBookName((prev) => (prev.trim() ? prev : project.name))
+      })
+      .catch(() => {
+        /* 项目信息读不到不影响手填 */
+      })
+    return () => {
+      active = false
+    }
+  }, [projectId])
+
+  const trimmedBook = bookName.trim()
+  const trimmedAuthor = authorName.trim()
+  const canBuild = Boolean(trimmedBook && trimmedAuthor)
+
+  /** 当前表单折算成出图入参（拼装与生成共用，保证所见即所发） */
+  const buildInput = useCallback(
+    (overrides?: Partial<GenerateCoverInput>): GenerateCoverInput => ({
+      projectId,
+      bookName: trimmedBook,
+      authorName: trimmedAuthor,
+      platform,
+      composition,
+      ...(genreOverride ? { genreOverride } : {}),
+      ...overrides
+    }),
+    [projectId, trimmedBook, trimmedAuthor, platform, composition, genreOverride]
+  )
+
+  // 未手改时跟随表单重拼提示词；手改后不再自动覆盖，改由「重置」显式放弃编辑
+  useEffect(() => {
+    if (promptDirty || !canBuild) return
+    let active = true
+    void window.api
+      .buildCoverPrompt(buildInput())
+      .then((text) => {
+        if (active) {
+          setPrompt(text)
+          setPromptPlatform(platform)
+        }
+      })
+      .catch(() => {
+        /* 拼装失败不打断填表 */
+      })
+    return () => {
+      active = false
+    }
+  }, [promptDirty, canBuild, buildInput, platform])
+
+  /**
+   * 手改过的提示词里写死了当时平台的比例（如 "portrait 3:4 ratio"），
+   * 之后改平台只会改出图尺寸，提示词里的比例不会跟着变 —— 两者打架会画歪。
+   */
+  const platformStale = promptDirty && promptPlatform !== null && promptPlatform !== platform
+
   const handleGenerate = async (): Promise<void> => {
-    if (!bookName.trim() || !authorName.trim()) {
+    if (!canBuild) {
       setError('书名和作者名必填')
+      return
+    }
+    if (!prompt.trim()) {
+      setError('提示词不能为空')
       return
     }
     if (!config?.hasKey) {
@@ -104,60 +201,71 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
     setGenerating(true)
     setError('')
     try {
-      const input: GenerateCoverInput = {
-        projectId,
-        bookName: bookName.trim(),
-        authorName: authorName.trim(),
-        platform,
-        composition,
-        styleHint: styleHint.trim() || undefined,
-        ...(genreOverride ? { genreOverride } : {})
-      }
-      await window.api.generateCover(input)
+      // 框里是什么就发什么
+      await window.api.generateCover(buildInput({ promptOverride: prompt }))
       await refresh()
     } catch (err) {
-      setError((err as Error).message)
+      setError(describeError(err))
     } finally {
       setGenerating(false)
     }
   }
 
-  const handleGenerateStyleHint = async (): Promise<void> => {
-    setGeneratingPrompt(true)
+  /**
+   * 读项目的大纲 / 人物卡 / 正文提炼画面要素，拼成整段提示词填进框里。
+   * 只调文本模型（走 auxiliary 路由），没配图像 Key 也能先把提示词调好。
+   */
+  const handleExtractPrompt = async (): Promise<void> => {
+    if (!canBuild) {
+      setError('书名和作者名必填')
+      return
+    }
+    setExtracting(true)
     setError('')
     try {
       const hasLlm = await window.api.hasLlmKey()
       if (!hasLlm) {
-        throw new Error('请先在全局设置中配置文本模型 API Key')
+        throw new Error('请先在全局设置中配置文本模型（API Key 或 codex / grok CLI 均可）')
       }
-
-      const project = await window.api.getProject(projectId)
-      const outline = await window.api.getMainOutline(projectId)
-      
-      const prompt = `请根据以下小说的书名、简介和大纲，提取小说的核心视觉元素，并生成一段用于 AI 绘画的封面提示词（风格补充）。
-要求：
-1. 重点突出小说的氛围、主角特征、核心场景、色调等视觉元素。
-2. 语言简练，直接输出提示词，不需要解释，不需要多余的话，尽量用短语或短句。
-3. 示例："偏暗黑系，赛博朋克风格，霓虹灯光，主角黑衣单刀，背景高楼大厦，冷色调"
-
-小说书名：${project.name}
-小说简介：${project.description || '无'}
-小说大纲：${outline?.synopsis || '无'}`
-
-      let generated = ''
-      setStyleHint('')
-      const res = await window.api.generateStream(prompt, (token) => {
-        generated += token
-        setStyleHint(generated)
+      const draft = await window.api.extractCoverPrompt({
+        projectId,
+        bookName: trimmedBook,
+        authorName: trimmedAuthor,
+        platform,
+        ...(genreOverride ? { genreOverride } : {}),
+        ...(extraHint.trim() ? { extraHint: extraHint.trim() } : {})
       })
-
-      if (!res.ok) {
-        throw new Error(res.error || '生成失败')
-      }
+      setPrompt(draft.prompt)
+      // 提炼结果视同手改：后续改平台/题材不该把它冲掉
+      setPromptDirty(true)
+      setPromptPlatform(platform)
+      setSummary(draft.summary)
+      setSources(draft.sources)
+      setComposition(draft.composition)
+      if (!genreOverride) setGenreOverride(draft.genre)
     } catch (err) {
-      setError((err as Error).message)
+      setError(describeError(err))
     } finally {
-      setGeneratingPrompt(false)
+      setExtracting(false)
+    }
+  }
+
+  /** 丢弃提炼与手改，回到当前平台/题材/构图的模板提示词 */
+  const handleResetPrompt = async (): Promise<void> => {
+    setError('')
+    setSummary('')
+    setSources([])
+    setPromptDirty(false)
+    if (!canBuild) {
+      setPrompt('')
+      setPromptPlatform(null)
+      return
+    }
+    try {
+      setPrompt(await window.api.buildCoverPrompt(buildInput()))
+      setPromptPlatform(platform)
+    } catch (err) {
+      setError(describeError(err))
     }
   }
 
@@ -184,8 +292,11 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
 
       {config && !config.hasKey ? (
         <div className="placeholder" style={{ marginTop: 16 }}>
-          <p style={{ margin: '0 0 12px', fontSize: 14, color: 'var(--danger)' }}>
-            图像生成 API 未配置。封面生成需要 OpenAI Images API 或兼容代理的 Key（gpt-image-2）。
+          <p style={{ margin: '0 0 6px', fontSize: 14, color: 'var(--danger)' }}>
+            图像生成 API 未配置。出图需要 OpenAI Images API 或兼容代理的 Key（gpt-image-2）。
+          </p>
+          <p className="meta" style={{ margin: '0 0 12px' }}>
+            codex / grok 这类 CLI 只能生成文本，不能出图；下方「提炼画面要素」可以先用它们把提示词调好。
           </p>
           <button className="btn btn-primary" onClick={() => setShowConfig(true)}>
             前往配置
@@ -260,52 +371,111 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             </select>
           </div>
         </div>
-        <div className="field">
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>风格补充（可选）</span>
-            <button
-              className="btn"
-              style={{
-                fontSize: 12,
-                padding: '2px 10px',
-                height: 24,
-                borderRadius: 12,
-                background: 'var(--accent-soft)',
-                color: 'var(--accent)',
-                border: '1px solid var(--line-strong)',
-                cursor: generatingPrompt ? 'wait' : 'pointer',
-                opacity: generatingPrompt ? 0.7 : 1,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4
-              }}
-              onClick={() => void handleGenerateStyleHint()}
-              disabled={generatingPrompt}
-            >
-              {generatingPrompt ? (
-                <>
-                  <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span> 生成中...
-                </>
-              ) : (
-                '✦ 智能生成'
-              )}
-            </button>
+        {/* 唯一的提示词事实来源：框里是什么，就原样送给图像模型 */}
+        <div className="field" style={{ marginBottom: 4 }}>
+          <label
+            htmlFor="cover-prompt"
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}
+          >
+            <span>
+              封面提示词
+              <span className="meta" style={{ marginLeft: 6 }}>
+                {promptDirty ? '已手改，出图按此原文' : '按平台/题材自动拼装，可直接编辑'}
+              </span>
+            </span>
+            <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                className="btn"
+                style={{
+                  fontSize: 12,
+                  padding: '2px 10px',
+                  height: 24,
+                  borderRadius: 12,
+                  background: 'var(--accent-soft)',
+                  color: 'var(--accent)',
+                  border: '1px solid var(--line-strong)',
+                  cursor: extracting ? 'wait' : 'pointer',
+                  opacity: extracting ? 0.7 : 1
+                }}
+                onClick={() => void handleExtractPrompt()}
+                disabled={extracting || !canBuild}
+                title="读本书的简介、大纲、人物卡与开篇正文，提炼出专属画面后重写整段提示词（只调文本模型，不消耗图像额度）"
+              >
+                {extracting ? (
+                  <>
+                    <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>{' '}
+                    提炼中…
+                  </>
+                ) : (
+                  '✦ 从小说内容提炼'
+                )}
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 12, padding: '2px 10px', height: 24 }}
+                onClick={() => void handleResetPrompt()}
+                disabled={extracting}
+                title="丢弃提炼与手改，回到当前平台/题材/构图的模板提示词"
+              >
+                ↺ 重置
+              </button>
+            </span>
           </label>
           <textarea
+            id="cover-prompt"
             className="input"
-            value={styleHint}
-            onChange={(e) => setStyleHint(e.target.value)}
-            placeholder="如：偏暗黑系，赛博朋克风格，霓虹灯光，主角黑衣单刀，背景高楼大厦，冷色调"
-            style={{ resize: 'vertical', minHeight: '60px', padding: '8px 12px', lineHeight: 1.5 }}
-            rows={2}
+            value={prompt}
+            onChange={(e) => {
+              setPrompt(e.target.value)
+              setPromptDirty(true)
+            }}
+            placeholder={canBuild ? '' : '填写书名与作者名后自动生成'}
+            spellCheck={false}
+            style={{
+              resize: 'vertical',
+              minHeight: 200,
+              padding: '10px 12px',
+              lineHeight: 1.6,
+              fontSize: 12,
+              fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace)'
+            }}
+            rows={10}
+          />
+          {platformStale ? (
+            <p className="meta" style={{ margin: '6px 0 0', color: 'var(--danger)' }}>
+              平台已改为「{PLATFORM_OPTIONS.find((o) => o.value === platform)?.label}」，
+              但提示词里的比例还是改平台之前的。点「重置」重拼，或手动改掉里面的 ratio。
+            </p>
+          ) : null}
+          {summary ? (
+            <p style={{ margin: '6px 0 0', fontSize: 13 }}>{summary}</p>
+          ) : null}
+          {sources.length > 0 ? (
+            <p className="meta" style={{ margin: '2px 0 0' }}>
+              素材来源：{sources.join(' · ')}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="field">
+          <label htmlFor="cover-extra-hint" style={{ fontSize: 12 }}>
+            提炼方向（可选，只影响「从小说内容提炼」）
+          </label>
+          <input
+            id="cover-extra-hint"
+            className="input"
+            value={extraHint}
+            onChange={(e) => setExtraHint(e.target.value)}
+            placeholder="如：主角画女性视角 / 不要人物只要场景 / 突出第三卷的决战"
           />
         </div>
+
         {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button
             className="btn btn-primary"
             onClick={() => void handleGenerate()}
-            disabled={generating || !bookName.trim() || !authorName.trim()}
+            disabled={generating || !canBuild || !prompt.trim()}
           >
             {generating ? '生成中…（约 30-90 秒）' : '✦ 生成封面'}
           </button>

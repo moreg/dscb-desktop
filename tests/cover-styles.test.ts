@@ -7,6 +7,7 @@ import {
   COMPOSITION_DESC,
   GENRE_RULES
 } from '../src/main/data/skill-prompts/cover/cover-styles'
+import { CoverService } from '../src/main/data/cover-service'
 import type { CoverGenre, CoverPlatform } from '../src/shared/types'
 
 describe('inferGenre 书名题材推断', () => {
@@ -233,6 +234,47 @@ describe('buildCoverPrompt 完整提示词构建', () => {
     })
     expect(fanqiePrompt).toContain('3:4')
     expect(qidianPrompt).toContain('2:3')
+  })
+})
+
+describe('CoverService.resolvePrompt 手改优先', () => {
+  // 只测提示词解析，不触碰出图/落盘，故依赖传 null
+  const service = new CoverService(
+    null as unknown as ConstructorParameters<typeof CoverService>[0],
+    null as unknown as ConstructorParameters<typeof CoverService>[1]
+  )
+  const base = {
+    projectId: 'p1',
+    bookName: '断刀行',
+    authorName: '老猫',
+    platform: 'fanqie' as const
+  }
+
+  it('没给 promptOverride 时按模板拼装', () => {
+    const prompt = service.resolvePrompt(base)
+    expect(prompt).toContain("Title text '断刀行'")
+    expect(prompt).toContain('no watermark')
+  })
+
+  it('给了 promptOverride 就原样返回，一个字不加', () => {
+    const mine = 'my own prompt, nothing else'
+    expect(service.resolvePrompt({ ...base, promptOverride: mine })).toBe(mine)
+  })
+
+  it('手改内容删掉了模板约束也照发（用户说了算）', () => {
+    const mine = 'just a cat'
+    const prompt = service.resolvePrompt({ ...base, promptOverride: mine })
+    expect(prompt).not.toContain('no watermark')
+    expect(prompt).not.toContain('断刀行')
+  })
+
+  it('纯空白的 promptOverride 视为未提供，回退模板', () => {
+    const prompt = service.resolvePrompt({ ...base, promptOverride: '   \n  ' })
+    expect(prompt).toContain("Title text '断刀行'")
+  })
+
+  it('首尾空白被裁掉', () => {
+    expect(service.resolvePrompt({ ...base, promptOverride: '  hello  ' })).toBe('hello')
   })
 })
 

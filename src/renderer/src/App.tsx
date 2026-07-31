@@ -32,6 +32,8 @@ const StyleProfilePage = lazy(() => import('./StyleProfilePage'))
 const TeardownPage = lazy(() => import('./TeardownPage'))
 const CoverPage = lazy(() => import('./CoverPage'))
 const ScanPage = lazy(() => import('./ScanPage'))
+const ProjectInspirationPage = lazy(() => import('./ProjectInspirationPage'))
+const ProjectInfoPage = lazy(() => import('./ProjectInfoPage'))
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -39,6 +41,8 @@ type View =
   | { kind: 'projects' }
   | { kind: 'teardown' }
   | { kind: 'scan' }
+  | { kind: 'inspiration' }
+  | { kind: 'projectInfo'; projectId: string }
   | { kind: 'chapters'; projectId: string }
   | { kind: 'editor'; projectId: string; chapterNumber: number }
   | { kind: 'characters'; projectId: string }
@@ -85,12 +89,26 @@ function projectIdOf(view: View): string | null {
   return 'projectId' in view ? view.projectId : null
 }
 
+function initialView(): View {
+  const projectId = new URLSearchParams(window.location.search).get('projectId')?.trim()
+  return projectId ? { kind: 'chapters', projectId } : { kind: 'projects' }
+}
+
+function replaceProjectInUrl(projectId: string | null): void {
+  const url = new URL(window.location.href)
+  if (projectId) url.searchParams.set('projectId', projectId)
+  else url.searchParams.delete('projectId')
+  window.history.replaceState(null, '', url)
+}
+
 function isNavActive(view: View, kind: string, projectId: string | null): boolean {
   if (kind === 'projects') return view.kind === 'projects'
   if (kind === 'teardown') return view.kind === 'teardown'
+  if (kind === 'inspiration') return view.kind === 'inspiration'
   if (kind === 'styles') return view.kind === 'styles'
   if (!projectId) return false
   if (kind === 'chapters') return view.kind === 'chapters' || view.kind === 'editor'
+  if (kind === 'projectInfo') return view.kind === 'projectInfo'
   if (kind === 'outline') return view.kind === 'outline'
   if (kind === 'rhythm') return view.kind === 'rhythm'
   if (kind === 'figures') return view.kind === 'figures'
@@ -108,7 +126,7 @@ function isNavActive(view: View, kind: string, projectId: string | null): boolea
 }
 
 export default function App() {
-  const [view, setView] = useState<View>({ kind: 'projects' })
+  const [view, setView] = useState<View>(initialView)
   const [theme, setTheme] = useState<ThemeMode>('system')
   const [projectName, setProjectName] = useState('')
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
@@ -180,28 +198,66 @@ export default function App() {
 
   const currentProjectId = projectIdOf(view)
   useEffect(() => {
+    let cancelled = false
     if (!currentProjectId) {
+      replaceProjectInUrl(null)
+      document.title = '大神持笔'
+      void window.api
+        .bindProjectWindow(null)
+        .catch((err) => console.error('[App] release window project failed:', err))
       setProjectName('')
       setDiagnostics([])
       // 离开项目视图：停止文件监听
       void window.api.stopWatchProject().catch((err) => console.error('[App] stopWatch failed:', err))
-      return
+      return () => {
+        cancelled = true
+      }
     }
-    // 进入/切换项目：启动文件监听（主进程会先释放旧 watcher）
-    void window.api.watchProject(currentProjectId).catch((err) => console.error('[App] watch failed:', err))
-    void window.api
-      .listProjects()
-      .then((list: ProjectMeta[]) => {
-        const project = list.find((item) => item.id === currentProjectId)
-        setProjectName(project?.name ?? '')
-      })
-      .catch((err) => console.error('[App] Failed to list projects:', err))
-    setDiagDismissed(false)
-    void window.api
-      .getDiagnostics(currentProjectId)
-      .then(setDiagnostics)
-      .catch((err) => console.error('[App] Failed to get diagnostics:', err))
+    replaceProjectInUrl(currentProjectId)
+    const activateProject = async () => {
+      try {
+        const result = await window.api.bindProjectWindow(currentProjectId)
+        if (cancelled) return
+        if (!result.ok) {
+          if (result.focusedExisting) setView({ kind: 'projects' })
+          return
+        }
+
+        // 只有窗口绑定成功后才启动该项目的监听和数据加载。
+        const watching = await window.api.watchProject(currentProjectId)
+        if (cancelled || !watching) return
+
+        void window.api
+          .listProjects()
+          .then((list: ProjectMeta[]) => {
+            if (cancelled) return
+            const project = list.find((item) => item.id === currentProjectId)
+            setProjectName(project?.name ?? '')
+            document.title = project?.name ? `${project.name} — 大神持笔` : '大神持笔'
+          })
+          .catch((err) => console.error('[App] Failed to list projects:', err))
+        setDiagDismissed(false)
+        void window.api
+          .getDiagnostics(currentProjectId)
+          .then((nextDiagnostics) => {
+            if (!cancelled) setDiagnostics(nextDiagnostics)
+          })
+          .catch((err) => console.error('[App] Failed to get diagnostics:', err))
+      } catch (err) {
+        console.error('[App] activate project failed:', err)
+        if (!cancelled) setView({ kind: 'projects' })
+      }
+    }
+    void activateProject()
+    return () => {
+      cancelled = true
+    }
   }, [currentProjectId])
+
+  const openProjectHere = async (projectId: string) => {
+    const result = await window.api.bindProjectWindow(projectId)
+    if (result.ok) setView({ kind: 'chapters', projectId })
+  }
 
   const onThemeChange = (nextTheme: ThemeMode) => {
     setTheme(nextTheme)
@@ -222,6 +278,8 @@ export default function App() {
             ? 'foreshadowing-wide'
             : view.kind === 'tracking'
               ? 'tracking-wide'
+              : view.kind === 'inspiration'
+                ? 'inspiration-wide'
               : ''
   }`
 
@@ -253,6 +311,13 @@ export default function App() {
             拆文库
           </button>
           <button
+            className={`nav-item ${view.kind === 'inspiration' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'inspiration' })}
+          >
+            <span className="icon">🎲</span>
+            灵感抽签
+          </button>
+          <button
             className={`nav-item ${view.kind === 'scan' ? 'active' : ''}`}
             onClick={() => setView({ kind: 'scan' })}
           >
@@ -270,6 +335,13 @@ export default function App() {
           {currentProjectId ? (
             <>
               <div className="sidebar-section">{projectName || '当前项目'}</div>
+              <button
+                className={`nav-item ${isNavActive(view, 'projectInfo', currentProjectId) ? 'active' : ''}`}
+                onClick={() => setView({ kind: 'projectInfo', projectId: currentProjectId })}
+              >
+                <span className="icon">📖</span>
+                作品信息
+              </button>
               <button
                 className={`nav-item ${isNavActive(view, 'chapters', currentProjectId) ? 'active' : ''}`}
                 onClick={() => setView({ kind: 'chapters', projectId: currentProjectId })}
@@ -441,7 +513,10 @@ export default function App() {
           <Suspense fallback={<p className="empty">页面加载中…</p>}>
           {view.kind === 'projects' ? (
             <ErrorBoundary>
-              <ProjectListPage onOpenProject={(id) => setView({ kind: 'chapters', projectId: id })} />
+              <ProjectListPage
+                onOpenProject={(id) => void openProjectHere(id)}
+                onOpenProjectWindow={(id) => void window.api.openProjectWindow(id)}
+              />
             </ErrorBoundary>
           ) : view.kind === 'settings' ? (
             <ErrorBoundary>
@@ -459,6 +534,20 @@ export default function App() {
           ) : view.kind === 'scan' ? (
             <ErrorBoundary>
               <ScanPage />
+            </ErrorBoundary>
+          ) : view.kind === 'inspiration' ? (
+            <ErrorBoundary>
+              <ProjectInspirationPage />
+            </ErrorBoundary>
+          ) : view.kind === 'projectInfo' ? (
+            <ErrorBoundary>
+              <ProjectInfoPage
+                projectId={view.projectId}
+                onProjectUpdated={(name) => {
+                  setProjectName(name)
+                  document.title = `${name} — 大神持笔`
+                }}
+              />
             </ErrorBoundary>
           ) : view.kind === 'chapters' ? (
             <ErrorBoundary>

@@ -22,6 +22,7 @@ export class LibraryRepository {
       const project: ProjectMeta = {
         id: input.id ?? randomUUID(),
         name: input.name,
+        description: input.description,
         path: input.path,
         genre: input.genre,
         createdAt: now,
@@ -30,6 +31,22 @@ export class LibraryRepository {
       const next: Library = { ...lib, projects: [...lib.projects, project] }
       await writeJsonAtomic(this.libraryFile, next)
       return project
+    })
+  }
+
+  async update(
+    projectId: string,
+    patch: Partial<Pick<ProjectMeta, 'name' | 'description' | 'genre'>>
+  ): Promise<ProjectMeta> {
+    return withFileLock(this.libraryFile, async () => {
+      const lib = await readJson<Library>(this.libraryFile, EMPTY)
+      const index = lib.projects.findIndex((project) => project.id === projectId)
+      if (index < 0) throw new Error(`project not found: ${projectId}`)
+      const updated = { ...lib.projects[index], ...patch }
+      const projects = [...lib.projects]
+      projects[index] = updated
+      await writeJsonAtomic(this.libraryFile, { ...lib, projects })
+      return updated
     })
   }
 }

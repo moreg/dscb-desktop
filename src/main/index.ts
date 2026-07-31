@@ -20,6 +20,7 @@ import { BenchmarkResolver } from './data/teardown/benchmark-resolver'
 import { DeslopService } from './data/deslop/deslop-service'
 import { ImageService } from './data/image-service'
 import { CoverService } from './data/cover-service'
+import { CoverPromptService } from './data/cover-prompt-service'
 import { registerLibraryIpc } from './ipc/library'
 import { registerProjectsIpc } from './ipc/projects'
 import { registerChaptersIpc } from './ipc/chapters'
@@ -38,15 +39,17 @@ import { registerDeslopIpc } from './ipc/deslop'
 import { registerDeslopRulesIpc } from './ipc/deslop-rules'
 import { registerCoverIpc } from './ipc/cover'
 import { registerScanIpc } from './ipc/scan'
+import { registerWindowsIpc, type ProjectWindowResult } from './ipc/windows'
 import { ScanService } from './data/scan/scan-service'
 import { ChapterNameService } from './data/chapter-name-service'
-import { ProjectFileWatcher } from './data/project-file-watcher'
+import { ProjectWindowRegistry } from './data/project-window-registry'
 
-let mainWindow: BrowserWindow | null = null
-let fileWatcher: ProjectFileWatcher | null = null
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+const projectWindows = new ProjectWindowRegistry<BrowserWindow>()
+let disposeProjectWatchers: (() => void) | null = null
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
+function createWindow(projectId: string | null = null): BrowserWindow {
+  const window = new BrowserWindow({
     width: 1200,
     height: 800,
     show: false,
@@ -60,22 +63,60 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  if (projectId) projectWindows.bind(window, projectId)
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  window.on('ready-to-show', () => window.show())
+  window.on('closed', () => {
+    projectWindows.release(window)
+  })
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    const rendererUrl = new URL(process.env['ELECTRON_RENDERER_URL'])
+    if (projectId) rendererUrl.searchParams.set('projectId', projectId)
+    void window.loadURL(rendererUrl.toString())
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void window.loadFile(join(__dirname, '../renderer/index.html'), {
+      query: projectId ? { projectId } : undefined
+    })
   }
+
+  return window
 }
 
-app.whenReady().then(async () => {
-  const userData = app.getPath('userData')
+function bindProjectWindow(window: BrowserWindow, projectId: string | null): ProjectWindowResult {
+  const existing = projectWindows.bind(window, projectId)
+  if (existing) {
+    projectWindows.focus(existing)
+    return { ok: false, focusedExisting: true }
+  }
+  return { ok: true, focusedExisting: false }
+}
+
+function openProjectWindow(projectId: string): ProjectWindowResult {
+  const existing = projectWindows.get(projectId)
+  if (existing) {
+    projectWindows.focus(existing)
+    return { ok: false, focusedExisting: true }
+  }
+  createWindow(projectId)
+  return { ok: true, focusedExisting: false }
+}
+
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // 再次启动始终给出一个真正的书架窗口；未绑定项目的窗口可能正停在设置/扫描等页面。
+    createWindow()
+  })
+
+  void app.whenReady().then(async () => {
+    const userData = app.getPath('userData')
   const libraryFile = join(userData, 'library.json')
   const defaultProjectsRoot = join(userData, 'projects')
   const settingsFile = join(userData, 'config', 'settings.json')
@@ -86,12 +127,10 @@ app.whenReady().then(async () => {
   const projectService = new ProjectService(projectsRoot, libraryRepo, settings)
   const usageRepo = new UsageRepository(join(userData, 'config'))
 
-  // 文件监听器：用户在外部编辑器改源文件时，自动推送事件让渲染进程刷新。
-  // watcher 绑定到主窗口；窗口销毁/退出时 dispose（在 app 事件里调 dispose）。
-  fileWatcher = new ProjectFileWatcher(() => mainWindow)
-
+  // 文件监听器按渲染窗口创建，避免多本书同时打开时互相替换监听目标。
   registerLibraryIpc(projectService)
-  registerProjectsIpc(projectService, fileWatcher)
+  disposeProjectWatchers = registerProjectsIpc(projectService)
+  registerWindowsIpc({ open: openProjectWindow, bind: bindProjectWindow })
   const chapterService = new ChapterService(projectService)
   registerSettingsIpc(settings, defaultProjectsRoot)
   registerUsageIpc(usageRepo, settings)
@@ -153,9 +192,17 @@ app.whenReady().then(async () => {
   registerDeslopRulesIpc(settings, llmService)
 
   // 封面生成（story-cover）—— 图像 API + skia-canvas 裁剪
+  // 提示词提炼走文本模型（auxiliary 路由），与出图的图像 API 相互独立：
+  // 没配图像 Key 也能先把提示词调好，且可用 codex/grok 这类免 Key 的 CLI provider。
   const imageService = new ImageService(settings)
   const coverService = new CoverService(projectService, imageService)
-  registerCoverIpc(coverService, settings)
+  const coverPromptService = new CoverPromptService(
+    projectService,
+    llmService,
+    outlineService,
+    chapterService
+  )
+  registerCoverIpc(coverService, settings, coverPromptService)
 
   // 扫榜（story-long-scan / story-short-scan）—— 采集 + 选题决策
   const scanService = new ScanService(userData, llmService)
@@ -179,13 +226,13 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
-})
+  })
+}
 
 app.on('before-quit', () => {
-  fileWatcher?.dispose()
+  disposeProjectWatchers?.()
 })
 
 app.on('window-all-closed', () => {
-  fileWatcher?.dispose()
   if (process.platform !== 'darwin') app.quit()
 })

@@ -730,9 +730,9 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                 )}
               </div>
               <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                用于大纲生成、细纲生成、章节续写、改稿。支持 OpenAI Chat
-                Completions 兼容协议（POST <code>{'{baseUrl}'}/chat/completions</code>）和
-                Anthropic Messages API（POST <code>{'{baseUrl}'}/v1/messages</code>）。
+                用于大纲生成、细纲生成、章节续写、改稿。HTTP 模型可选择 Anthropic
+                Messages（<code>/v1/messages</code>）、Chat Completions（
+                <code>/chat/completions</code>）或 Responses（<code>/responses</code>）接入。
               </p>
 
               {/* provider 列表 */}
@@ -2696,16 +2696,16 @@ function ProviderRow({
 
   const protocolLabel =
     provider.protocol === 'openai-responses'
-      ? 'OpenAI Responses'
+      ? 'Responses /responses'
       : provider.protocol === 'anthropic'
-      ? 'Anthropic'
+      ? 'Anthropic messages /v1/messages'
       : provider.protocol === 'antigravity'
         ? 'Antigravity (agy)'
         : provider.protocol === 'codex'
           ? 'Codex CLI'
           : provider.protocol === 'grok'
             ? 'Grok CLI'
-            : 'OpenAI'
+            : 'Chat completions /chat/completions'
   const protocolChipStyle: CSSProperties = {
     background:
       provider.protocol === 'openai-responses'
@@ -2980,6 +2980,19 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const isResponses = protocol === 'openai-responses'
   const isCli = isAg || isCodex || isGrok
 
+  const defaultBaseUrlFor = (next: ProviderProtocol): string =>
+    next === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'
+
+  const requestUrlPreview = (() => {
+    const base = baseUrl.trim().replace(/\/+$/, '')
+    if (!base) return ''
+    if (protocol === 'anthropic') {
+      return `${base.endsWith('/v1') ? base : `${base}/v1`}/messages`
+    }
+    if (protocol === 'openai-responses') return `${base}/responses`
+    return `${base}/chat/completions`
+  })()
+
   /** Codex 模型 slug → 展示名（与 main CODEX_MODEL_LABELS 对齐） */
   const codexModelLabel = (slug: string): string => {
     const map: Record<string, string> = {
@@ -3127,7 +3140,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
       {/* 协议优先：先选协议再填名称/模型，避免和模型挤在一行导致点不中 */}
       <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
         <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
-          <label htmlFor="np-protocol">协议</label>
+          <label htmlFor="np-protocol">接入方式</label>
           <select
             id="np-protocol"
             className="select"
@@ -3135,6 +3148,17 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             onChange={(e) => {
               const next = e.target.value as ProviderProtocol
               setProtocol(next)
+              setBaseUrl((current) => {
+                const normalized = current.trim().replace(/\/+$/, '')
+                const isKnownDefault =
+                  !normalized ||
+                  normalized === 'https://api.openai.com/v1' ||
+                  normalized === 'https://api.anthropic.com' ||
+                  normalized === 'https://api.anthropic.com/v1'
+                return isKnownDefault && next !== 'antigravity' && next !== 'codex' && next !== 'grok'
+                  ? defaultBaseUrlFor(next)
+                  : current
+              })
               // 切协议时重置模型；名称若仍是旧默认则同步新建议名
               setModel('')
               setCodexCustom(false)
@@ -3157,12 +3181,16 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
               })
             }}
           >
-            <option value="openai">OpenAI 兼容</option>
-            <option value="openai-responses">OpenAI Responses API（官方）</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="antigravity">Antigravity (agy CLI)</option>
-            <option value="codex">Codex (codex CLI)</option>
-            <option value="grok">Grok (grok CLI 登录)</option>
+            <optgroup label="HTTP API">
+              <option value="anthropic">Anthropic messages (/v1/messages)</option>
+              <option value="openai">Chat completions (/chat/completions)</option>
+              <option value="openai-responses">Responses (/responses)</option>
+            </optgroup>
+            <optgroup label="本地 CLI">
+              <option value="antigravity">Antigravity (agy CLI)</option>
+              <option value="codex">Codex (codex CLI)</option>
+              <option value="grok">Grok (grok CLI 登录)</option>
+            </optgroup>
           </select>
         </div>
         <div className="field" style={{ flex: 1, marginBottom: 10, minWidth: 0 }}>
@@ -3368,6 +3396,12 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
           </>
         )}
       </div>
+
+      {!isCli && requestUrlPreview ? (
+        <div className="meta" style={{ marginTop: -4, marginBottom: 10, wordBreak: 'break-all' }}>
+          实际请求：<code>{requestUrlPreview}</code>
+        </div>
+      ) : null}
 
       {isCli ? (
         <div className="field" style={{ marginBottom: 10 }}>

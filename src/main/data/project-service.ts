@@ -24,7 +24,13 @@ export class ProjectService {
     const dir = input.customPath ? join(input.customPath, id) : join(projectsRoot, id)
     await this.writeV3Skeleton(dir, input)
     this.dirCache.set(id, dir)
-    return this.library.create({ id, name: input.name, path: dir, genre: input.genre })
+    return this.library.create({
+      id,
+      name: input.name,
+      description: input.description,
+      path: dir,
+      genre: input.genre
+    })
   }
 
   private async writeV3Skeleton(dir: string, input: CreateProjectDataInput): Promise<void> {
@@ -172,11 +178,35 @@ export class ProjectService {
     return next
   }
 
+  /** 保存对外展示的小说信息，同时同步 project.json 与 library.json。 */
+  async updateProjectInfo(
+    projectId: string,
+    info: { name: string; description?: string }
+  ): Promise<ProjectData> {
+    const next = await this.updateProjectData(projectId, {
+      name: info.name,
+      description: info.description
+    })
+    await this.library.update(projectId, {
+      name: next.name,
+      description: next.description
+    })
+    return next
+  }
+
   async listProjects(): Promise<ProjectMeta[]> {
     const all = await this.library.list()
     const filtered: ProjectMeta[] = []
     for (const project of all) {
-      if (await hasV3Outline(project.path)) filtered.push(project)
+      if (!(await hasV3Outline(project.path))) continue
+      // project.json 是小说名称/简介的主数据；兼容旧 library.json 没有 description
+      // 或名称尚未同步的项目。读取失败时仍保留索引条目。
+      const data = await new ProjectRepository(project.path).read().catch(() => null)
+      filtered.push({
+        ...project,
+        ...(data?.name ? { name: data.name } : {}),
+        ...(data ? { description: data.description, genre: data.genre } : {})
+      })
     }
     return filtered
   }

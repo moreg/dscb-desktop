@@ -68,7 +68,35 @@ function createFakeChild(opts: {
   return child
 }
 
-import { runGrok, probeGrok, listGrokModels } from '../src/main/data/grok-runner'
+import {
+  runGrok,
+  probeGrok,
+  listGrokModels,
+  parseGrokJsonOutput,
+  toAsciiJson
+} from '../src/main/data/grok-runner'
+
+/**
+ * `grok --output-format json --json-schema ...` 的真实输出形态
+ * （来自本机 grok 0.1.x 实测：单个多行 pretty JSON 对象，非 NDJSON）。
+ */
+const REAL_JSON_ENVELOPE = `{
+  "text": "{\\"city\\":\\"Paris\\"}",
+  "stopReason": "end_turn",
+  "sessionId": "019fb91e-97a0-7010-a3e0-184ee536c504",
+  "thought": "The user wants the capital of France.\\n",
+  "usage": {
+    "input_tokens": 12206,
+    "cache_read_input_tokens": 2560,
+    "output_tokens": 67,
+    "reasoning_tokens": 57,
+    "total_tokens": 14833
+  },
+  "num_turns": 1,
+  "structuredOutput": {
+    "city": "Paris"
+  }
+}`
 
 beforeEach(() => {
   lastSpawnArgs = null
@@ -177,6 +205,134 @@ describe('runGrok', () => {
         exitCode: 2
       })
     await expect(runGrok('hi')).rejects.toThrow(/GROK_ERROR/)
+  })
+})
+
+describe('toAsciiJson', () => {
+  it('ASCII 内容原样序列化', () => {
+    expect(toAsciiJson({ type: 'object' })).toBe('{"type":"object"}')
+  })
+
+  it('中文转成 \\uXXXX，结果是纯 ASCII 且语义不变', () => {
+    const out = toAsciiJson({ desc: '中文说明' })
+    expect(/^[\x00-\x7e]*$/.test(out)).toBe(true)
+    expect(JSON.parse(out)).toEqual({ desc: '中文说明' })
+  })
+
+  it('emoji（代理对）逐码元转义后仍可解析', () => {
+    const out = toAsciiJson({ e: '✦🎨' })
+    expect(/^[\x00-\x7e]*$/.test(out)).toBe(true)
+    expect(JSON.parse(out)).toEqual({ e: '✦🎨' })
+  })
+
+  it('嵌套 schema 完整保留', () => {
+    const schema = { type: 'object', properties: { a: { type: 'string', enum: ['x', 'y'] } } }
+    expect(JSON.parse(toAsciiJson(schema))).toEqual(schema)
+  })
+})
+
+describe('parseGrokJsonOutput', () => {
+  it('优先取 structuredOutput（已过 schema 校验）', () => {
+    const r = parseGrokJsonOutput(REAL_JSON_ENVELOPE)
+    expect(r.full).toBe('{"city":"Paris"}')
+    expect(r.error).toBeUndefined()
+  })
+
+  it('usage 按 input/output/total 映射', () => {
+    expect(parseGrokJsonOutput(REAL_JSON_ENVELOPE).usage).toEqual({
+      inputTokens: 12206,
+      outputTokens: 67,
+      totalTokens: 14833
+    })
+  })
+
+  it('没有 structuredOutput 时回退 text', () => {
+    const r = parseGrokJsonOutput('{"text":"hello","stopReason":"end_turn"}')
+    expect(r.full).toBe('hello')
+  })
+
+  it('total_tokens 缺失时用 input+output 兜底', () => {
+    const r = parseGrokJsonOutput('{"text":"x","usage":{"input_tokens":10,"output_tokens":5}}')
+    expect(r.usage).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
+  })
+
+  it('容忍 JSON 前后夹杂的日志行', () => {
+    const r = parseGrokJsonOutput('warning: something\n{"text":"ok"}\nbye')
+    expect(r.full).toBe('ok')
+  })
+
+  it('空输出 / 非法 JSON 返回空而非抛错', () => {
+    expect(parseGrokJsonOutput('')).toEqual({ full: '', usage: null })
+    expect(parseGrokJsonOutput('not json at all')).toEqual({ full: '', usage: null })
+    expect(parseGrokJsonOutput('{broken')).toEqual({ full: '', usage: null })
+  })
+
+  it('error 字段被带出', () => {
+    expect(parseGrokJsonOutput('{"error":"rate limit exceeded"}').error).toBe(
+      'rate limit exceeded'
+    )
+  })
+})
+
+describe('runGrok --json-schema 结构化模式', () => {
+  const schema = { type: 'object', properties: { city: { type: 'string' } } }
+
+  it('传 jsonSchema 时切到 --output-format json 并下发 schema', async () => {
+    fakeChildFactory = () => createFakeChild({ stdout: REAL_JSON_ENVELOPE, exitCode: 0 })
+    const result = await runGrok('hi', { jsonSchema: schema })
+
+    expect(result.full).toBe('{"city":"Paris"}')
+    const args = lastSpawnArgs!.args
+    expect(args).toContain('--json-schema')
+    expect(args[args.indexOf('--json-schema') + 1]).toBe(toAsciiJson(schema))
+    expect(args[args.indexOf('--output-format') + 1]).toBe('json')
+    expect(args).not.toContain('streaming-json')
+  })
+
+  it('不传 jsonSchema 时保持 streaming-json，不带 --json-schema', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({ stdout: streamingJsonl(['ok']), exitCode: 0 })
+    await runGrok('hi')
+    const args = lastSpawnArgs!.args
+    expect(args[args.indexOf('--output-format') + 1]).toBe('streaming-json')
+    expect(args).not.toContain('--json-schema')
+  })
+
+  it('该模式无增量事件：onToken 在收尾时被喂一次全文', async () => {
+    fakeChildFactory = () => createFakeChild({ stdout: REAL_JSON_ENVELOPE, exitCode: 0 })
+    const tokens: string[] = []
+    await runGrok('hi', { jsonSchema: schema, onToken: (t) => tokens.push(t) })
+    expect(tokens).toEqual(['{"city":"Paris"}'])
+  })
+
+  it('多行 pretty JSON 跨 chunk 到达也能解析（不按行切）', async () => {
+    const mid = Math.floor(REAL_JSON_ENVELOPE.length / 2)
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '',
+        exitCode: 0,
+        stdoutChunks: [
+          Buffer.from(REAL_JSON_ENVELOPE.slice(0, mid), 'utf8'),
+          Buffer.from(REAL_JSON_ENVELOPE.slice(mid), 'utf8')
+        ]
+      })
+    const result = await runGrok('hi', { jsonSchema: schema })
+    expect(result.full).toBe('{"city":"Paris"}')
+  })
+
+  it('结构化模式下的鉴权错误仍映射 GROK_AUTH_EXPIRED', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout: '{"error":"please sign in again"}',
+        exitCode: 1
+      })
+    await expect(runGrok('hi', { jsonSchema: schema })).rejects.toThrow('GROK_AUTH_EXPIRED')
+  })
+
+  it('结构化模式下的限流映射 LLM_RATE_LIMIT', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({ stdout: '{"error":"429 rate limit"}', exitCode: 1 })
+    await expect(runGrok('hi', { jsonSchema: schema })).rejects.toThrow('LLM_RATE_LIMIT')
   })
 })
 

@@ -153,6 +153,7 @@ export class DeslopService {
 
     const results: DeslopResult[] = []
     for (let i = 0; i < chunks.length; i++) {
+      throwIfAborted(opts.signal)
       const c = chunks[i]
       emit(
         `\n══════ 第 ${i + 1}/${chunks.length} 块（原文第 ${c.startLine} 行起，${countWords(c.text)} 字）══════\n`
@@ -261,6 +262,7 @@ export class DeslopService {
       // =====================================================
       const totalPasses = passes.length
       for (let pi = 0; pi < passes.length; pi++) {
+        throwIfAborted(opts.signal)
         const passNum = passes[pi]
         const passGates = PASS_GATE_MAP[passNum].filter((g) => gates.includes(g))
         if (passGates.length === 0) continue
@@ -432,6 +434,7 @@ export class DeslopService {
       return { text: result, changes }
     }
     while (remaining.length > 0 && round < MAX_CLEANUP_ROUNDS) {
+      throwIfAborted(opts.signal)
       round += 1
       emit(`   🔄 二次清理 ${round}/${MAX_CLEANUP_ROUNDS}（Pass${passNum} 剩余 ${remaining.length} 处 blocking）...\n`)
       const cleanupPrompt = buildCleanupPrompt(
@@ -538,6 +541,11 @@ const MAX_LLM_CALLS_PER_CHUNK = 9
 /** 用户主动取消（llm-service 在 opts.signal 已 abort 时抛 LLM_ABORTED），区别于超时/截断 */
 function isUserAbort(err: unknown): boolean {
   return err instanceof Error && err.message === 'LLM_ABORTED'
+}
+
+/** 轮次间隙检查取消：不依赖下一次 LLM 调用才抛，避免扫完一整遍才响应「停止」 */
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('LLM_ABORTED')
 }
 
 /** 一个待改写分块：正文 + 它在原文里的起始行号（1-based），用于把行号引用还原成全局 */

@@ -13,7 +13,8 @@ import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../..
  * 渲染层向主进程发起 LLM 调用的入口。
  *
  * Provider 配置完全由用户控制：baseUrl / model / apiKey 都在设置页填写，
- * 主进程不再硬编码任何厂商。统一走 OpenAI Chat Completions 兼容协议。
+ * 主进程不再硬编码任何厂商。HTTP provider 可选择 Chat Completions、
+ * Anthropic Messages 或 OpenAI Responses 请求格式。
  */
 
 function maskKey(apiKey: string): string {

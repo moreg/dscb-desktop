@@ -6,6 +6,7 @@ import { homedir, tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import type { UsageInfo } from './llm-service'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
+import { killProcessTree } from './kill-process-tree'
 
 /**
  * Grok CLI 子进程执行器。
@@ -33,6 +34,12 @@ import { LLM_ABORTED_ERROR } from './agent-meta-detect'
  *   {"type":"end","usage":{...},...}
  *   {"type":"error","message":"..."}
  *
+ * 结构化模式（opts.jsonSchema，见 GrokOptions）：
+ *   追加 `--json-schema <ascii-json>`，CLI 强制 `--output-format json`，
+ *   stdout 变成**单个多行 pretty JSON 对象**（非 NDJSON）：
+ *   { "text": "{...}", "structuredOutput": {...}, "usage": {...}, "stopReason": "end_turn" }
+ *   由服务端保证输出符合 schema，不必再靠提示词约定「只输出 JSON」。
+ *
  * 每次调用独立 session，并发安全（无需串行化）。
  * 用临时文件传 prompt，避开 Windows 命令行长度上限；finally 递归清理 workDir。
  */
@@ -45,6 +52,17 @@ export interface GrokOptions {
   onToken?: (token: string) => void
   /** 中止信号（仅用户取消；超时由 timeoutSec 处理） */
   signal?: AbortSignal
+  /**
+   * JSON Schema。设置后走 `--json-schema`，由服务端约束模型输出，
+   * 不再依赖提示词里的「只输出 JSON」约定 —— 结构化提取（如封面画面要素）用。
+   *
+   * 两个代价，调用方需知晓：
+   * 1. CLI 会强制 `--output-format json`（见 `grok --help`），该模式**没有增量事件**，
+   *    onToken 只在收尾时被喂一次全文。
+   * 2. 返回的 `full` 是 `structuredOutput` 重新序列化的紧凑 JSON 字符串，
+   *    不是模型原始 `text`（两者内容一致，但前者已被 CLI 校验过 schema）。
+   */
+  jsonSchema?: object
 }
 
 export interface GrokResult {
@@ -71,6 +89,104 @@ const PROSE_ONLY_PREAMBLE = `【硬性约束】你是小说写作引擎。禁止
 ---
 
 `
+
+/**
+ * jsonSchema 模式下的 prompt 头部。
+ * 仍然禁工具/禁旁白，但不能沿用「只输出成品文本」——那与结构化输出直接冲突。
+ */
+const JSON_ONLY_PREAMBLE = `【硬性约束】禁止调用任何技能、工具或 slash 命令。禁止输出流程说明、自检旁白、技能名。只输出一个符合给定 JSON Schema 的 JSON 对象。
+
+---
+
+`
+
+/**
+ * 把对象序列化成**纯 ASCII** 的 JSON 字符串（非 ASCII 转 \\uXXXX 转义）。
+ *
+ * schema 是经 argv 传的，而本模块之所以用 prompt 文件传正文，就是为了绕开
+ * Windows argv 的中文编码问题。schema 里若带中文 description 会踩同一个坑，
+ * 故在这里统一转义 —— 转义后仍是合法 JSON，语义不变。
+ */
+export function toAsciiJson(value: object): string {
+  const json = JSON.stringify(value)
+  let out = ''
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i)
+    // 0x7f 起（含 DEL、中文、代理对码元）逐码元转义，保证 argv 纯 ASCII
+    out += code < 0x7f ? json[i] : '\\u' + code.toString(16).padStart(4, '0')
+  }
+  return out
+}
+
+/** `--output-format json` 的单对象输出（非 NDJSON） */
+interface GrokJsonEnvelope {
+  text?: unknown
+  structuredOutput?: unknown
+  stopReason?: unknown
+  error?: unknown
+  message?: unknown
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+  }
+}
+
+/**
+ * 解析 `--output-format json` 的整段 stdout。
+ *
+ * 与 streaming-json 不同，这里 stdout 是**一个多行 pretty-print 的 JSON 对象**，
+ * 逐行 JSON.parse 会全部失败，必须整段解析。
+ *
+ * @returns full 优先取 structuredOutput（CLI 已按 schema 校验过）重新序列化；
+ *          没有则回退模型原始 text。error 非空表示 CLI 报了错。
+ * 导出供单测。
+ */
+export function parseGrokJsonOutput(raw: string): {
+  full: string
+  usage: UsageInfo | null
+  error?: string
+} {
+  const text = raw.trim()
+  if (!text) return { full: '', usage: null }
+
+  // 容错：CLI 偶尔在 JSON 前后夹杂日志行
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) return { full: '', usage: null }
+
+  let env: GrokJsonEnvelope
+  try {
+    env = JSON.parse(text.slice(start, end + 1)) as GrokJsonEnvelope
+  } catch {
+    return { full: '', usage: null }
+  }
+
+  let usage: UsageInfo | null = null
+  if (env.usage) {
+    const inputTokens = Number(env.usage.input_tokens ?? 0) || 0
+    const outputTokens = Number(env.usage.output_tokens ?? 0) || 0
+    const totalTokens = Number(env.usage.total_tokens ?? 0) || inputTokens + outputTokens
+    usage = { inputTokens, outputTokens, totalTokens }
+  }
+
+  // structuredOutput 已过 schema 校验，优先于 text
+  const full =
+    env.structuredOutput != null && typeof env.structuredOutput === 'object'
+      ? JSON.stringify(env.structuredOutput)
+      : typeof env.text === 'string'
+        ? env.text
+        : ''
+
+  const errText =
+    typeof env.error === 'string'
+      ? env.error
+      : env.stopReason === 'error' && typeof env.message === 'string'
+        ? env.message
+        : undefined
+
+  return { full, usage, ...(errText ? { error: errText } : {}) }
+}
 
 function utf8CompleteLength(buf: Buffer): number {
   if (buf.length === 0) return 0
@@ -107,13 +223,17 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
   const timeoutSec = opts.timeoutSec ?? DEFAULT_TIMEOUT_SEC
   const workDir = await mkdtemp(join(tmpdir(), 'aw-grok-'))
   const promptFile = join(workDir, `prompt-${randomUUID()}.txt`)
-  await writeFile(promptFile, PROSE_ONLY_PREAMBLE + prompt, 'utf8')
+  // 结构化模式走 JSON 头部；沿用「只输出成品文本」会与 schema 输出直接打架
+  const jsonMode = Boolean(opts.jsonSchema)
+  const preamble = jsonMode ? JSON_ONLY_PREAMBLE : PROSE_ONLY_PREAMBLE
+  await writeFile(promptFile, preamble + prompt, 'utf8')
 
   const args: string[] = [
     '--prompt-file',
     promptFile,
+    // --json-schema 会强制 --output-format json（单个 pretty JSON 对象，无增量事件）
     '--output-format',
-    'streaming-json',
+    jsonMode ? 'json' : 'streaming-json',
     '--max-turns',
     '1',
     '--no-subagents',
@@ -128,6 +248,9 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
     '--cwd',
     workDir
   ]
+  if (jsonMode) {
+    args.push('--json-schema', toAsciiJson(opts.jsonSchema!))
+  }
   if (opts.model && opts.model.trim() && opts.model.trim() !== 'default') {
     args.push('-m', opts.model.trim())
   }
@@ -144,7 +267,8 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
     return await new Promise<GrokResult>((resolve, reject) => {
       const child = spawn(GROK_BIN, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
+        windowsHide: true,
+        detached: process.platform !== 'win32'
       })
 
       let stderrBuf = ''
@@ -154,16 +278,18 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
       let full = ''
       let usage: UsageInfo | null = null
       let lineBuf = ''
+      /** json 模式下缓冲的完整 stdout（收尾时整段解析） */
+      const jsonChunks: Buffer[] = []
 
       const timer = setTimeout(() => {
-        if (!settled && !child.killed) {
+        if (!settled) {
           timedOut = true
-          child.kill('SIGTERM')
+          killProcessTree(child)
         }
       }, timeoutSec * 1000)
 
       const onAbort = (): void => {
-        if (!settled && !child.killed) child.kill('SIGTERM')
+        if (!settled) killProcessTree(child)
       }
       if (opts.signal) {
         if (opts.signal.aborted) onAbort()
@@ -237,6 +363,12 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
       }
 
       child.stdout.on('data', (chunk: Buffer) => {
+        // json 模式：输出是一个多行 pretty JSON 对象，逐行解析必然全部失败，
+        // 只能整段缓冲、收尾时一次解析（也就没有增量事件可喂）
+        if (jsonMode) {
+          jsonChunks.push(chunk)
+          return
+        }
         const combined = Buffer.concat([stdoutPending, chunk])
         const completeLen = utf8CompleteLength(combined)
         const text = combined.subarray(0, completeLen).toString('utf8')
@@ -258,11 +390,32 @@ async function runGrokOnce(prompt: string, opts: GrokOptions): Promise<GrokResul
       })
 
       child.on('close', (code) => {
-        if (stdoutPending.length > 0) {
-          lineBuf += stdoutPending.toString('utf8')
-          stdoutPending = Buffer.alloc(0)
+        if (jsonMode) {
+          const parsed = parseGrokJsonOutput(Buffer.concat(jsonChunks).toString('utf8'))
+          if (parsed.error) {
+            const msg = parsed.error
+            if (/auth|login|credential|401|403|sign in|not logged/i.test(msg)) {
+              fail(new Error('GROK_AUTH_EXPIRED'))
+            } else if (/rate|quota|limit|429/i.test(msg)) {
+              fail(new Error('LLM_RATE_LIMIT'))
+            } else {
+              fail(new Error(`GROK_ERROR: ${msg.slice(0, 200)}`))
+            }
+          } else if (parsed.full) {
+            // 该模式没有增量事件，收尾时一次性喂回，保持 onToken 契约
+            full = parsed.full
+            usage = parsed.usage
+            opts.onToken?.(parsed.full)
+          } else {
+            usage = parsed.usage
+          }
+        } else {
+          if (stdoutPending.length > 0) {
+            lineBuf += stdoutPending.toString('utf8')
+            stdoutPending = Buffer.alloc(0)
+          }
+          if (lineBuf.trim()) processLine(lineBuf)
         }
-        if (lineBuf.trim()) processLine(lineBuf)
 
         if (settled) return
         settled = true
@@ -322,7 +475,8 @@ function spawnWithTimeout(
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== 'win32'
     })
     let out = ''
     let settled = false
@@ -333,7 +487,7 @@ function spawnWithTimeout(
       resolve({ code, out: text })
     }
     const timer = setTimeout(() => {
-      if (!child.killed) child.kill('SIGTERM')
+      killProcessTree(child)
       finish(null, out)
     }, timeoutMs)
     child.stdout.on('data', (c: Buffer) => (out += c.toString('utf8')))

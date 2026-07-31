@@ -417,6 +417,34 @@ describe('LlmService', () => {
     fetchSpy.mockRestore()
   })
 
+  it('Responses API ping uses the Responses request body instead of chat messages', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-responses-ping-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p',
+      providers: [{
+        id: 'p', label: 'Responses', baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5.6-sol', apiKey: 'sk-test', protocol: 'openai-responses'
+      }]
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true } as never)
+
+    await expect(svc.ping('p')).resolves.toMatchObject({ ok: true })
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string)
+    expect(url).toBe('https://api.openai.com/v1/responses')
+    expect(body).toEqual({
+      model: 'gpt-5.6-sol',
+      input: 'hi',
+      max_output_tokens: 16,
+      stream: false
+    })
+    expect(body.messages).toBeUndefined()
+    fetchSpy.mockRestore()
+  })
+
   it('Anthropic: temperature from provider is sent in request body', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-anttemp-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
@@ -627,7 +655,7 @@ describe('LlmService feature routing', () => {
     fetchSpy.mockRestore()
   })
 
-  it('autoMemorySync / memoryExtract route to auxiliary (not activeId/chapter Codex)', async () => {
+  it('all post-write panel AI steps route to one auxiliary provider', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-mem-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
     await s.write({
@@ -673,8 +701,28 @@ describe('LlmService feature routing', () => {
       'https://kimi.example.com/v1/chat/completions'
     )
 
-    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    await svc.generateStream('hi', { meta: { feature: 'outlineCheck' } })
     expect((fetchSpy.mock.calls[2] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'rhythmEval' } })
+    expect((fetchSpy.mock.calls[3] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'figureGen' } })
+    expect((fetchSpy.mock.calls[4] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'batchRhythm' } })
+    expect((fetchSpy.mock.calls[5] as [string])[0]).toBe(
+      'https://kimi.example.com/v1/chat/completions'
+    )
+
+    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    expect((fetchSpy.mock.calls[6] as [string])[0]).toBe(
       'https://codex.example.com/v1/chat/completions'
     )
 

@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import type { UsageInfo } from './llm-service'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
+import { killProcessTree } from './kill-process-tree'
 
 /**
  * Codex CLI 子进程执行器（app-server 真流式）。
@@ -124,7 +125,9 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
       child = spawn(CODEX_BIN, ['app-server'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
-        shell: CODEX_SHELL
+        shell: CODEX_SHELL,
+        // Unix 上建立独立进程组，killProcessTree 才能用负 pid 终止整棵树。
+        detached: process.platform !== 'win32'
       }) as ChildProcessWithoutNullStreams
     } catch (err) {
       reject(new Error(`CODEX_SPAWN_FAILED: ${(err as Error).message}`))
@@ -153,11 +156,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
       if (settled) return
       settled = true
       cleanup()
-      try {
-        if (!child.killed) child.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
+      killProcessTree(child)
       // 拒绝所有挂起请求，避免泄漏
       for (const [, p] of pending) p.reject(err)
       pending.clear()
@@ -168,11 +167,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
       if (settled) return
       settled = true
       cleanup()
-      try {
-        if (!child.killed) child.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
+      killProcessTree(child)
       for (const [, p] of pending) p.reject(new Error('CODEX_SESSION_CLOSED'))
       pending.clear()
       resolve(result)
@@ -367,7 +362,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
     const timer = setTimeout(() => {
       if (settled) return
       timedOut = true
-      // 尽量优雅中断 turn；随后 kill
+      // 尽量优雅中断 turn；随后杀整棵进程树
       if (threadId && turnId) {
         try {
           writeMsg({
@@ -379,11 +374,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
           // ignore
         }
       }
-      try {
-        if (!child.killed) child.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
+      killProcessTree(child)
       // 若 close 未触发 fail，兜底
       setTimeout(() => {
         if (!settled) fail(new Error('LLM_TIMEOUT'))
@@ -403,11 +394,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
           // ignore
         }
       }
-      try {
-        if (!child.killed) child.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
+      killProcessTree(child)
     }
     if (opts.signal) {
       if (opts.signal.aborted) onAbort()

@@ -127,6 +127,24 @@ describe('ProjectService', () => {
     expect(data.id).toBe(meta.id)
   })
 
+  it('updates novel name and description in project data and library metadata', async () => {
+    const meta = await service.create({ name: '旧书名', description: '旧简介' })
+    const updated = await service.updateProjectInfo(meta.id, {
+      name: '抽到的新书名',
+      description: '抽到的新简介'
+    })
+    expect(updated).toMatchObject({ name: '抽到的新书名', description: '抽到的新简介' })
+    expect((await service.listProjects())[0]).toMatchObject({
+      name: '抽到的新书名',
+      description: '抽到的新简介'
+    })
+    expect((await service['library'].list())[0]).toMatchObject({
+      name: '抽到的新书名',
+      description: '抽到的新简介',
+      path: meta.path
+    })
+  })
+
   it('resolveDir caches directory across calls', async () => {
     const meta = await service.create({ name: 'X' })
     ;(service as unknown as { dirCache: Map<string, string> }).dirCache.delete(meta.id)

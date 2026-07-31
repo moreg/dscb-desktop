@@ -3,9 +3,10 @@ import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 
 interface Props {
   onOpenProject: (projectId: string) => void
+  onOpenProjectWindow: (projectId: string) => void
 }
 
-export default function ProjectListPage({ onOpenProject }: Props) {
+export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({})
   const [wordCounts, setWordCounts] = useState<Record<string, number>>({})
@@ -50,7 +51,10 @@ export default function ProjectListPage({ onOpenProject }: Props) {
     if (!keyword) return projects
     const k = keyword.toLowerCase()
     return projects.filter(
-      (p) => p.name.toLowerCase().includes(k) || (p.genre ?? '').toLowerCase().includes(k)
+      (p) =>
+        p.name.toLowerCase().includes(k) ||
+        (p.genre ?? '').toLowerCase().includes(k) ||
+        (p.description ?? '').toLowerCase().includes(k)
     )
   }, [projects, keyword])
 
@@ -127,9 +131,8 @@ export default function ProjectListPage({ onOpenProject }: Props) {
             const wc = wordCounts[p.id] ?? 0
             const initial = p.name.trim().charAt(0) || '卷'
             return (
-              <button
+              <article
                 key={p.id}
-                type="button"
                 className="project-card"
                 onClick={() => onOpenProject(p.id)}
               >
@@ -140,6 +143,7 @@ export default function ProjectListPage({ onOpenProject }: Props) {
                     {p.genre ? <div className="pc-genre">{p.genre}</div> : null}
                   </div>
                 </div>
+                {p.description ? <div className="pc-desc">{p.description}</div> : null}
                 <div className="pc-stats">
                   <div className="pc-stat">
                     <span className="num">{ch}</span>
@@ -152,9 +156,31 @@ export default function ProjectListPage({ onOpenProject }: Props) {
                 </div>
                 <div className="pc-foot">
                   <span>翻开 {formatRelative(p.lastOpenedAt)}</span>
-                  <span className="open">进入 →</span>
+                  <div className="pc-actions">
+                    <button
+                      type="button"
+                      className="open project-entry"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onOpenProject(p.id)
+                      }}
+                    >
+                      进入 →
+                    </button>
+                    <button
+                      type="button"
+                      className="open-window"
+                      title="在新窗口中打开，便于同时写多本书"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onOpenProjectWindow(p.id)
+                      }}
+                    >
+                      新窗口 ↗
+                    </button>
+                  </div>
                 </div>
-              </button>
+              </article>
             )
           })}
         </div>

@@ -31,4 +31,13 @@ describe('LibraryRepository', () => {
     expect(list).toHaveLength(1)
     expect(list[0].name).toBe('小说A')
   })
+
+  it('updates the project name and description without changing its path', async () => {
+    const created = await repo.create({ name: '旧名', path: dir })
+    const updated = await repo.update(created.id, { name: '新书名', description: '新简介' })
+    expect(updated.name).toBe('新书名')
+    expect(updated.description).toBe('新简介')
+    expect(updated.path).toBe(dir)
+    expect((await repo.list())[0]).toMatchObject({ name: '新书名', description: '新简介' })
+  })
 })

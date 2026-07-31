@@ -4,6 +4,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import type { UsageInfo } from './llm-service'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
+import { killProcessTree } from './kill-process-tree'
 
 /**
  * Antigravity CLI (agy) 子进程执行器。
@@ -178,7 +179,8 @@ async function runAntigravityOnce(
   return new Promise<AntigravityResult>((resolve, reject) => {
     const child = spawn(AGY_BIN, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== 'win32'
     })
 
       let stdoutBuf = ''
@@ -187,11 +189,9 @@ async function runAntigravityOnce(
       let stderrPending = Buffer.alloc(0)
       let settled = false
 
-      // 中止信号
+      // 中止信号：杀整棵进程树（Windows 上 SIGTERM 常杀不干净孙进程）
       const onAbort = (): void => {
-        if (!settled && !child.killed) {
-          child.kill('SIGTERM')
-        }
+        if (!settled) killProcessTree(child)
       }
       if (opts.signal) {
         if (opts.signal.aborted) {
@@ -361,6 +361,10 @@ export async function probeAntigravity(): Promise<string | null> {
  * 避免只能手输；真实列表仍以 `agy models` 为准并优先展示。
  */
 export const ANTIGRAVITY_KNOWN_MODELS: readonly string[] = [
+  'Gemini 3.6 Flash (Medium)',
+  'Gemini 3.6 Flash (High)',
+  'Gemini 3.6 Flash (Low)',
+  'Gemini 3.6 Flash (Minimal)',
   'Gemini 3.5 Flash (Medium)',
   'Gemini 3.5 Flash (High)',
   'Gemini 3.5 Flash (Low)',
@@ -376,8 +380,8 @@ export const ANTIGRAVITY_KNOWN_MODELS: readonly string[] = [
  * 优先返回 CLI 实时列表；未登录/未安装/失败时回退到内置 Gemini 等预设（不抛错）。
  *
  * 实测 `agy models` 输出格式（agy 1.1.0+）：
- *   Gemini 3.5 Flash (Medium)
- *   Gemini 3.5 Flash (High)
+ *   Gemini 3.6 Flash (Medium)
+ *   Gemini 3.6 Flash (High)
  *   ...
  * 认证失败时输出 `Error: Please sign in...`（exit 0）。
  */

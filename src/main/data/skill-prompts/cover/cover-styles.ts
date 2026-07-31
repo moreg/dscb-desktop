@@ -8,7 +8,8 @@
 import type {
   CoverComposition,
   CoverGenre,
-  CoverPlatform
+  CoverPlatform,
+  CoverScene
 } from '../../../../shared/types'
 
 /* =========================================================
@@ -240,16 +241,37 @@ export interface BuildPromptArgs {
   genre: CoverGenre
   composition: CoverComposition
   styleHint?: string
+  /**
+   * 从小说内容提炼的画面要素。逐字段覆盖 GENRE_STYLES 模板，
+   * 缺省字段仍回退题材默认值。
+   */
+  scene?: CoverScene
+}
+
+/** 取覆盖值，空串/全空白视为未提供 */
+function pick(override: string | undefined, fallback: string): string {
+  const trimmed = override?.trim()
+  return trimmed ? trimmed : fallback
+}
+
+/** 句尾补句点，避免提炼结果自带句点时出现 ".." */
+function sentence(text: string): string {
+  const t = text.trim().replace(/[.,;，。；]+$/, '')
+  return t + '.'
 }
 
 /**
  * 构建完整英文提示词（文字层 + 风格层 + 画面层 + 通用修饰）。
  * 对齐 SKILL.md 的完整提示词模板。
+ *
+ * `scene` 为空时行为与旧版一致（纯题材模板）；给了 scene 则按字段覆盖，
+ * 让同题材的不同作品得到各自的人物 / 场景 / 色调。
  */
 export function buildCoverPrompt(args: BuildPromptArgs): string {
   const platform = PLATFORM_STYLES[args.platform]
   const style = GENRE_STYLES[args.genre]
   const composition = COMPOSITION_DESC[args.composition]
+  const scene = args.scene
 
   const lines: string[] = []
   // 风格层
@@ -262,13 +284,19 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   // 题材 + 构图 + 画面层
   lines.push(`${style.tag}.`)
   lines.push(`${composition}.`)
-  lines.push(style.characterDesc + '.')
-  lines.push('Background: ' + style.backgroundDesc + '.')
-  lines.push(`Color palette: ${style.colorPalette}.`)
-  lines.push(`Lighting: ${style.lighting}.`)
+  // 纯场景构图不描述主体人物，否则与「no human figure as main subject」自相矛盾
+  if (args.composition !== 'scene') {
+    lines.push(sentence(pick(scene?.characterDesc, style.characterDesc)))
+  }
+  lines.push('Background: ' + sentence(pick(scene?.backgroundDesc, style.backgroundDesc)))
+  if (scene?.keyProps?.trim()) {
+    lines.push('Key symbolic elements: ' + sentence(scene.keyProps))
+  }
+  lines.push(`Color palette: ${sentence(pick(scene?.colorPalette, style.colorPalette))}`)
+  lines.push(`Lighting: ${sentence(pick(scene?.lighting, style.lighting))}`)
   // 用户风格偏好
   if (args.styleHint && args.styleHint.trim()) {
-    lines.push(args.styleHint.trim() + '.')
+    lines.push(sentence(args.styleHint))
   }
   // 通用修饰
   lines.push(

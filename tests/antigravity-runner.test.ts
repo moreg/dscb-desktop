@@ -384,6 +384,10 @@ describe('listAntigravityModels', () => {
 
     const models = await listAntigravityModels()
     expect(models.length).toBeGreaterThan(0)
+    expect(models).toContain('Gemini 3.6 Flash (Medium)')
+    expect(models).toContain('Gemini 3.6 Flash (High)')
+    expect(models).toContain('Gemini 3.6 Flash (Low)')
+    expect(models).toContain('Gemini 3.6 Flash (Minimal)')
     expect(models).toContain('Gemini 3.1 Pro (High)')
     expect(models).toContain('Gemini 3.5 Flash (Medium)')
   })
@@ -397,6 +401,7 @@ describe('listAntigravityModels', () => {
       })
 
     const models = await listAntigravityModels()
+    expect(models).toContain('Gemini 3.6 Flash (Medium)')
     expect(models).toContain('Gemini 3.1 Pro (High)')
   })
 })

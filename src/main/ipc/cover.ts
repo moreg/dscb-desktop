@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { CoverService } from '../data/cover-service'
+import { CoverPromptService } from '../data/cover-prompt-service'
 import { SettingsRepository } from '../data/settings-repository'
 import { safeHandle } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
@@ -37,7 +38,19 @@ const generateCoverSchema = z.object({
   genreOverride: genreSchema.optional(),
   composition: compositionSchema.optional(),
   styleHint: z.string().max(500).optional(),
+  // 手改后的整段提示词。8000 字符远超模板拼装长度，又低于图像 API 的上限
+  promptOverride: z.string().max(8000).optional(),
   refImagePath: z.string().max(1000).optional()
+})
+
+const extractCoverPromptSchema = z.object({
+  projectId: projectIdSchema,
+  bookName: bookNameSchema,
+  authorName: authorNameSchema,
+  platform: platformSchema,
+  genreOverride: genreSchema.optional(),
+  compositionOverride: compositionSchema.optional(),
+  extraHint: z.string().max(500).optional()
 })
 
 const fileNameSchema = z
@@ -48,8 +61,22 @@ const fileNameSchema = z
 
 export function registerCoverIpc(
   coverService: CoverService,
-  settings: SettingsRepository
+  settings: SettingsRepository,
+  coverPromptService: CoverPromptService
 ): void {
+  /* 从小说内容提炼封面提示词（只调文本模型，不出图） */
+  safeHandle('cover:extractPrompt', async (_e, input: unknown) => {
+    const validated = validateInput(extractCoverPromptSchema, input)
+    return coverPromptService.extract(validated)
+  })
+
+  /* 按模板拼一份提示词（纯函数，不调任何 API）——给编辑框填初值 / 重置用 */
+  safeHandle('cover:buildPrompt', async (_e, input: unknown) => {
+    const validated = validateInput(generateCoverSchema, input)
+    // 重置的语义就是丢掉手改，所以这里显式忽略 promptOverride
+    return coverService.resolvePrompt({ ...validated, promptOverride: undefined })
+  })
+
   /* 生成封面 */
   safeHandle('cover:generate', async (_e, input: unknown) => {
     const validated = validateInput(generateCoverSchema, input)

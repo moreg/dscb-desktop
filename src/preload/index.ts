@@ -38,6 +38,8 @@ import type {
   DeslopResult,
   DeslopRulesBundle,
   GenerateCoverInput,
+  ExtractCoverPromptInput,
+  CoverPromptDraft,
   CoverFile,
   CoverImageConfigSummary,
   CoverImageConfigInput,
@@ -46,9 +48,21 @@ import type {
 
 const api = {
   listProjects: () => ipcRenderer.invoke('library:list'),
+  openProjectWindow: (projectId: string) =>
+    ipcRenderer.invoke('windows:openProject', projectId) as Promise<{
+      ok: boolean
+      focusedExisting: boolean
+    }>,
+  bindProjectWindow: (projectId: string | null) =>
+    ipcRenderer.invoke('windows:bindProject', projectId) as Promise<{
+      ok: boolean
+      focusedExisting: boolean
+    }>,
   scanProjects: () => ipcRenderer.invoke('library:scan'),
   createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
   getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
+  updateProjectInfo: (projectId: string, info: { name: string; description?: string }) =>
+    ipcRenderer.invoke('projects:updateInfo', { projectId, ...info }),
   setBenchmarkBooks: (projectId: string, books: string[]) =>
     ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
   watchProject: (projectId: string) => ipcRenderer.invoke('projects:watch', projectId) as Promise<boolean>,
@@ -955,6 +969,10 @@ const api = {
   },
 
   /* ---- 封面生成（story-cover）---- */
+  extractCoverPrompt: (input: ExtractCoverPromptInput) =>
+    ipcRenderer.invoke('cover:extractPrompt', input) as Promise<CoverPromptDraft>,
+  buildCoverPrompt: (input: GenerateCoverInput) =>
+    ipcRenderer.invoke('cover:buildPrompt', input) as Promise<string>,
   generateCover: (input: GenerateCoverInput) =>
     ipcRenderer.invoke('cover:generate', input) as Promise<CoverFile>,
   listCovers: (projectId: string) =>
