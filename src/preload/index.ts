@@ -273,6 +273,8 @@ const api = {
       .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
       ok: boolean
       error?: string
+      /** 本次是否为续写、以及续写到哪一步；extend 表示这一章还没写完 */
+      continueMode?: 'extend' | 'finish'
     }>
     return Object.assign(result, {
       requestId,
@@ -530,6 +532,18 @@ const api = {
       projectId,
       chapterNumber,
       content
+    }),
+  checkAdjustPlanCompliance: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    items: string[]
+  ) =>
+    ipcRenderer.invoke('write:checkAdjustPlanCompliance', {
+      projectId,
+      chapterNumber,
+      content,
+      items
     }),
   undoChapterSync: (
     projectId: string,

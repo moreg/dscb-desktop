@@ -5,7 +5,10 @@ import type {
   SelfCheckItemResult,
   SelfCheckVerdict
 } from '../../shared/types'
-import { selfCheckHasActionableIssues } from '../../shared/self-check-to-requirements'
+import {
+  isCompletenessItem,
+  selfCheckHasActionableIssues
+} from '../../shared/self-check-to-requirements'
 
 const CATEGORY_LABEL: Record<SelfCheckCategory, string> = {
   continuity: '衔接',
@@ -50,6 +53,11 @@ interface Props {
   /** 紧凑模式（嵌在同步条下） */
   compact?: boolean
   /**
+   * 本章仍在分轮续写中（上轮是 extend），正文是**故意没写完**的半成品。
+   * 完成度类项（核心事件 / 到期伏笔）此时失败属正常，标注出来免得用户误当缺陷去修。
+   */
+  partialChapter?: boolean
+  /**
    * 一键：把失败/留意项生成「按要求重写」指令并打开重写对话框。
    */
   onApplyToRewrite?: () => void
@@ -69,6 +77,7 @@ export default function ChapterSelfCheckPanel(props: Props) {
     rerunLoading,
     defaultExpanded,
     compact,
+    partialChapter,
     onApplyToRewrite,
     onApplyToContinue
   } = props
@@ -164,6 +173,11 @@ export default function ChapterSelfCheckPanel(props: Props) {
       </div>
 
       <p className="self-check-summary muted">{report.summary}</p>
+      {partialChapter ? (
+        <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
+          本章仍在分轮续写中：标「待写完」的项要整章写完才作数，现在失败是正常的，不必为它硬收尾。
+        </p>
+      ) : null}
       <p className="muted" style={{ fontSize: 11, margin: '4px 0 0' }}>
         启发式检查（关键词/章末形态），供参考，不能替代人工通读。
       </p>
@@ -227,6 +241,15 @@ export default function ChapterSelfCheckPanel(props: Props) {
                     <div className="self-check-item-label">
                       <span className="self-check-cat">{CATEGORY_LABEL[item.category]}</span>
                       {item.label}
+                      {partialChapter && isCompletenessItem(item.id) ? (
+                        <span
+                          className="self-check-cat"
+                          style={{ marginLeft: 6 }}
+                          title="本章还没写完，这项要整章写完才作数"
+                        >
+                          待写完
+                        </span>
+                      ) : null}
                     </div>
                     <div className="self-check-item-detail muted">{item.detail}</div>
                   </div>

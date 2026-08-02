@@ -58,7 +58,11 @@ export function normalizePunctuation(input: string): NormalizeResult {
   })
 
   // 双破折号 —— → 视上下文用句号或逗号
-  text = text.replace(/([。！？!?"'」』）)】])——/g, '$1') // 句尾破折号直接删
+  // 句尾破折号直接删（也要计数：不计的话 totalNormChanges 会是 0，日志报"没改"但正文已变）
+  text = text.replace(/([。！？!?"'」』）)】])——/g, (_m, keep: string) => {
+    changes.emDash += 1
+    return keep
+  })
   text = text.replace(/——/g, (match, offset) => {
     changes.emDash += 1
     // 后接句号/感叹号/问号 → 删（已是断句）；否则用逗号
@@ -73,13 +77,27 @@ export function normalizePunctuation(input: string): NormalizeResult {
     return '，'
   })
 
-  // 双连字符 -- → 逗号
-  text = text.replace(/--+/g, () => {
-    changes.doubleHyphen += 1
-    return '，'
-  })
+  // 双连字符 -- → 逗号。整行分割线（--- / *** / ___）豁免：
+  // 扫描器的 isDivider() 就跳过这类行，兜底若照改会把场景分割线变成一个孤零零的「，」。
+  text = text
+    .split('\n')
+    .map((line) =>
+      isDividerLine(line)
+        ? line
+        : line.replace(/--+/g, () => {
+            changes.doubleHyphen += 1
+            return '，'
+          })
+    )
+    .join('\n')
 
   return { text, changes }
+}
+
+/** 整行分割线（与 check-ai-patterns 的 isDivider 同口径，多带一个 \r 容错） */
+function isDividerLine(line: string): boolean {
+  const trimmed = line.trim()
+  return /^-{3,}$/.test(trimmed) || /^[*_]{3,}$/.test(trimmed)
 }
 
 /**
@@ -95,7 +113,11 @@ export function countPunctuationIssues(input: string): number {
   if (emDash) count += emDash.length
   const dash = input.match(/(?<![0-9])—(?!—|[0-9])/g)
   if (dash) count += dash.length
-  const hyphen = input.match(/--+/g)
-  if (hyphen) count += hyphen.length
+  // 与 normalizePunctuation 同口径：整行分割线不算标点问题
+  for (const line of input.split('\n')) {
+    if (isDividerLine(line)) continue
+    const hyphen = line.match(/--+/g)
+    if (hyphen) count += hyphen.length
+  }
   return count
 }

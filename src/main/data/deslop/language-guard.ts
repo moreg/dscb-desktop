@@ -122,8 +122,10 @@ export function guardLanguageLeak(original: string, rewritten: string): Language
     if (reverted === 0) {
       return { text: rewritten, revertedUnits: 0, notes: [] }
     }
-    // 尽量保留原文换行结构：用改写的分隔风格重拼
-    const joiner = rewritten.includes('\n\n') ? '\n\n' : '\n'
+    // 保留原文的分段风格：原文空行分段时必须用 '\n\n' 重拼。
+    // 只看改写结果的话，模型把 '\n\n' 输出成 '\n' 会让回退后的自然段被静默并成一段——
+    // 语言守卫本来是回退到原文，结果顺手把段落结构也改了。
+    const joiner = original.includes('\n\n') || rewritten.includes('\n\n') ? '\n\n' : '\n'
     return { text: fixed.join(joiner), revertedUnits: reverted, notes }
   }
 

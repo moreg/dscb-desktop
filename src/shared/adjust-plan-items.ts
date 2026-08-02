@@ -48,6 +48,39 @@ export function extractMarkdownSection(
   return text || null
 }
 
+interface PlanBlock {
+  heading: string | null
+  body: string
+}
+
+/**
+ * 按 markdown 标题把文本切成块；首个标题前的部分 heading 为 null。
+ * 供兜底解析限定「无标题前缀区 + 落笔要点/修改建议小节」，
+ * 排除分析类小节（理解你的要求 / 原文相关位置 / 风险与取舍 等）的列表。
+ */
+function splitPlanBlocks(text: string): PlanBlock[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const blocks: PlanBlock[] = []
+  let heading: string | null = null
+  let body: string[] = []
+  const flush = (): void => {
+    const b = body.join('\n').trim()
+    if (heading !== null || b) blocks.push({ heading, body: b })
+    body = []
+  }
+  for (const line of lines) {
+    const t = line.trim()
+    if (ANY_HEADING_RE.test(t) && !LIST_ITEM_RE.test(t)) {
+      flush()
+      heading = t
+    } else {
+      body.push(line)
+    }
+  }
+  flush()
+  return blocks
+}
+
 /** 从一段文本中解析列表条目（只取单行列表项） */
 export function parseListItemLines(block: string): string[] {
   const out: string[] = []
@@ -86,7 +119,18 @@ export function parseAdjustPlanItems(plan: string): AdjustPlanCheckItem[] {
   }
 
   if (texts.length === 0) {
-    const all = parseListItemLines(trimmed)
+    // 兜底只接受「无标题前缀区」与「落笔要点/修改建议」小节里的列表，
+    // 排除分析类小节（理解你的要求 / 原文相关位置 / 风险与取舍 等）下的编号/符号列表，
+    // 避免把分析句误抓成可勾选落笔要点。
+    const allowed: string[] = []
+    for (const b of splitPlanBlocks(trimmed)) {
+      if (b.heading === null) {
+        allowed.push(b.body)
+      } else if (ACTION_HEADING_RE.test(b.heading) || SUGGESTION_HEADING_RE.test(b.heading)) {
+        allowed.push(b.body)
+      }
+    }
+    const all = parseListItemLines(allowed.join('\n'))
     // 全文列表往往混有输出要求示例；只有明显多条才当作条目
     if (all.length >= 2) texts = all
   }

@@ -10,6 +10,7 @@ import {
   type ChangeEvent as ReactChangeEvent
 } from 'react'
 import type {
+  AdjustPlanComplianceResult,
   AuditReport,
   ChapterContent,
   ChapterStatus,
@@ -110,6 +111,7 @@ import {
   needsChapterProseFormat
 } from '../../shared/format-chapter-prose'
 import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
+import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
 
 interface Props {
   projectId: string
@@ -545,10 +547,15 @@ export default function ChapterEditor({
   const [adjustInstruction, setAdjustInstruction] = useState('')
   /** 按要求重写：AI 给出的修改建议（可编辑，确认后作为落笔方案） */
   const [adjustPlan, setAdjustPlan] = useState('')
-  /** 从建议中解析出的可勾选落笔要点（默认全选） */
+  /** 从建议中解析出的可勾选落笔要点（默认全选；可编辑文字/增删） */
   const [adjustPlanChecks, setAdjustPlanChecks] = useState<
     { id: string; text: string; checked: boolean }[]
   >([])
+  /** 手动新增条目用自增 id（区别于解析出的 item-N） */
+  const adjustPlanManualIdRef = useRef(0)
+  /** 落笔要点达成度核验：落笔后逐条判定勾选要点是否真落地 */
+  const [complianceReport, setComplianceReport] = useState<AdjustPlanComplianceResult | null>(null)
+  const [complianceChecking, setComplianceChecking] = useState(false)
   const [adjustPlanning, setAdjustPlanning] = useState(false)
   const [adjusting, setAdjusting] = useState(false)
   const adjustPlanRef = useRef(0)
@@ -557,6 +564,23 @@ export default function ChapterEditor({
     const items = parseAdjustPlanItems(planText)
     setAdjustPlanChecks(items.map((it) => ({ ...it, checked: true })))
   }
+  /** 就地编辑某条要点文字 */
+  const patchAdjustPlanItem = (id: string, text: string) => {
+    setAdjustPlanChecks((xs) => xs.map((x) => (x.id === id ? { ...x, text } : x)))
+  }
+  /** 删除某条要点 */
+  const removeAdjustPlanItem = (id: string) => {
+    setAdjustPlanChecks((xs) => xs.filter((x) => x.id !== id))
+  }
+  /** 追加一条手动要点（默认勾选） */
+  const addAdjustPlanItem = () => {
+    const id = `manual-${++adjustPlanManualIdRef.current}`
+    setAdjustPlanChecks((xs) => [...xs, { id, text: '', checked: true }])
+  }
+  /** 已勾选且非空文本的要点数：空文本条目不参与落笔，计数与落笔口径一致 */
+  const checkedNonEmptyPlanCount = adjustPlanChecks.filter(
+    (x) => x.checked && x.text.trim().length > 0
+  ).length
   // 正文追问（chat）：全书视野回答写作疑问，不修改正文
   const [showAskDialog, setShowAskDialog] = useState(false)
   const [askQuestion, setAskQuestion] = useState('')
@@ -567,6 +591,14 @@ export default function ChapterEditor({
   const [deslopRunning, setDeslopRunning] = useState(false)
   const [deslopLog, setDeslopLog] = useState('')
   const [deslopResult, setDeslopResult] = useState<DeslopResult | null>(null)
+  /** 已请求停止、正在等主进程收尾（此时仍要等结果：已完成的分块会带回来） */
+  const [deslopStopping, setDeslopStopping] = useState(false)
+  /**
+   * 本轮润色开始时的正文快照。
+   * diff 必须拿它当基线：用实时 draft 的话，润色期间用户编辑了正文，
+   * 面板显示的差异就不是这次润色真正做的改动。
+   */
+  const [deslopBefore, setDeslopBefore] = useState<string | null>(null)
   const [deslopDiffFull, setDeslopDiffFull] = useState(false)
   const [deslopCollapsedGates, setDeslopCollapsedGates] = useState<Set<string>>(new Set())
   const [tempContextInput, setTempContextInput] = useState('')
@@ -617,6 +649,13 @@ export default function ChapterEditor({
     selfCheck?: import('../../shared/types').ChapterSelfCheckReport | null
   } | null>(null)
   const [selfCheckLoading, setSelfCheckLoading] = useState(false)
+  /**
+   * 上一次续写的模式（主进程按细纲字数预估算出）。
+   * 'extend' = 这一章是**故意还没写完**的：写后自检里「核心事件未完成」「到期伏笔未回收」
+   * 这类完成度项此时必然失败，属正常状态，不该按整章判死、更不该灌成下一轮的硬性要求。
+   * 切章 / 整章重写后作废。
+   */
+  const [lastContinueMode, setLastContinueMode] = useState<'extend' | 'finish' | null>(null)
   const [undoSyncLoading, setUndoSyncLoading] = useState(false)
   /** 会话内同步撤销栈（仅当前编辑会话；切章清空） */
   const syncHistoryRef = useRef<SyncHistoryEntry[]>([])
@@ -854,7 +893,11 @@ export default function ChapterEditor({
    */
   const askHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const deslopHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
-  /** 去 AI 味代数：点「停止」或重新开跑时 +1，丢弃过期 token/结果 */
+  /**
+   * 去 AI 味代数：切章或重新开跑时 +1，丢弃过期 token/结果。
+   * 注意「停止润色」**不**加代数——主进程取消后会把已完成的分块合并成结果返回，
+   * 作废本轮就等于把它扔了（见 stopDeslop）。
+   */
   const deslopGenRef = useRef(0)
   const castHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const abortSideStreams = (): void => {
@@ -948,6 +991,8 @@ export default function ChapterEditor({
     setDeslopResult(null)
     setDeslopLog('')
     setDeslopRunning(false)
+    setDeslopStopping(false)
+    setDeslopBefore(null)
     setDeslopScanning(false)
     // P9-A：从 localStorage 加载该章的持久化改写历史（如果存在）
     const storage = getLocalStorage()
@@ -991,6 +1036,7 @@ export default function ChapterEditor({
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
     setAutoSyncSeed(null)
     setPostWriteSync(null)
+    setLastContinueMode(null)
     setSkipMemoryOnAutoSyncAll(false)
     setFlowSyncTrigger(0)
     // 质检报告属于旧章正文，必须跟着切章作废。
@@ -999,6 +1045,9 @@ export default function ChapterEditor({
     // 违例，且「应用/全部应用」仍可点——违例多是「嘴角勾起」这类高频套路短语，在新章
     // 里照样能匹配上，于是旧章的改写被塞进新章的句子，无声改坏正文。
     setAutoAudit(null)
+    // 同理：落笔要点核验属于旧章正文，切章一并作废
+    setComplianceReport(null)
+    setComplianceChecking(false)
     // 同理：续写完成时面板是自动弹开的（见 aiGenerate），切章后不该继续开着展示旧结果
     setFlowPanelOpen(false)
     // 切章：从 localStorage 恢复撤销栈 + 失败队列
@@ -1596,6 +1645,9 @@ export default function ChapterEditor({
     // 作废本轮 gen / plan，后续 token 全部丢弃
     ++genRef.current
     ++adjustPlanRef.current
+    // 取消即作废正文改动：后台跑着的落笔要点核验（若有）一并失效
+    setComplianceReport(null)
+    setComplianceChecking(false)
     const restore = preStreamDraftRef.current
     // 续写 / 落笔会改正文，取消时回滚；出建议不改正文
     if (restore != null && (generating || adjusting)) {
@@ -1649,9 +1701,15 @@ export default function ChapterEditor({
     preStreamDraftRef.current = initialDraft
     setFlowPanelOpen(false)
     setAutoAudit(null)
+    // 续写会用全新正文替换整章：上一轮落笔的要点核验（结果/进行中）一并作废。
+    // 不清会导致核验完成时 genRef 已变、结果被丢弃，但 complianceChecking 卡在 true。
+    setComplianceReport(null)
+    setComplianceChecking(false)
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
+    // 本轮模式由主进程回包给出（依赖细纲字数预估，前端算不出）；失败/取消时保持已清空
+    setLastContinueMode(null)
     setSkipMemoryOnAutoSyncAll(false)
     // 续写会用全新正文替换整章，旧的"已应用改写"记录（含 oldSnippet/newText、
     // 用于流程面板 AI 审稿建议折叠区的 applied 标记）都对不上新正文了。
@@ -1737,6 +1795,8 @@ export default function ChapterEditor({
       // 关键：即使 done 事件尚未到达 / 丢失，也必须结束 generating，否则会永久停在「停止生成」
       streamCompletedRef.current = true
       releaseIfMine()
+      // extend：本章仍是分轮续写的半成品，写后自检的完成度项据此降级（见 lastContinueMode）
+      setLastContinueMode(result.continueMode ?? null)
       // 标记终态：此后 stream 回调不得再 setDraft
       editorFinalized = true
       // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
@@ -1927,9 +1987,14 @@ export default function ChapterEditor({
         return
       }
       if (adjustPlanChecks.length > 0) {
+        // 空文本要点（用户改空/新增未填）不参与落笔：与 buildConfirmedPlanFromSelection
+        // 的过滤口径一致。若不滤掉，selected=[''] 会经它滤空返回 ''，导致 confirmedPlan
+        // 为空 → 落笔意外退化回"按追问原句全量执行"，勾选机制失效。
         const selected = selectedPlanTexts(adjustPlanChecks)
+          .map((t) => t.trim())
+          .filter(Boolean)
         if (selected.length === 0) {
-          setAlertInfo({ message: '请至少勾选一条落笔要点，或点「全选」后再落笔' })
+          setAlertInfo({ message: '请至少勾选一条非空的落笔要点，或点「全选」后再落笔' })
           return
         }
         confirmedPlan = buildConfirmedPlanFromSelection(adjustPlan, selected)
@@ -1940,6 +2005,15 @@ export default function ChapterEditor({
     }
 
     ++adjustPlanRef.current
+    // 落笔前快照本次勾选的要点文案：落笔完成后据此做达成度核验
+    // （此时先取好，下面 setAdjustPlanChecks([]) 清空不影响；trim+过滤与
+    // 下方落笔的 confirmedPlan 口径一致，避免空白条目送进核验）
+    const confirmedPlanItems =
+      usePlan && adjustPlanChecks.length > 0
+        ? selectedPlanTexts(adjustPlanChecks)
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : []
     // 改前自检：落笔后自动复检并对比改善幅度
     const previousSelfCheck =
       postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
@@ -1951,6 +2025,8 @@ export default function ChapterEditor({
     userAbortedRef.current = false
     setFlowPanelOpen(false)
     setAutoAudit(null)
+    setComplianceReport(null)
+    setComplianceChecking(false)
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
@@ -2047,6 +2123,10 @@ export default function ChapterEditor({
       void runPostGenerateMemorySync(myGen, contentForPost, {
         previousSelfCheck
       })
+      // 落笔后：要点达成度核验（仅当走了勾选落笔路径）
+      if (confirmedPlanItems.length > 0) {
+        void runAdjustPlanCompliance(myGen, contentForPost, confirmedPlanItems)
+      }
     } catch {
       if (genRef.current === myGen && sessionEpochRef.current === myEpoch) {
         setDraft(sourceDraft)
@@ -2172,6 +2252,47 @@ export default function ChapterEditor({
         message: `自动质检未跑成功（${(err as Error)?.message ?? '未知错误'}）；正文已写入，可在流程面板点「重新质检」`,
         type: 'warning'
       })
+    }
+  }
+
+  /**
+   * 落笔要点达成度核验：落笔后逐条判定勾选的落笔要点是否在正文中有可见落地。
+   * 失败/解析兜底会在后端判为全部未落实；这里只负责展示与提示。
+   */
+  const runAdjustPlanCompliance = async (
+    myGen: number,
+    finalDraft: string,
+    items: string[]
+  ) => {
+    if (items.length === 0) return
+    if (genRef.current !== myGen) return
+    setComplianceChecking(true)
+    try {
+      const report = await window.api.checkAdjustPlanCompliance(
+        projectId,
+        chapterNumber,
+        finalDraft,
+        items
+      )
+      if (genRef.current !== myGen) return
+      setComplianceReport(report)
+      const okCount = report.results.length - report.failCount
+      setUndoToast({
+        message:
+          report.failCount === 0
+            ? `落笔要点核验：${okCount}/${report.results.length} 条已落实 ✅`
+            : `落笔要点核验：${okCount}/${report.results.length} 条已落实，${report.failCount} 条未落实`,
+        type: report.failCount === 0 ? 'success' : 'error'
+      })
+    } catch (err) {
+      if (genRef.current !== myGen) return
+      setComplianceReport(null)
+      setUndoToast({
+        message: `落笔要点核验未跑成功（${(err as Error)?.message ?? '未知错误'}）`,
+        type: 'warning'
+      })
+    } finally {
+      if (genRef.current === myGen) setComplianceChecking(false)
     }
   }
 
@@ -2567,7 +2688,8 @@ export default function ChapterEditor({
     const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
     const text = buildTempRequirementsFromSelfCheck(sc, {
       mode: 'rewrite',
-      chapterNumber
+      chapterNumber,
+      partialChapter: lastContinueMode === 'extend'
     })
     if (!text.trim()) {
       setUndoToast({ message: '当前自检无失败/留意项，无需改正文', type: 'info' })
@@ -2583,11 +2705,33 @@ export default function ChapterEditor({
     })
   }
 
+  /** 流程面板：落笔要点核验未落实 → 一键重开「按要求重写」框补改 */
+  const applyFailedComplianceToRewrite = () => {
+    const failed = complianceReport?.results?.filter((r) => !r.ok) ?? []
+    if (failed.length === 0) {
+      setUndoToast({ message: '落笔要点均已落实，无需补改', type: 'info' })
+      return
+    }
+    const text =
+      '【按落笔要点核验补改以下未落实项】\n' +
+      failed.map((r, i) => `${i + 1}. ${r.text}${r.detail ? `（${r.detail}）` : ''}`).join('\n') +
+      '\n请逐条补齐，能局部修补就局部修补，不要重写无关段落。'
+    setAdjustInstruction(text)
+    setAdjustPlan('')
+    setAdjustPlanChecks([])
+    setShowAdjustDialog(true)
+    setUndoToast({
+      message: '已填入未落实的落笔要点：可直接出建议或确认落笔',
+      type: 'success'
+    })
+  }
+
   const applySelfCheckToContinue = () => {
     const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
     const text = buildTempRequirementsFromSelfCheck(sc, {
       mode: 'continue',
-      chapterNumber
+      chapterNumber,
+      partialChapter: lastContinueMode === 'extend'
     })
     if (!text.trim()) {
       setUndoToast({ message: '当前自检无失败/留意项', type: 'info' })
@@ -2763,7 +2907,8 @@ export default function ChapterEditor({
   /** 去 AI 味结果：改动块 + 首差异窗口 + 明细（LLM 漏写时前端再 diff 一次） */
   const deslopDiffView = useMemo(() => {
     if (!deslopResult) return null
-    const before = draft
+    // 基线用开跑时的快照，不用实时 draft：否则润色期间的手动编辑会混进"本次润色的改动"里
+    const before = deslopBefore ?? draft
     const after = deslopResult.rewritten
     const window = findFirstDiffWindow(before, after, 600)
     const hunks = listChangeHunks(before, after, 20)
@@ -2775,9 +2920,11 @@ export default function ChapterEditor({
       window,
       hunks,
       summary,
-      identical: before === after
+      identical: before === after,
+      /** 润色期间正文被改过：点「应用」会覆盖这些编辑，得先警告 */
+      staleBaseline: deslopBefore !== null && deslopBefore !== draft
     }
-  }, [deslopResult, draft])
+  }, [deslopResult, deslopBefore, draft])
 
   /** 去 AI 味：扫描（确定性，不调 LLM）→ 弹报告 */
   const startDeslopScan = async (): Promise<void> => {
@@ -2804,11 +2951,13 @@ export default function ChapterEditor({
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
     }
-    // 新一轮润色：作废上一次「停止」后的残留回调/结果
+    // 新一轮润色：作废上一轮（切章/上一次运行）的残留回调与结果
     const myGen = ++deslopGenRef.current
     setDeslopRunning(true)
+    setDeslopStopping(false)
     setDeslopLog('')
     setDeslopResult(null)
+    setDeslopBefore(draft)
     const myEpoch = sessionEpochRef.current
     try {
       const handle = window.api.deslopStream(projectId, draft, levelOverride, (token, done) => {
@@ -2828,26 +2977,36 @@ export default function ChapterEditor({
       if (deslopGenRef.current !== myGen) return
       if (sessionEpochRef.current !== myEpoch) return
       const msg = (err as Error).message ?? ''
-      if (!msg.includes('LLM_ABORTED')) {
+      if (msg.includes('LLM_ABORTED')) {
+        // 单块（未切块）的正文取消后主进程直接抛错，没有可保留的部分结果
+        setDeslopLog((l) => `${l}\n🛑 已停止：本次未产出可用结果，正文保持原样。\n`)
+      } else {
         setAlertInfo({ message: `去 AI 味失败：${friendlyLlmError(msg)}` })
       }
     } finally {
       if (deslopGenRef.current === myGen) {
         deslopHandleRef.current = null
-        if (sessionEpochRef.current === myEpoch) setDeslopRunning(false)
+        if (sessionEpochRef.current === myEpoch) {
+          setDeslopRunning(false)
+          setDeslopStopping(false)
+        }
       }
     }
   }
 
-  /** 停止进行中的去 AI 味润色（保留已生成日志，不产出结果） */
+  /**
+   * 停止进行中的去 AI 味润色。
+   *
+   * 只发 abort、不作废本轮：长文分块时主进程会把「已完成的块保留 + 未处理的块补原文」
+   * 合并成结果正常返回。之前这里先 `deslopGenRef.current += 1`，那个结果和收尾日志
+   * 全被丢弃，用户跑了十分钟点停止等于一无所获。收尾很快（剩下的块只扫描不调 LLM）。
+   */
   const stopDeslop = (): void => {
-    // 先作废本轮：后续 token / 完成回调一律丢弃
-    deslopGenRef.current += 1
     const handle = deslopHandleRef.current
-    deslopHandleRef.current = null
-    void handle?.abort().catch(() => undefined)
-    setDeslopRunning(false)
-    setDeslopLog((l) => (l ? `${l}\n\n🛑 已停止润色（不产出结果）\n` : '🛑 已停止润色\n'))
+    if (!handle) return
+    setDeslopStopping(true)
+    setDeslopLog((l) => `${l}\n\n🛑 已请求停止：正在收尾，已完成的分块会保留下来供确认…\n`)
+    void handle.abort().catch(() => undefined)
   }
 
   /** 应用去 AI 味结果到正文 */
@@ -2861,6 +3020,7 @@ export default function ChapterEditor({
     setDeslopResult(null)
     setDeslopScanReport(null)
     setDeslopLog('')
+    setDeslopBefore(null)
   }
 
   const startDetectCast = async () => {
@@ -2937,6 +3097,58 @@ export default function ChapterEditor({
 
   const appearing = useMemo(() => data?.meta.appearingCharacters ?? [], [data])
   const appearingSet = useMemo(() => new Set(appearing), [appearing])
+
+  /** 本章生成强度建议（按细纲情绪/爽点动态计算，见 shared/chapter-strength-suggestion） */
+  const strengthSuggestion = useMemo(() => suggestChapterStrength(data?.meta), [data])
+
+  /**
+   * 本章强度建议的当前值/建议值/是否偏离。
+   * applyValue 是一键采用时要写入 updateChapterStrength 的值。
+   */
+  const strengthHint = useMemo<{
+    current: string
+    suggested: string
+    applyValue: string
+    diverged: boolean
+    label: string
+  } | null>(() => {
+    if (!chapterProvider) return null
+    const p = chapterProvider.protocol
+    if (p === 'openai-responses') {
+      const suggested = strengthSuggestion.effort
+      const current = chapterProvider.reasoningEffort ?? 'medium'
+      return { current, suggested, applyValue: suggested, diverged: current !== suggested, label: suggested }
+    }
+    if (p === 'codex') {
+      const suggested = strengthSuggestion.effort
+      return { current: codexGlobalEffort, suggested, applyValue: suggested, diverged: codexGlobalEffort !== suggested, label: suggested }
+    }
+    if (p === 'antigravity') {
+      const suggested = strengthSuggestion.tier
+      const variants = antigravityTierVariants(chapterProvider.model, chapterAgyModels)
+      const target = variants.find((m) => m.match(/\((Low|Medium|High)\)$/)?.[1] === suggested)
+      const currentTier = chapterProvider.model.match(/\((Low|Medium|High)\)$/)?.[1] ?? ''
+      return {
+        current: currentTier,
+        suggested,
+        applyValue: target ?? '',
+        diverged: currentTier !== suggested,
+        label: `${suggested}（切换实际 Gemini 模型）`
+      }
+    }
+    if (p === 'openai' || p === 'anthropic') {
+      const suggested = strengthSuggestion.temperature
+      const current = chapterProvider.temperature ?? 0.8
+      return {
+        current: current.toFixed(1),
+        suggested: suggested.toFixed(1),
+        applyValue: String(suggested),
+        diverged: Math.abs(current - suggested) > 0.001,
+        label: suggested.toFixed(1)
+      }
+    }
+    return null
+  }, [chapterProvider, codexGlobalEffort, chapterAgyModels, strengthSuggestion])
 
   const toggleCast = async (id: string) => {
     if (!data) return
@@ -3756,9 +3968,26 @@ export default function ChapterEditor({
                     <option key={effort} value={effort}>{effort}</option>
                   ))}
                 </select>
-                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  建议本章：medium
-                </span>
+                {strengthHint ? (
+                  <button
+                    type="button"
+                    className="meta strength-hint"
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: 'nowrap',
+                      color: strengthHint.diverged ? 'var(--warning)' : 'var(--ink-3)',
+                      fontWeight: strengthHint.diverged ? 600 : 400
+                    }}
+                    title={`${strengthSuggestion.reason}${strengthHint.diverged ? '（点击采用建议值）' : '（已是建议值）'}`}
+                    onClick={() => void updateChapterStrength(strengthHint.applyValue)}
+                    disabled={!strengthHint.diverged || chapterStrengthSaving || generating || adjusting}
+                  >
+                    建议本章：{strengthHint.label}
+                    <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.85 }}>
+                      {strengthSuggestion.reason}
+                    </span>
+                  </button>
+                ) : null}
               </>
             ) : chapterProvider.protocol === 'codex' ? (
               <>
@@ -3777,9 +4006,26 @@ export default function ChapterEditor({
                     <option key={effort} value={effort}>{effort}</option>
                   ))}
                 </select>
-                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  建议本章：medium
-                </span>
+                {strengthHint ? (
+                  <button
+                    type="button"
+                    className="meta strength-hint"
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: 'nowrap',
+                      color: strengthHint.diverged ? 'var(--warning)' : 'var(--ink-3)',
+                      fontWeight: strengthHint.diverged ? 600 : 400
+                    }}
+                    title={`${strengthSuggestion.reason}${strengthHint.diverged ? '（点击采用建议值）' : '（已是建议值）'}`}
+                    onClick={() => void updateChapterStrength(strengthHint.applyValue)}
+                    disabled={!strengthHint.diverged || chapterStrengthSaving || generating || adjusting}
+                  >
+                    建议本章：{strengthHint.label}
+                    <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.85 }}>
+                      {strengthSuggestion.reason}
+                    </span>
+                  </button>
+                ) : null}
               </>
             ) : chapterProvider.protocol === 'antigravity' ? (
               <>
@@ -3804,9 +4050,26 @@ export default function ChapterEditor({
                     无可切换档位
                   </span>
                 )}
-                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  建议本章：High（切换实际 Gemini 模型）
-                </span>
+                {strengthHint ? (
+                  <button
+                    type="button"
+                    className="meta strength-hint"
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: 'nowrap',
+                      color: strengthHint.diverged ? 'var(--warning)' : 'var(--ink-3)',
+                      fontWeight: strengthHint.diverged ? 600 : 400
+                    }}
+                    title={`${strengthSuggestion.reason}${strengthHint.diverged ? '（点击采用建议值）' : '（已是建议值）'}`}
+                    onClick={() => void updateChapterStrength(strengthHint.applyValue)}
+                    disabled={!strengthHint.diverged || chapterStrengthSaving || generating || adjusting}
+                  >
+                    建议本章：{strengthHint.label}
+                    <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.85 }}>
+                      {strengthSuggestion.reason}
+                    </span>
+                  </button>
+                ) : null}
               </>
             ) : chapterProvider.protocol === 'openai' || chapterProvider.protocol === 'anthropic' ? (
               <>
@@ -3825,9 +4088,26 @@ export default function ChapterEditor({
                     <option key={temperature} value={temperature}>{temperature.toFixed(1)}</option>
                   ))}
                 </select>
-                <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  建议本章：0.8
-                </span>
+                {strengthHint ? (
+                  <button
+                    type="button"
+                    className="meta strength-hint"
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: 'nowrap',
+                      color: strengthHint.diverged ? 'var(--warning)' : 'var(--ink-3)',
+                      fontWeight: strengthHint.diverged ? 600 : 400
+                    }}
+                    title={`${strengthSuggestion.reason}${strengthHint.diverged ? '（点击采用建议值）' : '（已是建议值）'}`}
+                    onClick={() => void updateChapterStrength(strengthHint.applyValue)}
+                    disabled={!strengthHint.diverged || chapterStrengthSaving || generating || adjusting}
+                  >
+                    建议本章：{strengthHint.label}
+                    <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.85 }}>
+                      {strengthSuggestion.reason}
+                    </span>
+                  </button>
+                ) : null}
               </>
             ) : (
               <span className="meta" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
@@ -4202,6 +4482,10 @@ export default function ChapterEditor({
           selfCheckReport={
             postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
           }
+          partialChapter={lastContinueMode === 'extend'}
+          complianceReport={complianceReport}
+          complianceChecking={complianceChecking}
+          onApplyFailedComplianceToRewrite={applyFailedComplianceToRewrite}
           onRerunSelfCheck={() => void rerunSelfCheck()}
           selfCheckLoading={selfCheckLoading}
           onApplySelfCheckToRewrite={applySelfCheckToRewrite}
@@ -4846,6 +5130,7 @@ export default function ChapterEditor({
               setDeslopScanReport(null)
               setDeslopResult(null)
               setDeslopLog('')
+              setDeslopBefore(null)
             }
           }}
         >
@@ -4922,14 +5207,15 @@ export default function ChapterEditor({
                     <button
                       className="btn btn-danger"
                       onClick={stopDeslop}
-                      title="停止润色（不产出结果；多轮润色可能耗时数分钟）"
+                      disabled={deslopStopping}
+                      title="停止润色（长文分块时会保留已完成的分块结果供确认；多轮润色可能耗时数分钟）"
                     >
-                      ⏹ 停止润色
+                      {deslopStopping ? '停止中…' : '⏹ 停止润色'}
                     </button>
                   ) : null}
                   <button
                     className="btn btn-ghost"
-                    onClick={() => { setDeslopScanReport(null); setDeslopLog('') }}
+                    onClick={() => { setDeslopScanReport(null); setDeslopLog(''); setDeslopBefore(null) }}
                     disabled={deslopRunning}
                   >
                     取消
@@ -4945,15 +5231,18 @@ export default function ChapterEditor({
               </div>
             ) : null}
 
-            {/* 润色进度 */}
-            {deslopRunning && deslopLog ? (
+            {/* 润色进度 —— 跑完也要留着：拒绝原因、语言守卫回退、标点兜底统计、
+                复扫剩余 blocking 的具体行都只在这里，随 deslopRunning 一起消失的话
+                「结果没改动」的时候用户完全看不到为什么 */}
+            {deslopLog ? (
               <pre
                 style={{
                   background: 'var(--bg-code, #1e1e2e)',
                   color: 'var(--fg-code, #cdd6f4)',
                   padding: 12,
                   borderRadius: 8,
-                  maxHeight: 480,
+                  // 跑完后收窄，把版面让给下面的 diff 预览（日志仍可滚动回看）
+                  maxHeight: deslopRunning ? 480 : 200,
                   overflow: 'auto',
                   fontSize: 12,
                   whiteSpace: 'pre-wrap',
@@ -5012,7 +5301,13 @@ export default function ChapterEditor({
 
                 {deslopDiffView?.identical ? (
                   <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--ink-2)' }}>
-                    正文与改写前一致（可能仅做了扫描收尾、未改写到可见内容）。
+                    正文与改写前一致（可能仅做了扫描收尾、未改写到可见内容）。上方润色日志里有每一遍的处理结果和被拒绝的原因。
+                  </p>
+                ) : null}
+
+                {deslopDiffView?.staleBaseline ? (
+                  <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--danger)' }}>
+                    ⚠ 润色期间你编辑过正文。这份结果是基于开跑时的版本改的，点「应用」会覆盖期间的编辑（可用 Ctrl+Z 撤回）。
                   </p>
                 ) : null}
 
@@ -5170,7 +5465,7 @@ export default function ChapterEditor({
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
                   <button
                     className="btn btn-ghost"
-                    onClick={() => { setDeslopResult(null); setDeslopLog('') }}
+                    onClick={() => { setDeslopResult(null); setDeslopLog(''); setDeslopBefore(null) }}
                   >
                     放弃
                   </button>
@@ -5178,7 +5473,13 @@ export default function ChapterEditor({
                     className="btn btn-primary"
                     onClick={applyDeslopResult}
                     disabled={deslopDiffView?.identical}
-                    title={deslopDiffView?.identical ? '无改动可应用' : undefined}
+                    title={
+                      deslopDiffView?.identical
+                        ? '无改动可应用'
+                        : deslopDiffView?.staleBaseline
+                          ? '注意：会覆盖润色期间对正文的手动编辑'
+                          : undefined
+                    }
                   >
                     应用到正文
                   </button>
@@ -5357,8 +5658,7 @@ export default function ChapterEditor({
                           勾选要落笔的要点
                           {adjustPlanChecks.length > 0 ? (
                             <span style={{ fontWeight: 400, marginLeft: 6 }}>
-                              已选 {adjustPlanChecks.filter((x) => x.checked).length}/
-                              {adjustPlanChecks.length}
+                              已选 {checkedNonEmptyPlanCount}/{adjustPlanChecks.length}
                             </span>
                           ) : null}
                         </label>
@@ -5368,7 +5668,7 @@ export default function ChapterEditor({
                             className="btn btn-ghost btn-sm"
                             disabled={adjusting || !adjustPlan.trim()}
                             onClick={() => syncAdjustPlanChecks(adjustPlan)}
-                            title="若你改过上方建议文案，可重新提取列表"
+                            title="按上方建议文案重新解析列表（会重置你对要点的手动编辑与勾选）"
                           >
                             重新提取
                           </button>
@@ -5422,8 +5722,8 @@ export default function ChapterEditor({
                               style={{
                                 display: 'flex',
                                 gap: 10,
-                                alignItems: 'flex-start',
-                                padding: '10px 12px',
+                                alignItems: 'center',
+                                padding: '8px 12px',
                                 borderBottom:
                                   idx < adjustPlanChecks.length - 1
                                     ? '1px solid var(--line)'
@@ -5441,32 +5741,67 @@ export default function ChapterEditor({
                                     )
                                   )
                                 }
-                                style={{ marginTop: 3, flexShrink: 0 }}
+                                style={{ flexShrink: 0 }}
                                 id={`adjust-plan-check-${item.id}`}
                               />
-                              <label
-                                htmlFor={`adjust-plan-check-${item.id}`}
+                              <span
                                 style={{
-                                  fontSize: 13.5,
-                                  lineHeight: 1.5,
-                                  color: item.checked ? 'var(--ink)' : 'var(--ink-3)',
-                                  cursor: adjusting ? 'default' : 'pointer',
-                                  flex: 1
+                                  color: 'var(--ink-3)',
+                                  fontSize: 12,
+                                  flexShrink: 0,
+                                  width: 22
                                 }}
                               >
-                                <span
-                                  style={{
-                                    color: 'var(--ink-3)',
-                                    fontSize: 12,
-                                    marginRight: 6
-                                  }}
-                                >
-                                  {idx + 1}.
-                                </span>
-                                {item.text}
-                              </label>
+                                {idx + 1}.
+                              </span>
+                              <input
+                                type="text"
+                                className="textarea"
+                                value={item.text}
+                                disabled={adjusting}
+                                onChange={(e) => patchAdjustPlanItem(item.id, e.target.value)}
+                                placeholder="修改这条要点的文字…"
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  fontSize: 13.5,
+                                  lineHeight: 1.4,
+                                  padding: '6px 8px',
+                                  borderRadius: 'var(--r-sm)',
+                                  background: item.checked ? 'var(--surface)' : 'var(--surface-2)',
+                                  border: '1px solid var(--line)',
+                                  color: item.checked ? 'var(--ink)' : 'var(--ink-3)'
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                disabled={adjusting}
+                                onClick={() => removeAdjustPlanItem(item.id)}
+                                title="删除这条要点"
+                                style={{ flexShrink: 0 }}
+                              >
+                                ✕
+                              </button>
                             </li>
                           ))}
+                          <li
+                            style={{
+                              display: 'flex',
+                              gap: 10,
+                              padding: '8px 12px'
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled={adjusting}
+                              onClick={addAdjustPlanItem}
+                              style={{ width: '100%' }}
+                            >
+                              ＋ 新增一条落笔要点
+                            </button>
+                          </li>
                         </ul>
                       ) : (
                         <p
@@ -5548,8 +5883,7 @@ export default function ChapterEditor({
                       adjusting ||
                       !adjustInstruction.trim() ||
                       !adjustPlan.trim() ||
-                      (adjustPlanChecks.length > 0 &&
-                        adjustPlanChecks.every((x) => !x.checked))
+                      (adjustPlanChecks.length > 0 && checkedNonEmptyPlanCount === 0)
                     }
                     title={
                       adjustPlanChecks.length > 0
@@ -5560,7 +5894,7 @@ export default function ChapterEditor({
                     {adjusting
                       ? '落笔中…'
                       : adjustPlanChecks.length > 0
-                        ? `确认落笔（${adjustPlanChecks.filter((x) => x.checked).length}/${adjustPlanChecks.length}）`
+                        ? `确认落笔（${checkedNonEmptyPlanCount}/${adjustPlanChecks.length}）`
                         : '确认落笔'}
                   </button>
                 </>

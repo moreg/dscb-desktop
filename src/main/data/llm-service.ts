@@ -17,6 +17,11 @@ export interface GenerateOptions {
    * 未提供时退化为旧行为（仅 user 单条消息）。
    */
   systemPrompt?: string
+  /**
+   * 以下两个字段由 **WriteService 消费**（拼进 user prompt），provider 层一律忽略。
+   * 它们借 GenerateOptions 当传参通道，是因为 IPC 层构造的就是这个对象——
+   * 别误以为是死字段删掉，删了续写就拿不到已写前部了。
+   */
   /** 临时续写上下文指导语 */
   tempContext?: string
   /** 本章已写正文前部（续写用） */
@@ -151,6 +156,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   scan: 'auxiliary',
   // 封面提示词提炼：读大纲/人物卡/正文，属分析类，与其它辅助提取同一 provider
   coverPrompt: 'auxiliary',
+  // 学习库：本地扫描封面后，由 LLM 汇总补充规则
+  coverLearn: 'library',
   ask: 'ask'
 }
 

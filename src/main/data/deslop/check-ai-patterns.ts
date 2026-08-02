@@ -290,6 +290,27 @@ function scanProsePatterns(proseLines: ProseLine[]): DeslopFinding[] {
       })
     }
 
+    // ellipsis（省略号，advisory）
+    // 铁律 9 明令正文禁用 ……/…，normalize-punctuation 也会机械替换成句号；
+    // 但若这里不产出 finding，「只有省略号问题」的正文会扫出 0 条 —— 扫描报告显示"无问题"、
+    // 前端「开始润色」按钮因 findings.length === 0 被禁用，用户根本没法清理。
+    // 用 advisory 而非 blocking：修复是确定性的（不需要 LLM 复扫清零），只需把 Gate D 纳入处理范围。
+    const ellipsisRe = /……|…/g
+    let ellipsis: RegExpExecArray | null
+    while ((ellipsis = ellipsisRe.exec(text)) !== null) {
+      findings.push({
+        line: lineNo,
+        column: ellipsis.index + 1,
+        type: 'ellipsis',
+        severity: 'advisory',
+        gate: 'D',
+        message: '省略号停顿：正文禁用 ……/…；改用句号、逗号、短句或动作断句（未改写的会由标点兜底替换为句号）。',
+        excerpt: compact(
+          text.slice(Math.max(0, ellipsis.index - 8), ellipsis.index + ellipsis[0].length + 8)
+        )
+      })
+    }
+
     // long-paragraph（advisory）
     if (trimmed.length > LONG_PARAGRAPH_CHARS) {
       findings.push({

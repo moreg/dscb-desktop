@@ -598,3 +598,78 @@ describe('splitForDeslop 单行超长', () => {
     expect(log.join('')).toContain('含超长单行')
   })
 })
+
+describe('Phase 3.5 收尾标点兜底（无条件执行）', () => {
+  it('LLM 原样退回时，省略号/破折号仍被确定性清理', async () => {
+    // 旧行为：兜底只在"某一遍改写被接受且文本有变"这条路径上跑；
+    // 模型把原文原样退回来，标点问题就一直留着。
+    const text = '他站在门口。\n「我……我不知道。」\n她没回答——转身走了。'
+    const mock = makeMockLlm([`【改写后】\n${text}`])
+    const result = await new DeslopService(mock).deslop(text)
+    expect(result.rewritten).not.toContain('……')
+    expect(result.rewritten).not.toContain('——')
+    // 改动要进 changeSummary，不能只留在会被关掉的日志里
+    expect(result.changeSummary.some((c) => c.includes('标点兜底'))).toBe(true)
+    // 复扫过，兜底修掉的问题不该还挂在"剩余问题"里
+    expect(result.remainingFindings.some((f) => f.type === 'em-dash' || f.type === 'ellipsis')).toBe(
+      false
+    )
+  })
+
+  it('只有省略号的正文也能扫出 finding（否则前端「开始润色」被禁用）', async () => {
+    const text = '他站在门口。\n「我……我不知道。」\n窗外的雨停了。'
+    const report = await new DeslopService(makeMockLlm([''])).scan(text)
+    expect(report.findings.length).toBeGreaterThan(0)
+    expect(report.findings.some((f) => f.type === 'ellipsis' && f.gate === 'D')).toBe(true)
+  })
+
+  it('全部 Pass 被拒绝时，标点兜底照样兜住', async () => {
+    const text = '他不是冷漠，而是绝望——彻底的绝望。\n她说：「算了……」'
+    // 返回一段寒暄，会被 acceptRewrite 拒绝
+    const mock = makeMockLlm(['好的，我来帮你改写：'])
+    const result = await new DeslopService(mock).deslop(text)
+    expect(result.rewritten).not.toContain('——')
+    expect(result.rewritten).not.toContain('……')
+    expect(result.changeSummary.some((c) => c.startsWith('- [已拒绝]'))).toBe(true)
+  })
+})
+
+describe('changeSummary 只剩 [已拒绝] 时的自动 diff 兜底', () => {
+  it('一遍被拒 + 一遍改了却漏写说明 → 仍要生成改动明细', async () => {
+    // Pass1（Gate A+B）被拒；Pass2（Gate C+D）改了但没写【改动说明】。
+    // 旧判据 `changeSummary.length === 0` 因为有一条"已拒绝"而失效，真实改动全丢。
+    const text = '他不是冷漠，而是绝望。\n她感到失落，坐在门口的台阶上，看着远处的灯一盏盏亮起来。'
+    const mock = makeMockLlm([
+      '好的，我来帮你改写：', // Pass1 被拒
+      '【改写后】\n他不是冷漠，而是绝望。\n她坐在门口的台阶上，看着远处的灯一盏盏亮起来。'
+    ])
+    const result = await new DeslopService(mock).deslop(text)
+    expect(result.changeSummary.some((c) => c.startsWith('- [已拒绝]'))).toBe(true)
+    expect(result.changeSummary.some((c) => !c.startsWith('- [已拒绝]'))).toBe(true)
+  })
+})
+
+describe('isTail=false（正文中间截出来的片段）', () => {
+  const fragment = '他把杯子放下，缓缓抬起头'
+
+  it('片段末尾无终止标点不再报"疑似截断"', async () => {
+    const svc = new DeslopService(makeMockLlm(['']))
+    const tailScan = await svc.scan(fragment)
+    const fragScan = await svc.scan(fragment, { isTail: false })
+    expect(tailScan.findings.some((f) => f.type === 'truncation')).toBe(true)
+    expect(fragScan.findings.some((f) => f.type === 'truncation')).toBe(false)
+  })
+
+  it('deslop({ isTail: false }) 把截断检测一路关到底', async () => {
+    let prompt = ''
+    const llm = {
+      generateStream: async (p: string): Promise<string> => {
+        prompt = p
+        return `【改写后】\n${fragment}`
+      }
+    } as unknown as LlmService
+    const result = await new DeslopService(llm).deslop(fragment, { isTail: false })
+    expect(prompt).not.toContain('疑似截断')
+    expect(result.remainingFindings.some((f) => f.type === 'truncation')).toBe(false)
+  })
+})

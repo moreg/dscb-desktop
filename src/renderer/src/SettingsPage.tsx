@@ -667,7 +667,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           ) : null}
 
           {activeTab === 'appearance' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <h3 className="sub">外观</h3>
               <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
                 切换浅色/深色主题，或跟随系统设置。
@@ -696,7 +696,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'storage' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <div className="row" style={{ marginBottom: 4 }}>
                 <h3 className="sub" style={{ margin: 0 }}>书籍保存位置</h3>
               </div>
@@ -716,7 +716,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'model' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 1100 }}>
               <div className="row" style={{ marginBottom: 4 }}>
                 <h3 className="sub" style={{ margin: 0 }}>模型服务</h3>
                 {activeProvider ? (
@@ -735,9 +735,18 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                 <code>/chat/completions</code>）或 Responses（<code>/responses</code>）接入。
               </p>
 
-              {/* provider 列表 */}
+              {/* provider 列表：双列网格铺开左右空间，避免 provider 一多就把下方「功能模型分配」挤到页面最底部 */}
               {providers.providers.length > 0 ? (
-                <ul className="bare" style={{ marginTop: 12 }}>
+                <ul
+                  className="bare"
+                  style={{
+                    marginTop: 12,
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))',
+                    gap: 10,
+                    alignItems: 'start'
+                  }}
+                >
                   {providers.providers.map((p) => (
                     <ProviderRow
                       key={p.id}
@@ -811,7 +820,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'usage' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <div className="row" style={{ marginBottom: 4 }}>
                 <h3 className="sub" style={{ margin: 0 }}>用量与费用</h3>
                 <button className="btn btn-ghost btn-sm" onClick={refreshUsage}>
@@ -1044,7 +1053,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'aiwords' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
                 <h3 className="sub" style={{ margin: 0 }}>AI 高频词</h3>
                 <label
@@ -1083,7 +1092,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'syncQueue' && (
-            <div className="card" style={{ maxWidth: 720 }}>
+            <div className="card" style={{ maxWidth: 1000 }}>
               <div className="row" style={{ alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
                 <h3 className="sub" style={{ margin: 0 }}>
                   待同步队列
@@ -1251,7 +1260,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'writing' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <h3 className="sub">写作节奏</h3>
               <div className="field" style={{ marginTop: 8 }}>
                 <label>设定随书进化</label>
@@ -1379,7 +1388,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'writingReq' && (
-            <div className="card" style={{ maxWidth: 600 }}>
+            <div className="card" style={{ maxWidth: 900 }}>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <h3 className="sub" style={{ margin: 0, fontSize: 15 }}>长期写作要求模板</h3>
@@ -1607,7 +1616,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'writingRules' && (
-            <div className="card" style={{ maxWidth: 760 }}>
+            <div className="card" style={{ maxWidth: 1000 }}>
               <div
                 className="row"
                 style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}
@@ -1689,7 +1698,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'deslopRules' && (
-            <div className="card" style={{ maxWidth: 760 }}>
+            <div className="card" style={{ maxWidth: 1000 }}>
               <div
                 className="row"
                 style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}
@@ -1940,7 +1949,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           )}
 
           {activeTab === 'reviewRules' && reviewCfg && (
-            <div className="card" style={{ maxWidth: 760 }}>
+            <div className="card" style={{ maxWidth: 1000 }}>
               <div className="row" style={{ alignItems: 'center', marginBottom: 4 }}>
                 <h3 className="sub" style={{ margin: 0 }}>审稿规则</h3>
                 <label
@@ -2749,7 +2758,6 @@ function ProviderRow({
       className="card"
       style={{
         padding: '14px 16px',
-        marginBottom: 10,
         borderColor: active ? 'var(--vermilion)' : undefined
       }}
     >

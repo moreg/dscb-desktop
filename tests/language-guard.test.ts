@@ -83,3 +83,14 @@ describe('guardLanguageLeak 回退', () => {
     expect(countLatinWords('他刚才')).toBe(0)
   })
 })
+
+describe('guardLanguageLeak 回退后保留原文分段结构', () => {
+  it('原文空行分段、改写用单换行时，回退不得把自然段并成一段', () => {
+    const before = '第一段中文内容比较长。\n\n第二段也是中文内容。'
+    const after = 'He said something here today.\n第二段也是中文内容。'
+    const r = guardLanguageLeak(before, after)
+    expect(r.revertedUnits).toBeGreaterThan(0)
+    expect(r.text).toContain('\n\n')
+    expect(r.text).toBe(before)
+  })
+})

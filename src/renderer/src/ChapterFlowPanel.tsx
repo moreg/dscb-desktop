@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
+  AdjustPlanComplianceResult,
   AuditReport,
   ChapterReviewReport,
   ChapterSelfCheckReport,
@@ -138,6 +139,17 @@ interface Props {
   } | null
   /** 编辑器持有的写后自检报告（与 banner 同源） */
   selfCheckReport?: ChapterSelfCheckReport | null
+  /**
+   * 上轮续写是 extend：本章是**故意还没写完**的半成品。
+   * 自检面板据此提示"完成度类项暂不作数"，避免用户把正常状态当成缺陷去修。
+   */
+  partialChapter?: boolean
+  /** 落笔要点达成度核验：落笔后逐条判定勾选的要点是否真落地 */
+  complianceReport?: AdjustPlanComplianceResult | null
+  /** 核验进行中（banner 提示用） */
+  complianceChecking?: boolean
+  /** 未落实要点 → 重开「按要求重写」补改 */
+  onApplyFailedComplianceToRewrite?: () => void
   /** 用当前 draft 重新跑写后自检 */
   onRerunSelfCheck?: () => void | Promise<void>
   selfCheckLoading?: boolean
@@ -186,6 +198,10 @@ export default function ChapterFlowPanel(props: Props) {
     skipMemoryOnAutoSyncAll,
     postWriteSyncBanner,
     selfCheckReport,
+    partialChapter,
+    complianceReport,
+    complianceChecking,
+    onApplyFailedComplianceToRewrite,
     onRerunSelfCheck,
     selfCheckLoading,
     onApplySelfCheckToRewrite,
@@ -1061,6 +1077,7 @@ export default function ChapterFlowPanel(props: Props) {
 
         <ChapterSelfCheckPanel
           report={selfCheckReport ?? localSelfCheck}
+          partialChapter={partialChapter}
           defaultExpanded
           rerunLoading={selfCheckLoading || localSelfCheckLoading}
           onApplyToRewrite={onApplySelfCheckToRewrite}
@@ -1089,6 +1106,87 @@ export default function ChapterFlowPanel(props: Props) {
                 }
           }
         />
+
+        {complianceChecking || complianceReport ? (
+          <div
+            style={{
+              marginTop: 8,
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--r-sm)',
+              background: 'var(--surface)',
+              padding: '10px 12px'
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                flexWrap: 'wrap'
+              }}
+            >
+              <strong style={{ fontSize: 13 }}>
+                落笔要点核验
+                {complianceChecking ? (
+                  <span style={{ fontWeight: 400, color: 'var(--ink-3)', marginLeft: 6 }}>
+                    核验中…
+                  </span>
+                ) : complianceReport ? (
+                  <span
+                    style={{
+                      fontWeight: 400,
+                      marginLeft: 6,
+                      color: complianceReport.failCount === 0 ? 'var(--ok, #2e7d32)' : '#c62828'
+                    }}
+                  >
+                    {complianceReport.results.length - complianceReport.failCount}/
+                    {complianceReport.results.length} 条已落实
+                  </span>
+                ) : null}
+              </strong>
+              {complianceReport && complianceReport.failCount > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={onApplyFailedComplianceToRewrite}
+                  title="把未落实的要点填入「按要求重写」框，重新出建议或直接落笔补改"
+                >
+                  补改未落实项
+                </button>
+              ) : null}
+            </div>
+            {complianceReport ? (
+              <ul style={{ listStyle: 'none', margin: '8px 0 0', padding: 0 }}>
+                {complianceReport.results.map((r, idx) => (
+                  <li
+                    key={idx}
+                    style={{
+                      display: 'flex',
+                      gap: 8,
+                      alignItems: 'flex-start',
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      padding: '3px 0'
+                    }}
+                  >
+                    <span style={{ flexShrink: 0, color: r.ok ? '#2e7d32' : '#c62828' }}>
+                      {r.ok ? '✅' : '❌'}
+                    </span>
+                    <span>
+                      {r.text}
+                      {r.detail ? (
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          {r.detail}
+                        </span>
+                      ) : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
 
         {auditReport ? (
           <div style={{ marginTop: 8 }}>

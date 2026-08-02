@@ -34,7 +34,11 @@ import { evaluateChapterSelfCheck } from './chapter-self-check'
 import { extractPowerBoundaryBullets } from './power-boundary'
 import { readText, parseDoc } from './skill-format/md-parser'
 import { isForeshadowMatch } from '../../shared/parsers'
-import { DeslopService } from './deslop/deslop-service'
+import { DeslopService, hasRealChange } from './deslop/deslop-service'
+import {
+  resolveDeslopTextOverrides,
+  resolveDeslopBannedWords
+} from './skill-prompts/deslop/deslop-rules'
 import type {
   AuditReport,
   AuditViolation,
@@ -63,7 +67,8 @@ import type {
   RhythmEvaluation,
   StyleProfile,
   VolumeOutline,
-  ChapterSelfCheckReport
+  ChapterSelfCheckReport,
+  AdjustPlanComplianceResult
 } from '../../shared/types'
 import {
   parseFigureDraftJson,
@@ -90,6 +95,21 @@ export interface BatchState {
   total: number
   /** 整批已完成的章号 */
   completed: number[]
+}
+
+/**
+ * 章节正文生成选项。
+ *
+ * 比 LlmService 的 GenerateOptions 多一个 onPromptMeta：prompt 组装阶段才知道的信息
+ * （本次是不是续写、续写到哪一步、本次目标字数）要回传给调用方，而 generateChapterStream
+ * 的返回值是正文字符串、被批量流程依赖，不能改成对象。
+ * onPromptMeta 在下发给 LlmService 前会被剔除，不进 provider 层。
+ */
+export interface ChapterGenerateOptions extends GenerateOptions {
+  onPromptMeta?: (meta: {
+    continueMode?: 'extend' | 'finish'
+    targetWords: number
+  }) => void
 }
 
 export interface ChapterPrompt {
@@ -218,7 +238,13 @@ export class WriteService {
     styleProfileId?: string | null,
     tempContext?: string,
     existingText?: string
-  ): Promise<{ system: string; user: string; targetWords: number }> {
+  ): Promise<{
+    system: string
+    user: string
+    targetWords: number
+    /** 续写模式；无 existingText 时为 undefined。供调用方（写后自检降级）判断本章是否还没写完 */
+    continueMode?: 'extend' | 'finish'
+  }> {
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
     const style = await this.loadStyleProfile(
@@ -235,8 +261,6 @@ export class WriteService {
 
     // 对标书方法论召回（oh-story-claudecode 闭环：拆文产物 → 写作召回）
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
-
-    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
 
     const chapterTargetWords = parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
     let targetWords = chapterTargetWords
@@ -256,6 +280,16 @@ export class WriteService {
         targetWords = CONTINUE_FINISH_WORDS
       }
     }
+
+    // continueMode 必须先算出来：system prompt 的通用守则按「从零写整章」写死，
+    // 续写时要靠末尾的覆盖声明改写开头/字数/章末三类条款。
+    const system = buildSystemPrompt(
+      project.genre,
+      style,
+      overrides,
+      benchmarkRecall,
+      continueMode
+    )
 
     const user = renderUserPrompt({
       projectName: project.name,
@@ -280,14 +314,14 @@ export class WriteService {
       continueMode
     })
 
-    return { system, user, targetWords }
+    return { system, user, targetWords, continueMode }
   }
 
   async generateChapterStream(
     projectId: string,
     chapterNumber: number,
-    styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {}
+    styleProfileIdOrOpts?: string | null | ChapterGenerateOptions,
+    maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     const prompt = await this.buildChapterPrompt(
@@ -298,8 +332,12 @@ export class WriteService {
       opts.existingText
     )
     const targetWords = prompt.targetWords ?? TARGET_WORDS
+    // 让调用方（IPC → 前端）知道本次是不是「还没写完的续写」：
+    // extend 下整章是半成品，写后自检的完成度类项不该按整章判死。
+    const { onPromptMeta, ...llmOpts } = opts as ChapterGenerateOptions
+    onPromptMeta?.({ continueMode: prompt.continueMode, targetWords })
     const full = await this.generateProseStream(prompt.user, {
-      ...opts,
+      ...llmOpts,
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
@@ -674,16 +712,28 @@ export class WriteService {
     if (this.deslopService) {
       try {
         const styleContext = genre ? { genre } : undefined
+        // 用户在设置页改的禁用词表/Gate 方法、项目白名单，这条路径同样要吃到——
+        // 不传的话「编辑器按钮」和「质检面板逐条改写」会按两套规则跑，用户改了设置这里却纹丝不动。
+        const { bannedWords, textOverrides } = await this.resolveDeslopRules()
+        const whitelist = await this.resolveDeslopWhitelist(projectId)
         const result = await this.deslopService.deslop(snippet, {
           levelOverride: 'mild',
           styleContext,
+          bannedWords,
+          textOverrides,
+          whitelist,
+          // 命中段是从正文中间截出来的片段，不是章末：
+          // 否则末尾没有终止标点会被判成「疑似截断，请补全」，反倒诱导模型给片段续写
+          isTail: false,
           meta: { projectId, chapterNumber }
         })
-        // deslop 扫描到了问题并改写了 -> 返回改写结果
-        if (result.changeSummary.length > 0) {
+        // deslop 真的改动了正文 -> 返回改写结果
+        // 只有 [已拒绝] 记录时 rewritten 与原文一字不差，当成功返回会让面板显示一个
+        // 与原文相同的「改写建议」，用户点应用等于空转——这种情况照样降级走旧路径重试。
+        if (result.rewritten !== snippet && hasRealChange(result.changeSummary)) {
           return { rewritten: result.rewritten, reason: result.changeSummary.join('；') }
         }
-        // deslop 没扫描到问题（snippet 可能不含 deslop 检测器命中的词）
+        // deslop 没扫描到问题（snippet 可能不含 deslop 检测器命中的词），或改写被护栏拒绝
         // -> 降级走旧路径，用 violationType 驱动改写（质检说有问题但 deslop 扫描器没覆盖到）
       } catch (err) {
         return { rewritten: '', reason: `LLM 调用失败：${(err as Error).message}` }
@@ -701,6 +751,38 @@ export class WriteService {
       return parseHumanizerOutput(raw)
     } catch (err) {
       return { rewritten: '', reason: `LLM 调用失败：${(err as Error).message}` }
+    }
+  }
+
+  /**
+   * 取设置页配置的去 AI 味规则（禁用词表 + Gate 方法覆盖），口径与 ipc/deslop.ts 一致。
+   * settings 未注入或读取失败时返回空配置 = 用内置默认，不阻断改写。
+   */
+  private async resolveDeslopRules(): Promise<{
+    bannedWords?: string[]
+    textOverrides?: { systemPrompt?: string; gates?: Partial<Record<string, string>> }
+  }> {
+    if (!this.settings) return {}
+    try {
+      const rules = await this.settings.getDeslopRules()
+      return {
+        bannedWords: resolveDeslopBannedWords(rules.bannedWords),
+        textOverrides: resolveDeslopTextOverrides(rules.textOverrides ?? {})
+      }
+    } catch (err) {
+      console.warn('[humanizeSegment] Failed to load deslop rules:', err)
+      return {}
+    }
+  }
+
+  /** 取项目级豁免词（项目根的 .deslop-whitelist）；读不到就当没有 */
+  private async resolveDeslopWhitelist(projectId: string): Promise<Set<string> | undefined> {
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+      const words = await DeslopService.readWhitelistFile(join(dir, '.deslop-whitelist'))
+      return words.length > 0 ? new Set(words) : undefined
+    } catch {
+      return undefined
     }
   }
 
@@ -940,6 +1022,60 @@ export class WriteService {
         summary: '写后自检未执行（加载异常）'
       }
     }
+  }
+
+  /**
+   * 落笔要点达成度核验：把「按要求重写」时用户勾选执行的落笔要点逐条对照落笔后的正文，
+   * 判定每条是否在正文中有可见落地。LLM 调用，失败/解析兜底为全部未落实（failCount=items.length），
+   * 由调用方决定是否提示。
+   */
+  async checkAdjustPlanCompliance(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    items: string[]
+  ): Promise<AdjustPlanComplianceResult> {
+    const clean = (items ?? []).map((t) => t?.trim() ?? '').filter((t) => t.length > 0)
+    if (clean.length === 0) {
+      return { results: [], failCount: 0 }
+    }
+    const trimmedContent =
+      content.length > 24_000 ? content.slice(0, 24_000) + '\n\n（后文因长度限制省略）' : content
+    const prompt = [
+      `## 任务：核验「按要求重写」的落笔要点是否真的落实到本章正文`,
+      '',
+      '下面是一章小说正文，以及落笔时用户勾选执行的修改要点清单。',
+      '请逐条核对正文，判断每条要点是否**在正文中有可见落地**（对应的段落/情节真的按要点改过了）。',
+      '',
+      '判定准则：',
+      '- 若正文中有对应改动落地（可指出大致位置或引用关键句），ok 为 true。',
+      '- 若要点确实没有落实、或只被旁白式带过没有实际内容，ok 为 false，并在 detail 里给一句话原因。',
+      '- 不要因为要点本身没写清就判通过；也不要替用户脑补"隐含已落实"。',
+      '',
+      '## 输出要求',
+      '严格 JSON，不要任何解释、Markdown 代码块：',
+      '{',
+      '  "results": [',
+      '    { "index": 0, "ok": true, "detail": "一句话依据（可选）" }',
+      '  ]',
+      '}',
+      'results 数组顺序与下方要点编号一致，必须逐条给出，不要遗漏。',
+      '',
+      '## 用户勾选执行的落笔要点',
+      ...clean.map((t, i) => `${i + 1}. ${t}`),
+      '',
+      `------ 第 ${chapterNumber} 章正文 ------`,
+      trimmedContent,
+      '',
+      '请只输出上述 JSON：'
+    ].join('\n')
+
+    const raw = await this.llm.generateStream(prompt, {
+      systemPrompt: '你是小说编辑，负责客观核验修改是否落实。',
+      maxTokens: 1200,
+      meta: { feature: 'adjust-plan-compliance', projectId, chapterNumber }
+    })
+    return parseAdjustPlanCompliance(raw, clean)
   }
 
   /** 自检专用：只取本章细纲核心字段 */
@@ -2474,7 +2610,9 @@ function clipExistingText(s: string): string {
   const head = s.slice(0, EXISTING_TEXT_HEAD_CHARS)
   const tailPart = s.slice(-(EXISTING_TEXT_MAX_CHARS - EXISTING_TEXT_HEAD_CHARS))
   const omitted = s.length - head.length - tailPart.length
-  return `${head}\n\n……（此处省略本章中段 ${omitted} 字，情节已发生，不要重写）……\n\n${tailPart}`
+  // 标记刻意不用「（此处省略…）」这种括号省略句式：deslop 的占位符硬规则会拦这个形状
+  // （check-degeneration.ts PLACEHOLDER_PATTERNS），模型照着仿写一句回吐就是 blocking。
+  return `${head}\n\n【已写正文·省略本章中段 ${omitted} 字：这段情节已经发生过，不要重写也不要复述】\n\n${tailPart}`
 }
 
 /** 取尾部 n 字符（按字符数，不按字节） */
@@ -2516,7 +2654,7 @@ interface RenderInput {
   continueMode?: 'extend' | 'finish'
 }
 
-interface AdjustRenderInput {
+export interface AdjustRenderInput {
   projectName: string
   genre?: string
   chapterNumber: number
@@ -2603,6 +2741,16 @@ function normalizeStyleGenerateArgs(
 function renderUserPrompt(input: RenderInput): string {
   const parts: string[] = []
   const chapterRequirements = input.chapterDetail?.writingRequirements?.trim()
+  /**
+   * 续写时「上一章衔接原料」「上一章结尾状态」这两段的口径必须跟着改：
+   * 原文写的是「本章开头必须对接此处状态」，而续写时开头已经写好且禁止重写，
+   * 照抄会和下文的「只输出新写的后续正文」直接打架。
+   */
+  const isContinuation = Boolean(input.existingText && input.existingText.trim())
+  /** 上一章状态在续写下的用途：只用于不矛盾 + 前部漏了才补 */
+  const prevStateUse = isContinuation
+    ? '（本章开头已写好，**不要回头改开头**；这些状态仅用于：新写内容不得与之矛盾，且前部若尚未回应则在本次补上）'
+    : '（本章开头必须对接此处状态）'
 
   // 1. 基本信息
   parts.push(
@@ -2667,7 +2815,7 @@ function renderUserPrompt(input: RenderInput): string {
       parts.push(renderChapterDetail(input.prevDetail, '上一章细纲'))
     }
     if (input.prevTail) {
-      parts.push('**上一章正文结尾**（用于衔接检查，本章开头必须对接此处状态）：')
+      parts.push(`**上一章正文结尾**（用于衔接检查）${prevStateUse}：`)
       parts.push('```')
       parts.push(input.prevTail)
       parts.push('```')
@@ -2682,7 +2830,7 @@ function renderUserPrompt(input: RenderInput): string {
       input.prevEndingState.unfinished.length > 0)
   ) {
     parts.push('---')
-    parts.push(`# 上一章结尾状态（结构化提取，本章开头必须对接）`)
+    parts.push(`# 上一章结尾状态（结构化提取）${prevStateUse}`)
     const s = input.prevEndingState
     if (s.characterPositions.length > 0) {
       parts.push('**人物位置**：')
@@ -2695,10 +2843,20 @@ function renderUserPrompt(input: RenderInput): string {
     }
     if (s.timePoint) parts.push(`**时间点**：${s.timePoint}`)
     if (s.unfinished.length > 0) {
-      parts.push('**未完成事项**（本章必须处理）：')
+      parts.push(
+        isContinuation
+          ? '**未完成事项**（整章含已写前部必须处理；前部没处理的，本次处理）：'
+          : '**未完成事项**（本章必须处理）：'
+      )
       for (const u of s.unfinished) parts.push(`- ${u}`)
     }
-    if (s.suspense) parts.push(`**章末悬念**（本章必须回应）：${s.suspense}`)
+    if (s.suspense) {
+      parts.push(
+        isContinuation
+          ? `**章末悬念**（前部若已回应就不要再回应一遍；未回应则本次回应或延续）：${s.suspense}`
+          : `**章末悬念**（本章必须回应）：${s.suspense}`
+      )
+    }
     if (s.props.length > 0) parts.push(`**关键道具**：${s.props.join('、')}`)
   }
 
@@ -2775,6 +2933,11 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
   if (input.existingText && input.existingText.trim()) {
+    // 剧情点进度对齐：细纲剧情点每轮都整份重发，但 prompt 里没有「前部写到哪了」这一信息，
+    // 中段还可能被 clipExistingText 省掉。不点明就只能靠头尾猜，反复续写必然重复或跳点。
+    parts.push(
+      '**下笔前先做一次进度对齐**：对照本章细纲逐个剧情点判定「已写 / 未写」（依据是上面的【本章已写正文前部】），然后从**第一个未写的剧情点**接着往下写。已写过的不得重复叙述，也不得倒回去补写。'
+    )
     const common =
       '请保持文风、人称视角（如第一人称或第三人称）、语气风格及叙事逻辑与前部完全一致，承接前文的情节向下发展，不要重复前部已有的内容或情节。**只输出新写的后续正文**，不要重复前部任何一句，开头不需要任何问候或承接词。'
     if (input.continueMode === 'finish') {
@@ -2894,11 +3057,13 @@ function renderAdjustPlanUserPrompt(input: AdjustRenderInput): string {
 /**
  * 渲染「追问调整正文」的 user prompt。
  *
- * 优先级语义：用户追问要求为最高优先级，覆盖细纲、人物、伏笔、长期写作要求等一切既有约束；
- * 冲突时以用户要求为准。结构上把用户要求放在当前正文之后、紧贴输出指令，使其处于 LLM 注意力最靠后处。
- * 若提供 confirmedPlan，则落笔时以用户确认的方案为准具体执行。
+ * 优先级语义：
+ * - 无 confirmedPlan（直接落笔）：用户追问要求为最高优先级，覆盖细纲、人物、伏笔、长期写作要求等一切既有约束；
+ *   冲突时以用户要求为准。结构上把用户要求放在当前正文之后、紧贴输出指令，使其处于 LLM 注意力最靠后处。
+ * - 有 confirmedPlan：**落笔要点为最高优先级**，用户追问要求降级为背景参考（仅在要点未点名的范围内生效），
+ *   避免「要点只勾了 2 条、追问原句却写着 5 条」时模型按原句把没勾的也改掉。
  */
-function renderAdjustUserPrompt(input: AdjustRenderInput): string {
+export function renderAdjustUserPrompt(input: AdjustRenderInput): string {
   const trimmedContent =
     input.content.length > 30_000 ? input.content.slice(0, 30_000) + '\n\n（后文因长度限制省略）' : input.content
   const charactersSection =
@@ -2915,6 +3080,8 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
           .map((f) => `- ${f.content}`)
           .join('\n')}`
       : ''
+
+  const hasPlan = Boolean(input.confirmedPlan?.trim())
 
   const planSection = input.confirmedPlan?.trim()
     ? [
@@ -2933,17 +3100,31 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
     '请直接输出调整后的完整正文，不要输出解释、标题、修改清单、Markdown 代码块或前后缀。',
     '',
     '## 优先级（务必严格遵守）',
-    '1. **用户追问要求是最高优先级，覆盖一切既有约束。** 凡用户明确要求改的（剧情走向、人物行为、场景、写法、节奏、删减、增写等），必须改到位；若用户要求与细纲、人物卡、伏笔、长期写作要求冲突，以用户要求为准，并在调整后让正文自洽。',
-    '2. 若提供了「用户已确认的修改方案」，按该方案的落笔要点与具体建议执行；方案未点名的部分尽量保持原貌。',
-    '3. 用户**没有**提及的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与用户要求直接冲突，无条件让位于用户要求。',
-    '4. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非用户要求明确涉及增减篇幅。',
+    hasPlan
+      ? '1. **「用户已确认的修改方案」中的落笔要点是最高优先级，必须逐条落实到正文。** 落笔要点与用户追问要求、细纲、人物卡、伏笔、长期写作要求等冲突时，一律以落笔要点为准，并让调整后的正文自洽。'
+      : '1. **用户追问要求是最高优先级，覆盖一切既有约束。** 凡用户明确要求改的（剧情走向、人物行为、场景、写法、节奏、删减、增写等），必须改到位；若用户要求与细纲、人物卡、伏笔、长期写作要求冲突，以用户要求为准，并在调整后让正文自洽。',
+    hasPlan
+      ? '2. 用户追问要求与细纲、人物卡、伏笔、长期写作要求只在落笔要点**未点名**的范围内生效：它们约束你不要无故改动未被要求的剧情与人物，但不得借此扩大改动范围。'
+      : '2. 若提供了「用户已确认的修改方案」，按该方案的落笔要点与具体建议执行；方案未点名的部分尽量保持原貌。',
+    hasPlan
+      ? '3. 落笔要点**没有**点名的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与落笔要点直接冲突，无条件让位于落笔要点。'
+      : '3. 用户**没有**提及的部分尽量保持原貌（人物名、未被要求改的剧情节点、伏笔、关键线索不要无故变动），但若它们与用户要求直接冲突，无条件让位于用户要求。',
+    hasPlan
+      ? '4. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非落笔要点明确涉及增减篇幅。'
+      : '4. 输出必须是可直接替换编辑器当前正文的成品正文，篇幅与原正文相当，除非用户要求明确涉及增减篇幅。',
     '5. 不要把修改要求、分析过程、对照清单或免责声明写进正文。',
     '6. 避免引入新的 AI 味套话，保持动作、对话、细节和因果推进。',
     '',
     '## 执行方式',
-    '- 先逐条拆解用户的追问要求（及已确认方案），明确每一条要落到正文的哪个段落/情节。',
-    '- 改写时逐一落实，不要遗漏任何一条；与原意冲突处，按用户要求重写而非折中。',
-    '- 输出前自检：用户提出的每一条要求是否都已体现在正文中；若有遗漏，回头补齐再输出。',
+    hasPlan
+      ? '- 先逐条拆解「用户已确认的修改方案」的落笔要点，明确每一条要落到正文的哪个段落/情节。'
+      : '- 先逐条拆解用户的追问要求（及已确认方案），明确每一条要落到正文的哪个段落/情节。',
+    hasPlan
+      ? '- 只落实上列落笔要点，逐条执行、不要遗漏；方案未点名的内容一律保持原貌，不要擅自扩大改动范围。'
+      : '- 改写时逐一落实，不要遗漏任何一条；与原意冲突处，按用户要求重写而非折中。',
+    hasPlan
+      ? '- 输出前自检：每条落笔要点是否都已体现在正文中；若有遗漏，回头补齐再输出。'
+      : '- 输出前自检：用户提出的每一条要求是否都已体现在正文中；若有遗漏，回头补齐再输出。',
     '',
     `## 小说信息`,
     `- 书名：${input.projectName}`,
@@ -2962,11 +3143,15 @@ function renderAdjustUserPrompt(input: AdjustRenderInput): string {
     `------ 第 ${input.chapterNumber} 章当前正文 ------`,
     trimmedContent,
     '',
-    `## 用户追问要求（最高优先级，必须逐条落实到上方正文）`,
+    hasPlan
+      ? `## 用户追问要求（背景参考；与已确认落笔要点冲突时以落笔要点为准，仅在要点未点名的范围内生效）`
+      : `## 用户追问要求（最高优先级，必须逐条落实到上方正文）`,
     input.instruction.trim(),
     planSection,
     '',
-    '请基于上述追问要求，直接输出调整后的完整正文：'
+    hasPlan
+      ? '请基于上述「用户已确认的修改方案」，逐条落实其落笔要点，直接输出调整后的完整正文（只落实方案点名的内容）：'
+      : '请基于上述追问要求，直接输出调整后的完整正文：'
   ]
     .filter(Boolean)
     .join('\n')
@@ -3747,5 +3932,44 @@ export function parseHumanizerOutput(raw: string): { rewritten: string; reason: 
   // 4. 兜底：reason 为空时给默认说明
   if (rewritten && !reason) reason = '（未提供改动说明）'
   return { rewritten, reason }
+}
+
+/**
+ * 解析「落笔要点达成度核验」的 JSON 输出。
+ * 容错：抽第一个 {...} 块；按 index 对位到传入的要点；
+ * 缺失/解析失败/ok 非布尔一律判为未落实（ok=false），保证"没核到就不算落实"。
+ */
+export function parseAdjustPlanCompliance(
+  raw: string,
+  items: string[]
+): AdjustPlanComplianceResult {
+  const results: AdjustPlanComplianceResult['results'] = items.map((text) => ({ text, ok: false }))
+  try {
+    const m = raw.match(/\{[\s\S]*\}/)
+    if (m) {
+      const obj = JSON.parse(m[0])
+      if (Array.isArray(obj.results)) {
+        for (const r of obj.results) {
+          if (!r || typeof r !== 'object') continue
+          const idx = r.index
+          if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0 || idx >= results.length) {
+            continue
+          }
+          results[idx] = {
+            text: results[idx].text,
+            ok: r.ok === true,
+            detail:
+              typeof r.detail === 'string' && r.detail.trim()
+                ? r.detail.trim().slice(0, 200)
+                : undefined
+          }
+        }
+      }
+    }
+  } catch {
+    // 解析失败：全部按未落实处理
+  }
+  const failCount = results.filter((r) => !r.ok).length
+  return { results, failCount }
 }
 

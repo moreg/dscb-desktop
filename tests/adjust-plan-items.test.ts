@@ -82,6 +82,27 @@ describe('parseAdjustPlanItems', () => {
     expect(parseAdjustPlanItems('')).toEqual([])
     expect(parseAdjustPlanItems('只是一段没有列表的意见。')).toEqual([])
   })
+
+  it('fallback ignores numbered lists inside analysis sections', () => {
+    // 无「落笔要点/修改建议」小节时，分析类小节的编号列表不应被误抓成勾选项
+    const plan = `## 理解你的要求
+1. 我理解用户想要加强冲突
+2. 主要原因是结尾太平
+## 风险与取舍
+1. 可能拖慢节奏
+2. 可能写偏
+`
+    expect(parseAdjustPlanItems(plan)).toEqual([])
+  })
+
+  it('fallback accepts lists in the pre-heading zone only', () => {
+    const plan = `1. 删掉开篇旁白
+2. 加强女主反击
+## 其他说明
+这是一段补充说明。
+`
+    expect(parseAdjustPlanItems(plan).map((x) => x.text)).toEqual(['删掉开篇旁白', '加强女主反击'])
+  })
 })
 
 describe('buildConfirmedPlanFromSelection / selectedPlanTexts', () => {

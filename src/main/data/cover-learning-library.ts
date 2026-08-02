@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import { writeJsonAtomic } from './atomic'
 import type { SettingsRepository } from './settings-repository'
+import type { LlmService } from './llm-service'
 import {
   COVER_STYLE_PRESETS,
   type CoverStyleDefinition
@@ -268,7 +269,8 @@ export class CoverLearningLibraryService {
 
   constructor(
     private readonly settings: SettingsRepository,
-    private readonly defaultDirectory: string
+    private readonly defaultDirectory: string,
+    private readonly llm?: LlmService
   ) {}
 
   async initialize(): Promise<CoverLearningLibrarySummary> {
@@ -400,6 +402,17 @@ export class CoverLearningLibraryService {
       loaded.library.learning.legacyUntrackedSampleCount + loaded.library.learning.samples.length
     loaded.library.updatedAt = new Date().toISOString()
 
+    const aiRefinement = learned > 0
+      ? await this.refineWithLlm(loaded.library.learning.samples, learnedRules)
+      : { extraGlobalRules: [], observations: [] }
+    if (aiRefinement.extraGlobalRules.length > 0) {
+      const existing = new Set(loaded.library.globalRules)
+      loaded.library.globalRules = [
+        ...loaded.library.globalRules,
+        ...aiRefinement.extraGlobalRules.filter((rule) => !existing.has(rule))
+      ].slice(0, 60)
+    }
+
     const completedAt = new Date().toISOString()
     const storedRun: StoredLearningRun = {
       directory: normalized,
@@ -409,7 +422,7 @@ export class CoverLearningLibraryService {
       failed,
       startedAt,
       completedAt,
-      observations
+      observations: [...observations, ...aiRefinement.observations]
     }
     loaded.library.learning.runs = [...loaded.library.learning.runs, storedRun].slice(-100)
     await writeJsonAtomic(loaded.summary.filePath, loaded.library)
@@ -418,6 +431,56 @@ export class CoverLearningLibraryService {
     return {
       ...storedRun,
       summary: refreshed.summary
+    }
+  }
+
+  /**
+   * 本地扫描完成后，交给 LLM 汇总一份补充规则。
+   * feature=coverLearn，走「功能模型分配 → 学习库」路由；未配置或调用失败都不影响本地结果。
+   */
+  private async refineWithLlm(
+    samples: LearnedCoverSample[],
+    baseRules: string[]
+  ): Promise<{ extraGlobalRules: string[]; observations: string[] }> {
+    if (!this.llm || samples.length === 0) return { extraGlobalRules: [], observations: [] }
+    const aggregate = aggregateMetrics(samples)
+    const stats = {
+      totalSamples: samples.length,
+      portraitShare: Math.round(aggregate.portraitShare * 100),
+      nineSixteenShare: Math.round(aggregate.nineSixteenShare * 100),
+      saturation: Number(aggregate.saturation.toFixed(3)),
+      contrast: Number(aggregate.contrast.toFixed(3)),
+      warmth: Number(aggregate.warmth.toFixed(3)),
+      quietBand: ['upper third', 'middle third', 'lower third'][aggregate.quietBand],
+      topColors: aggregate.topColors
+    }
+    const prompt = [
+      'You are refining a novel-cover design knowledge base after a fresh local scan.',
+      'Given the aggregate metrics and mechanically-derived rules below, add 2-4 higher-level design rules (English, imperative) and 1-3 short Chinese observations for the author.',
+      'Do not repeat the base rules verbatim. Focus on what a mechanical stat summary would miss (composition intent, typography rhythm, palette usage).',
+      'Return ONLY valid JSON matching this shape and nothing else: {"extraGlobalRules": string[], "observations": string[]}.',
+      '',
+      `Aggregate metrics: ${JSON.stringify(stats)}`,
+      `Base rules already stored: ${JSON.stringify(baseRules)}`
+    ].join('\n')
+    try {
+      const raw = await this.llm.generateStream(prompt, {
+        meta: { feature: 'coverLearn' },
+        maxTokens: 800,
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            extraGlobalRules: { type: 'array', items: { type: 'string' } },
+            observations: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['extraGlobalRules', 'observations'],
+          additionalProperties: false
+        }
+      })
+      return parseAiRefinement(raw)
+    } catch (err) {
+      console.warn('[cover-learning-library] LLM 补充规则失败：', (err as Error).message)
+      return { extraGlobalRules: [], observations: [] }
     }
   }
 
@@ -701,6 +764,32 @@ function deriveLearnedRules(samples: LearnedCoverSample[]): string[] {
     rules.push(`Observed recurring dominant color families: ${aggregate.topColors.join(', ')}; use them as evidence, not as a mandatory palette.`)
   }
   return rules.slice(0, 8)
+}
+
+function parseAiRefinement(raw: string): { extraGlobalRules: string[]; observations: string[] } {
+  const empty = { extraGlobalRules: [], observations: [] }
+  if (!raw) return empty
+  const match = raw.match(/\{[\s\S]*\}/)
+  if (!match) return empty
+  try {
+    const parsed = JSON.parse(match[0]) as unknown
+    if (!isObject(parsed)) return empty
+    const rules = Array.isArray(parsed.extraGlobalRules)
+      ? parsed.extraGlobalRules
+        .filter((rule): rule is string => typeof rule === 'string' && rule.trim().length > 0)
+        .map((rule) => rule.trim())
+        .slice(0, 6)
+      : []
+    const observations = Array.isArray(parsed.observations)
+      ? parsed.observations
+        .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+        .map((line) => line.trim())
+        .slice(0, 4)
+      : []
+    return { extraGlobalRules: rules, observations }
+  } catch {
+    return empty
+  }
 }
 
 function deriveChineseObservations(samples: LearnedCoverSample[]): string[] {

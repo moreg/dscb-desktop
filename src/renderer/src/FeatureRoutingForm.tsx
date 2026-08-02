@@ -14,7 +14,8 @@ const FEATURE_CATEGORIES: { key: FeatureCategory; label: string; hint: string }[
     key: 'auxiliary',
     label: '续写后处理',
     hint: '细纲对照 / 记忆提取 / 写后同步 / 节奏评估 / 图解'
-  }
+  },
+  { key: 'library', label: '学习库', hint: '学习封面时的 AI 规则提炼' }
 ]
 
 function draftFromRouting(

@@ -318,3 +318,69 @@ describe('WriteService.humanizeSegment (deslop pipeline 路径)', () => {
     expect(result.reason).toContain('空')
   })
 })
+
+describe('humanizeSegment 走 deslop pipeline 的修复项', () => {
+  let root: string
+  let ps: ProjectService
+  let projectId: string
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'aw-hz2-'))
+    const library = new LibraryRepository(path.join(root, 'library.json'))
+    ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
+    projectId = (await ps.create({ name: '青云志', genre: '古风仙侠' })).id
+  })
+
+  it('改写被护栏拒绝时不把原文当成功结果返回，而是降级走旧 humanizer 路径', async () => {
+    // 第一次调用（deslop）返回寒暄 → acceptRewrite 拒绝 → rewritten 与原文一字不差；
+    // 旧逻辑因为 changeSummary 里有一条 [已拒绝] 就当成功，面板会显示一个和原文相同的"改写建议"。
+    const replies = [
+      '好的，我来帮你改写：',
+      '【改写后】\n他没接话。\n\n【改动说明】\n- 删"仿佛"'
+    ]
+    let call = 0
+    const llm = {
+      generateStream: vi.fn().mockImplementation(async () => replies[Math.min(call++, 1)])
+    } as unknown as LlmService
+    const service = new WriteService(
+      ps, llm, undefined, undefined, undefined, undefined, undefined, new DeslopService(llm)
+    )
+    const result = await service.humanizeSegment(projectId, '他仿佛在想什么。', '仿佛')
+    expect(result.rewritten).toBe('他没接话。')
+    expect(result.rewritten).not.toBe('他仿佛在想什么。')
+  })
+
+  it('片段不按章末算：不会因末尾无标点被判"疑似截断"而要求补全', async () => {
+    let prompt = ''
+    const llm = {
+      generateStream: vi.fn().mockImplementation(async (p: string) => {
+        prompt = p
+        return '【改写后】\n他没接话\n\n【改动说明】\n- 删"仿佛"'
+      })
+    } as unknown as LlmService
+    const service = new WriteService(
+      ps, llm, undefined, undefined, undefined, undefined, undefined, new DeslopService(llm)
+    )
+    await service.humanizeSegment(projectId, '他仿佛在想什么', '仿佛')
+    expect(prompt).not.toContain('疑似截断')
+  })
+
+  it('设置页配置的禁用词表会注入 deslop 改写 prompt', async () => {
+    let prompt = ''
+    const llm = {
+      generateStream: vi.fn().mockImplementation(async (p: string) => {
+        prompt = p
+        return '【改写后】\n他没接话。\n\n【改动说明】\n- 删"仿佛"'
+      })
+    } as unknown as LlmService
+    const settings = {
+      getProjectsRoot: async (fallback: string) => fallback,
+      getDeslopRules: async () => ({ textOverrides: {}, bannedWords: ['仿佛', '独有的禁用词'] })
+    } as unknown as SettingsRepository
+    const service = new WriteService(
+      ps, llm, undefined, undefined, undefined, settings, undefined, new DeslopService(llm)
+    )
+    await service.humanizeSegment(projectId, '他仿佛在想什么。', '仿佛')
+    expect(prompt).toContain('独有的禁用词')
+  })
+})

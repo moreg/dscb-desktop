@@ -53,6 +53,23 @@ export interface DeslopOptions {
   meta?: Record<string, unknown>
   /** 用户取消信号：透传到每一遍 LLM 改写/清理调用 */
   signal?: AbortSignal
+  /**
+   * 传入的文本是否是「完整正文的结尾」。缺省 true（整章润色）。
+   *
+   * 传 false 用于「正文中间截出来的片段」（如质检面板逐条改写命中段）：
+   * 否则片段末尾没有终止标点会被 findTruncation 判成 blocking「疑似截断，请补全」，
+   * 这条 finding 还会注进改写 prompt——等于在要求模型给片段续写。
+   * Gate F 章末升华的 blocking 升级同理，片段不该按章末算。
+   */
+  isTail?: boolean
+}
+
+/** 改写/清理被护栏拒绝时写进 changeSummary 的前缀（用于区分「真改动」与「没改成」） */
+const REJECTED_PREFIX = '- [已拒绝]'
+
+/** changeSummary 里是否存在真正的改动条目（排除 [已拒绝] 记录） */
+export function hasRealChange(changeSummary: string[]): boolean {
+  return changeSummary.some((c) => !c.startsWith(REJECTED_PREFIX))
 }
 
 /**
@@ -131,8 +148,9 @@ export class DeslopService {
    */
   async deslop(text: string, opts: DeslopOptions = {}): Promise<DeslopResult> {
     const emit = (t: string): void => opts.onToken?.(t)
+    const tail = opts.isTail ?? true
     const chunks = splitForDeslop(text)
-    if (chunks.length <= 1) return this.deslopChunk(text, opts, true)
+    if (chunks.length <= 1) return this.deslopChunk(text, opts, tail)
 
     // 长文一跑就是几十次 LLM 调用，先把规模摆出来，用户可以立刻点停止
     emit(
@@ -160,7 +178,7 @@ export class DeslopService {
       )
       try {
         // 只有最后一块是真正的全文结尾：其余块不按「章末」升级 Gate F、不做截断检测
-        results.push(await this.deslopChunk(c.text, opts, i === chunks.length - 1))
+        results.push(await this.deslopChunk(c.text, opts, tail && i === chunks.length - 1))
       } catch (err) {
         if (!isUserAbort(err)) throw err
         // 用户取消：已完成的块不能白跑。未处理的块按原文补齐后照常返回，
@@ -170,7 +188,9 @@ export class DeslopService {
             `   仍需在下方确认改动后点「应用」才会写回正文。\n`
         )
         for (let j = i; j < chunks.length; j++) {
-          results.push(await this.unchangedChunkResult(chunks[j].text, opts, j === chunks.length - 1))
+          results.push(
+            await this.unchangedChunkResult(chunks[j].text, opts, tail && j === chunks.length - 1)
+          )
         }
         return mergeChunkResults(text, chunks, results)
       }
@@ -300,7 +320,7 @@ export class DeslopService {
         const verdict = acceptRewrite(finalText, llmOutput, rewritten, level)
         if (!verdict.ok) {
           emit(`\n   ⛔ 本遍改写结果被拒绝（${verdict.reason}），保留改写前正文。\n`)
-          allChangeSummary.push(`- [已拒绝] Pass${passNum} 改写结果不可用：${verdict.reason}`)
+          allChangeSummary.push(`${REJECTED_PREFIX} Pass${passNum} 改写结果不可用：${verdict.reason}`)
           lastReport = passScan
           continue
         }
@@ -326,14 +346,11 @@ export class DeslopService {
 
         // Phase 3.5：标点兜底（每遍改写后都跑，清理 LLM 可能引入的破折号/省略号）
         const normalized = normalizePunctuation(rewritten)
-        const totalNormChanges =
-          normalized.changes.emDash +
-          normalized.changes.dash +
-          normalized.changes.doubleHyphen +
-          normalized.changes.ellipsis +
-          normalized.changes.singleEllipsis
-        if (totalNormChanges > 0) {
-          emit(`   🧹 标点兜底：修正 ${totalNormChanges} 处（破折号 ${normalized.changes.emDash + normalized.changes.dash} / 省略号 ${normalized.changes.ellipsis + normalized.changes.singleEllipsis}）\n`)
+        const normLine = punctuationSummaryLine(normalized.changes, `Pass${passNum}`)
+        if (normLine) {
+          // 也进 changeSummary：只 emit 的话这条改动只存在于日志里，面板一关就查无此事
+          allChangeSummary.push(normLine)
+          emit(`   🧹 ${normLine.replace(/^-\s*/, '')}\n`)
         }
         finalText = normalized.text
 
@@ -364,13 +381,32 @@ export class DeslopService {
       emit(`\n✔️ 无 AI 味问题，跳过改写。\n`)
     }
 
+    // Phase 3.5 收尾：标点兜底无条件再跑一次。
+    // 循环里的兜底只在「某一遍改写被接受」之后才执行，于是两种情况会漏网：
+    // 一是全部 Pass 都被拒绝，二是正文只有破折号/省略号这类确定性问题、根本没调过 LLM。
+    // 这里补一刀，顺带把改动写进 changeSummary——只记在日志里的话，面板关掉就查无此事。
+    const tailNorm = normalizePunctuation(finalText)
+    const tailNormLine = punctuationSummaryLine(tailNorm.changes, '收尾')
+    if (tailNormLine) {
+      finalText = tailNorm.text
+      allChangeSummary.push(tailNormLine)
+      emit(`\n🧹 ${tailNormLine.replace(/^-\s*/, '')}\n`)
+      // 复扫，否则报告里会留着刚被兜底修掉的 em-dash/省略号当"剩余问题"
+      lastReport = await this.scan(finalText, {
+        whitelist: opts.whitelist,
+        bannedWords: opts.bannedWords,
+        isTail
+      })
+    }
+
     // extractRewritten 会 trim；把原文首尾空白还回去，否则分块时块边界的空行会被吃掉
     finalText = restoreEdgeWhitespace(text, finalText)
 
     // Phase 4：报告
-    // LLM 常漏写【改动说明】或格式不规范 → 文本已变但 changeSummary 为空。
-    // 用段级自动 diff 兜底，保证 UI 总能提示「改了什么」。
-    if (finalText !== text && allChangeSummary.length === 0) {
+    // LLM 常漏写【改动说明】或格式不规范 → 文本已变但 changeSummary 只剩 [已拒绝] 记录。
+    // 判据必须是「有没有真改动条目」而不是「数组空不空」：某遍被拒 + 另一遍改了却漏写说明时，
+    // 数组非空但一条真改动都没有，兜底不触发，用户只看到一句"已拒绝"，真实改动全丢。
+    if (finalText !== text && !hasRealChange(allChangeSummary)) {
       const autoSummary = summarizeTextDiff(text, finalText)
       if (autoSummary.length > 0) {
         allChangeSummary.push(...autoSummary)
@@ -456,7 +492,9 @@ export class DeslopService {
       const verdict = acceptRewrite(result, cleanupOutput, cleanupRewritten, level)
       if (!verdict.ok) {
         emit(`   ⛔ 第 ${round} 轮清理结果被拒绝（${verdict.reason}），保留上一版正文并停止清理。\n`)
-        changes.push(`- [已拒绝] Pass${passNum} 第 ${round} 轮清理结果不可用：${verdict.reason}`)
+        changes.push(
+          `${REJECTED_PREFIX} Pass${passNum} 第 ${round} 轮清理结果不可用：${verdict.reason}`
+        )
         break
       }
       const cleanupChanges = extractChangeSummary(cleanupOutput)
@@ -473,6 +511,11 @@ export class DeslopService {
       }
       // 标点兜底
       const reNorm = normalizePunctuation(cleanupRewritten)
+      const reNormLine = punctuationSummaryLine(reNorm.changes, `Pass${passNum} 第 ${round} 轮清理`)
+      if (reNormLine) {
+        changes.push(reNormLine)
+        emit(`   🧹 ${reNormLine.replace(/^-\s*/, '')}\n`)
+      }
       result = reNorm.text
       // 复扫判断是否还需下一轮
       scan = await this.scan(result, {
@@ -754,6 +797,23 @@ function acceptRewrite(
     }
   }
   return { ok: true }
+}
+
+/**
+ * 把一次标点兜底的改动渲染成一条改动说明；没改动返回 null。
+ *
+ * 兜底改的是正文（省略号→句号、破折号→逗号），必须进 changeSummary：
+ * 只 emit 到日志的话，这些改动在结果面板里查无此事，用户对着 diff 找不到出处。
+ */
+function punctuationSummaryLine(
+  changes: ReturnType<typeof normalizePunctuation>['changes'],
+  scope: string
+): string | null {
+  const dash = changes.emDash + changes.dash + changes.doubleHyphen
+  const ellipsis = changes.ellipsis + changes.singleEllipsis
+  const total = dash + ellipsis
+  if (total === 0) return null
+  return `- 标点兜底（${scope}）｜修正 ${total} 处（破折号 ${dash} / 省略号 ${ellipsis}）｜理由：铁律 9 正文禁用破折号与省略号停顿，确定性替换为句号/逗号`
 }
 
 function levelName(level: DeslopLevel): string {

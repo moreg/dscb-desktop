@@ -29,6 +29,22 @@ export interface BuildSelfCheckRequirementsOptions {
   /** 最多条数（默认 12） */
   maxItems?: number
   chapterNumber?: number
+  /**
+   * 本章仍在分轮续写中（extend），正文是**故意没写完**的半成品。
+   * 此时「核心事件未完成」「到期伏笔未回收」这类完成度检查必然失败，
+   * 原样灌成"必须"级要求等于逼模型下一轮把整章的活全干完——与分轮续写的意图相反。
+   * 置 true 时这些项降级为"后续"，其余项（衔接/禁项/金手指等）照常。
+   */
+  partialChapter?: boolean
+}
+
+/**
+ * 完成度类检查项：只有整章写完才有意义。
+ * 分轮续写的中间轮里，它们失败是正常状态，不是缺陷。
+ * 自检面板复用它给这些项打「待写完」标，两处判定必须同源。
+ */
+export function isCompletenessItem(id: string): boolean {
+  return id === 'core_plot' || id.startsWith('due_fb_')
 }
 
 /**
@@ -46,9 +62,14 @@ export function buildTempRequirementsFromSelfCheck(
   const mode = opts.mode ?? 'rewrite'
   const ch = opts.chapterNumber ?? report.chapterNumber
 
-  const issues = pickIssueItems(report.items, includeWarn).slice(0, maxItems)
+  // partial 下完成度项排到最后：本次要落实的项优先占用 maxItems 名额与模型注意力
+  const issues = pickIssueItems(report.items, includeWarn, opts.partialChapter === true).slice(
+    0,
+    maxItems
+  )
   if (issues.length === 0) return ''
 
+  const partial = opts.partialChapter === true
   const lines: string[] = []
   if (mode === 'rewrite') {
     lines.push(`【按写后自检修订第 ${ch} 章】`)
@@ -61,11 +82,17 @@ export function buildTempRequirementsFromSelfCheck(
       '续写/补写时必须落实下列未通过项；与既有正文衔接，不要重复已写情节，不要抢写下一章。'
     )
   }
+  if (partial) {
+    lines.push(
+      '注意：本章尚未写完（仍在分轮续写中）。标【后续】的是"整章写完前必须落实"的完成度项，本次能顺势推进就推进，**不要为了勾掉它们而把本章硬收尾或跳过中间剧情**；标【必须】【建议】的按本次落实。'
+    )
+  }
   lines.push('')
 
   let n = 1
   for (const it of issues) {
-    const tag = it.verdict === 'fail' ? '必须' : '建议'
+    const tag =
+      partial && isCompletenessItem(it.id) ? '后续' : it.verdict === 'fail' ? '必须' : '建议'
     const cat = CATEGORY_LABEL[it.category] ?? it.category
     lines.push(`${n}. 【${tag}·${cat}】${it.label}`)
     if (it.detail?.trim()) {
@@ -77,7 +104,11 @@ export function buildTempRequirementsFromSelfCheck(
     n++
   }
 
-  lines.push('改完后自检：上列每一项都要在正文中有可见落地，禁止仅用旁白声称「已解决」。')
+  lines.push(
+    partial
+      ? '改完后自检：上列【必须】【建议】项都要在正文中有可见落地，禁止仅用旁白声称「已解决」；【后续】项留到本章写完前落实即可。'
+      : '改完后自检：上列每一项都要在正文中有可见落地，禁止仅用旁白声称「已解决」。'
+  )
   if (mode === 'rewrite') {
     lines.push('直接输出修订后的完整本章正文（或明确改动的连续段落），不要解释过程。')
   }
@@ -96,13 +127,14 @@ export function selfCheckHasActionableIssues(
 
 function pickIssueItems(
   items: SelfCheckItemResult[],
-  includeWarn: boolean
+  includeWarn: boolean,
+  partialChapter = false
 ): SelfCheckItemResult[] {
   const allowed: SelfCheckVerdict[] = includeWarn ? ['fail', 'warn'] : ['fail']
   const rank: Record<SelfCheckVerdict, number> = { fail: 0, warn: 1, pass: 2, skip: 3 }
-  return items
-    .filter((i) => allowed.includes(i.verdict))
-    .sort((a, b) => rank[a.verdict] - rank[b.verdict])
+  const weight = (i: SelfCheckItemResult): number =>
+    (partialChapter && isCompletenessItem(i.id) ? 10 : 0) + rank[i.verdict]
+  return items.filter((i) => allowed.includes(i.verdict)).sort((a, b) => weight(a) - weight(b))
 }
 
 /** 按检查 id / 类别给可操作改法提示 */

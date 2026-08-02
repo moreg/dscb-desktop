@@ -198,7 +198,8 @@ if (!hasSingleInstanceLock) {
   const imageService = new ImageService(settings)
   const coverLearningLibrary = new CoverLearningLibraryService(
     settings,
-    join(userData, 'cover-learning-library')
+    join(userData, 'cover-learning-library'),
+    llmService
   )
   await coverLearningLibrary.initialize()
   const coverService = new CoverService(projectService, imageService, coverLearningLibrary)

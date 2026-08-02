@@ -194,6 +194,34 @@ describe('buildDeslopPrompt 构建', () => {
     expect(prompt).toContain('约莫')
     expect(prompt).toContain('殊不知')
   })
+
+  it('风格语境注入「原句→改后句」替换示例（题材档案优先，缺省用通用表）', () => {
+    // 有题材档案：用该题材的 replacements
+    const xianxia = buildDeslopPrompt('原文', 'mild', [], ['A', 'B'], { genre: '古风' })
+    expect(xianxia).toContain('替换示例')
+    expect(xianxia).toContain('勾了勾唇') // genre-voice xianxia replacements 的右项
+
+    // 无题材：退回通用成对示例，保证模型永远有正锚点
+    const generic = buildDeslopPrompt('原文', 'mild', [], ['A', 'B'])
+    expect(generic).toContain('替换示例')
+    expect(generic).toContain('他垂下眼，没接话')
+  })
+
+  it('命中项全部列出（超过 30 条才截断并注明余量）', () => {
+    const many: DeslopFinding[] = Array.from({ length: 12 }, (_, i) => ({
+      line: i + 1,
+      column: 1,
+      type: 'banned-word',
+      severity: 'advisory' as const,
+      gate: 'A',
+      message: '',
+      excerpt: `命中词${i + 1}`
+    }))
+    const prompt = buildDeslopPrompt('原文', 'moderate', many, ['A'])
+    // 12 条全列出，不再截断到 8 条
+    expect(prompt).toContain('命中词12')
+    expect(prompt).toContain('须逐条处理')
+  })
 })
 
 describe('extractRewritten 解析 LLM 输出', () => {
@@ -278,13 +306,24 @@ describe('去 AI 味 prompt 内部一致性', () => {
     const prompt = buildDeslopPrompt('仿佛被抽空了力气。', 'mild', [finding], ['A'], {
       genre: '古风/仙侠'
     })
-    expect(prompt).toMatch(/该题材允许保留的虚词[^\n]*仿佛/)
-    // 同一份 prompt 不得再把"仿佛"列进禁用清单，否则模型收到互相矛盾的指令
+    // xianxia 允许清单已收窄为不撞铁律 10 的词（渐渐/一时之间/似乎）
+    expect(prompt).toMatch(/该题材允许保留的虚词[^\n]*渐渐/)
+    // 同一份 prompt 不得再把允许词列进禁用清单，否则模型收到互相矛盾的指令
     const banned = extractBannedList(prompt)
-    expect(banned).not.toContain('仿佛')
-    expect(banned).not.toContain('一丝')
-    expect(banned).not.toContain('一抹')
+    expect(banned).not.toContain('渐渐')
+    expect(banned).not.toContain('似乎')
     expect(banned).toContain('嘴角勾起')
+  })
+
+  it('铁律 10 禁用词与题材允许清单求差后不再互相矛盾', () => {
+    // 「仿佛/一丝/一抹」已从 xianxia allowedHedges 移除，避免系统铁律禁、题材又放行
+    const prompt = buildDeslopPrompt('仿佛被抽空了力气。', 'mild', [finding], ['A'], {
+      genre: '古风/仙侠'
+    })
+    const banned = extractBannedList(prompt)
+    expect(banned).toContain('仿佛')
+    expect(banned).toContain('一丝')
+    expect(banned).toContain('一抹')
   })
 
   it('无题材语境时禁用清单保持完整', () => {

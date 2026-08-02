@@ -1,4 +1,4 @@
-import { CHAPTER_RULE_SECTIONS } from './chapter-rules'
+import { CHAPTER_RULE_SECTIONS, buildContinueModeRules } from './chapter-rules'
 import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
@@ -6,7 +6,7 @@ import type { StyleProfile } from '../../../shared/types'
 export { FORBIDDEN_WORD_CATEGORIES, flattenForbiddenWords } from './forbidden-words'
 export { GENRE_VOICES, resolveGenreVoice } from './genre-voice'
 export type { GenreKey, GenreVoice } from './genre-voice'
-export { CHAPTER_RULE_SECTIONS } from './chapter-rules'
+export { CHAPTER_RULE_SECTIONS, buildContinueModeRules } from './chapter-rules'
 export type { ChapterRuleKey, ChapterRuleSection } from './chapter-rules'
 export {
   REVIEW_CHECK_SECTIONS,
@@ -32,11 +32,16 @@ export interface BenchmarkRecallPrompt {
   technique: string
 }
 
+/**
+ * @param continueMode 续写模式；传了则在末尾追加「续写模式覆盖声明」，
+ *   把上文按「从零写整章」写死的开头/字数/章末三类条款改写成续写口径。
+ */
 export function buildSystemPrompt(
   genre?: string,
   style?: StyleProfile | null,
   overrides?: Record<string, string>,
-  benchmarkRecall?: BenchmarkRecallPrompt | null
+  benchmarkRecall?: BenchmarkRecallPrompt | null,
+  continueMode?: 'extend' | 'finish'
 ): string {
   const voice = resolveGenreVoice(genre)
   const sections: string[] = []
@@ -78,6 +83,14 @@ export function buildSystemPrompt(
   sections.push('---')
   sections.push(`## ${n}. 禁用高频词`)
   sections.push(renderForbiddenWordsMarkdown())
+  n++
+
+  // 续写覆盖声明放最后：位置最靠后、措辞最具体，冲突时压过上面的通用守则
+  if (continueMode) {
+    sections.push('---')
+    sections.push(`## ${n}. 续写模式覆盖声明（最高优先级）`)
+    sections.push(buildContinueModeRules(continueMode))
+  }
 
   return sections.join('\n\n')
 }

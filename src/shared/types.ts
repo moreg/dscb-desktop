@@ -96,7 +96,14 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
 }
 
 /** 功能大类：用于按任务类型路由到不同 provider/模型 */
-export type FeatureCategory = 'chapter' | 'review' | 'humanize' | 'opening' | 'auxiliary' | 'ask'
+export type FeatureCategory =
+  | 'chapter'
+  | 'review'
+  | 'humanize'
+  | 'opening'
+  | 'auxiliary'
+  | 'ask'
+  | 'library'
 
 /** 单个功能大类的路由配置：指向某个 provider，可选覆盖模型名 */
 export interface FeatureRoutingEntry {
@@ -416,6 +423,17 @@ export type StreamHandleOf<T> = Promise<T> & {
 }
 export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
+/**
+ * 章节正文流式生成的句柄。
+ * 比通用 StreamHandle 多回一个 continueMode：本次是不是续写、续写到哪一步。
+ * extend 表示这一章是**故意还没写完**的半成品，写后自检的完成度类项据此降级。
+ */
+export type ChapterStreamHandle = StreamHandleOf<{
+  ok: boolean
+  error?: string
+  continueMode?: 'extend' | 'finish'
+}>
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
   /** Open a project in its own window, or focus it when already open. */
@@ -644,7 +662,7 @@ export interface RendererApi {
     tempContext: string | undefined,
     existingText: string | undefined,
     onToken: (token: string, done: boolean) => void
-  ) => StreamHandle
+  ) => ChapterStreamHandle
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
     projectId: string,
@@ -730,6 +748,13 @@ export interface RendererApi {
     chapterNumber: number,
     content: string
   ) => Promise<ChapterSelfCheckReport>
+  /** 落笔要点达成度核验（LLM 逐条判定勾选的落笔要点是否在正文中有可见落地） */
+  checkAdjustPlanCompliance: (
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    items: string[]
+  ) => Promise<AdjustPlanComplianceResult>
   /**
    * 撤销一次写后同步的自动写入（best-effort）。
    * 需传入上次 sync 返回的 extraction + memory/settings 结果。
@@ -1461,6 +1486,23 @@ export interface ChapterSelfCheckReport {
   ok: boolean
   /** toast / 状态条短文案（启发式检查，供参考） */
   summary: string
+}
+
+/**
+ * 「按要求重写」落笔后的落笔要点达成度核验（LLM 逐条判定）。
+ */
+export interface AdjustPlanComplianceResult {
+  /** 逐条结果，顺序与传入的 items 一致 */
+  results: {
+    /** 要点原文（与落笔时勾选的一致） */
+    text: string
+    /** 是否在正文中有可见落地 */
+    ok: boolean
+    /** 未落实时的一句话原因（ok=true 时可为空） */
+    detail?: string
+  }[]
+  /** 未落实（ok=false，含解析兜底判为未落实的条目）的条数；全部落实时为 0 */
+  failCount: number
 }
 
 /**

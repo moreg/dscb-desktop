@@ -343,3 +343,45 @@ describe('normalize-punctuation: 标点兜底', () => {
     expect(countPunctuationIssues('正常句子。')).toBe(0)
   })
 })
+
+describe('normalizePunctuation 分割线豁免', () => {
+  it('整行分割线 --- 不会被改成逗号', () => {
+    const r = normalizePunctuation('第一段。\n---\n第二段。')
+    expect(r.text).toBe('第一段。\n---\n第二段。')
+    expect(r.changes.doubleHyphen).toBe(0)
+  })
+
+  it('*** / ___ 分割线同样豁免', () => {
+    expect(normalizePunctuation('上文。\n***\n下文。').text).toContain('***')
+    expect(normalizePunctuation('上文。\n___\n下文。').text).toContain('___')
+  })
+
+  it('正文行内的 -- 照常改成逗号', () => {
+    const r = normalizePunctuation('他停下--然后转身。')
+    expect(r.text).toBe('他停下，然后转身。')
+    expect(r.changes.doubleHyphen).toBe(1)
+  })
+
+  it('句尾破折号被删除时要计数（否则日志报"没改"但正文已变）', () => {
+    const r = normalizePunctuation('他笑了。——')
+    expect(r.text).toBe('他笑了。')
+    expect(r.changes.emDash).toBe(1)
+  })
+
+  it('countPunctuationIssues 不把分割线算成标点问题', () => {
+    expect(countPunctuationIssues('第一段。\n---\n第二段。')).toBe(0)
+  })
+})
+
+describe('scanAiPatterns 省略号检测', () => {
+  it('…… 与 … 都产出 Gate D finding', () => {
+    const findings = scanAiPatterns('她低下头。\n「我……算了…」')
+    const ellipsis = findings.filter((f) => f.type === 'ellipsis')
+    expect(ellipsis).toHaveLength(2)
+    expect(ellipsis.every((f) => f.gate === 'D' && f.severity === 'advisory')).toBe(true)
+  })
+
+  it('没有省略号时不误报', () => {
+    expect(scanAiPatterns('他站起来，走了出去。').some((f) => f.type === 'ellipsis')).toBe(false)
+  })
+})

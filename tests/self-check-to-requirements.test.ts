@@ -106,6 +106,72 @@ describe('buildTempRequirementsFromSelfCheck', () => {
     expect(buildTempRequirementsFromSelfCheck(null)).toBe('')
     expect(selfCheckHasActionableIssues(undefined)).toBe(false)
   })
+
+  /**
+   * 分轮续写（extend）中间轮：整章本就没写完，完成度项失败是正常状态。
+   * 原样灌成「必须」会逼模型下一轮硬收尾——正是分轮续写要避免的。
+   */
+  describe('partialChapter：本章仍在分轮续写中', () => {
+    const partialReport = report([
+      {
+        id: 'core_plot',
+        category: 'plot',
+        label: '核心事件已完成',
+        verdict: 'fail',
+        detail: '未覆盖'
+      },
+      {
+        id: 'due_fb_0',
+        category: 'foreshadow',
+        label: '到期伏笔回收迹象',
+        verdict: 'fail',
+        detail: '山本的目的'
+      },
+      {
+        id: 'prev_suspense',
+        category: 'continuity',
+        label: '上章悬念已回应',
+        verdict: 'fail',
+        detail: '他到底走不走'
+      }
+    ])
+
+    it('完成度项降级为「后续」，衔接类仍是「必须」', () => {
+      const text = buildTempRequirementsFromSelfCheck(partialReport, {
+        mode: 'continue',
+        partialChapter: true
+      })
+      expect(text).toContain('后续·剧情')
+      expect(text).toContain('后续·伏笔')
+      expect(text).toContain('必须·衔接')
+      expect(text).toContain('本章尚未写完')
+      expect(text).toContain('不要为了勾掉它们而把本章硬收尾')
+    })
+
+    it('完成度项排到最后，本次要落实的项优先占名额', () => {
+      const text = buildTempRequirementsFromSelfCheck(partialReport, {
+        mode: 'continue',
+        partialChapter: true
+      })
+      expect(text.indexOf('上章悬念已回应')).toBeLessThan(text.indexOf('核心事件已完成'))
+
+      // maxItems 卡到 1 条时留下的是衔接项，不是完成度项
+      const only = buildTempRequirementsFromSelfCheck(partialReport, {
+        mode: 'continue',
+        partialChapter: true,
+        maxItems: 1
+      })
+      expect(only).toContain('上章悬念已回应')
+      expect(only).not.toContain('核心事件已完成')
+    })
+
+    it('不传 partialChapter 时维持原行为：完成度项仍是「必须」', () => {
+      const text = buildTempRequirementsFromSelfCheck(partialReport, { mode: 'continue' })
+      expect(text).toContain('必须·剧情')
+      expect(text).not.toContain('后续·')
+      expect(text).not.toContain('本章尚未写完')
+    })
+  })
 })
 
 describe('formatSelfCheckDelta', () => {

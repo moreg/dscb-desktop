@@ -213,6 +213,129 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('若【本章已写正文前部】尚未回应')
   })
 
+  /**
+   * system prompt 的通用守则是按「从零写整章」写死的，且允许用户在设置里覆盖，
+   * 逐条改内置文本既盖不全也会破坏用户自定义。改成末尾追加覆盖声明，
+   * 这几条断言钉住「续写时冲突条款确实被改写过」。
+   */
+  describe('system prompt 续写覆盖声明', () => {
+    it('非续写时不出现覆盖声明', async () => {
+      await writeOutline('2500')
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(projectId, 1)
+
+      expect(prompt.system).not.toContain('续写模式覆盖声明')
+      expect(prompt.continueMode).toBeUndefined()
+    })
+
+    it('extend：字数是本次增量，章末不得强行收尾', async () => {
+      await writeOutline('2500')
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(
+        projectId,
+        1,
+        null,
+        undefined,
+        '甲'.repeat(500)
+      )
+
+      expect(prompt.continueMode).toBe('extend')
+      expect(prompt.system).toContain('续写模式覆盖声明')
+      // 与 OUTPUT_RULES「章末必须以对话或事件结尾，违反此条立即视为失败」冲突的改写
+      expect(prompt.system).toContain('不要强行收尾')
+      expect(prompt.system).toContain('本次要新增')
+      // 与 CONTINUITY_RULES「本章开头必须回应或延续」冲突的改写
+      expect(prompt.system).toContain('禁止重写、复述或另起一个开头')
+    })
+
+    it('finish：明确宣布「字数硬性下限」本次不适用，且要求收尾', async () => {
+      await writeOutline('2500')
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(
+        projectId,
+        1,
+        null,
+        undefined,
+        '甲'.repeat(2400)
+      )
+
+      expect(prompt.continueMode).toBe('finish')
+      // 回归：user prompt 说「不要凑字数拉长」，system 却说「宁可写超」，finish 模式会被压过去
+      expect(prompt.system).toContain('本次**不适用**')
+      expect(prompt.system).toContain('收束本章')
+      expect(prompt.system).not.toContain('不要强行收尾')
+    })
+  })
+
+  /**
+   * 自检清单当初已按续写改过措辞，但它上游的「衔接原料 / 上一章结尾状态」两段
+   * 仍写着「本章开头必须对接此处状态」——同一份 prompt 里前后打架。
+   */
+  it('续写时上游衔接段不再要求「开头对接」，改成不矛盾 + 前部漏了才补', async () => {
+    await writeOutline('2500')
+    const dir = await ps.resolveDir(projectId)
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    await writeFile(
+      path.join(dir, '正文', '第001章 上一章.md'),
+      '他站在码头上，望着远处的船。到底走不走，他还没想好。',
+      'utf-8'
+    )
+    const service = new WriteService(
+      ps,
+      mockLlm(
+        JSON.stringify({
+          characterPositions: [{ name: '他', location: '码头', action: '眺望' }],
+          characterStates: [],
+          timePoint: '傍晚',
+          unfinished: ['还没决定走不走'],
+          suspense: '他到底走不走',
+          props: []
+        })
+      )
+    )
+
+    const cont = await service.buildChapterPrompt(projectId, 2, null, undefined, '甲'.repeat(500))
+    expect(cont.user).not.toContain('本章开头必须对接')
+    expect(cont.user).toContain('不要回头改开头')
+    expect(cont.user).toContain('前部若已回应就不要再回应一遍')
+    expect(cont.user).toContain('整章含已写前部必须处理')
+
+    // 非续写路径保持原措辞
+    const fresh = await service.buildChapterPrompt(projectId, 2)
+    expect(fresh.user).toContain('本章开头必须对接')
+  })
+
+  it('续写时给出剧情点进度对齐指令（细纲每轮整份重发，不点明就会重复或跳点）', async () => {
+    await writeOutline('2500')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(
+      projectId,
+      1,
+      null,
+      undefined,
+      '甲'.repeat(500)
+    )
+
+    expect(prompt.user).toContain('进度对齐')
+    expect(prompt.user).toContain('第一个未写的剧情点')
+  })
+
+  it('中段省略标记不采用括号省略句式（deslop 占位符硬规则会拦这个形状）', async () => {
+    await writeOutline('2500')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(
+      projectId,
+      1,
+      null,
+      undefined,
+      '中'.repeat(9000)
+    )
+
+    expect(prompt.user).toContain('省略本章中段')
+    // check-degeneration.ts PLACEHOLDER_PATTERNS 的括号省略正则
+    expect(prompt.user).not.toMatch(/[（(](此处|以下|这里|下文|后续)?\s*(省略|略)(去|过)?[^）)]{0,10}[）)]/)
+  })
+
   it('续写时自检清单改为对接已写前部，不再要求「开头」对齐上一章', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))

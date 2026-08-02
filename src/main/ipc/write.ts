@@ -122,6 +122,9 @@ export function registerWriteIpc(service: WriteService): void {
         )
         const signal = beginStream(validated.requestId)
         try {
+          // 续写模式由 prompt 组装阶段算出（依赖细纲字数预估），回传给前端用于
+          // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
+          let continueMode: 'extend' | 'finish' | undefined
           await service.generateChapterStream(
             validated.projectId,
             validated.chapterNumber,
@@ -130,6 +133,9 @@ export function registerWriteIpc(service: WriteService): void {
               tempContext: validated.tempContext,
               existingText: validated.existingText,
               signal,
+              onPromptMeta: (meta) => {
+                continueMode = meta.continueMode
+              },
               onToken: (token) =>
                 safeSend(win, 'llm:token', {
                   requestId: validated.requestId,
@@ -139,7 +145,7 @@ export function registerWriteIpc(service: WriteService): void {
             }
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true }
+          return { ok: true, continueMode }
         } finally {
           endStream(validated.requestId)
         }
@@ -539,6 +545,31 @@ export function registerWriteIpc(service: WriteService): void {
         validated.projectId,
         validated.chapterNumber,
         validated.content
+      )
+    }
+  )
+
+  /** 落笔要点达成度核验（LLM 逐条判定） */
+  safeHandle(
+    'write:checkAdjustPlanCompliance',
+    async (
+      _e,
+      payload: { projectId: string; chapterNumber: number; content: string; items: string[] }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          content: chapterContentSchema,
+          items: z.array(z.string().trim().min(1).max(500)).max(20)
+        }),
+        payload
+      )
+      return service.checkAdjustPlanCompliance(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.content,
+        validated.items
       )
     }
   )
