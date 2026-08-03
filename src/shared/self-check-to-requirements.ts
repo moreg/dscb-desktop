@@ -44,7 +44,7 @@ export interface BuildSelfCheckRequirementsOptions {
  * 自检面板复用它给这些项打「待写完」标，两处判定必须同源。
  */
 export function isCompletenessItem(id: string): boolean {
-  return id === 'core_plot' || id.startsWith('due_fb_')
+  return id === 'core_plot' || id === 'word_count' || id.startsWith('due_fb_')
 }
 
 /**
@@ -98,6 +98,16 @@ export function buildTempRequirementsFromSelfCheck(
     if (it.detail?.trim()) {
       lines.push(`   依据：${clip(it.detail.trim(), 160)}`)
     }
+    // 自检是字面比对：把「正文里找不到的子事件」原样列出，模型才有明确靶子
+    const missing = (it.missing ?? []).map((m) => m.trim()).filter(Boolean)
+    if (missing.length > 0) {
+      lines.push(
+        `   正文里找不到这些要点，逐条补写：${missing
+          .slice(0, 6)
+          .map((m) => `「${clip(m, 60)}」`)
+          .join('、')}`
+      )
+    }
     const action = actionHint(it)
     if (action) lines.push(`   改法：${action}`)
     lines.push('')
@@ -110,7 +120,9 @@ export function buildTempRequirementsFromSelfCheck(
       : '改完后自检：上列每一项都要在正文中有可见落地，禁止仅用旁白声称「已解决」。'
   )
   if (mode === 'rewrite') {
-    lines.push('直接输出修订后的完整本章正文（或明确改动的连续段落），不要解释过程。')
+    // 落笔结果是整体替换编辑器正文的（见 ChapterEditor.adjustChapter），
+    // 这段又被 adjust prompt 声明为最高优先级——放任「只给改动段落」会把整章截没。
+    lines.push('直接输出修订后的**完整本章正文**（含未改动的段落），不要只给改动片段，不要解释过程。')
   }
 
   return lines.join('\n').trim() + '\n'
@@ -157,7 +169,7 @@ function actionHint(item: SelfCheckItemResult): string {
     return '开头交代人物如何从上一地点移动到此处，禁止无过程瞬移。'
   }
   if (id === 'core_plot') {
-    return '补写或强化本章核心事件的过程与结果，让事件在正文里真正发生。'
+    return '补写或强化本章核心事件的过程与结果，让事件在正文里真正发生；人名/地名/关键物件沿用细纲原词，别整句换成同义说法。'
   }
   if (id.startsWith('due_fb_')) {
     return '在正文中明确回收该到期伏笔（对话揭示 / 物品出场 / 场景重现 / 点破），不要拖到下章。'
@@ -170,6 +182,9 @@ function actionHint(item: SelfCheckItemResult): string {
   }
   if (id === 'volume_spoiler') {
     return '删掉属于更后章节的大事件揭晓，本章只推进当前细纲节点。'
+  }
+  if (id === 'word_count') {
+    return '把细纲里尚未充分展开的剧情点写满（环境/心理/动作/对白展开），不要靠注水或复述凑字数。'
   }
   if (id === 'meta_narration') {
     return '去掉「第N章」「下章见」「未完待续」等元叙述，改用故事内对话/事件收尾。'

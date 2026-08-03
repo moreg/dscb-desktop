@@ -102,6 +102,40 @@ describe('buildTempRequirementsFromSelfCheck', () => {
     expect(failOnly).not.toContain('位置')
   })
 
+  /**
+   * 自检是字面比对：只说「核心事件没落地」模型无从下手，
+   * 必须把「正文里找不到的子事件」原样列出来。
+   */
+  it('把未落地子事件逐条列进要求', () => {
+    const r = report([
+      {
+        id: 'core_plot',
+        category: 'plot',
+        label: '本章核心事件有落地',
+        verdict: 'fail',
+        detail: '核心事件要点只覆盖 1/3',
+        missing: ['与邱北因先救还是先取火争执', '旁白分层点出七女登船由头']
+      }
+    ])
+    const text = buildTempRequirementsFromSelfCheck(r, { mode: 'rewrite' })
+    expect(text).toContain('正文里找不到这些要点')
+    expect(text).toContain('「与邱北因先救还是先取火争执」')
+    expect(text).toContain('「旁白分层点出七女登船由头」')
+  })
+
+  it('无 missing 字段时不多输出一行', () => {
+    const r = report([
+      {
+        id: 'ending_taboo',
+        category: 'structure',
+        label: '章末无说教',
+        verdict: 'fail',
+        detail: '章末 AI 味抒怀'
+      }
+    ])
+    expect(buildTempRequirementsFromSelfCheck(r)).not.toContain('正文里找不到这些要点')
+  })
+
   it('null 安全', () => {
     expect(buildTempRequirementsFromSelfCheck(null)).toBe('')
     expect(selfCheckHasActionableIssues(undefined)).toBe(false)

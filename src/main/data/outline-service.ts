@@ -8,7 +8,14 @@ import { writeTextAtomic } from './atomic'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import type { LlmService } from './llm-service'
-import type { MainOutline, DetailedOutlineItem, RhythmEntry, Volume, VolumeOutline } from '../../shared/types'
+import type {
+  MainOutline,
+  DetailedOutlineItem,
+  DetailedOutlineRaw,
+  RhythmEntry,
+  Volume,
+  VolumeOutline
+} from '../../shared/types'
 import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 
 
@@ -76,6 +83,15 @@ export class OutlineService {
       climax: e.climax,
       hook: ''
     }))
+  }
+
+  /**
+   * 读取指定章细纲的磁盘原文。
+   * `listDetailed` 只回传字段白名单，纯段落节看不到；此接口给渲染端展示完整内容。
+   */
+  async getDetailedRaw(projectId: string, chapterNumber: number): Promise<DetailedOutlineRaw | null> {
+    const dir = await this.projectService.resolveDir(projectId)
+    return new DetailedOutlineMdRepo(dir).readRaw(chapterNumber)
   }
 
   /**
@@ -250,9 +266,9 @@ export class OutlineService {
       text = `# 第 ${volNum} 卷细纲\n\n`
     }
 
-    const { parseDoc, parseChapterNumber } = await import('./skill-format/md-parser')
+    const { parseDoc, parseChapterHeadingNumber } = await import('./skill-format/md-parser')
     const doc = parseDoc(text)
-    const chSec = doc.sections.find((s) => parseChapterNumber(s.title) === chapterNumber)
+    const chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) === chapterNumber)
     if (!chSec) {
       // Append a new section for this chapter
       const appendText = `\n\n## 第 ${chapterNumber} 章：未命名\n- **核心事件**：\n`

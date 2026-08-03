@@ -4,6 +4,11 @@ import { z } from 'zod'
 import { OutlineService } from '../data/outline-service'
 import type { MainOutline, DetailedOutlineItem } from '../../shared/types'
 
+const detailedRawSchema = z.object({
+  projectId: projectIdSchema,
+  chapterNumber: chapterNumberSchema
+})
+
 const detailedRangeSchema = z.object({
   projectId: projectIdSchema,
   fromChapter: chapterNumberSchema,
@@ -26,6 +31,10 @@ export function registerOutlineIpc(service: OutlineService): void {
     (_e, projectId: string, chapterNumber: number, patch: Partial<DetailedOutlineItem>) =>
       service.updateDetailed(projectId, chapterNumber, patch)
   )
+  safeHandle('outline:getDetailedRaw', (_e, projectId: string, chapterNumber: number) => {
+    const validated = validateInput(detailedRawSchema, { projectId, chapterNumber })
+    return service.getDetailedRaw(validated.projectId, validated.chapterNumber)
+  })
   safeHandle('outline:generateDetailed', (_e, projectId: string, chapterNumber: number) =>
     service.generateDetailed(projectId, chapterNumber)
   )

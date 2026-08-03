@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
-import type { Diagnostic, MemoryEntityType, ProjectMeta } from '../../shared/types'
+import type { Diagnostic, DiagnosticFixKind, MemoryEntityType, ProjectMeta } from '../../shared/types'
 import {
   loadPendingSyncQueue,
   countPendingSyncQueue,
@@ -135,6 +135,14 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [diagDismissed, setDiagDismissed] = useState(false)
   const [diagExpanded, setDiagExpanded] = useState(false)
+  const diagWarnCount = useMemo(
+    () => diagnostics.filter((d) => d.severity === 'warn').length,
+    [diagnostics]
+  )
+  /** 正在执行的修复类型；非 null 时禁用全部修复按钮，避免并发改同一批文件 */
+  const [diagFixing, setDiagFixing] = useState<DiagnosticFixKind | null>(null)
+  /** 各修复的结果文案，按 kind 存 */
+  const [diagFixResults, setDiagFixResults] = useState<Record<string, string>>({})
   /** 启动时：待同步队列提醒 */
   const [bootSyncHint, setBootSyncHint] = useState<string | null>(null)
   /** 侧栏「设置」角标：待同步条数 */
@@ -210,6 +218,7 @@ export default function App() {
         .catch((err) => console.error('[App] release window project failed:', err))
       setProjectName('')
       setDiagnostics([])
+      setDiagFixResults({})
       // 离开项目视图：停止文件监听
       void window.api.stopWatchProject().catch((err) => console.error('[App] stopWatch failed:', err))
       return () => {
@@ -256,6 +265,42 @@ export default function App() {
       cancelled = true
     }
   }, [currentProjectId])
+
+  // 细纲/节奏图谱/正文变动后重跑体检：一致性问题多是外部改文件（技能、脚本）引入的，
+  // 只在打开项目时跑一次会让告警停在旧状态。
+  useEffect(() => {
+    if (!currentProjectId) return
+    const off = window.api.onProjectFilesChanged((e) => {
+      if (e.projectId !== currentProjectId) return
+      if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'prose') return
+      void window.api
+        .getDiagnostics(currentProjectId)
+        .then(setDiagnostics)
+        .catch((err) => console.error('[App] Failed to refresh diagnostics:', err))
+    })
+    return off
+  }, [currentProjectId])
+
+  /** 执行一键修复，完成后立刻重跑体检，让列表反映最新状态 */
+  const runDiagnosticFix = async (kind: DiagnosticFixKind): Promise<void> => {
+    if (!currentProjectId || diagFixing) return
+    setDiagFixing(kind)
+    try {
+      const result = await window.api.fixDiagnostic(currentProjectId, kind)
+      const skipped = result.skipped?.length
+        ? `；${result.skipped.length} 项跳过：${result.skipped.slice(0, 3).join('，')}`
+        : ''
+      setDiagFixResults((prev) => ({ ...prev, [kind]: `${result.message}${skipped}` }))
+      setDiagnostics(await window.api.getDiagnostics(currentProjectId))
+    } catch (err) {
+      setDiagFixResults((prev) => ({
+        ...prev,
+        [kind]: `修复失败：${(err as Error).message || '请重试'}`
+      }))
+    } finally {
+      setDiagFixing(null)
+    }
+  }
 
   const openProjectHere = async (projectId: string) => {
     const result = await window.api.bindProjectWindow(projectId)
@@ -497,7 +542,12 @@ export default function App() {
           {diagnostics.length > 0 && !diagDismissed && currentProjectId ? (
             <div className="diag-banner">
               <div className="diag-banner-head">
-                <strong>⚠ 格式体检：发现 {diagnostics.length} 处可能的格式问题</strong>
+                <strong>
+                  ⚠ 项目体检：{diagWarnCount > 0 ? `${diagWarnCount} 项待处理` : '无告警'}
+                  {diagnostics.length > diagWarnCount
+                    ? ` · ${diagnostics.length - diagWarnCount} 条提示`
+                    : ''}
+                </strong>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button className="btn btn-ghost btn-sm" onClick={() => setDiagExpanded((v) => !v)}>
                     {diagExpanded ? '收起' : '查看详情'}
@@ -512,8 +562,41 @@ export default function App() {
                   <ul className="diag-list">
                     {diagnostics.map((item, index) => (
                       <li key={index} className="diag-item">
-                        <span className="diag-msg">{item.message}</span>
+                        <span className="diag-msg">
+                          <span className="diag-file">{item.file}</span>
+                          {item.message}
+                        </span>
                         {item.hint ? <span className="diag-hint">修复建议：{item.hint}</span> : null}
+                        {item.details?.length ? (
+                          <ul className="diag-details">
+                            {item.details.map((line, i) => (
+                              <li key={i}>{line}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {item.fixes?.length ? (
+                          <span className="diag-actions">
+                            {item.fixes.map((fix) => (
+                              <button
+                                key={fix.kind}
+                                className="btn btn-sm"
+                                title={fix.title}
+                                disabled={diagFixing !== null}
+                                onClick={() => void runDiagnosticFix(fix.kind)}
+                              >
+                                {diagFixing === fix.kind ? '修复中…' : fix.label}
+                              </button>
+                            ))}
+                          </span>
+                        ) : null}
+                        {item.fixes
+                          ?.map((fix) => diagFixResults[fix.kind])
+                          .filter(Boolean)
+                          .map((text, i) => (
+                            <span key={i} className="diag-hint">
+                              ✓ {text}
+                            </span>
+                          ))}
                       </li>
                     ))}
                   </ul>

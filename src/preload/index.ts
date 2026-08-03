@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  DiagnosticFixKind,
   CreateProjectDataInput,
   CreateChapterInput,
   UpdateChapterMetaInput,
@@ -230,6 +231,8 @@ const api = {
   listDetailedOutline: (id: string) => ipcRenderer.invoke('outline:listDetailed', id),
   updateDetailedOutline: (id: string, chapterNumber: number, patch: Partial<DetailedOutlineItem>) =>
     ipcRenderer.invoke('outline:updateDetailed', id, chapterNumber, patch),
+  getDetailedOutlineRaw: (id: string, chapterNumber: number) =>
+    ipcRenderer.invoke('outline:getDetailedRaw', id, chapterNumber),
   generateDetailedOutline: (id: string, n: number) =>
     ipcRenderer.invoke('outline:generateDetailed', id, n),
   generateDetailedOutlineRange: (id: string, fromChapter: number, count: number) =>
@@ -239,6 +242,8 @@ const api = {
   getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
   getVolumeOutlines: (id: string) => ipcRenderer.invoke('outline:getVolumeOutlines', id),
   getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),
+  fixDiagnostic: (id: string, kind: DiagnosticFixKind) =>
+    ipcRenderer.invoke('diagnostics:fix', id, kind),
   listFigures: (id: string) => ipcRenderer.invoke('figure:list', id),
   readFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:read', id, fileName),
   openFigure: (id: string, fileName: string) => ipcRenderer.invoke('figure:open', id, fileName),
@@ -275,6 +280,13 @@ const api = {
       error?: string
       /** 本次是否为续写、以及续写到哪一步；extend 表示这一章还没写完 */
       continueMode?: 'extend' | 'finish'
+      /** 本次实际下发的字数口径（本次目标 / 整章目标 / 已写），供编辑器提示 */
+      wordBudget?: {
+        targetWords: number
+        chapterTargetWords: number
+        writtenWords: number
+        fromOutline: boolean
+      }
     }>
     return Object.assign(result, {
       requestId,

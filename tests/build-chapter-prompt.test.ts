@@ -494,6 +494,70 @@ describe('buildChapterPrompt with new skill-format context (outline md / trackin
     expect(user).toContain('情绪弧线')
   })
 
+  it('细纲的纯段落节（无字段标记）会进入 prompt', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const fs = await import('fs/promises')
+    await fs.mkdir(path.join(dir, '细纲'), { recursive: true })
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第007章_礁石对峙.md'),
+      `# 细纲_第007章_礁石对峙.md
+
+## 第 7 章：礁石对峙
+
+- **核心事件**：邹英与邱北争执。
+
+## 情节安排
+
+邹英把七人分成三组，语气不容置疑。
+邱北蹲在礁石边没动，只说了一句"先取火"。
+`,
+      'utf8'
+    )
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 7)
+    expect(user).toContain('情节安排')
+    expect(user).toContain('邹英把七人分成三组')
+    expect(user).toContain('先取火')
+  })
+
+  it('上一章细纲只带结构化字段，不重复灌入其纯段落节', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const fs = await import('fs/promises')
+    await fs.mkdir(path.join(dir, '细纲'), { recursive: true })
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第008章_前情.md'),
+      `# 细纲_第008章_前情.md
+
+## 第 8 章：前情
+
+- **核心事件**：上一章的核心事件。
+
+## 情节安排
+
+上一章的大段散文铺陈内容。
+`,
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(dir, '细纲', '细纲_第009章_本章.md'),
+      `# 细纲_第009章_本章.md
+
+## 第 9 章：本章
+
+- **核心事件**：本章的核心事件。
+`,
+      'utf8'
+    )
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 9)
+    // 上一章细纲的字段仍在（衔接需要）
+    expect(user).toContain('上一章的核心事件')
+    // 但其纯段落节不再灌进来——衔接原料由「上一章正文末尾」承担
+    expect(user).not.toContain('上一章的大段散文铺陈内容')
+  })
+
   it('gracefully degrades when 追踪/ and 设定/ do not exist (old projects)', async () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 1)

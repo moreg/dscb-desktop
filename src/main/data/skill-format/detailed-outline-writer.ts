@@ -1,6 +1,15 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, parseChapterNumber, parseBoldFields } from './md-parser'
+import {
+  readText,
+  parseDoc,
+  parseChapterHeadingNumber,
+  parseBoldFields,
+  BOLD_FIELD_HEAD,
+  BOLD_FIELD_SUB_DASH,
+  BOLD_FIELD_SUB_NUM,
+  type FieldValue
+} from './md-parser'
 import { writeTextAtomic } from '../atomic'
 import { normalizeWritingRequirementLines } from '../../../shared/writing-requirement-templates'
 
@@ -31,7 +40,7 @@ export interface DetailedOutlinePatch {
  * 策略：
  * - 遍历所有细纲文件，找到包含目标章节 H2 section 的文件
  * - 定位章节 section，解析现有字段
- * - 根据 patch 更新或新增字段
+ * - 根据 patch 就地改写对应字段行，非字段内容（如 `> 7 Gate / 节奏对齐` 引用块）原样保留
  * - 原子写入文件
  */
 export class DetailedOutlineWriter {
@@ -73,10 +82,11 @@ export class DetailedOutlineWriter {
     if (!text) return false
 
     const doc = parseDoc(text)
-    const chSec = doc.sections.find((s) => parseChapterNumber(s.title) === chapterNumber)
+    const chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) === chapterNumber)
     if (!chSec) return false
 
     // 解析现有字段
+    const bodyLines = chSec.body.split(/\r?\n/)
     const { fields, order } = parseBoldFields(chSec.body)
 
     // 构建新字段
@@ -130,13 +140,22 @@ export class DetailedOutlineWriter {
       this.setListField(newFields, newOrder, '伏笔铺设', patch.foreshadowings)
     }
 
-    // 更新节奏标注（特殊处理：合并情绪值和爽点类型）
+    // 更新节奏标注：新格式细纲把情绪值/爽点写在 `> 节奏对齐：...` 引用块里，
+    // 优先就地改那一行；只有没有引用块时才退回 `- **节奏标注**` 字段，避免两处并存打架。
+    let nextBodyLines = bodyLines
     if (patch.emotion !== undefined || patch.climax !== undefined) {
-      this.updateRhythmAnnotation(newFields, newOrder, patch.emotion, patch.climax)
+      const quoted = fields.has('节奏标注')
+        ? null
+        : updateRhythmQuote(bodyLines, patch.emotion, patch.climax)
+      if (quoted) {
+        nextBodyLines = quoted
+      } else {
+        this.updateRhythmAnnotation(newFields, newOrder, patch.emotion, patch.climax)
+      }
     }
 
-    // 生成新的 body
-    const newBody = this.renderFields(newFields, newOrder)
+    // 生成新的 body（就地改写字段行，保留引用块等非字段内容）
+    const newBody = this.renderBody(nextBodyLines, newFields, newOrder, fields)
 
     // 替换 section body
     const nextText = this.replaceSectionBody(text, chSec.title, newTitle, newBody)
@@ -248,7 +267,7 @@ export class DetailedOutlineWriter {
     // 更新或添加爽点类型
     let hasClimax = false
     if (climax !== undefined) {
-      const suffix = this.climaxSuffix(climax)
+      const suffix = climaxSuffix(climax)
       for (let i = 0; i < rhythmLines.length; i++) {
         if (/爽点类型[：:]/.test(rhythmLines[i])) {
           rhythmLines[i] = `爽点类型：${climax}${suffix}`
@@ -270,41 +289,66 @@ export class DetailedOutlineWriter {
   }
 
   /**
-   * 爽点类型的中文后缀
+   * 就地改写 body：字段行按新值替换，被删字段整段移除，新增字段追加在最后一个字段之后。
+   * 关键点是**非字段行原样保留**——细纲的 `> 【7 Gate】/ 三处一致 / 节奏对齐 / 对标状态`
+   * 引用块就在这里，早先按字段重建 body 会把它整块吞掉（情绪值/爽点随之丢失）。
    */
-  private climaxSuffix(c: number): string {
-    const map: Record<number, string> = {
-      0: '（无爽点）',
-      1: '（小打脸）',
-      2: '（中打脸）',
-      3: '（大高潮）',
-      3.5: '（卷中决战）',
-      4: '（卷终决战）'
-    }
-    return map[c] ?? ''
-  }
+  private renderBody(
+    bodyLines: readonly string[],
+    fields: Map<string, FieldValue>,
+    order: readonly string[],
+    originalFields: Map<string, FieldValue>
+  ): string {
+    const spans = scanFieldSpans(bodyLines)
+    const out: string[] = []
+    const emitted = new Set<string>()
+    /** 最后一个字段渲染结束时的输出行数，新增字段插在这里 */
+    let fieldsEnd = -1
 
-  /**
-   * 将字段 Map 渲染为 markdown body
-   */
-  private renderFields(fields: Map<string, string | string[]>, order: string[]): string {
-    const lines: string[] = []
+    let i = 0
+    while (i < bodyLines.length) {
+      const span = spans.find((s) => s.start === i)
+      if (!span) {
+        out.push(bodyLines[i])
+        i++
+        continue
+      }
+      const value = fields.get(span.key)
+      // value === undefined 表示该字段已被删除；重复键只保留首次出现
+      if (value !== undefined && !emitted.has(span.key)) {
+        // 值没变就整段原样搬过去。规范化重写会顺手抹掉键名后的括号注释
+        // （`- **对标引用**（可选）：N/A` → `- **对标引用**：N/A`），
+        // 那是本次 patch 之外的静默改动，不能做。
+        if (valuesEqual(originalFields.get(span.key), value)) {
+          out.push(...bodyLines.slice(span.start, span.end))
+        } else {
+          out.push(...renderField(span.key, value))
+        }
+        emitted.add(span.key)
+      }
+      fieldsEnd = out.length
+      i = span.end
+    }
+
+    const added: string[] = []
     for (const key of order) {
+      if (emitted.has(key)) continue
       const value = fields.get(key)
       if (value === undefined) continue
-
-      if (Array.isArray(value)) {
-        // 列表字段
-        lines.push(`- **${key}**：`)
-        for (const item of value) {
-          lines.push(`  - ${item}`)
-        }
-      } else {
-        // 简单字段
-        lines.push(`- **${key}**：${value}`)
-      }
+      added.push(...renderField(key, value))
+      emitted.add(key)
     }
-    return lines.join('\n')
+    const merged =
+      added.length === 0
+        ? out
+        : fieldsEnd >= 0
+          ? [...out.slice(0, fieldsEnd), ...added, ...out.slice(fieldsEnd)]
+          : [...out, ...added]
+
+    // 去掉尾部空行：replaceSectionBody 会自己补一个空行分隔，否则每保存一次多一行
+    let end = merged.length
+    while (end > 0 && merged[end - 1].trim() === '') end--
+    return merged.slice(0, end).join('\n')
   }
 
   /**
@@ -354,4 +398,90 @@ export class DetailedOutlineWriter {
   private escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
+}
+
+/** `- **字段**：值` 及其缩进子列表在 body 中占据的行区间 [start, end) */
+interface FieldSpan {
+  key: string
+  start: number
+  end: number
+}
+
+function scanFieldSpans(lines: readonly string[]): FieldSpan[] {
+  const spans: FieldSpan[] = []
+  let i = 0
+  while (i < lines.length) {
+    const m = lines[i].match(BOLD_FIELD_HEAD)
+    if (!m) {
+      i++
+      continue
+    }
+    let j = i + 1
+    while (
+      j < lines.length &&
+      (BOLD_FIELD_SUB_DASH.test(lines[j]) || BOLD_FIELD_SUB_NUM.test(lines[j]))
+    ) {
+      j++
+    }
+    spans.push({ key: m[1].trim(), start: i, end: j })
+    i = j
+  }
+  return spans
+}
+
+/** 字段值是否等价（数组逐项比较） */
+function valuesEqual(a: FieldValue | undefined, b: FieldValue | undefined): boolean {
+  if (a === undefined || b === undefined) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => item === b[i])
+  }
+  return a === b
+}
+
+function renderField(key: string, value: FieldValue): string[] {
+  if (!Array.isArray(value)) return [`- **${key}**：${value}`]
+  return [`- **${key}**：`, ...value.map((item) => `  - ${item}`)]
+}
+
+/** 引用块形如 `> 节奏对齐：情绪值 7、爽点类型 2（中打脸）｜所属卷：第 1 卷` */
+const RHYTHM_QUOTE = /^(\s*>\s*节奏对齐[：:]\s*)(.*)$/
+
+/**
+ * 就地改写 `> 节奏对齐：情绪值 X、爽点类型 Y` 里的数值，保留该行其余内容（所属卷等）。
+ * @returns 改写后的新数组；没有这一行则返回 null
+ */
+function updateRhythmQuote(
+  lines: readonly string[],
+  emotion: number | undefined,
+  climax: number | undefined
+): string[] | null {
+  const idx = lines.findIndex((l) => RHYTHM_QUOTE.test(l))
+  if (idx < 0) return null
+  const [, prefix, rest] = lines[idx].match(RHYTHM_QUOTE)!
+  let next = rest
+  if (emotion !== undefined) {
+    next = next.replace(/情绪值\s*\d+(?:\.\d+)?/, `情绪值 ${emotion}`)
+  }
+  if (climax !== undefined) {
+    next = next.replace(
+      /爽点类型\s*\d+(?:\.\d+)?(?:（[^）]*）)?/,
+      `爽点类型 ${climax}${climaxSuffix(climax)}`
+    )
+  }
+  if (next === rest) return null
+  return lines.map((l, i) => (i === idx ? `${prefix}${next}` : l))
+}
+
+/** 爽点类型的中文后缀（与技能模板一致） */
+function climaxSuffix(c: number): string {
+  const map: Record<number, string> = {
+    0: '（无爽点）',
+    1: '（小打脸）',
+    2: '（中打脸）',
+    3: '（大高潮）',
+    3.5: '（卷中决战）',
+    4: '（卷终决战）'
+  }
+  return map[c] ?? ''
 }

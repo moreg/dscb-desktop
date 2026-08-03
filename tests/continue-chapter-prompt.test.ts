@@ -31,13 +31,18 @@ describe('续写 prompt', () => {
     projectId = (await ps.create({ name: '续写测试', genre: '都市' })).id
   })
 
-  /** 写一份细纲，指定本章字数预估 */
+  /**
+   * 写一份细纲，指定本章字数预估。
+   *
+   * 字段必须写成 `- **键**：值`——parseBoldFields 只认这个形状。
+   * （旧写法 `**字数预估：** 2500` 根本解析不出来，测试却因为 2500 恰好等于兜底值而"通过"。）
+   */
   async function writeOutline(wordEstimate: string): Promise<void> {
     const dir = await ps.resolveDir(projectId)
     await mkdir(path.join(dir, '细纲'), { recursive: true })
     await writeFile(
       path.join(dir, '细纲', '第01卷.md'),
-      `# 第01卷\n\n## 第1章：测试章节\n\n**核心事件：** 测试事件\n**字数预估：** ${wordEstimate}\n`,
+      `# 第01卷\n\n## 第1章：测试章节\n\n- **核心事件**：测试事件\n- **字数预估**：${wordEstimate}\n`,
       'utf-8'
     )
   }
@@ -334,6 +339,194 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('省略本章中段')
     // check-degeneration.ts PLACEHOLDER_PATTERNS 的括号省略正则
     expect(prompt.user).not.toMatch(/[（(](此处|以下|这里|下文|后续)?\s*(省略|略)(去|过)?[^）)]{0,10}[）)]/)
+  })
+
+  /**
+   * 回归：细纲块在续写时原样注入，里面躺着「字数目标：约3000字」「预算合计：约3000字」，
+   * 而末尾指令说的是「本次继续写 1500 字」。三个数字并排，模型会把整章的 3000 当权威目标、
+   * 把已写部分算进去，于是补几百字就收工。字数条款必须只由一处给出。
+   */
+  describe('续写时细纲块的字数条款', () => {
+    /** 写一份带整章字数字段 + 字数预算契约的细纲（app 自己的细纲模板就长这样） */
+    async function writeOutlineWithBudget(): Promise<void> {
+      const dir = await ps.resolveDir(projectId)
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      await writeFile(
+        path.join(dir, '细纲', '细纲_第001章_测试.md'),
+        [
+          '# 细纲_第001章_测试.md',
+          '',
+          '## 第 1 章：测试',
+          '',
+          '- **核心事件**：测试事件',
+          '- **字数目标**：约 3000 字',
+          '',
+          '## 字数预算契约（情节点序列）',
+          '- 情节点 1-2：铺垫·疏，约 450 字',
+          '- **预算合计**：约 3000 字',
+          ''
+        ].join('\n'),
+        'utf-8'
+      )
+    }
+
+    it('extend：整章字数字段被替换成「整章/已写/本次增量」三段口径', async () => {
+      await writeOutlineWithBudget()
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(
+        projectId,
+        1,
+        null,
+        undefined,
+        '甲'.repeat(1000)
+      )
+
+      expect(prompt.continueMode).toBe('extend')
+      expect(prompt.targetWords).toBe(2000)
+      expect(prompt.user).toContain('整章目标 3000 字，已写约 1000 字')
+      expect(prompt.user).toContain('本次要新增 2000 字')
+      // 整章口径的字数字段不得再单独出现，否则又是两个数字打架
+      expect(prompt.user).not.toContain('字数目标：约 3000 字')
+      expect(prompt.user).not.toContain('预算合计：约 3000 字')
+    })
+
+    it('extend：末尾指令也要点明已写字数不计入本次增量', async () => {
+      await writeOutlineWithBudget()
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(
+        projectId,
+        1,
+        null,
+        undefined,
+        '甲'.repeat(1000)
+      )
+
+      expect(prompt.user).toContain('本次继续写不少于 2000 字')
+      expect(prompt.user).toContain('已写部分**不计入**')
+    })
+
+    it('finish：字数条款改成「篇幅已够、只需收尾」', async () => {
+      await writeOutlineWithBudget()
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(
+        projectId,
+        1,
+        null,
+        undefined,
+        '甲'.repeat(2900)
+      )
+
+      expect(prompt.continueMode).toBe('finish')
+      expect(prompt.user).toContain('篇幅已经够了')
+      expect(prompt.user).not.toContain('预算合计：约 3000 字')
+    })
+
+    it('非续写：整章字数只出现一次口径，仍是硬性下限', async () => {
+      await writeOutlineWithBudget()
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(projectId, 1)
+
+      expect(prompt.chapterTargetWords).toBe(3000)
+      expect(prompt.user).toContain('正文不少于 3000 字')
+      expect(prompt.user).not.toContain('字数目标：约 3000 字')
+      expect(prompt.user).not.toContain('预算合计：约 3000 字')
+      // 分段比例参考保留（节奏信息），但已声明只是参考
+      expect(prompt.user).toContain('情节点 1-2：铺垫·疏，约 450 字')
+    })
+  })
+
+  /**
+   * 回归：已写字数原先用 existingText.length，段间换行被算成正文。
+   * 前部越长虚高越多，remaining 被压小，还会提前跌破 500 转进 finish 提前收尾。
+   */
+  it('已写字数按 countWords（剥空白）算，换行不计入', async () => {
+    await writeOutline('2500')
+    const service = new WriteService(ps, mockLlm(''))
+    // 1000 个字 + 1000 个换行：按字符数会算成 1999 字，只剩 501 字额度
+    const existing = '甲\n'.repeat(1000)
+    const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
+
+    expect(prompt.writtenWords).toBe(1000)
+    expect(prompt.targetWords).toBe(1500)
+    expect(prompt.user).toContain('本次继续写不少于 1500 字')
+  })
+
+  /**
+   * 回归：旧解析只认 3-5 位半角数字，细纲写「3千字」会静默掉回兜底 2500。
+   */
+  it('细纲写「3千字」也能解析出 3000，而不是静默兜底', async () => {
+    await writeOutline('约 3千字')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(projectId, 1)
+
+    expect(prompt.chapterTargetWords).toBe(3000)
+    expect(prompt.wordTarget.fromOutline).toBe(true)
+    expect(prompt.user).toContain('正文不少于 3000 字')
+  })
+
+  it('细纲字数解析不出时兜底，并回报 fromOutline=false 供上层提示', async () => {
+    await writeOutline('适中')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(projectId, 1)
+
+    expect(prompt.wordTarget.fromOutline).toBe(false)
+    expect(prompt.chapterTargetWords).toBe(2500)
+  })
+
+  it('细纲是上限口径（「不超过 3000 字」）时不反过来当硬性下限下发', async () => {
+    await writeOutline('不超过 3000 字')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(projectId, 1)
+
+    expect(prompt.user).toContain('正文约 3000 字')
+    expect(prompt.user).not.toContain('正文不少于 3000 字')
+  })
+
+  /**
+   * 写后自检的篇幅项：此前审稿的 word_count 提醒已废弃、自检也没有这一项，
+   * 模型写少了全链路没人发现。
+   */
+  describe('写后自检的篇幅达标项', () => {
+    it('写不够时判 fail，并给出缺口', async () => {
+      await writeOutline('3000')
+      const service = new WriteService(ps, mockLlm(''))
+      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(1500))
+
+      const item = report.items.find((i) => i.id === 'word_count')
+      expect(item?.verdict).toBe('fail')
+      expect(item?.detail).toContain('1500')
+      expect(item?.detail).toContain('3000')
+    })
+
+    it('写够时判 pass', async () => {
+      await writeOutline('3000')
+      const service = new WriteService(ps, mockLlm(''))
+      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(3000))
+
+      expect(report.items.find((i) => i.id === 'word_count')?.verdict).toBe('pass')
+    })
+
+    /**
+     * 细纲写「3000 字以内」时 prompt 按上限口径下发，自检若只认下限，
+     * 就会把听话写少的章判死——bound 必须一路透传到自检。
+     */
+    it('上限口径（3000 字以内）写不满不判死', async () => {
+      await writeOutline('3000 字以内')
+      const service = new WriteService(ps, mockLlm(''))
+      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(2000))
+
+      const item = report.items.find((i) => i.id === 'word_count')
+      expect(item?.verdict).toBe('pass')
+      expect(item?.detail).toContain('上限')
+    })
+
+    it('细纲没写字数时只 warn 不判死（目标不是作者定的）', async () => {
+      await writeOutline('适中')
+      const service = new WriteService(ps, mockLlm(''))
+      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(100))
+
+      expect(report.items.find((i) => i.id === 'word_count')?.verdict).toBe('warn')
+    })
   })
 
   it('续写时自检清单改为对接已写前部，不再要求「开头」对齐上一章', async () => {

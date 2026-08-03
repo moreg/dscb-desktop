@@ -115,7 +115,9 @@ export class DeslopService {
     }
     const wordCount = countWords(text)
     const metrics = this.computeMetrics(findings, wordCount)
-    return { findings, counts, metrics, wordCount }
+    // level 一并算出来：前端「力度=自动」要显示自动判定的档位，
+    // 不带出去的话渲染层就得复刻一份 classify 阈值，迟早和这里漂移
+    return { findings, counts, metrics, wordCount, level: this.classify(metrics, counts) }
   }
 
   /* =========================================================
@@ -247,8 +249,9 @@ export class DeslopService {
       isTail
     })
 
-    // Phase 2 分级
-    const level = opts.levelOverride ?? this.classify(report.metrics, report.counts)
+    // Phase 2 分级（用户手选的档位优先于自动判定）
+    const autoLevel = report.level
+    const level = opts.levelOverride ?? autoLevel
     const baseGates = gatesForLevel(level)
     // 分级决定"改多狠"（删除比例上限），不决定"哪些问题配被修"：
     // 只含章末升华（F）或工程词泄漏（G）的正文会判为 mild，若不扩展就一次 LLM 都不调，
@@ -257,7 +260,12 @@ export class DeslopService {
     const gates = expandGatesForFindings(baseGates, report.findings.map((f) => f.gate))
     const passes = passesForGates(gates)
     const emit = (t: string): void => opts.onToken?.(t)
-    emit(`\n🔍 Phase 1-2：扫描完成，诊断为${levelName(level)}（blocking ${report.counts.blocking} / advisory ${report.counts.advisory}）\n`)
+    // 手选档位时要说清"自动判 X、你选了 Y"，不然日志写"诊断为重度"会让人以为是扫出来的
+    const levelNote =
+      opts.levelOverride && opts.levelOverride !== autoLevel
+        ? `诊断为${levelName(autoLevel)}，已手动指定${levelName(level)}（删除比例上限 ${deleteLimitPct(level)}%）`
+        : `诊断为${levelName(level)}`
+    emit(`\n🔍 Phase 1-2：扫描完成，${levelNote}（blocking ${report.counts.blocking} / advisory ${report.counts.advisory}）\n`)
     emit(`   总处理 Gate：${gates.join(' ')} | 三遍法：${passes.length} 遍\n`)
     const extraGates = gates.filter((g) => !baseGates.includes(g))
     if (extraGates.length > 0) {

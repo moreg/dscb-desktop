@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { DetailedOutlineMdRepo, parseChapterBlock } from '../src/main/data/skill-format/detailed-outline-md-repo'
+import { DetailedOutlineMdRepo, parseChapterBlock, extractProseSections } from '../src/main/data/skill-format/detailed-outline-md-repo'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -184,5 +184,95 @@ describe('parseChapterBlock 字段提取', () => {
     const d = parseChapterBlock('第 1 章：测试', body)
     expect(d).not.toBeNull()
     expect(d!.emotion).toBe(7)
+  })
+})
+
+/**
+ * 三种「技能写得出、应用读不回」的键名/取值变体。
+ * 真实样本（J:\book）：这三类合计让 500+ 章的情绪值/爽点被静默读丢，
+ * 表面无异常——因为章节列表会回退节奏图谱取值，改细纲则不生效。
+ */
+describe('节奏标注键名与取值变体', () => {
+  it('键名带括号后缀：节奏标注（必填，对齐节奏图谱）', () => {
+    // 样本：J:\book\我当婚礼司仪 300/300 章。该键名正是本应用 chapter-outline 提示词生成的
+    const body = `- **节奏标注（必填，对齐节奏图谱）**：
+  - 情绪值：5（1-10）
+  - 爽点类型：1（0/1/2/3/3.5/4）
+- **核心事件**：略。`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d).not.toBeNull()
+    expect(d!.emotion).toBe(5)
+    expect(d!.climax).toBe(1)
+  })
+
+  it('括号注释在冒号之前：- **节奏标注**（对齐节奏图谱）：', () => {
+    // 样本：J:\book\穿成秦始皇的废物系统 第01卷.md 第1章
+    const body = `- **节奏标注**（对齐节奏图谱）：
+  - 情绪值：6
+  - 爽点类型：1（小打脸）
+- **核心事件**：略。`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d).not.toBeNull()
+    expect(d!.emotion).toBe(6)
+    expect(d!.climax).toBe(1)
+  })
+
+  it('数值带口径注释：目标情绪 7（对齐大纲节奏标注表）', () => {
+    // 样本：J:\book\恋综直播 第 11-20 章
+    const body = `- **目标情绪**：7（对齐大纲节奏标注表）
+- **爽点类型**：2（对齐大纲节奏标注表 climax 值）`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d).not.toBeNull()
+    expect(d!.emotion).toBe(7)
+    expect(d!.climax).toBe(2)
+  })
+
+  it('同名字段被后节覆盖时，回退全文扫描也认带注释的数值', () => {
+    // 样本：J:\book\恋综直播 —— 「基本信息」节写 `爽点类型：2（对齐…）`，
+    // 「本章爽点」节又写了一个文字版 `爽点类型：开篇冲击`，后者覆盖前者
+    const body = `- **爽点类型**：2（对齐大纲节奏标注表 climax 值）
+- **爽点类型**：开篇冲击 + 弹幕炸场`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d!.climax).toBe(2)
+  })
+
+  it('基础信息表里的节奏锚点行也能取到情绪与爽点', () => {
+    // 样本：J:\book\全校蹲我盲盒 130 章 —— 节奏信息写在 GFM 表格行里，没有任何加粗字段
+    const body = `## 基础信息
+
+| 字段 | 内容 |
+|---|---|
+| **章节序号** | 第 21 章 |
+| **节奏锚点** | ▃ 小打脸（情绪 7 / 类型 1）|
+| **预计字数** | 约 2500 字 |`
+    const d = parseChapterBlock('第 21 章：测试', body)
+    expect(d!.emotion).toBe(7)
+    expect(d!.climax).toBe(1)
+  })
+
+  it('带括号注释的字段行不会既当字段又漏进正文', () => {
+    // isBoldFieldLine 与 parseBoldFields 必须同文法，否则该行会被两边同时消费：
+    // 既解析成 节奏标注 字段，又出现在「查看完整细纲」的散文里
+    const body =
+      '- **节奏标注**（对齐节奏图谱）：\n  - 情绪值：6\n  - 爽点类型：1（小打脸）\n' +
+      '- **核心事件**：普通字段。\n\n## 内容概括（五段式）\n\n正文段落。\n'
+    const sections = extractProseSections(body)
+    expect(sections.map((s) => s.text).join('\n')).not.toContain('节奏标注')
+    expect(sections.map((s) => s.text).join('\n')).not.toContain('情绪值：6')
+    expect(sections.find((s) => s.title === '内容概括（五段式）')?.text).toBe('正文段落。')
+  })
+
+  it('目标情绪是散文时不误判成数字', () => {
+    const body = `- **目标情绪**：错愕 → 压迫 → 决绝摸糖`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d!.emotion).toBeUndefined()
+  })
+
+  it('括号放宽不吃掉正文里的加粗强调', () => {
+    // `- **重点**，这里说明：xxx` 不是字段，逗号形态不在放宽范围内
+    const body = `- **重点**，这里说明：不应被当作字段
+- **核心事件**：真字段。`
+    const d = parseChapterBlock('第 1 章：测试', body)
+    expect(d!.plotSummary).toBe('真字段。')
   })
 })

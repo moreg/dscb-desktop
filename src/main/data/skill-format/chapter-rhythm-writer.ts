@@ -1,6 +1,6 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, findSection, parseSubsections, parseTable, parseChapterNumber } from './md-parser'
+import { readText, parseDoc, findSection, parseSubsections, parseTable, parseChapterHeadingNumber } from './md-parser'
 import { parseRhythmData, serializeRhythmData } from './rhythm-html'
 import { writeTextAtomic } from '../atomic'
 
@@ -109,7 +109,7 @@ export class ChapterRhythmWriter {
       const text = await readText(file)
       if (!text) continue
       const doc = parseDoc(text)
-      const chSec = doc.sections.find((s) => parseChapterNumber(s.title) === chapter)
+      const chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) === chapter)
       if (!chSec) continue
       const bodyLines = chSec.body.split(/\r?\n/)
       let changed = false
@@ -122,6 +122,12 @@ export class ChapterRhythmWriter {
           bodyLines[i] = `  - 爽点类型：${patch.climax}${climaxSuffix(patch.climax)}`
           changed = true
         }
+        // 新格式细纲把节奏写在引用块里：`> 节奏对齐：情绪值 7、爽点类型 2（中打脸）｜所属卷：第 1 卷`
+        const quoted = rewriteRhythmQuote(bodyLines[i], patch)
+        if (quoted !== null) {
+          bodyLines[i] = quoted
+          changed = true
+        }
       }
       if (!changed) continue
       const nextText = replaceSectionBody(text, chSec.title, bodyLines.join('\n'))
@@ -129,6 +135,29 @@ export class ChapterRhythmWriter {
       return
     }
   }
+}
+
+const RHYTHM_QUOTE = /^(\s*>\s*节奏对齐[：:]\s*)(.*)$/
+
+/**
+ * 改写引用块内的情绪值/爽点类型，保留该行其余内容（所属卷等）。
+ * @returns 改写后的整行；非节奏对齐行或无实际改动则返回 null
+ */
+function rewriteRhythmQuote(line: string, patch: RhythmPatch): string | null {
+  const m = line.match(RHYTHM_QUOTE)
+  if (!m) return null
+  const [, prefix, rest] = m
+  let next = rest
+  if (patch.emotion !== undefined) {
+    next = next.replace(/情绪值\s*\d+(?:\.\d+)?/, `情绪值 ${patch.emotion}`)
+  }
+  if (patch.climax !== undefined) {
+    next = next.replace(
+      /爽点类型\s*\d+(?:\.\d+)?(?:（[^）]*）)?/,
+      `爽点类型 ${patch.climax}${climaxSuffix(patch.climax)}`
+    )
+  }
+  return next === rest ? null : `${prefix}${next}`
 }
 
 /** 爽点类型的中文后缀（与技能模板一致） */

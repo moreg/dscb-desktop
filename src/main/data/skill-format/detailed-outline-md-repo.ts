@@ -1,7 +1,18 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, parseBoldFields, parseVolumeNumber, parseChapterNumber, type FieldValue } from './md-parser'
-import type { ChapterDetail } from '../../../shared/types'
+import {
+  readText,
+  parseDoc,
+  parseBoldFields,
+  parseVolumeNumber,
+  parseChapterNumber,
+  parseChapterHeadingNumber,
+  BOLD_FIELD_HEAD,
+  BOLD_FIELD_SUB_DASH,
+  BOLD_FIELD_SUB_NUM,
+  type FieldValue
+} from './md-parser'
+import type { ChapterDetail, DetailedOutlineRaw, OutlineProseSection } from '../../../shared/types'
 import { composeWritingRequirements } from '../../../shared/writing-requirement-templates'
 
 /**
@@ -42,6 +53,48 @@ export class DetailedOutlineMdRepo {
     return details.sort((a, b) => a.chapterNumber - b.chapterNumber)
   }
 
+  /**
+   * 读取指定章细纲的**原始 md 文本**（不做字段解析）。
+   *
+   * 用于「查看完整细纲」：`listAll()` 只把加粗字段行收进 ChapterDetail，
+   * 纯段落节（如 `## 情节安排` 下的散文）在结构化结果里看不到，这里给出磁盘原文。
+   *
+   * - 新格式（每章一文件）：返回整份文件文本（含所有扩展 H2 节）。
+   * - 旧格式（每卷一文件）：只截取该章的 H2 块，避免把整卷剧透出来。
+   *
+   * 找不到该章时返回 null。
+   */
+  async readRaw(chapterNumber: number): Promise<DetailedOutlineRaw | null> {
+    const dir = join(this.projectDir, '细纲')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      if (e.code === 'ENOENT') return null
+      throw err
+    }
+    for (const f of files.sort()) {
+      if (!f.endsWith('.md')) continue
+      const text = await readText(join(dir, f))
+      if (!text) continue
+      const doc = parseDoc(text)
+      const chapterSections = doc.sections.filter((s) => parseChapterHeadingNumber(s.title) != null)
+      // 每章一文件：文件名/H1 命中 `细纲_第NNN章`，或文件内根本没有章号 H2 块（变体格式）
+      const isPerChapterFile =
+        /^细纲_第\d+章/.test(f) || /^细纲_第\d+章/.test(doc.h1Title) || chapterSections.length === 0
+      if (isPerChapterFile) {
+        const fileChapter = parseChapterNumber(f) ?? parseChapterNumber(doc.h1Title)
+        if (fileChapter === chapterNumber) return { fileName: f, text }
+        continue
+      }
+      // 每卷一文件：截取本章 H2 块
+      const sec = chapterSections.find((s) => parseChapterHeadingNumber(s.title) === chapterNumber)
+      if (sec) return { fileName: f, text: `## ${sec.title}\n${sec.body}`.trim() }
+    }
+    return null
+  }
+
   /** 读取指定卷的细纲 */
   async listVolume(volume: number): Promise<ChapterDetail[]> {
     // 旧格式：直接读 第NN卷.md
@@ -66,7 +119,7 @@ export class DetailedOutlineMdRepo {
 
     if (isPerChapterFile) {
       // 新格式：每章一文件，章号块是 H2「## 第 N 章：标题」
-      let chSec = doc.sections.find((s) => parseChapterNumber(s.title) != null)
+      let chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) != null)
       // 从文件名提取章号（更可靠）
       let fileNameChapter = parseChapterNumber(fileName) ?? parseChapterNumber(doc.h1Title)
       // 从 H1 提取标题
@@ -87,7 +140,7 @@ export class DetailedOutlineMdRepo {
           body: doc.body
         }
       } else {
-        fileNameChapter = fileNameChapter ?? parseChapterNumber(chSec.title)
+        fileNameChapter = fileNameChapter ?? parseChapterHeadingNumber(chSec.title)
         if (fileNameChapter == null) return []
         // 合并所有 H2 节的 body 作为完整字段源（含扩展节）
         fullBody = collectAllSections(doc, chSec)
@@ -105,7 +158,7 @@ export class DetailedOutlineMdRepo {
     }
 
     // 旧格式：每卷一文件，所有 H2 都是章号块
-    const chapters = doc.sections.filter((s) => parseChapterNumber(s.title) != null)
+    const chapters = doc.sections.filter((s) => parseChapterHeadingNumber(s.title) != null)
     const details: ChapterDetail[] = []
     for (const ch of chapters) {
       const d = parseChapterBlock(ch.title, ch.body, volumeFromH1)
@@ -119,6 +172,23 @@ export class DetailedOutlineMdRepo {
  * 解析单章细纲块。heading 形如 "第 2 章：破窗" 或 "第 30 章：变异兽王（卷终决战）"。
  * body 可含多节内容（新格式的扩展 H2 节已被合并进来）。
  */
+/**
+ * 纯数字值，允许尾随括号注释。
+ * 技能会写「7（对齐大纲节奏标注表）」「1（0/1/2/3/3.5/4）」这类带口径说明的值，
+ * 早先只认光秃秃的数字，这些章的情绪值/爽点会被整体读丢。
+ */
+const LEADING_NUMBER = /^\s*(\d+(?:\.\d+)?)\s*(?:[（(].*)?$/
+
+/** 按键名前缀取字段值：容忍「节奏标注（必填，对齐节奏图谱）」这类带后缀的键 */
+function findByPrefix(fields: Map<string, FieldValue>, prefix: string): FieldValue | undefined {
+  const exact = fields.get(prefix)
+  if (exact !== undefined) return exact
+  for (const [key, value] of fields) {
+    if (key.startsWith(prefix)) return value
+  }
+  return undefined
+}
+
 export function parseChapterBlock(heading: string, body: string, volumeDefault?: number): ChapterDetail | null {
   const chapterNumber = parseChapterNumber(heading)
   if (chapterNumber == null) return null
@@ -131,7 +201,8 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
   const legacyWritingRequirements =
     toMultilineStr(fields.get('本章写作要求')) ?? toMultilineStr(fields.get('写作要求'))
 
-  const rhythmAnn = toArr(fields.get('节奏标注')) ?? []
+  // 键名按前缀取：技能模板实际会写成「节奏标注（必填，对齐节奏图谱）」，严格等值匹配会整节读不到
+  const rhythmAnn = toArr(findByPrefix(fields, '节奏标注')) ?? []
   let emotion: number | undefined
   let climax: number | undefined
   for (const line of rhythmAnn) {
@@ -148,8 +219,8 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
       const em = targetEmotion.match(/情绪值[：:]\s*(\d+(?:\.\d+)?)/)
       if (em) emotion = Number(em[1])
       else {
-        // 兼容纯数字值（如「- **目标情绪**：7」）
-        const num = targetEmotion.match(/^\s*(\d+(?:\.\d+)?)\s*$/)
+        // 兼容纯数字值，允许尾随括号注释（如「- **目标情绪**：7（对齐大纲节奏标注表）」）
+        const num = targetEmotion.match(LEADING_NUMBER)
         if (num) emotion = Number(num[1])
       }
     }
@@ -168,7 +239,7 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
       const cl = coolPointType.match(/爽点类型\s*(\d+(?:\.\d+)?)/)
       if (cl) climax = Number(cl[1])
       else {
-        const num = coolPointType.match(/^\s*(\d+(?:\.\d+)?)\s*$/)
+        const num = coolPointType.match(LEADING_NUMBER)
         if (num) climax = Number(num[1])
       }
     }
@@ -176,10 +247,23 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
   // 最后回退：扫描 body 全文里的「- **爽点类型**：N」（纯数字值）。
   // 处理「基本信息」和「本章爽点」节里都出现「爽点类型」字段、后者覆盖前者的情形。
   if (climax === undefined) {
-    const allMatches = body.matchAll(/^\s*-\s+\*\*爽点类型\*\*\s*[：:]\s*(\d+(?:\.\d+)?)\s*$/gm)
+    const allMatches = body.matchAll(
+      /^\s*-\s+\*\*爽点类型\*\*\s*[：:]\s*(\d+(?:\.\d+)?)\s*(?:[（(][^\n]*)?$/gm
+    )
     for (const m of allMatches) {
       climax = Number(m[1])
       break
+    }
+  }
+  // 「基础信息」表里的节奏锚点行：`| **节奏锚点** | ▃ 小打脸（情绪 7 / 类型 1）|`
+  // 这类细纲没有任何加粗字段，节奏信息只存在于 GFM 表格里
+  if (emotion === undefined || climax === undefined) {
+    const anchor = body.match(
+      /节奏锚点[^|\n]*\|[^|\n]*情绪\s*(\d+(?:\.\d+)?)\s*\/\s*类型\s*(\d+(?:\.\d+)?)/
+    )
+    if (anchor) {
+      if (emotion === undefined) emotion = Number(anchor[1])
+      if (climax === undefined) climax = Number(anchor[2])
     }
   }
 
@@ -219,7 +303,26 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
     writingRequirementCustomText,
     rawFields: toRawFields(fields, order)
   }
+  const prose = dropDuplicatedProse(extractProseSections(body), detail.plotSummary)
+  if (prose.length > 0) detail.proseSections = prose
   return detail
+}
+
+/**
+ * 去掉已被结构化字段吃掉的段落，避免同一段内容在 prompt 里出现两次。
+ * 典型：变体格式的 `## 核心事件` 纯段落已由 extractSectionBody 并入 plotSummary。
+ */
+function dropDuplicatedProse(
+  sections: OutlineProseSection[],
+  plotSummary: string | undefined
+): OutlineProseSection[] {
+  if (!plotSummary) return sections
+  const normalize = (s: string): string => s.replace(/\s+/g, '')
+  const summary = normalize(plotSummary)
+  return sections.filter((s) => {
+    const text = normalize(s.text)
+    return !summary.includes(text) && !text.includes(summary)
+  })
 }
 
 /** 从新格式 H1 `# 细纲_第NNN章_标题.md` 提取标题 */
@@ -242,7 +345,9 @@ function extractTitleFromH1Variant(h1: string): string {
 
 /**
  * 合并章号块及其后续扩展 H2 节的 body（新格式每章一文件，多节都在同一文件内）。
- * 跳过非章号 H2 节的标题行但保留其 body 内容，使 parseBoldFields 能提取扩展字段。
+ *
+ * 保留各节的 `## 标题` 行：加粗字段解析不受标题行影响，而纯段落节需要靠标题
+ * 才能归组（见 extractProseSections），extractSectionBody 也依赖标题定位。
  */
 function collectAllSections(
   doc: ReturnType<typeof parseDoc>,
@@ -257,12 +362,90 @@ function collectAllSections(
     for (let i = chIdx + 1; i < doc.sections.length; i++) {
       const sec = doc.sections[i]
       // 后续非章号 H2 节都是该章的扩展内容（如 内容概括/情节安排/人物关系/情节点序列等）
-      if (parseChapterNumber(sec.title) != null) break // 遇到下一个章号块则停止
-      fullBody += '\n' + sec.body
+      if (parseChapterHeadingNumber(sec.title) != null) break // 遇到下一个章号块则停止
+      fullBody += `\n## ${sec.title}\n${sec.body}`
     }
   }
 
   return fullBody
+}
+
+/**
+ * 判断是否为 `- **字段**：值` 行（parseBoldFields 消费的行）。
+ *
+ * 必须与 parseBoldFields 用同一个文法，否则两边会对同一行给出不同判断：
+ * 解析器把它当字段收走，这里却当它是散文，于是该行**既是字段又出现在正文里**。
+ * 所以直接复用 md-parser 导出的常量，不要再写一份。
+ */
+function isBoldFieldLine(line: string): boolean {
+  return BOLD_FIELD_HEAD.test(line)
+}
+
+/** 判断是否为缩进子列表项（`  - xxx` / `  1. xxx`），即加粗字段的下挂内容 */
+function isSubListLine(line: string): boolean {
+  return BOLD_FIELD_SUB_DASH.test(line) || BOLD_FIELD_SUB_NUM.test(line)
+}
+
+/**
+ * 提取纯段落内容，按所属小节标题分组。
+ *
+ * 与 parseBoldFields 互补：凡被加粗字段行（及其缩进子列表）消费掉的行一律跳过，
+ * 剩下的非空行就是「没有字段标记、因而此前彻底丢失」的散文内容——
+ * 如技能格式里的 `## 情节安排`、`## 章首钩子`。
+ *
+ * 标题为空串表示该段直接挂在章号块下、没有小节归属。
+ */
+export function extractProseSections(body: string): OutlineProseSection[] {
+  const lines = body.split(/\r?\n/)
+  const groups: OutlineProseSection[] = []
+  let title = ''
+  let buf: string[] = []
+  let inFence = false
+
+  const flush = (): void => {
+    // 段间空行保留，段首段尾的空行去掉
+    const text = buf.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+    if (text) groups.push({ title, text })
+    buf = []
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.trim().startsWith('```')) {
+      inFence = !inFence
+      buf.push(line)
+      continue
+    }
+    if (inFence) {
+      buf.push(line)
+      continue
+    }
+
+    const heading = line.match(/^#{2,4}\s+(.+?)\s*$/)
+    if (heading) {
+      flush()
+      title = heading[1].trim()
+      continue
+    }
+
+    // 加粗字段行 + 其缩进子列表：已由 parseBoldFields 收走，跳过
+    if (isBoldFieldLine(line)) {
+      while (i + 1 < lines.length && isSubListLine(lines[i + 1])) i++
+      continue
+    }
+
+    // `> 所属卷：…` / `> 节奏对齐：…` 是元信息引用块，已由 applyReferenceBlock 消费
+    if (/^\s*>/.test(line)) continue
+
+    if (line.trim() === '') {
+      if (buf.length > 0) buf.push('')
+      continue
+    }
+    buf.push(line.trim())
+  }
+  flush()
+
+  return groups
 }
 
 /**

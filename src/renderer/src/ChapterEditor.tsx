@@ -54,7 +54,12 @@ import {
 } from '../../main/data/usage-summary'
 import type { UsageSummary, CostAlertConfig } from '../../shared/types'
 import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
-import type { DetailedOutlineItem, DeslopScanReport, DeslopResult } from '../../shared/types'
+import type {
+  DetailedOutlineItem,
+  DeslopScanReport,
+  DeslopResult,
+  DeslopLevel
+} from '../../shared/types'
 import { findFirstDiffWindow, listChangeHunks, summarizeTextDiff } from '../../shared/text-diff'
 import { buildForeshadowingReminders, type ForeshadowingReminderItem } from './foreshadowingReminders'
 import ChapterFlowPanel from './ChapterFlowPanel'
@@ -62,7 +67,13 @@ import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 import { useStreamAborter } from './hooks/useStreamAborter'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
+import { FullOutlineDialog } from './FullOutlineDialog'
 import { parseForeshadowReceipt } from '../../shared/parsers'
+import {
+  describeDeslopShortfall,
+  describeWordShortfall,
+  resolveChapterTargetWords
+} from '../../shared/word-target'
 import {
   parseAdjustPlanItems,
   buildConfirmedPlanFromSelection,
@@ -112,6 +123,23 @@ import {
 } from '../../shared/format-chapter-prose'
 import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
+
+const DESLOP_LEVEL_NAMES: Record<DeslopLevel, string> = {
+  mild: '轻度',
+  moderate: '中度',
+  severe: '重度'
+}
+
+/**
+ * 润色力度可选项。limit 是该档的删除比例上限（与 deslop-service.deleteLimitPct 对齐），
+ * 直接标在按钮上——档位的实际作用就只有这个数，不写出来用户没法判断该选哪档。
+ */
+const DESLOP_LEVEL_CHOICES: { value: 'auto' | DeslopLevel; label: string; limit: number }[] = [
+  { value: 'auto', label: '自动', limit: 0 },
+  { value: 'mild', label: '轻度', limit: 15 },
+  { value: 'moderate', label: '中度', limit: 25 },
+  { value: 'severe', label: '重度', limit: 35 }
+]
 
 interface Props {
   projectId: string
@@ -530,9 +558,16 @@ export default function ChapterEditor({
   const [pomoRunning, setPomoRunning] = useState(false)
   const [pomoSessions, setPomoSessions] = useState(0)
   const [dailyGoal, setDailyGoal] = useState(3000)
-  const [chapterGoal, setChapterGoal] = useState<number>(() => {
+  /**
+   * 本章字数目标的手动覆盖值（localStorage）。null 表示跟随细纲「字数预估」。
+   *
+   * 原先这里硬编码默认 3000，而下发给模型的目标来自细纲（解析不出兜底 2500）——
+   * 界面显示的目标和模型收到的目标是两个数，用户据此判断「模型没按细纲字数写」时
+   * 看到的进度条其实是另一套口径。
+   */
+  const [chapterGoalOverride, setChapterGoalOverride] = useState<number | null>(() => {
     const saved = localStorage.getItem(`ai-writer:word-target:${projectId}:${chapterNumber}`)
-    return saved ? Number(saved) : 3000
+    return saved ? Number(saved) : null
   })
   const [isEditingGoal, setIsEditingGoal] = useState(false)
   const [editingGoalVal, setEditingGoalVal] = useState('3000')
@@ -599,6 +634,15 @@ export default function ChapterEditor({
    * 面板显示的差异就不是这次润色真正做的改动。
    */
   const [deslopBefore, setDeslopBefore] = useState<string | null>(null)
+  /**
+   * 润色力度：'auto' = 按扫描指标自动判定（DeslopScanReport.level），其余为手动覆盖。
+   *
+   * 档位实际只控制**删除比例上限**（轻 15% / 中 25% / 重 35%）——它既是写进 prompt 的硬约束，
+   * 也是 acceptRewrite 判「删太多就拒绝」的阈值。基础 Gate 范围那一层已被
+   * expandGatesForFindings 抹平（命中的 Gate 一律纳入处理）。
+   * 所以「嫌改得不够」调高、「嫌改得太狠」调低，不要指望调高能让模型改得更准。
+   */
+  const [deslopLevel, setDeslopLevel] = useState<'auto' | DeslopLevel>('auto')
   const [deslopDiffFull, setDeslopDiffFull] = useState(false)
   const [deslopCollapsedGates, setDeslopCollapsedGates] = useState<Set<string>>(new Set())
   const [tempContextInput, setTempContextInput] = useState('')
@@ -668,6 +712,7 @@ export default function ChapterEditor({
   const [showCastPanel, setShowCastPanel] = useState(false)
   const [flowPanelOpen, setFlowPanelOpen] = useState(false)
   const [outlinePanelOpen, setOutlinePanelOpen] = useState(true) // 细纲展开/收起
+  const [fullOutlineOpen, setFullOutlineOpen] = useState(false) // 完整细纲弹窗
   const [autoAudit, setAutoAudit] = useState<AuditReport | null>(null)
   const [reAuditLoading, setReAuditLoading] = useState(false)
   const [writeAuditMode, setWriteAuditMode] = useState<'soft' | 'strict'>('soft')
@@ -993,6 +1038,7 @@ export default function ChapterEditor({
     setDeslopRunning(false)
     setDeslopStopping(false)
     setDeslopBefore(null)
+    setDeslopLevel('auto')
     setDeslopScanning(false)
     // P9-A：从 localStorage 加载该章的持久化改写历史（如果存在）
     const storage = getLocalStorage()
@@ -1219,12 +1265,12 @@ export default function ChapterEditor({
 
   useEffect(() => {
     const saved = localStorage.getItem(`ai-writer:word-target:${projectId}:${chapterNumber}`)
-    setChapterGoal(saved ? Number(saved) : 3000)
+    setChapterGoalOverride(saved ? Number(saved) : null)
     setIsEditingGoal(false)
   }, [projectId, chapterNumber])
 
   const handleSaveChapterGoal = (val: number) => {
-    setChapterGoal(val)
+    setChapterGoalOverride(val)
     localStorage.setItem(`ai-writer:word-target:${projectId}:${chapterNumber}`, String(val))
   }
 
@@ -1808,6 +1854,9 @@ export default function ChapterEditor({
           recordHistory: true
         })
         setDirty(true)
+        // 字数达标提示：模型算不准中文字数，写不够是常态；不当场报出来就没人发现
+        const shortfall = describeWordShortfall(result.wordBudget, formatted)
+        if (shortfall) setUndoToast({ message: shortfall, type: 'warning' })
         // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
         // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
         setFlowPanelOpen(true)
@@ -2935,6 +2984,8 @@ export default function ChapterEditor({
     setDeslopScanning(true)
     setDeslopResult(null)
     setDeslopLog('')
+    // 新一次扫描 = 新的自动判定，上一次的手动档位不该跟着走
+    setDeslopLevel('auto')
     try {
       const report = await window.api.deslopScan(projectId, draft)
       setDeslopScanReport(report)
@@ -3017,6 +3068,8 @@ export default function ChapterEditor({
     // 必须置 dirty 并压改写栈：否则保存按钮仍显示「已存」无法保存，Ctrl+Z 也撤不掉
     setDirty(true)
     pushRewrite(before, deslopResult.rewritten, DESLOP_APPLY_KEY)
+    // 改写把正文删短到细纲目标以下时留一条提示：面板马上要关掉，不说就没人知道
+    if (deslopShortfall) setUndoToast({ message: deslopShortfall, type: 'warning' })
     setDeslopResult(null)
     setDeslopScanReport(null)
     setDeslopLog('')
@@ -3264,6 +3317,33 @@ export default function ChapterEditor({
   // 当前非空白字数：渲染中多处要用（字数条/进度条/会话字数），
   // 数万字章节每键触发多次全文正则并分配数组会造成打字卡顿，统一算一次
   const draftWordCount = useMemo(() => (draft.match(/\S/g) ?? []).length, [draft])
+
+  /**
+   * 本章目标字数：默认跟随细纲「字数预估」（与主进程下发给模型的口径同源），
+   * 用户在字数条上手动改过才用覆盖值。
+   */
+  const outlineWordTarget = useMemo(
+    () => resolveChapterTargetWords(chapterOutline?.wordEstimate),
+    [chapterOutline?.wordEstimate]
+  )
+  const chapterGoal = chapterGoalOverride ?? outlineWordTarget.targetWords
+
+  /**
+   * 去 AI 味结果是否把正文改到了细纲目标以下。
+   * 删除比例上限 35% 是相对原文算的，跟细纲目标无关——3000 字改完剩 2000 字会照常通过，
+   * 应用前不提示就没人发现成品短了。
+   */
+  const deslopShortfall = useMemo(
+    () =>
+      deslopResult
+        ? describeDeslopShortfall(
+            deslopResult.afterWords,
+            outlineWordTarget,
+            deslopResult.beforeWords
+          )
+        : null,
+    [deslopResult, outlineWordTarget]
+  )
 
   // 会话字数：当前字数 - 进入时字数
   const sessionWords = useMemo(
@@ -4343,7 +4423,13 @@ export default function ChapterEditor({
                     setIsEditingGoal(true)
                   }}
                   style={{ cursor: 'pointer', borderBottom: '1px dashed var(--ink-3)' }}
-                  title="点击修改本章字数目标"
+                  title={
+                    chapterGoalOverride != null
+                      ? `手动设定的目标（细纲口径为 ${outlineWordTarget.targetWords} 字）。点击修改`
+                      : outlineWordTarget.fromOutline
+                        ? `来自细纲字数预估「${outlineWordTarget.raw}」，与下发给 AI 的目标一致。点击修改`
+                        : '细纲未填「字数预估」，按默认值下发给 AI。点击修改，或去细纲里补上字数预估'
+                  }
                 >
                   {chapterGoal}
                 </span>
@@ -4356,6 +4442,17 @@ export default function ChapterEditor({
               style={{ width: `${Math.min(100, (draftWordCount / Math.max(1, chapterGoal)) * 100)}%` }}
             />
           </div>
+          {chapterGoalOverride == null && !outlineWordTarget.fromOutline && (
+            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--ink-3)' }}>
+              细纲未填字数预估，AI 按默认 {outlineWordTarget.targetWords} 字写
+            </div>
+          )}
+          {chapterGoalOverride != null &&
+            chapterGoalOverride !== outlineWordTarget.targetWords && (
+              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--warn, var(--ink-3))' }}>
+                这里是手动目标；AI 实际按细纲的 {outlineWordTarget.targetWords} 字写
+              </div>
+            )}
         </div>
       </div>
 
@@ -4691,6 +4788,15 @@ export default function ChapterEditor({
                 {chapterOutline ? `第 ${chapterNumber} 章` : '暂无细纲'}
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {chapterOutline ? (
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => setFullOutlineOpen(true)}
+                    title="展示 细纲/*.md 原文（含卡片未列出的扩展节）"
+                  >
+                    查看完整
+                  </button>
+                ) : null}
                 {onOpenOutline ? (
                   <button className="btn btn-sm btn-ghost" onClick={onOpenOutline}>
                     大纲页 →
@@ -4725,6 +4831,14 @@ export default function ChapterEditor({
               )
             )}
           </div>
+
+          {fullOutlineOpen ? (
+            <FullOutlineDialog
+              projectId={projectId}
+              chapterNumber={chapterNumber}
+              onClose={() => setFullOutlineOpen(false)}
+            />
+          ) : null}
 
           {findBarOpen ? (
             <div className="find-replace-bar" onClick={(e) => e.stopPropagation()}>
@@ -5202,6 +5316,39 @@ export default function ChapterEditor({
                     })}
                   </div>
                 )}
+                {/* 力度：只影响删除比例上限（轻 15% / 中 25% / 重 35%），
+                    默认跟自动判定走；嫌改得不够调高、嫌改得太狠调低 */}
+                <div className="row" style={{ gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}>
+                  <span className="meta" style={{ marginRight: 2 }}>润色力度</span>
+                  {DESLOP_LEVEL_CHOICES.map((c) => {
+                    const active = deslopLevel === c.value
+                    const label =
+                      c.value === 'auto'
+                        ? `自动（判定：${DESLOP_LEVEL_NAMES[deslopScanReport.level]}）`
+                        : `${c.label} ≤${c.limit}%`
+                    return (
+                      <button
+                        key={c.value}
+                        className={active ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-ghost'}
+                        style={{ fontSize: 11 }}
+                        disabled={deslopRunning}
+                        onClick={() => setDeslopLevel(c.value)}
+                        title={
+                          c.value === 'auto'
+                            ? '按扫描指标自动判定档位（禁用词密度 / 排比数 / blocking 数）'
+                            : `强制${c.label}：删除比例上限 ${c.limit}%。超出上限的改写会被护栏拒绝`
+                        }
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
+                  {deslopLevel !== 'auto' && deslopLevel !== deslopScanReport.level ? (
+                    <span className="meta" style={{ color: 'var(--ink-2)' }}>
+                      （已覆盖自动判定的{DESLOP_LEVEL_NAMES[deslopScanReport.level]}）
+                    </span>
+                  ) : null}
+                </div>
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
                   {deslopRunning ? (
                     <button
@@ -5222,7 +5369,7 @@ export default function ChapterEditor({
                   </button>
                   <button
                     className="btn btn-primary"
-                    onClick={() => void runDeslop(undefined)}
+                    onClick={() => void runDeslop(deslopLevel === 'auto' ? undefined : deslopLevel)}
                     disabled={deslopRunning || deslopScanReport.findings.length === 0}
                   >
                     {deslopRunning ? '润色中…' : '开始润色'}
@@ -5298,6 +5445,12 @@ export default function ChapterEditor({
                     {deslopDiffFull ? '只看差异' : '看全文'}
                   </button>
                 </div>
+
+                {deslopShortfall ? (
+                  <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--warning)' }}>
+                    ⚠ {deslopShortfall}
+                  </p>
+                ) : null}
 
                 {deslopDiffView?.identical ? (
                   <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--ink-2)' }}>

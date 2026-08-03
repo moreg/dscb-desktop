@@ -78,6 +78,13 @@ import {
 } from '../../shared/parsers'
 import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 import {
+  DEFAULT_TARGET_WORDS,
+  MAX_TARGET_WORDS,
+  resolveChapterTargetWords,
+  type WordTargetResolution
+} from '../../shared/word-target'
+import { countWords } from './words'
+import {
   assertNovelProse,
   isEarlyAgentNarration,
   LLM_AGENT_META_ERROR
@@ -106,10 +113,20 @@ export interface BatchState {
  * onPromptMeta 在下发给 LlmService 前会被剔除，不进 provider 层。
  */
 export interface ChapterGenerateOptions extends GenerateOptions {
-  onPromptMeta?: (meta: {
-    continueMode?: 'extend' | 'finish'
-    targetWords: number
-  }) => void
+  onPromptMeta?: (meta: ChapterPromptMeta) => void
+}
+
+/** prompt 组装阶段才知道的字数口径，回传给前端做「目标 / 实际 / 还差」提示 */
+export interface ChapterPromptMeta {
+  continueMode?: 'extend' | 'finish'
+  /** 本次要写的字数（续写时是增量） */
+  targetWords: number
+  /** 整章目标字数 */
+  chapterTargetWords: number
+  /** 下笔前已写字数（countWords 口径） */
+  writtenWords: number
+  /** 整章目标是否真的来自细纲；false 表示走了兜底，前端应提示补细纲 */
+  fromOutline: boolean
 }
 
 export interface ChapterPrompt {
@@ -126,16 +143,10 @@ export interface ChapterPrompt {
 const PREV_TAIL_CHARS = 1500
 
 /**
- * 每章目标字数。
- * 基于典型网文节奏设定，约 2500 字/章。
+ * 每章目标字数兜底值（细纲无「字数预估」或解析不出时）。
+ * 解析规则与夹取区间见 shared/word-target.ts——渲染进程的目标条与写后自检同源。
  */
-const TARGET_WORDS = 2500
-
-/**
- * 字数预估的兜底下限/上限，防止用户在细纲里填出极端值（如 0 或 50000）。
- */
-const MIN_TARGET_WORDS = 800
-const MAX_TARGET_WORDS = 8000
+const TARGET_WORDS = DEFAULT_TARGET_WORDS
 
 /**
  * 时间线注入 prompt 的最大字符数。
@@ -185,31 +196,6 @@ const CONTINUE_FINISH_WORDS = 300
 const ENDING_STATE_CACHE_MAX = 16
 
 /**
- * 从细纲「字数预估」文本解析出整数目标字数。
- * 容忍多种写法：「约 2500 字」「2500-3000」「2500~3000」「不少于3000」。
- * 解析失败或无细纲时返回 undefined，由调用方决定兜底值。
- */
-function parseWordEstimate(raw: string | undefined): number | undefined {
-  if (!raw) return undefined
-  // 取第一个出现的数字区间，取其上限（"2500-3000" → 3000，"约 2500" → 2500）
-  const range = raw.match(/(\d{3,5})\s*[-~到]\s*(\d{3,5})/)
-  if (range) {
-    const high = Number(range[2])
-    if (Number.isFinite(high)) return clampTargetWords(high)
-  }
-  const single = raw.match(/(\d{3,5})/)
-  if (single) {
-    const n = Number(single[1])
-    if (Number.isFinite(n)) return clampTargetWords(n)
-  }
-  return undefined
-}
-
-function clampTargetWords(n: number): number {
-  return Math.min(MAX_TARGET_WORDS, Math.max(MIN_TARGET_WORDS, n))
-}
-
-/**
  * 按目标字数反算生成 token 上限，留出约 30% 余量。
  * 中文 1 字 ≈ 1.7 token（取 1.5~2 的中位偏高，避免临界截断）。
  * 最低不低于 DEFAULT_MAX_TOKENS，保证小目标章节也不被误伤。
@@ -242,6 +228,12 @@ export class WriteService {
     system: string
     user: string
     targetWords: number
+    /** 整章目标字数（续写时 targetWords 只是本次增量，这个才是全章口径） */
+    chapterTargetWords: number
+    /** 已写字数（countWords 口径）；非续写为 0 */
+    writtenWords: number
+    /** 细纲字数解析结果：兜底/夹取都在这里回报，供上层提示用户 */
+    wordTarget: WordTargetResolution
     /** 续写模式；无 existingText 时为 undefined。供调用方（写后自检降级）判断本章是否还没写完 */
     continueMode?: 'extend' | 'finish'
   }> {
@@ -262,8 +254,27 @@ export class WriteService {
     // 对标书方法论召回（oh-story-claudecode 闭环：拆文产物 → 写作召回）
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
 
-    const chapterTargetWords = parseWordEstimate(ctx.detail?.wordEstimate) ?? TARGET_WORDS
+    const wordTarget = resolveChapterTargetWords(ctx.detail?.wordEstimate)
+    if (!wordTarget.fromOutline && ctx.detail?.wordEstimate) {
+      console.warn(
+        `[buildChapterPrompt] 第 ${chapterNumber} 章「字数预估：${ctx.detail.wordEstimate}」解析不出数字，` +
+          `按兜底 ${TARGET_WORDS} 字下发`
+      )
+    }
+    if (wordTarget.clampedFrom != null) {
+      console.warn(
+        `[buildChapterPrompt] 第 ${chapterNumber} 章字数预估 ${wordTarget.clampedFrom} 超出允许区间，` +
+          `已按 ${wordTarget.targetWords} 字下发`
+      )
+    }
+    const chapterTargetWords = wordTarget.targetWords
     let targetWords = chapterTargetWords
+    /**
+     * 已写字数一律用 countWords（剥空白）口径。
+     * 原先用 existingText.length，段间换行被算成正文，前部越长虚高越多：
+     * remaining 被压小，还会提前跌破 CONTINUE_MIN_WORDS 转进 finish 提前收尾。
+     */
+    const writtenWords = existingText ? countWords(existingText) : 0
     /**
      * 续写模式：
      * - extend：本章篇幅还差得多，按剩余额度继续展开
@@ -271,7 +282,7 @@ export class WriteService {
      */
     let continueMode: 'extend' | 'finish' | undefined
     if (existingText && existingText.trim()) {
-      const remaining = chapterTargetWords - existingText.trim().length
+      const remaining = chapterTargetWords - writtenWords
       if (remaining >= CONTINUE_MIN_WORDS) {
         continueMode = 'extend'
         targetWords = remaining
@@ -309,12 +320,15 @@ export class WriteService {
       recentPlotSummaries: ctx.recentPlotSummaries,
       chapterNumber,
       targetWords,
+      chapterTargetWords,
+      writtenWords,
+      wordBound: wordTarget.bound,
       tempContext,
       existingText,
       continueMode
     })
 
-    return { system, user, targetWords, continueMode }
+    return { system, user, targetWords, chapterTargetWords, writtenWords, wordTarget, continueMode }
   }
 
   async generateChapterStream(
@@ -335,7 +349,13 @@ export class WriteService {
     // 让调用方（IPC → 前端）知道本次是不是「还没写完的续写」：
     // extend 下整章是半成品，写后自检的完成度类项不该按整章判死。
     const { onPromptMeta, ...llmOpts } = opts as ChapterGenerateOptions
-    onPromptMeta?.({ continueMode: prompt.continueMode, targetWords })
+    onPromptMeta?.({
+      continueMode: prompt.continueMode,
+      targetWords,
+      chapterTargetWords: prompt.chapterTargetWords,
+      writtenWords: prompt.writtenWords,
+      fromOutline: prompt.wordTarget.fromOutline
+    })
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
       systemPrompt: prompt.system,
@@ -456,7 +476,8 @@ export class WriteService {
       ...opts,
       systemPrompt: prompt.system,
       maxTokens:
-        opts.maxTokens ?? tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
+        opts.maxTokens ??
+        tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
       meta: { feature: 'chapter-adjust', projectId, chapterNumber }
     })
     return full
@@ -987,10 +1008,16 @@ export class WriteService {
         ])
 
       const powerBullets = extractPowerBoundaryBullets(settings, settingsEvolution)
+      const wordTarget = resolveChapterTargetWords(detail?.wordEstimate)
 
       return evaluateChapterSelfCheck({
         chapterNumber,
         content,
+        targetWords: wordTarget.targetWords,
+        targetFromOutline: wordTarget.fromOutline,
+        // 上限口径（「3000 字以内」）必须跟着走，否则自检会把上限当下限，
+        // 把听话写少的章判死——写正文的 prompt 一直认这个字段
+        targetBound: wordTarget.bound,
         // 只读缓存：命中则连续性三项照常检查，未命中退回 undefined（跳过），不打 LLM
         prevEndingState: prevTail ? this.peekEndingState(dir, chapterNumber, prevTail) : undefined,
         prevTail,
@@ -1078,22 +1105,27 @@ export class WriteService {
     return parseAdjustPlanCompliance(raw, clean)
   }
 
-  /** 自检专用：只取本章细纲核心字段 */
+  /** 自检专用：只取本章细纲核心字段（wordEstimate 供篇幅达标检查） */
   private async loadSelfCheckDetail(
     dir: string,
     chapterNumber: number
-  ): Promise<{ plotSummary?: string; hook?: string } | undefined> {
+  ): Promise<{ plotSummary?: string; hook?: string; wordEstimate?: string } | undefined> {
     try {
       const all = await new DetailedOutlineMdRepo(dir).listAll()
       const d = all.find((x) => x.chapterNumber === chapterNumber)
-      if (d) return { plotSummary: d.plotSummary, hook: d.hook }
+      if (d) return { plotSummary: d.plotSummary, hook: d.hook, wordEstimate: d.wordEstimate }
     } catch {
       /* fall through */
     }
     try {
       const items = await new OutlineRepository(dir).listDetailed()
       const item = items.find((d) => d.chapterNumber === chapterNumber)
-      if (item) return { plotSummary: item.plotSummary, hook: item.hook }
+      if (item)
+        return {
+          plotSummary: item.plotSummary,
+          hook: item.hook,
+          wordEstimate: item.wordEstimate
+        }
     } catch {
       /* ignore */
     }
@@ -1101,8 +1133,15 @@ export class WriteService {
   }
 
   private async loadSelfCheckForeshadowings(dir: string): Promise<
-    { content: string; status: string; expectedCollect?: number; plantChapter?: number }[]
+    {
+      content: string
+      status: string
+      expectedCollect?: number
+      plantChapter?: number
+      actualCollect?: number
+    }[]
   > {
+    // actualCollect 必须带上：伏笔回执把状态改成已回收后，自检要靠它继续验本章正文
     try {
       const list = await new ForeshadowingMdRepo(dir).list()
       if (list.length > 0) {
@@ -1110,7 +1149,8 @@ export class WriteService {
           content: f.content,
           status: f.status,
           expectedCollect: f.expectedCollect,
-          plantChapter: f.plantChapter
+          plantChapter: f.plantChapter,
+          actualCollect: f.actualCollect
         }))
       }
     } catch {
@@ -1122,7 +1162,8 @@ export class WriteService {
         content: f.content,
         status: f.status,
         expectedCollect: f.expectedCollect,
-        plantChapter: f.plantChapter
+        plantChapter: f.plantChapter,
+        actualCollect: f.actualCollect
       }))
     } catch {
       return []
@@ -2644,6 +2685,12 @@ interface RenderInput {
    * 续写时是「还要再写多少」，不是整章字数。
    */
   targetWords: number
+  /** 整章目标字数（细纲口径）。续写时用于改写细纲块里的字数条款，消除数字冲突。 */
+  chapterTargetWords?: number
+  /** 下笔前已写字数（countWords 口径）；非续写为 0 */
+  writtenWords?: number
+  /** 细纲字数的语义：下限（默认）还是上限口径 */
+  wordBound?: 'min' | 'about'
   tempContext?: string
   existingText?: string
   /**
@@ -2789,7 +2836,11 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(renderRequirementChecklist(chapterRequirements))
   }
   if (input.chapterDetail) {
-    parts.push(renderChapterDetail(input.chapterDetail, '本章细纲'))
+    parts.push(
+      renderChapterDetail(input.chapterDetail, '本章细纲', {
+        wordBudgetNote: buildWordBudgetNote(input)
+      })
+    )
   } else {
     parts.push('（本章无细纲，可参考总纲自由发挥，但仍须遵循三铁律精神：不写下一章剧情。）')
   }
@@ -2812,7 +2863,7 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push('---')
     parts.push(`# 第 ${input.chapterNumber - 1} 章 衔接原料`)
     if (input.prevDetail) {
-      parts.push(renderChapterDetail(input.prevDetail, '上一章细纲'))
+      parts.push(renderChapterDetail(input.prevDetail, '上一章细纲', { includeProse: false }))
     }
     if (input.prevTail) {
       parts.push(`**上一章正文结尾**（用于衔接检查）${prevStateUse}：`)
@@ -2945,16 +2996,27 @@ function renderUserPrompt(input: RenderInput): string {
         `**本章篇幅已经写够了，现在请收尾**：接续上面的【本章已写正文前部】，把本章细纲里还没落实的剧情点补完，然后收束本章，**约 ${input.targetWords} 字即可，不要为了凑字数拉长**。${common}`
       )
     } else {
+      // 已写字数要写进指令：只给增量数字时，模型会拿它和细纲的整章目标对比，
+      // 误以为"整章才 3000、已经写了不少"，于是补几百字就停。
+      const written = input.writtenWords ?? 0
+      const budget = input.chapterTargetWords
+        ? `（已写约 ${written} 字，整章目标 ${input.chapterTargetWords} 字，已写部分**不计入**本次的 ${input.targetWords} 字）`
+        : '（这是硬性下限）'
       parts.push(
-        `**请接续上面的【本章已写正文前部】继续写本章后续正文，本次继续写不少于 ${input.targetWords} 字**（这是硬性下限）。${common}`
+        `**请接续上面的【本章已写正文前部】继续写本章后续正文，本次继续写不少于 ${input.targetWords} 字**${budget}。${common}`
       )
     }
     parts.push(
       '**若本次已把本章细纲的剧情点全部写完，就在本次输出里把本章收束掉**：章末必须以"对话"或"事件"结尾，禁止总结式旁白收尾；剧情点还没写完则不要强行收尾。'
     )
   } else {
+    // 细纲写的是上限口径（「不超过 3000 字」）时不能反过来当硬性下限下发
+    const lengthClause =
+      input.wordBound === 'about'
+        ? `**正文约 ${input.targetWords} 字**（细纲给的是上限口径，可以少写，但不要明显超出）`
+        : `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）`
     parts.push(
-      `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
+      `${lengthClause}。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
     )
   }
   parts.push(
@@ -3327,7 +3389,62 @@ function renderRequirementChecklist(text: string): string {
     .join('\n')
 }
 
-function renderChapterDetail(d: ChapterDetail, label: string): string {
+/**
+ * 细纲块里所有「整章字数」口径的字段名。
+ *
+ * 这些字段和末尾的「本次写多少字」指令是同一件事的两种口径：细纲说整章 3000，
+ * 续写时指令说本次 1500，两个数字并排出现，模型会把 3000 当权威目标、把已写部分算进去，
+ * 于是只补几百字就收工。所以字数条款统一由 wordBudgetNote 一处给出，其余全部剔除。
+ */
+const WORD_BUDGET_FIELD_KEYS = ['字数目标', '字数预算', '预算合计', '本章字数', '每章字数']
+
+/**
+ * 构造字数条款。返回 undefined 表示细纲照原样渲染（无整章目标信息时）。
+ *
+ * 续写时必须显式拆开「整章目标 / 已写 / 本次增量」三个数，否则细纲里的整章字数
+ * 会盖过末尾的增量指令。
+ */
+function buildWordBudgetNote(input: RenderInput): string | undefined {
+  const chapterTarget = input.chapterTargetWords
+  if (!chapterTarget) return undefined
+  const tail =
+    '（细纲里若还写着别的字数，那都是整章口径或分段比例参考，不是本次的目标。）'
+  if (input.continueMode === 'finish') {
+    return (
+      `整章目标 ${chapterTarget} 字，已写约 ${input.writtenWords ?? 0} 字——**篇幅已经够了**，` +
+      `本次只需补完剩余剧情点并收束本章，约 ${input.targetWords} 字，不要为凑字数拉长。${tail}`
+    )
+  }
+  if (input.continueMode === 'extend') {
+    return (
+      `整章目标 ${chapterTarget} 字，已写约 ${input.writtenWords ?? 0} 字，` +
+      `**本次要新增 ${input.targetWords} 字**（硬性下限，已写部分不计入）。${tail}`
+    )
+  }
+  // 从零写整章：细纲原文一并保留（作者可能在字数字段里附了别的交代），
+  // 此时两处是同一个整章数字，不存在口径冲突
+  const raw = input.chapterDetail?.wordEstimate?.trim()
+  const rawNote = raw ? `（细纲原文：${raw}）` : ''
+  return input.wordBound === 'about'
+    ? `本章约 ${chapterTarget} 字（细纲为上限口径，不要超出太多）${rawNote}。`
+    : `本章正文 **不少于 ${chapterTarget} 字**（硬性下限）${rawNote}。`
+}
+
+/**
+ * 渲染细纲块。
+ *
+ * `includeProse`：是否带上纯段落节（情节安排/章首钩子等散文内容）。
+ * 本章默认带；上一章不带——衔接原料已由「上一章正文末尾」提供，
+ * 再灌一遍上一章的散文只会挤占上下文。
+ *
+ * `wordBudgetNote`：给定时，细纲里所有整章字数字段都被它替换（见 WORD_BUDGET_FIELD_KEYS）。
+ */
+function renderChapterDetail(
+  d: ChapterDetail,
+  label: string,
+  opts?: { includeProse?: boolean; wordBudgetNote?: string }
+): string {
+  const note = opts?.wordBudgetNote
   const lines: string[] = []
   lines.push(`**${label}**：`)
   if (d.title) lines.push(`- 章节标题：${d.title}`)
@@ -3338,24 +3455,40 @@ function renderChapterDetail(d: ChapterDetail, label: string): string {
   if (d.foreshadowings?.length) lines.push(`- 伏笔铺设：${d.foreshadowings.join('；')}`)
   if (d.charactersAppearing?.length)
     lines.push(`- 角色出场：${d.charactersAppearing.join('、')}`)
-  if (d.wordEstimate) lines.push(`- 字数预估：${d.wordEstimate}`)
+  if (note) lines.push(`- 本次字数要求：${note}`)
+  else if (d.wordEstimate) lines.push(`- 字数预估：${d.wordEstimate}`)
   if (d.climaxTag) lines.push(`- 关键标记：${d.climaxTag}`)
   if (d.writingRequirements) lines.push(`- 本章写作要求：${d.writingRequirements}`)
 
   if (d.rawFields) {
     const skipKeys = new Set([
-      '章节标题', '核心事件', '爽点/打脸', '爽点', '章末钩子', 
-      '金句', '伏笔铺设', '角色出场', '字数预估', '关键标记', 
+      '章节标题', '核心事件', '爽点/打脸', '爽点', '章末钩子',
+      '金句', '伏笔铺设', '角色出场', '字数预估', '关键标记',
       '本章写作要求', '写作要求', '写作要求模板', '自定义补充要求',
-      'title', 'plotSummary', 'coolPoint', 'hook', 'goldenLine', 
-      'foreshadowings', 'charactersAppearing', 'wordEstimate', 
-      'climaxTag', 'writingRequirements', 'writingRequirementTemplateId', 
+      // 字数目标是 wordEstimate 的别名（见 detailed-outline-md-repo），
+      // 不跳会和上面的字数行重复输出同一个数字
+      '字数目标',
+      'title', 'plotSummary', 'coolPoint', 'hook', 'goldenLine',
+      'foreshadowings', 'charactersAppearing', 'wordEstimate',
+      'climaxTag', 'writingRequirements', 'writingRequirementTemplateId',
       'writingRequirementCustomText', 'volume', 'chapterNumber', 'emotion', 'climax'
     ])
+    if (note) for (const k of WORD_BUDGET_FIELD_KEYS) skipKeys.add(k)
     for (const [k, v] of Object.entries(d.rawFields)) {
       if (skipKeys.has(k)) continue
       const text = Array.isArray(v) ? v.join('；') : v
       if (text) lines.push(`- ${k}：${text}`)
+    }
+  }
+
+  // 纯段落节：细纲里没有字段标记的散文（情节安排/章首钩子等），逐节缩进附在字段之后
+  if ((opts?.includeProse ?? true) && d.proseSections?.length) {
+    for (const sec of d.proseSections) {
+      const indented = sec.text
+        .split('\n')
+        .map((l) => `  ${l}`)
+        .join('\n')
+      lines.push(sec.title ? `- ${sec.title}：\n${indented}` : indented)
     }
   }
 

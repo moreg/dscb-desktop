@@ -131,6 +131,21 @@ export interface BoldFields {
 }
 
 /**
+ * 字段头行：`- **字段**：值`。
+ *
+ * 键名与冒号之间容许一段括号注释——技能模板里 `- **节奏标注**（对齐节奏图谱）：` 这种写法很常见，
+ * 早先严格要求 `**` 后紧跟冒号，整行匹配不上，该字段被静默丢弃。
+ * 只放开括号形态，不放开任意文字，避免把 `- **重点**，说明：xxx` 这类正文误判成字段。
+ *
+ * ⚠️ 改这里要同步 detailed-outline-writer 的 scanFieldSpans（它直接引用本常量，勿另写一份）。
+ */
+export const BOLD_FIELD_HEAD = /^\s*-\s+\*\*(.+?)\*\*\s*(?:（[^）]*）|\([^)]*\))?\s*[：:]\s*(.*)$/
+/** 缩进子列表：`  - xxx` */
+export const BOLD_FIELD_SUB_DASH = /^\s{2,}-\s+(.+)$/
+/** 缩进数字子列表：`  1. xxx`（细纲情节点序列等） */
+export const BOLD_FIELD_SUB_NUM = /^\s{2,}\d+\s*[.、)]\s+(.+)$/
+
+/**
  * 解析 `- **字段**：值` 行。
  * - 行内值非空 → string
  * - 行内空 + 后续缩进子列表（`  - xxx`）→ string[]
@@ -142,7 +157,7 @@ export function parseBoldFields(body: string): BoldFields {
   const order: string[] = []
   let i = 0
   while (i < lines.length) {
-    const m = lines[i].match(/^\s*-\s+\*\*(.+?)\*\*\s*[：:]\s*(.*)$/)
+    const m = lines[i].match(BOLD_FIELD_HEAD)
     if (!m) {
       i++
       continue
@@ -153,14 +168,14 @@ export function parseBoldFields(body: string): BoldFields {
     let j = i + 1
     while (j < lines.length) {
       // 连字符子列表：  - xxx
-      const sm = lines[j].match(/^\s{2,}-\s+(.+)$/)
+      const sm = lines[j].match(BOLD_FIELD_SUB_DASH)
       if (sm) {
         sub.push(sm[1].trim())
         j++
         continue
       }
       // 数字子列表：  1. xxx /  2. xxx（技能 v3.2 细纲情节点序列等使用此格式）
-      const nm = lines[j].match(/^\s{2,}\d+\s*[.、)]\s+(.+)$/)
+      const nm = lines[j].match(BOLD_FIELD_SUB_NUM)
       if (nm) {
         sub.push(nm[1].trim())
         j++
@@ -182,6 +197,18 @@ export function parseBoldFields(body: string): BoldFields {
 /** 提取「第 N 章」/「第 N 卷」中的数字 */
 export function parseChapterNumber(text: string): number | null {
   const m = text.match(/第\s*(\d+)\s*章/)
+  return m ? parseInt(m[1], 10) : null
+}
+
+/**
+ * 判定某个 H2 标题是否为「章号块」并取章号——要求「第N章」出现在标题**开头**。
+ *
+ * 与 parseChapterNumber 的区别：后者在整串里任意位置找章号，用于文件名/H1 这类
+ * 一定含章号的串。标题就不行了——`细纲/` 里混进说明文档时，`## 修复点 1：第121章——衔接硬伤`
+ * 这种标题会被误当成第 121 章的章节块，凭空多出一个没有任何字段的幽灵章。
+ */
+export function parseChapterHeadingNumber(title: string): number | null {
+  const m = title.match(/^\s*[#【\[]*\s*第\s*(\d+)\s*章/)
   return m ? parseInt(m[1], 10) : null
 }
 

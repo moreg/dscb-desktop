@@ -432,7 +432,21 @@ export type ChapterStreamHandle = StreamHandleOf<{
   ok: boolean
   error?: string
   continueMode?: 'extend' | 'finish'
+  /** 本次实际下发的字数口径，供编辑器显示「本次目标 / 实际写了 / 整章还差」 */
+  wordBudget?: ChapterWordBudget
 }>
+
+/** 一次正文生成实际使用的字数口径（主进程按细纲算出，前端算不出） */
+export interface ChapterWordBudget {
+  /** 本次要写的字数；续写时是增量 */
+  targetWords: number
+  /** 整章目标字数（细纲「字数预估」，解析不出时为兜底值） */
+  chapterTargetWords: number
+  /** 下笔前已写字数 */
+  writtenWords: number
+  /** 整章目标是否来自细纲；false 表示走了兜底 */
+  fromOutline: boolean
+}
 
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
@@ -639,6 +653,11 @@ export interface RendererApi {
     chapterNumber: number,
     patch: Partial<DetailedOutlineItem>
   ) => Promise<DetailedOutlineItem>
+  /** 读取某章细纲的磁盘原文（完整 md，不经字段白名单裁剪）；无细纲返回 null */
+  getDetailedOutlineRaw: (
+    projectId: string,
+    chapterNumber: number
+  ) => Promise<DetailedOutlineRaw | null>
   generateDetailedOutline: (projectId: string, chapterNumber: number) => Promise<DetailedOutlineItem>
   generateDetailedOutlineRange: (
     projectId: string,
@@ -650,6 +669,7 @@ export interface RendererApi {
   getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
   getVolumeOutlines: (projectId: string) => Promise<VolumeOutline[]>
   getDiagnostics: (projectId: string) => Promise<Diagnostic[]>
+  fixDiagnostic: (projectId: string, kind: DiagnosticFixKind) => Promise<DiagnosticFixResult>
   listFigures: (projectId: string) => Promise<FigureSummary[]>
   readFigure: (projectId: string, fileName: string) => Promise<ChapterFigure | null>
   openFigure: (projectId: string, fileName: string) => Promise<void>
@@ -1273,6 +1293,14 @@ export interface DetailedOutlineItem {
   writingRequirementCustomText?: string
 }
 
+/** 某章细纲的磁盘原文（供「查看完整细纲」展示，不经字段白名单裁剪） */
+export interface DetailedOutlineRaw {
+  /** 所在 md 文件名（如 `细纲_第004章_标题.md` 或 `第01卷.md`） */
+  fileName: string
+  /** 原始 md 文本；每卷一文件的旧格式只含该章的 H2 块 */
+  text: string
+}
+
 export interface DetailedOutline {
   schemaVersion: number
   updatedAt: string
@@ -1355,6 +1383,47 @@ export interface ChapterDetail {
   writingRequirementCustomText?: string
   /** 全部原始字段（兜底） */
   rawFields?: Record<string, string | string[]>
+  /**
+   * 纯段落节（无 `- **字段**：` 标记的散文内容，如「情节安排」「章首钩子」）。
+   * rawFields 只收加粗字段行，这些内容此前既不入库也不进 prompt。
+   */
+  proseSections?: OutlineProseSection[]
+}
+
+/** 细纲里一段没有字段标记的散文内容及其所属小节 */
+export interface OutlineProseSection {
+  /** 所属 H2/H3 小节标题；直接挂在章号块下的散文为空串 */
+  title: string
+  /** 原文段落（保留换行） */
+  text: string
+}
+
+/**
+ * 可一键修复的体检项种类。
+ * 只收录「机械、确定、不需要人判断」的修复；凡是要作者定夺哪边为准的（如细纲与节奏图谱
+ * 数值打架）一律不给按钮，避免一键改错。
+ */
+export type DiagnosticFixKind =
+  /** 把没有正文的章节 actualized 改回 false */
+  | 'reset-actualized'
+  /** 卷纲文件名改成 `第N卷_卷名.md` */
+  | 'rename-volume-outlines'
+  /** 正文 .txt 改扩展名为 .md */
+  | 'rename-prose-txt'
+  /** 细纲缺情绪值/爽点时，按节奏图谱补 `- **节奏标注**：` 字段 */
+  | 'backfill-outline-rhythm'
+  /** 数值打架时：改细纲，向节奏图谱看齐（技能规定的默认方向） */
+  | 'align-outline-to-rhythm'
+  /** 数值打架时：改节奏图谱，向细纲看齐（图谱/大纲表/细纲三处同步） */
+  | 'align-rhythm-to-outline'
+
+/** 体检项附带的修复入口 */
+export interface DiagnosticFix {
+  kind: DiagnosticFixKind
+  /** 按钮文案，如「改回 false」 */
+  label: string
+  /** 悬停说明：点下去到底改哪些文件 */
+  title?: string
 }
 
 /** 格式体检结果项（解析健康检查） */
@@ -1363,6 +1432,24 @@ export interface Diagnostic {
   file: string
   message: string
   hint?: string
+  /**
+   * 逐条明细，如「第 361 章：细纲 8/2 → 图谱 7/2」。
+   * 修复方向需要作者判断时，先把差异摆出来再让他点。
+   */
+  details?: string[]
+  /** 可选的一键修复入口；一项可以有多个方向（如向左对齐 / 向右对齐） */
+  fixes?: DiagnosticFix[]
+}
+
+/** 一键修复的执行结果 */
+export interface DiagnosticFixResult {
+  kind: DiagnosticFixKind
+  /** 实际改动的条目数（章节数 / 文件数） */
+  changed: number
+  /** 人可读的结果描述 */
+  message: string
+  /** 未能处理的条目说明，如目标文件名已存在 */
+  skipped?: string[]
 }
 
 /** 关键情节图解（图解/第N章-*.html）的结构化解析 */
@@ -1471,6 +1558,11 @@ export interface SelfCheckItemResult {
   label: string
   verdict: SelfCheckVerdict
   detail: string
+  /**
+   * 未通过时：约束句里「正文中找不到落地痕迹」的子事件原文。
+   * 「按自检改正文」会把它逐条列给模型，否则模型只知道哪项没过、不知道缺哪一段。
+   */
+  missing?: string[]
 }
 
 export interface ChapterSelfCheckReport {
@@ -2292,6 +2384,12 @@ export interface DeslopScanReport {
   metrics: DeslopMetrics
   /** 字数 */
   wordCount: number
+  /**
+   * 按指标自动判定的力度档位（Phase 2 classify 的结果）。
+   * 前端拿它给「自动」档做标注，也让用户看清手选档位相对自动判定是调高还是调低。
+   * 润色时若不传 levelOverride，实际用的就是这个值。
+   */
+  level: DeslopLevel
 }
 
 /**

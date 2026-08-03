@@ -252,6 +252,13 @@ export default function ChapterSelfCheckPanel(props: Props) {
                       ) : null}
                     </div>
                     <div className="self-check-item-detail muted">{item.detail}</div>
+                    {item.missing?.length ? (
+                      <ul className="self-check-missing muted">
+                        {item.missing.slice(0, 6).map((m) => (
+                          <li key={m}>{m}</li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </div>
                 </li>
               ))}

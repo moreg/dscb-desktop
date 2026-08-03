@@ -673,3 +673,51 @@ describe('isTail=false（正文中间截出来的片段）', () => {
     expect(result.remainingFindings.some((f) => f.type === 'truncation')).toBe(false)
   })
 })
+
+describe('润色力度档位（levelOverride）', () => {
+  const svc = () => new DeslopService(makeMockLlm(['']))
+
+  it('scan 带出自动判定的 level，前端不必复刻 classify 阈值', async () => {
+    const clean = '他站起来，走了出去。窗外的雨停了。'
+    expect((await svc().scan(clean)).level).toBe('mild')
+    // 禁用词密度拉满 -> 重度
+    const heavy = '他仿佛缓缓微微轻轻淡淡不禁一丝一抹些许几分隐约地站了起来。'.repeat(3)
+    expect((await svc().scan(heavy)).level).toBe('severe')
+  })
+
+  it('手选档位覆盖自动判定，并改变删除比例上限', async () => {
+    // 这段禁用词密度为 0，自动判定是 mild（上限 15%）；手选 severe 应放宽到 35%
+    const text = '他把门关上，走回桌边。\n这一刻，他终于明白了一切。'
+    expect((await svc().scan(text)).level).toBe('mild')
+    const prompts: string[] = []
+    const llm = {
+      generateStream: async (p: string): Promise<string> => {
+        prompts.push(p)
+        return `【改写后】\n${text}`
+      }
+    } as unknown as LlmService
+    const log: string[] = []
+    await new DeslopService(llm).deslop(text, {
+      levelOverride: 'severe',
+      onToken: (t) => log.push(t)
+    })
+    expect(prompts[0]).toContain('删除比例上限 35%')
+    // 日志要说清是手选的，不能写成"诊断为重度"让人以为是扫出来的
+    expect(log.join('')).toContain('已手动指定重度')
+  })
+
+  it('不传 levelOverride 时沿用自动判定（行为不变）', async () => {
+    const text = '他不是冷漠，而是绝望。\n仿佛被抽空了力气，他缓缓坐下。'
+    const prompts: string[] = []
+    const llm = {
+      generateStream: async (p: string): Promise<string> => {
+        prompts.push(p)
+        return `【改写后】\n${text}`
+      }
+    } as unknown as LlmService
+    const scan = await new DeslopService(llm).scan(text)
+    await new DeslopService(llm).deslop(text)
+    const expected = { mild: 15, moderate: 25, severe: 35 }[scan.level]
+    expect(prompts[0]).toContain(`删除比例上限 ${expected}%`)
+  })
+})

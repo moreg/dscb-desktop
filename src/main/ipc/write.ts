@@ -125,6 +125,9 @@ export function registerWriteIpc(service: WriteService): void {
           // 续写模式由 prompt 组装阶段算出（依赖细纲字数预估），回传给前端用于
           // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
           let continueMode: 'extend' | 'finish' | undefined
+          let wordBudget:
+            | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean }
+            | undefined
           await service.generateChapterStream(
             validated.projectId,
             validated.chapterNumber,
@@ -135,6 +138,12 @@ export function registerWriteIpc(service: WriteService): void {
               signal,
               onPromptMeta: (meta) => {
                 continueMode = meta.continueMode
+                wordBudget = {
+                  targetWords: meta.targetWords,
+                  chapterTargetWords: meta.chapterTargetWords,
+                  writtenWords: meta.writtenWords,
+                  fromOutline: meta.fromOutline
+                }
               },
               onToken: (token) =>
                 safeSend(win, 'llm:token', {
@@ -145,7 +154,7 @@ export function registerWriteIpc(service: WriteService): void {
             }
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, continueMode }
+          return { ok: true, continueMode, wordBudget }
         } finally {
           endStream(validated.requestId)
         }
