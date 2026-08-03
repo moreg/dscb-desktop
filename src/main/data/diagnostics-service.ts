@@ -139,6 +139,8 @@ export class DiagnosticsService {
         return this.fixAlignOutlineToRhythm(dir)
       case 'align-rhythm-to-outline':
         return this.fixAlignRhythmToOutline(dir)
+      case 'rebuild-rhythm-from-outline':
+        return this.fixRebuildRhythm(dir)
       default:
         throw new Error(`未知的修复类型：${kind}`)
     }
@@ -194,6 +196,40 @@ export class DiagnosticsService {
       changed,
       message: `${changed} 章节奏图谱已按细纲改写，大纲逐章节奏标注表同步更新`,
       skipped: skipped.length > 0 ? skipped : undefined
+    }
+  }
+
+  /**
+   * rhythmData 是空数组 → 用大纲「逐章节奏标注」表重建。
+   * 全部写成预测值（actualized: false）：大纲表里存的就是规划值，不是成稿回填的实际值。
+   */
+  private async fixRebuildRhythm(dir: string): Promise<DiagnosticFixResult> {
+    const file = join(dir, '图解', '节奏图谱.html')
+    const html = await readText(file)
+    if (!html || !html.includes('rhythmData')) {
+      return { kind: 'rebuild-rhythm-from-outline', changed: 0, message: '没找到节奏图谱文件' }
+    }
+    const existing = parseRhythmData(html)
+    if (existing && existing.length > 0) {
+      return {
+        kind: 'rebuild-rhythm-from-outline',
+        changed: 0,
+        message: `rhythmData 已有 ${existing.length} 条，为免覆盖不做重建`
+      }
+    }
+    const fallback = (await new OutlineMdRepo(dir).read())?.rhythmFallback ?? []
+    if (fallback.length === 0) {
+      return {
+        kind: 'rebuild-rhythm-from-outline',
+        changed: 0,
+        message: '大纲的「逐章节奏标注」表里没有可用数据'
+      }
+    }
+    await writeTextAtomic(file, serializeRhythmData(html, fallback))
+    return {
+      kind: 'rebuild-rhythm-from-outline',
+      changed: fallback.length,
+      message: `已用大纲表重建 ${fallback.length} 章节奏数据（全部为预测值）`
     }
   }
 
@@ -560,12 +596,45 @@ export class DiagnosticsService {
     if (!html || !html.includes('rhythmData')) return []
     const entries = parseRhythmData(html)
     if (entries && entries.length > 0) return []
+
+    // 区分两种「0 条」：数组本身是空的（从没填过数据），还是有内容但格式不对。
+    // 两者修法完全不同，提示混在一起会把人带偏。
+    const isEmptyArray = /const\s+rhythmData\s*=\s*\[\s*\];/.test(html)
+    if (!isEmptyArray) {
+      return [
+        {
+          severity: 'warn',
+          file: '图解/节奏图谱.html',
+          message: 'rhythmData 有内容但一条都解析不出来（格式不符）',
+          hint: "每条须为 { chapter: N, title: '...', emotion: N, climax: N, volume: N, actualized: bool }（单引号、小写 true/false、字段顺序固定）"
+        }
+      ]
+    }
+
+    // 空数组：能否从大纲的逐章节奏标注表重建？
+    const fallback = (await new OutlineMdRepo(dir).read())?.rhythmFallback ?? []
     return [
       {
         severity: 'warn',
         file: '图解/节奏图谱.html',
-        message: 'rhythmData 块存在但解析到 0 条',
-        hint: "每条须为 { chapter: N, title: '...', emotion: N, climax: N, volume: N, actualized: bool }（单引号、小写 true/false）"
+        message:
+          fallback.length > 0
+            ? `rhythmData 是空数组，节奏图谱画不出来（大纲逐章节奏标注表里有 ${fallback.length} 章可用于重建）`
+            : 'rhythmData 是空数组，节奏图谱画不出来',
+        hint:
+          fallback.length > 0
+            ? '章节列表会自动回退读大纲表，所以数据没丢；但图谱页和违规检查依赖 rhythmData，需要把大纲表同步进来'
+            : '大纲的「逐章节奏标注」表也是空的，需要先补大纲，再同步到图谱',
+        fixes:
+          fallback.length > 0
+            ? [
+                {
+                  kind: 'rebuild-rhythm-from-outline',
+                  label: `按大纲表重建 ${fallback.length} 章`,
+                  title: '用大纲「逐章节奏标注」表的情绪值/爽点填充 rhythmData，全部标为预测值'
+                }
+              ]
+            : undefined
       }
     ]
   }

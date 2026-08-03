@@ -1,6 +1,14 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, findSection, parseSubsections, parseTable, parseVolumeNumber } from './md-parser'
+import {
+  readText,
+  parseDoc,
+  findSection,
+  findSectionsByPrefix,
+  parseSubsections,
+  parseTable,
+  parseVolumeNumber
+} from './md-parser'
 import type { MainOutline, Volume, RhythmEntry } from '../../../shared/types'
 
 export interface OutlineMdRead {
@@ -31,7 +39,10 @@ export class OutlineMdRepo {
     if (!text) return null
     const doc = parseDoc(text)
 
-    const mainLineSection = findSection(doc, '主线剧情走向')
+    // 标题按前缀取：规范写「主线剧情走向」，但实际项目里也有写成「主线剧情」的。
+    // 严格等值匹配会让整段卷结构读不出来——若该书卷纲文件名也不合规，卷数直接变 0。
+    const mainLineSection =
+      findSection(doc, '主线剧情走向') ?? findSectionsByPrefix(doc, '主线剧情')[0] ?? null
     const volumesFromMain = mainLineSection ? extractVolumes(mainLineSection.body) : []
 
     // 补充：扫描独立卷文件 大纲/第N卷_卷名.md
@@ -153,7 +164,10 @@ function parseVolumeHeading(title: string): Volume | null {
 
 /** 从「逐章节奏标注」的所有 H3 子表提取逐章节奏 */
 function extractRhythmFallback(doc: ReturnType<typeof parseDoc>): RhythmEntry[] {
-  const sec = findSection(doc, '逐章节奏标注')
+  // 标题按前缀取：技能实际写的是「逐章节奏标注（与节奏图谱对齐）」，带括号说明。
+  // 按等值匹配的话，这条回退路径对所有真实项目都是死的——节奏图谱一旦缺失或为空，
+  // 明明大纲表里有几百章数据也读不出来。
+  const sec = findSection(doc, '逐章节奏标注') ?? findSectionsByPrefix(doc, '逐章节奏标注')[0] ?? null
   if (!sec) {
     // 兼容：大纲.md 没有「逐章节奏标注」H2 节时，
     // 尝试从 H1 body 中的表格直接提取（技能标准格式）
@@ -167,7 +181,13 @@ function extractRhythmFallback(doc: ReturnType<typeof parseDoc>): RhythmEntry[] 
     if (headers.length < 4) continue
     entries.push(...extractRhythmRows(headers, rows, volDefault))
   }
-  return entries
+  if (entries.length > 0) return entries
+
+  // 没有 H3 分卷子节：整张表直接挂在 H2 底下（多数项目是这种）。
+  // 卷号取自表格自身的「卷」列，所以 volDefault 给 0 即可。
+  const { headers, rows } = parseTable(sec.body)
+  if (headers.length < 4) return []
+  return extractRhythmRows(headers, rows, 0)
 }
 
 /**

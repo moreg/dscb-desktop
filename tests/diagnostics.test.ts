@@ -508,6 +508,70 @@ describe('一键修复 applyFix', () => {
     expect(readFileSync(join(tmp, '细纲', '细纲_第001章_已写.md'), 'utf-8')).toContain('情绪值 5')
   })
 
+  it('rhythmData 空数组与格式错误要分开报', async () => {
+    // 真实样本：`师父的七个师姐` 的 rhythmData 是空数组，不是格式错。
+    // 旧提示让人去查单引号，方向完全错了。
+    mkdirSync(join(tmp, '图解'), { recursive: true })
+    mkdirSync(join(tmp, '大纲'), { recursive: true })
+    writeFileSync(
+      join(tmp, '图解', '节奏图谱.html'),
+      '<html><script>\nconst rhythmData = [\n\n        ];\n</script></html>',
+      'utf-8'
+    )
+    writeFileSync(
+      join(tmp, '大纲', '大纲.md'),
+      '# 大纲\n\n## 逐章节奏标注\n\n### 第1卷\n\n| 章节 | 标题 | 情绪值 | 爽点类型 | 卷 |\n|---|---|---|---|---|\n| 第 1 章 | 静海坠落 | 5 | 1 | 1 |\n| 第 2 章 | 白沙滩六人 | 6 | 1 | 1 |\n',
+      'utf-8'
+    )
+
+    const report = await serviceFor(tmp).report('x')
+    const warn = report.find((d) => d.file === '图解/节奏图谱.html')
+    expect(warn!.message).toContain('空数组')
+    expect(warn!.message).toContain('2 章可用于重建')
+    expect(warn!.fixes?.[0].kind).toBe('rebuild-rhythm-from-outline')
+  })
+
+  it('rebuild-rhythm-from-outline：按大纲表重建，全部为预测值', async () => {
+    mkdirSync(join(tmp, '图解'), { recursive: true })
+    mkdirSync(join(tmp, '大纲'), { recursive: true })
+    writeFileSync(
+      join(tmp, '图解', '节奏图谱.html'),
+      '<html><script>\nconst rhythmData = [\n\n        ];\n</script></html>',
+      'utf-8'
+    )
+    writeFileSync(
+      join(tmp, '大纲', '大纲.md'),
+      '# 大纲\n\n## 逐章节奏标注\n\n### 第1卷\n\n| 章节 | 标题 | 情绪值 | 爽点类型 | 卷 |\n|---|---|---|---|---|\n| 第 1 章 | 静海坠落 | 5 | 1 | 1 |\n| 第 2 章 | 白沙滩六人 | 6 | 1 | 1 |\n',
+      'utf-8'
+    )
+
+    const service = serviceFor(tmp)
+    const result = await service.applyFix('x', 'rebuild-rhythm-from-outline')
+    expect(result.changed).toBe(2)
+
+    const html = readFileSync(join(tmp, '图解', '节奏图谱.html'), 'utf-8')
+    expect(html).toContain("{ chapter: 1, title: '静海坠落', emotion: 5, climax: 1, volume: 1, actualized: false }")
+    expect(html).toContain("{ chapter: 2, title: '白沙滩六人', emotion: 6, climax: 1, volume: 1, actualized: false }")
+
+    expect((await service.report('x')).find((d) => d.file === '图解/节奏图谱.html')).toBeUndefined()
+  })
+
+  it('rebuild-rhythm-from-outline：已有数据时拒绝覆盖', async () => {
+    mkdirSync(join(tmp, '图解'), { recursive: true })
+    mkdirSync(join(tmp, '大纲'), { recursive: true })
+    writeFileSync(join(tmp, '图解', '节奏图谱.html'), rhythmHtml([entry(1, 9, 3, true)]), 'utf-8')
+    writeFileSync(
+      join(tmp, '大纲', '大纲.md'),
+      '# 大纲\n\n## 逐章节奏标注\n\n### 第1卷\n\n| 章节 | 标题 | 情绪值 | 爽点类型 | 卷 |\n|---|---|---|---|---|\n| 第 1 章 | 静海坠落 | 5 | 1 | 1 |\n',
+      'utf-8'
+    )
+
+    const result = await serviceFor(tmp).applyFix('x', 'rebuild-rhythm-from-outline')
+    expect(result.changed).toBe(0)
+    expect(result.message).toContain('为免覆盖')
+    expect(readFileSync(join(tmp, '图解', '节奏图谱.html'), 'utf-8')).toMatch(/emotion: 9/)
+  })
+
   it('未知修复类型直接报错', async () => {
     await expect(
       serviceFor(tmp).applyFix('x', 'nope' as never)

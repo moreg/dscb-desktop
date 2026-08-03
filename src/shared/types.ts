@@ -1416,6 +1416,8 @@ export type DiagnosticFixKind =
   | 'align-outline-to-rhythm'
   /** 数值打架时：改节奏图谱，向细纲看齐（图谱/大纲表/细纲三处同步） */
   | 'align-rhythm-to-outline'
+  /** rhythmData 是空数组时：用大纲「逐章节奏标注」表重建 */
+  | 'rebuild-rhythm-from-outline'
 
 /** 体检项附带的修复入口 */
 export interface DiagnosticFix {
