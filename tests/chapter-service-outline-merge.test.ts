@@ -5,6 +5,10 @@ import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { ChapterService } from '../src/main/data/chapter-service'
+import {
+  CHAPTER_REVISION_CONFLICT,
+  contentRevision
+} from '../src/main/data/chapter-revision'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 
 const mockSettings = {
@@ -237,5 +241,25 @@ describe('ChapterService outline merge', () => {
     expect(ch1.wordCount).toBeGreaterThan(0)
     const { meta } = await service.getChapter(projectId, 1)
     expect(ch1.wordCount).toBe(meta.wordCount)
+  })
+
+  it('同一基础版本的并发写入只允许一个成功', async () => {
+    const service = new ChapterService(ps)
+    await service.updateContent(projectId, 1, '基础正文')
+    const revision = contentRevision('基础正文')
+
+    const results = await Promise.allSettled([
+      service.updateContent(projectId, 1, '手机版本 A', revision),
+      service.updateContent(projectId, 1, '手机版本 B', revision)
+    ])
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find((result) => result.status === 'rejected')
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: { code: CHAPTER_REVISION_CONFLICT }
+    })
+    const { content } = await service.getChapter(projectId, 1)
+    expect(['手机版本 A', '手机版本 B']).toContain(content)
   })
 })

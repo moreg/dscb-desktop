@@ -44,10 +44,14 @@ import { registerWindowsIpc, type ProjectWindowResult } from './ipc/windows'
 import { ScanService } from './data/scan/scan-service'
 import { ChapterNameService } from './data/chapter-name-service'
 import { ProjectWindowRegistry } from './data/project-window-registry'
+import { MobileServer } from './mobile/mobile-server'
+import { registerMobileIpc } from './ipc/mobile'
+import { MobileReferenceService } from './mobile/mobile-reference-service'
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const projectWindows = new ProjectWindowRegistry<BrowserWindow>()
 let disposeProjectWatchers: (() => void) | null = null
+let mobileServer: MobileServer | null = null
 
 function createWindow(projectId: string | null = null): BrowserWindow {
   const window = new BrowserWindow({
@@ -177,6 +181,13 @@ if (!hasSingleInstanceLock) {
     deslopService
   )
   registerWriteIpc(writeService)
+  mobileServer = new MobileServer(
+    projectService,
+    chapterService,
+    new MobileReferenceService(projectService),
+    writeService
+  )
+  registerMobileIpc(mobileServer)
   const diagnosticsService = new DiagnosticsService(projectService)
   registerDiagnosticsIpc(diagnosticsService)
   const figureService = new FigureService(projectService)
@@ -239,6 +250,7 @@ if (!hasSingleInstanceLock) {
 
 app.on('before-quit', () => {
   disposeProjectWatchers?.()
+  void mobileServer?.stop()
 })
 
 app.on('window-all-closed', () => {

@@ -8,6 +8,7 @@ import { DetailedOutlineWriter } from './skill-format/detailed-outline-writer'
 import { CharacterRepo } from './memory/character-repo'
 import { countWords } from './words'
 import { CHAPTER_NAME_MAX_LEN, sanitizeChapterName } from '../../shared/parsers'
+import { ChapterRevisionConflictError, contentRevision } from './chapter-revision'
 import type {
   ChapterMeta,
   ChapterContent,
@@ -28,6 +29,31 @@ import type { RhythmEntry } from '../../shared/types'
  */
 export class ChapterService {
   constructor(private readonly projectService: ProjectService) {}
+
+  /** 同一章节的所有正文写入共用一条队列，避免桌面端与手机端在校验后交叉覆盖。 */
+  private readonly contentWriteTails = new Map<string, Promise<void>>()
+
+  private async withContentWriteLock<T>(
+    projectId: string,
+    chapterNumber: number,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const key = `${projectId}:${chapterNumber}`
+    const previous = this.contentWriteTails.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const tail = previous.then(() => gate)
+    this.contentWriteTails.set(key, tail)
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (this.contentWriteTails.get(key) === tail) this.contentWriteTails.delete(key)
+    }
+  }
 
   /** 取本项目的逐章节奏：优先节奏图谱 html，其次大纲逐章表回退 */
   private async readRhythm(dir: string): Promise<RhythmEntry[]> {
@@ -132,14 +158,27 @@ export class ChapterService {
     return { meta, content }
   }
 
-  async updateContent(projectId: string, n: number, content: string): Promise<ChapterMeta> {
-    const dir = await this.projectService.resolveDir(projectId)
-    // 先取章节标题（用于生成 `第NNN章 标题.md` 格式文件名）
-    const before = await this.getChapter(projectId, n)
-    await new ProseRepo(dir).write(n, content, before.meta.title)
-    // 正文写完 → rhythmData 标记 actualized=true（预测值转为实际值）
-    await new ChapterRhythmWriter(dir).markActualized(n)
-    return (await this.getChapter(projectId, n)).meta
+  async updateContent(
+    projectId: string,
+    n: number,
+    content: string,
+    expectedRevision?: string
+  ): Promise<ChapterMeta> {
+    return this.withContentWriteLock(projectId, n, async () => {
+      const dir = await this.projectService.resolveDir(projectId)
+      // 在章节锁内读取并校验版本；桌面端无 expectedRevision，但仍走同一把锁。
+      const before = await this.getChapter(projectId, n)
+      if (
+        expectedRevision !== undefined &&
+        contentRevision(before.content) !== expectedRevision
+      ) {
+        throw new ChapterRevisionConflictError()
+      }
+      await new ProseRepo(dir).write(n, content, before.meta.title)
+      // 正文写完 → rhythmData 标记 actualized=true（预测值转为实际值）
+      await new ChapterRhythmWriter(dir).markActualized(n)
+      return (await this.getChapter(projectId, n)).meta
+    })
   }
 
   /**

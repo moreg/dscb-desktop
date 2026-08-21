@@ -448,8 +448,25 @@ export interface ChapterWordBudget {
   fromOutline: boolean
 }
 
+/** 电脑端临时开启的局域网手机连接状态。 */
+export interface MobileServerStatus {
+  running: boolean
+  /** 可从局域网访问的候选地址；第一项用于二维码。 */
+  addressUrls: string[]
+  /** 含一次性配对凭据的地址；配对完成后置空。 */
+  pairingUrl: string | null
+  qrDataUrl: string | null
+  pairingAvailable: boolean
+  pairedDevices: number
+  accessibleOnLan: boolean
+}
+
 export interface RendererApi {
   listProjects: () => Promise<ProjectMeta[]>
+  getMobileServerStatus: () => Promise<MobileServerStatus>
+  startMobileServer: () => Promise<MobileServerStatus>
+  stopMobileServer: () => Promise<MobileServerStatus>
+  refreshMobilePairing: () => Promise<MobileServerStatus>
   /** Open a project in its own window, or focus it when already open. */
   openProjectWindow: (projectId: string) => Promise<{
     ok: boolean

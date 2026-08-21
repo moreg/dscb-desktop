@@ -46,11 +46,20 @@ import type {
   CoverImageConfigInput,
   CoverLearningLibrarySummary,
   CoverLearningRunResult,
-  ReviewRulesConfig
+  ReviewRulesConfig,
+  MobileServerStatus
 } from '../shared/types'
 
 const api = {
   listProjects: () => ipcRenderer.invoke('library:list'),
+  getMobileServerStatus: () =>
+    ipcRenderer.invoke('mobile:status') as Promise<MobileServerStatus>,
+  startMobileServer: () =>
+    ipcRenderer.invoke('mobile:start') as Promise<MobileServerStatus>,
+  stopMobileServer: () =>
+    ipcRenderer.invoke('mobile:stop') as Promise<MobileServerStatus>,
+  refreshMobilePairing: () =>
+    ipcRenderer.invoke('mobile:refreshPairing') as Promise<MobileServerStatus>,
   openProjectWindow: (projectId: string) =>
     ipcRenderer.invoke('windows:openProject', projectId) as Promise<{
       ok: boolean

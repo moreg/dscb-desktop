@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
+import MobileConnectPanel from './MobileConnectPanel'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
 import type { Diagnostic, DiagnosticFixKind, MemoryEntityType, ProjectMeta } from '../../shared/types'
@@ -479,6 +480,7 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
+          <MobileConnectPanel />
           <button
             className={`nav-item ${view.kind === 'settings' ? 'active' : ''}`}
             onClick={() =>
