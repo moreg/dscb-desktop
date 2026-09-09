@@ -295,7 +295,7 @@ describe('MemoryWriter (v4)', () => {
       }
       const result = await writer.applyAutomatic(extraction)
       expect(result.applied.collected).toBe(0)
-      expect(result.errors).toEqual([])
+      expect(result.errors).toContainEqual(expect.stringContaining('伏笔回收未应用'))
     })
 
     it('appends plot point as separate chapter file (not aggregated)', async () => {
@@ -346,7 +346,7 @@ describe('MemoryWriter (v4)', () => {
       expect(raw).toMatch(/\|\s*-\s*\|\s*-\s*\|/)
     })
 
-    it('updates progress row when same chapter is re-synced', async () => {
+    it('preserves unowned progress rows when the same chapter is synced', async () => {
       mkdirSync(join(dir, '追踪'), { recursive: true })
       const file = join(dir, '追踪', '上下文.md')
       writeFileSync(
@@ -368,11 +368,11 @@ describe('MemoryWriter (v4)', () => {
       await writer.applyAutomatic(extraction)
 
       const raw = readFileSync(file, 'utf-8')
-      // 同章只保留一行，摘要刷新为最新
+      // 旧版无归属标记的行可能是作者手写，不能按章号直接覆盖。
       const ch5Lines = raw.split(/\r?\n/).filter((l) => l.includes('第 5 章'))
-      expect(ch5Lines.length).toBe(1)
+      expect(ch5Lines.length).toBe(2)
       expect(raw).toContain('新事件：xxx')
-      expect(raw).not.toContain('旧摘要')
+      expect(raw).toContain('旧摘要')
     })
 
     it('creates 上下文.md when absent and writes progress', async () => {

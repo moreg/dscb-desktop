@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   buildTempRequirementsFromSelfCheck,
   formatSelfCheckDelta,
+  isDeferredSelfCheckItem,
   selfCheckHasActionableIssues
 } from '../src/shared/self-check-to-requirements'
+import { evaluateChapterSelfCheck } from '../src/main/data/chapter-self-check'
 import type { ChapterSelfCheckReport } from '../src/shared/types'
 
 function report(
@@ -71,6 +73,7 @@ describe('buildTempRequirementsFromSelfCheck', () => {
     expect(text).toContain('到期伏笔')
     expect(text).toContain('建议·金手指')
     expect(text).toContain('完整本章正文')
+    expect(text).toContain('不强行改成对话或突然动作')
   })
 
   it('continue 模式文案不同且可 only fail', () => {
@@ -106,7 +109,7 @@ describe('buildTempRequirementsFromSelfCheck', () => {
    * 自检是字面比对：只说「核心事件没落地」模型无从下手，
    * 必须把「正文里找不到的子事件」原样列出来。
    */
-  it('把未落地子事件逐条列进要求', () => {
+  it('把未命中的子事件列为待核对，允许已有同义表达', () => {
     const r = report([
       {
         id: 'core_plot',
@@ -118,7 +121,9 @@ describe('buildTempRequirementsFromSelfCheck', () => {
       }
     ])
     const text = buildTempRequirementsFromSelfCheck(r, { mode: 'rewrite' })
-    expect(text).toContain('正文里找不到这些要点')
+    expect(text).toContain('待核对的要点')
+    expect(text).toContain('可能已有同义表达')
+    expect(text).not.toContain('逐条补写')
     expect(text).toContain('「与邱北因先救还是先取火争执」')
     expect(text).toContain('「旁白分层点出七女登船由头」')
   })
@@ -139,6 +144,34 @@ describe('buildTempRequirementsFromSelfCheck', () => {
   it('null 安全', () => {
     expect(buildTempRequirementsFromSelfCheck(null)).toBe('')
     expect(selfCheckHasActionableIssues(undefined)).toBe(false)
+  })
+
+  it('执行失败不应生成修改正文的要求，混合报告只处理正文提示', () => {
+    const execution = {
+      id: 'self_check_error', category: 'structure' as const, label: '自检执行',
+      verdict: 'fail' as const, detail: '读取细纲失败'
+    }
+    expect(buildTempRequirementsFromSelfCheck(report([execution]))).toBe('')
+    expect(selfCheckHasActionableIssues(report([execution]))).toBe(false)
+    const mixed = report([execution, {
+      id: 'punctuation_rule', category: 'ban', label: '标点守则', verdict: 'warn', detail: '第 1 行有省略号'
+    }])
+    const text = buildTempRequirementsFromSelfCheck(mixed)
+    expect(text).not.toContain('读取细纲失败')
+    expect(text).toContain('一键替换标点')
+    expect(text).not.toContain('删除抢写')
+  })
+
+  it('旧版超限报告仍应压缩，无法确定口径的旧报告先核对完整性', () => {
+    const over = report([{
+      id: 'word_count', category: 'structure', label: '篇幅符合细纲上限',
+      verdict: 'warn', detail: '实际 3600 字，超出细纲上限 3000 字'
+    }])
+    expect(buildTempRequirementsFromSelfCheck(over)).toContain('压缩重复叙述')
+    const old = report([{
+      id: 'word_count', category: 'structure', label: '字数参考', verdict: 'warn', detail: '篇幅需要核对'
+    }])
+    expect(buildTempRequirementsFromSelfCheck(old)).toContain('完整则保留现有长度')
   })
 
   /**
@@ -208,6 +241,53 @@ describe('buildTempRequirementsFromSelfCheck', () => {
   })
 })
 
+describe('自检到修订要求的方向一致性', () => {
+  it.each(['rewrite', 'continue'] as const)('超过上限时 %s 要求压缩且未完章也不降为后续补写', (mode) => {
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 1, content: '甲'.repeat(3600), targetWords: 3000, targetBound: 'about'
+    })
+    const word = r.items.find((item) => item.id === 'word_count')!
+    expect(word.verdict).toBe('warn')
+    expect(word.detail).toContain('超出')
+    expect(isDeferredSelfCheckItem(word)).toBe(false)
+    const text = buildTempRequirementsFromSelfCheck(r, { mode, partialChapter: true })
+    expect(text).toContain('压缩重复叙述')
+    expect(text).toContain('建议·结构')
+    expect(text).not.toContain('把细纲里尚未充分展开的剧情点写满')
+  })
+
+  it('篇幅不足先核对情节，剧情完整时保留原有长度', () => {
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 1, content: '甲'.repeat(1800), targetWords: 3000, targetBound: 'min'
+    })
+    const text = buildTempRequirementsFromSelfCheck(r)
+    expect(text).toContain('完整则保留现有长度')
+    expect(text).toContain('不为凑字扩写')
+    expect(text).not.toContain('剧情点写满')
+  })
+
+  it.each(['rewrite', 'continue'] as const)('到期伏笔可延期，%s 不把提及等同完整回收', (mode) => {
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 5, content: '林舟关上房门，吹灭了灯。',
+      foreshadowings: [{ content: '玉佩背面的暗纹藏着失踪王子的身份', status: 'planted', expectedCollect: 5 }]
+    })
+    expect(r.items.find((i) => i.id === 'due_fb_0')?.detail).toContain('合理延期')
+    const text = buildTempRequirementsFromSelfCheck(r, { mode })
+    expect(text).toContain('因果条件不足可合理延期')
+    expect(text).toContain('不能为迎合记录编造回收情节')
+    expect(text).not.toContain('不要拖到下章')
+    expect(text).not.toContain('到期必收')
+  })
+
+  it('核心事件提示核验同义表达，不为匹配词语重写已完成的情节', () => {
+    const r = evaluateChapterSelfCheck({ chapterNumber: 1, content: '天色暗了。', plotSummary: '林舟取得密室钥匙' })
+    const text = buildTempRequirementsFromSelfCheck(r)
+    expect(text).toContain('先核对同义表述')
+    expect(text).not.toContain('别整句换成同义说法')
+    expect(text).not.toContain('逐条补写')
+  })
+})
+
 describe('formatSelfCheckDelta', () => {
   it('无 previous 时用 summary', () => {
     const next = report([])
@@ -247,9 +327,21 @@ describe('formatSelfCheckDelta', () => {
     ])
     const next = report([
       { id: 'a', category: 'plot', label: '1', verdict: 'fail', detail: '' },
+      { id: 'b', category: 'plot', label: '2', verdict: 'pass', detail: '' },
       { id: 'c', category: 'power', label: '3', verdict: 'warn', detail: '' }
     ])
     expect(formatSelfCheckDelta(prev, next)).toMatch(/复检有改善/)
     expect(formatSelfCheckDelta(prev, next)).toContain('2→1')
+  })
+
+  it('旧问题被跳过或未再检查，不可报修复成功', () => {
+    const prev = report([{ id: 'core_plot', category: 'plot', label: '剧情', verdict: 'fail', detail: '' }])
+    const skipped = report([{ id: 'core_plot', category: 'plot', label: '剧情', verdict: 'skip', detail: '细纲缺失' }])
+    for (const next of [skipped, report([])]) {
+      const text = formatSelfCheckDelta(prev, next)
+      expect(text).toContain('此前 1 项问题本次未核验')
+      expect(text).not.toContain('复检全部通过')
+      expect(text).not.toContain('复检有改善')
+    }
   })
 })

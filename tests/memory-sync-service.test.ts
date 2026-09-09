@@ -235,4 +235,44 @@ describe('MemorySyncService', () => {
     expect(r2.removed).toBe(0)
     await expect(stat(manual)).resolves.toBeDefined()
   })
+
+  it('伏笔按各表列头同步，计划表和编号映射不能覆盖实际条目', async () => {
+    const dir = await setupProject(root)
+    await writeFile(path.join(dir, '追踪', '伏笔.md'), `# 伏笔追踪\n\n| 伏笔编号 | 伏笔内容 | 伏笔类型 | 埋设章节 | 预计回收章节 | 实际回收章节 | 状态 |\n|---|---|---|---|---|---|---|\n| FB-001 | 母亲的病因 | 身世 | 第 5 章 | 第 111 章 | 第 9 章 | 部分回收 |\n\n## 卷次伏笔\n\n| 伏笔编号 | 原编号 | 内容 | 状态 | 实际回收章节 | 埋设章节 | 预计回收章节 |\n|---|---|---|---|---|---|---|\n| FB-002 | FB-OLD-3 | 铜铃的声音 | 已回收 | 第 20 章 | 第 2 章 | 第 30 章 |\n\n## 六列表\n\n| 伏笔编号 | 伏笔内容 | 伏笔类型 | 埋设章节 | 预计回收章节 | 状态 |\n|---|---|---|---|---|---|\n| FB-003 | 旧日印记 | 设定 | 第 3 章 | 第 80 章 | 已强化 |\n\n## 细纲回收计划\n\n| 伏笔编号 | 内容 | 回收章节 | 回收机制 |\n|---|---|---|---|\n| FB-002 | 计划重写的铃声 | 第 90 章 | 终战揭晓 |\n\n## 编号映射\n\n| 局部编号 | 局部内容 | 全局编号 |\n|---|---|---|\n| FB-880 | 映射说明 | FB-001 |\n`)
+    const report = await new MemorySyncService(dir).syncAll()
+    expect(report.errors).toEqual([])
+    expect((await readdir(path.join(dir, '记忆', '伏笔'))).sort()).toEqual(['FB-001.md', 'FB-002.md', 'FB-003.md'])
+    const partial = await readFile(path.join(dir, '记忆', '伏笔', 'FB-001.md'), 'utf8')
+    expect(partial).toContain('**状态**：部分回收')
+    expect(partial).not.toContain('**实际回收章节**')
+    expect(partial).toContain('**部分回收章节**：第 9 章')
+    const collected = await readFile(path.join(dir, '记忆', '伏笔', 'FB-002.md'), 'utf8')
+    expect(collected).toContain('铜铃的声音')
+    expect(collected).toContain('**实际回收章节**：第 20 章')
+    expect(collected).not.toContain('计划重写')
+    expect(collected).not.toContain('FB-OLD-3\n')
+    const reinforced = await readFile(path.join(dir, '记忆', '伏笔', 'FB-003.md'), 'utf8')
+    expect(reinforced).toContain('**状态**：已强化')
+  })
+
+  it('伏笔解析规则升级重建旧派生视图并清理旧错位条目，之后保持增量', async () => {
+    const dir = await setupProject(root)
+    const src = path.join(dir, '追踪', '伏笔.md')
+    await writeFile(src, '# 伏笔\n\n| 伏笔编号 | 内容 | 状态 | 埋设章节 | 实际回收章节 |\n|---|---|---|---|---|\n| FB-001 | 铜铃 | 已回收 | 第 1 章 | 第 20 章 |\n')
+    const sourceMtime = (await stat(src)).mtimeMs
+    await writeFile(path.join(dir, '记忆', '伏笔', 'FB-001.md'), '# FB-001\n\n旧解析错误内容')
+    await writeFile(path.join(dir, '记忆', '伏笔', 'FB-880.md'), '# FB-880\n\n旧映射行误转')
+    await writeFile(path.join(dir, '记忆', '.sync-index.json'), JSON.stringify({
+      '伏笔/FB-001.md': { sourceMtime, targetMtime: Date.now(), sourceRel: '追踪/伏笔.md' },
+      '伏笔/FB-880.md': { sourceMtime, targetMtime: Date.now(), sourceRel: '追踪/伏笔.md' }
+    }))
+    const svc = new MemorySyncService(dir)
+    const first = await svc.syncAll()
+    expect(first.updated).toBe(1)
+    expect(first.removed).toBe(1)
+    expect(await readFile(path.join(dir, '记忆', '伏笔', 'FB-001.md'), 'utf8')).toContain('铜铃')
+    const second = await svc.syncAll()
+    expect(second.updated).toBe(0)
+    expect(second.removed).toBe(0)
+  })
 })

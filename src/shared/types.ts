@@ -33,6 +33,7 @@ export type ProviderProtocol =
   | 'antigravity'
   | 'codex'
   | 'grok'
+  | 'claude'
 
 /** OpenAI Responses API 的 GPT 推理预算档位。 */
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -73,6 +74,9 @@ export interface ProviderConfig {
    *   此时 baseUrl 可空、apiKey 可空、model 为 codex 模型名（可空，走 config.toml 默认）。
    * - 'grok'：调用本机 grok CLI（`grok --prompt-file` headless），用 `grok login` 登录态，不走 HTTP。
    *   此时 baseUrl 可空、apiKey 可空、model 为 grok 模型 ID（可空，走 CLI/config 默认）。
+   * - 'claude'：调用本机 Claude Code CLI（`claude -p` headless），用 `claude login` 登录态或
+   *   环境变量 ANTHROPIC_API_KEY，不走应用内 HTTP。此时 baseUrl 可空、apiKey 可空、
+   *   model 为 Claude 别名/全名（可空，走 CLI 默认）。
    */
   protocol?: ProviderProtocol
   /**
@@ -83,8 +87,8 @@ export interface ProviderConfig {
    */
   temperature?: number
   /**
-   * 仅 `openai-responses` 使用：GPT reasoning 模型的思考强度。
-   * 与 temperature 独立；Responses 请求不会透传 temperature。
+   * `openai-responses`：GPT reasoning 模型的思考强度（与 temperature 独立，Responses 不透传 temperature）。
+   * `claude`：映射到 `claude` 子进程的 `MAX_THINKING_TOKENS`，控制扩展思考预算。
    */
   reasoningEffort?: ReasoningEffort
 }
@@ -446,6 +450,8 @@ export interface ChapterWordBudget {
   writtenWords: number
   /** 整章目标是否来自细纲；false 表示走了兜底 */
   fromOutline: boolean
+  /** about 表示细纲字数上限，不提示补足篇幅。 */
+  bound?: 'min' | 'about'
 }
 
 /** 电脑端临时开启的局域网手机连接状态。 */
@@ -650,6 +656,8 @@ export interface RendererApi {
   setCodexReasoningEffort: (effort: ReasoningEffort) => Promise<ReasoningEffort>
   /** 列出 grok CLI 可用模型（`grok models`，供 grok provider 的模型选择） */
   listGrokModels: () => Promise<string[]>
+  /** 列出 Claude Code CLI 可选模型（内置预设 + settings.json 默认，供 claude provider 的模型选择） */
+  listClaudeModels: () => Promise<string[]>
   listProviders: () => Promise<ListProvidersResult>
   upsertProvider: (p: ProviderConfig) => Promise<ProviderConfig>
   deleteProvider: (id: string) => Promise<void>
@@ -762,6 +770,7 @@ export interface RendererApi {
   ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
+  invalidateChapterMemorySync: (projectId: string, chapterNumber: number) => Promise<void>
   /**
    * 续写完成后自动同步：extract → applyMemory → applySettingsPatches(onlyAuto)。
    * autoMemorySync=false 时返回 null；失败不抛（errors 在结果内）。
@@ -778,6 +787,7 @@ export interface RendererApi {
     extraction: MemoryExtraction
     /** 写后自检清单对照（算法）；同步关闭时也可能仅返回此项 */
     selfCheck?: ChapterSelfCheckReport | null
+    deepReview?: AuditViolation[]
   } | null>
   /** 单独跑写后自检（不写记忆） */
   selfCheckChapter: (
@@ -1000,6 +1010,21 @@ export interface RendererApi {
     levelOverride: DeslopLevel | undefined,
     onToken: (token: string, done: boolean) => void
   ) => StreamHandleOf<DeslopResult>
+  /**
+   * 结构体检（流式）：LLM 判定层，返回诊断清单。
+   * 刻意不改正文——这几条要修就得改「说什么」，得作者自己动笔。
+   */
+  deslopJudgeStream: (
+    projectId: string,
+    text: string,
+    onToken: (token: string, done: boolean) => void,
+    context?: { outlineSummary?: string; chapterGoal?: string }
+  ) => StreamHandleOf<DeslopStructureReport>
+  /**
+   * 标点兜底：确定性替换破折号/省略号，零 LLM 调用。
+   * 写后自检的「标点守则」项一键修复用；返回替换后全文与替换处数。
+   */
+  normalizePunctuation: (text: string) => Promise<{ text: string; changed: number }>
   /** 读取项目级去 AI 味白名单 */
   getDeslopWhitelist: (projectId: string) => Promise<string[]>
   /** 写入项目级去 AI 味白名单 */
@@ -1027,6 +1052,8 @@ export interface RendererApi {
   listCovers: (projectId: string) => Promise<CoverFile[]>
   /** 读取封面为 base64 data URL（前端预览用） */
   readCover: (projectId: string, fileName: string) => Promise<string | null>
+  /** 在系统资源管理器中定位封面文件 */
+  showCoverInFolder: (projectId: string, fileName: string) => Promise<{ ok: true }>
   /** 读取图像生成 API 配置（脱敏，不含 apiKey 明文） */
   getCoverImageConfig: () => Promise<CoverImageConfigSummary>
   /** 保存图像生成 API 配置 */
@@ -1153,6 +1180,7 @@ export interface TrackingView {
     planted: number
     collected: number
     missed: number
+    deferred?: number
   }
 }
 
@@ -1216,7 +1244,7 @@ export interface UpdateMemoryEntityInput {
   notes?: string
 }
 
-export type ForeshadowingStatus = 'pending' | 'planted' | 'collected' | 'missed'
+export type ForeshadowingStatus = 'pending' | 'planted' | 'reinforced' | 'partial' | 'deferred' | 'collected' | 'missed'
 
 export interface Foreshadowing {
   id: string
@@ -1225,6 +1253,8 @@ export interface Foreshadowing {
   plantChapter?: number
   expectedCollect?: number
   actualCollect?: number
+  reinforcementChapters?: number[]
+  partialCollectChapters?: number[]
   note?: string
   createdAt: string
   updatedAt: string
@@ -1238,8 +1268,11 @@ export interface CreateForeshadowingInput {
 
 export interface UpdateForeshadowingInput {
   content?: string
-  expectedCollect?: number
-  note?: string
+  expectedCollect?: number | null
+  note?: string | null
+  status?: 'reinforced' | 'partial' | 'deferred'
+  reinforcementChapters?: number[]
+  partialCollectChapters?: number[]
 }
 
 export interface Relationship {
@@ -1577,6 +1610,8 @@ export interface SelfCheckItemResult {
   label: string
   verdict: SelfCheckVerdict
   detail: string
+  /** 修订方向与展示文案分离；旧报告缺省时只给保守的核对要求。 */
+  repairKind?: 'short_length' | 'over_length' | 'verify_plot' | 'verify_foreshadow' | 'execution_error'
   /**
    * 未通过时：约束句里「正文中找不到落地痕迹」的子事件原文。
    * 「按自检改正文」会把它逐条列给模型，否则模型只知道哪项没过、不知道缺哪一段。
@@ -1957,6 +1992,8 @@ export interface OutlineDiffApplyResult {
 /** 记忆提取结果（LLM 从正文提取） */
 export interface MemoryExtraction {
   chapterNumber: number
+  /** 模型输出未通过结构校验时不可当作“本章无变化”提交。 */
+  parseError?: string
   /** 新增角色（需确认）；appearance/abilities 可选，写入人物卡 */
   newCharacters: {
     name: string
@@ -1979,14 +2016,14 @@ export interface MemoryExtraction {
   /** 新增伏笔（需确认） */
   newForeshadowings: { content: string; expectedCollect?: number; note?: string }[]
   /** 新增情节（自动追加到核心情节.md） */
-  newPlotPoints: { title: string; event: string; coolPoint?: string }[]
+  newPlotPoints: { title: string; event: string; coolPoint?: string; evidence?: string }[]
   /**
    * 既有角色的状态/设定变化（自动更新）。
    * field 推荐：伤势/情绪/位置/当前状态/身份/性格/能力/境界/外貌/关系/持有物
    */
-  characterStateChanges: { name: string; field: string; oldValue: string; newValue: string }[]
+  characterStateChanges: { name: string; field: string; oldValue: string; newValue: string; evidence?: string }[]
   /** 伏笔回收（自动更新） */
-  collectedForeshadowings: { content: string; chapter: number }[]
+  collectedForeshadowings: { content: string; chapter: number; evidence?: string; foreshadowingId?: string }[]
   /**
    * 设定增量补丁（A 类：只 append，不改底稿）。
    * 高置信可自动应用；见 settingsEvolution 配置。
@@ -2010,6 +2047,8 @@ export type SettingsPatchTarget =
 
 /** 设定增量补丁（MVP：仅 append） */
 export interface SettingsPatch {
+  /** 可在本章正文中精确定位的原文；自动生效前核对。 */
+  evidence?: string
   target: SettingsPatchTarget
   /** 文件名不含扩展名，如「力量体系」「青帮」；geography 固定地理 */
   fileName: string
@@ -2083,6 +2122,10 @@ export interface MemoryApplyDiffItem {
   /** 能否应用（角色不存在时 false） */
   applicable: boolean
   note?: string
+  /** Exact automatic foreshadow operation; undo never guesses by text or chapter alone. */
+  foreshadowingId?: string
+  receiptId?: string
+  collectionAction?: 'collect' | 'uncollect'
 }
 
 /** 记忆自动应用预览（应用前展示） */
@@ -2096,6 +2139,10 @@ export interface MemoryApplyPreview {
 
 /** 记忆应用结果 */
 export interface MemoryApplyResult {
+  /** 候选已提取但尚未生效；不按网络故障自动重试。 */
+  reviewRequired?: string[]
+  /** 正文或任务版本已变化，本次未写入。 */
+  superseded?: boolean
   applied: {
     characters: number
     locations: number
@@ -2218,6 +2265,8 @@ export interface ChapterFlowResult {
   outlineDiff: OutlineDiffReport
   /** 记忆提取 */
   memory: MemoryExtraction
+  /** 自动提交结果；有待核对问题时提取候选仍返回，但不生效。 */
+  memoryApply?: MemoryApplyResult
   /** 节奏评估（可能为 null，LLM 失败时） */
   rhythm: RhythmEvaluation | null
   /** 图解草稿 */
@@ -2424,6 +2473,14 @@ export interface DeslopMetrics {
   bannedWordDensity: number
   /** 连续排比命中数 */
   parallelismCount: number
+  /**
+   * 结构均匀度（变异系数，越小越均匀越像 AI；null = 样本量不足，不参与判定）。
+   * 和上面两项方向相反：密度罚「用了什么词」，CV 罚「排得太齐」——
+   * 禁用词全换干净但每段都是完整闭合单元的稿子，只有这几项能抓出来。
+   */
+  sentenceLengthCv: number | null
+  paragraphLengthCv: number | null
+  dialogueLengthCv: number | null
 }
 
 /** 去 AI 味严重度分级（Phase 2 产出） */
@@ -2469,6 +2526,55 @@ export interface DeslopResult {
   remainingFindings: DeslopFinding[]
   /** 改动摘要（逐 Gate 的修改统计） */
   changeSummary: string[]
+}
+
+/* ----------------------------------------------------------
+   结构体检（去 AI 味的第二层：LLM 判定，不做自动改写）
+   ---------------------------------------------------------- */
+
+/**
+ * 结构维度。这几条都是「分布/语义」层的 AI 特征，正则和词表抓不到，
+ * 也**不能**交给 deslop 的改写器自动修——改写器的铁律是「只改怎么说，不改说什么」，
+ * 而这几条恰恰要改说什么（补一个人物判断错的地方、加一处和情节无关的细节）。
+ * 所以结构体检只出诊断，交给作者自己动笔。
+ */
+export type DeslopStructureDimension =
+  /** 阻力虚张声势（假危机）：危机渲染极其夸张，但化解过程儿戏化，缺乏推拉博弈与代价值 */
+  | 'fake-obstacle'
+  /** 配角/反派交底说明书：台词沦为世界观科普机、自曝底牌与阴谋，缺乏独立立场与算计 */
+  | 'npc-explainer'
+  /** 情绪断层与无因顿悟：心态与立场转变缺乏外部物理刺激或代价交换，全凭内心独白突变 */
+  | 'unfounded-emotion-leap'
+  /** 段落等长与呼吸感缺失：情节小节篇幅过度均匀对称，高潮被压缩写平，缺乏节奏张力 */
+  | 'equal-length-cadence'
+  /** 全知视角与缺乏认知偏差：人物判断永远精准、洞悉全局，缺乏角色本位的偏见与信息差盲区 */
+  | 'cognitive-blindspot'
+  // 向后兼容旧维度别名（允许历史数据解析）：
+  | 'all-purpose-detail'
+  | 'closed-unit'
+  | 'dialogue-always-answers'
+  | 'uniform-information'
+
+/** 结构体检的单条诊断 */
+export interface DeslopStructureFinding {
+  dimension: DeslopStructureDimension
+  /** 1-based 行号（已按分块偏移校正，落在原文范围内） */
+  line: number
+  /** 命中的原文片段（≤80 字） */
+  excerpt: string
+  /** 为什么这处像 AI 写的 */
+  why: string
+  /** 具体怎么改（作者手动执行，系统不自动改） */
+  suggestion: string
+}
+
+/** 结构体检报告 */
+export interface DeslopStructureReport {
+  findings: DeslopStructureFinding[]
+  /** 实际送检的分块数（长文按 splitForDeslop 切） */
+  chunks: number
+  /** 解析失败的分块数：模型没吐出可用 JSON。> 0 时 findings 不完整，UI 要说明 */
+  unparsedChunks: number
 }
 
 /* ==========================================================
@@ -2687,6 +2793,13 @@ export interface CoverImageConfigInput {
   baseUrl: string
   /** 模型名，默认 gpt-image-2 */
   model: string
+  /**
+   * 出图通道：
+   * - 'api'：走上面 apiKey/baseUrl/model 的 OpenAI Images API
+   * - 'codex'：走本机 codex CLI（ChatGPT 登录态），不需要 API Key
+   * - 'grok'：走本机 grok CLI（Grok 登录态），不需要 API Key
+   */
+  channel: 'api' | 'codex' | 'grok'
 }
 
 /** 图像生成 API 配置摘要（脱敏，list 返回） */
@@ -2695,6 +2808,7 @@ export interface CoverImageConfigSummary {
   keyMasked: string
   baseUrl: string
   model: string
+  channel: 'api' | 'codex' | 'grok'
 }
 
 /** 本地封面学习库的可见状态。 */

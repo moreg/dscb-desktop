@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import FanqieTagPanel from './FanqieTagPanel'
 
 interface Props {
   projectId: string
@@ -136,6 +137,8 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
           </div>
         </aside>
       </div>
+
+      <FanqieTagPanel projectId={projectId} />
     </div>
   )
 }

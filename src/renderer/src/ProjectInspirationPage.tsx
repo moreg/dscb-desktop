@@ -117,7 +117,9 @@ export default function ProjectInspirationPage() {
   useEffect(() => {
     return () => {
       generationRef.current += 1
-      void handleRef.current?.abort().catch(() => undefined)
+      if (typeof handleRef.current?.abort === 'function') {
+        void handleRef.current.abort().catch(() => undefined)
+      }
     }
   }, [])
 
@@ -125,7 +127,9 @@ export default function ProjectInspirationPage() {
     generationRef.current += 1
     const handle = handleRef.current
     handleRef.current = null
-    void handle?.abort().catch(() => undefined)
+    if (typeof handle?.abort === 'function') {
+      void handle.abort().catch(() => undefined)
+    }
     setDrawing(false)
   }
 

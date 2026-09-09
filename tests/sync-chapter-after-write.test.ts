@@ -14,8 +14,8 @@ function mockLlm(reply: string): LlmService {
 }
 
 const FIXED_EXTRACTION = JSON.stringify({
-  newPlotPoints: [{ title: '初露锋芒', event: '林远击败赵乾', coolPoint: '打脸' }],
-  characterStateChanges: [{ name: '林远', field: '伤势', oldValue: '无', newValue: '轻伤' }],
+  newPlotPoints: [{ title: '初露锋芒', event: '林远击败赵乾', coolPoint: '打脸', evidence: '林远在青云山击败了赵乾' }],
+  characterStateChanges: [{ name: '林远', field: '伤势', oldValue: '无', newValue: '轻伤', evidence: '林远在青云山击败了赵乾，受了轻伤。' }],
   newCharacters: [],
   newLocations: [],
   newItems: [],
@@ -29,6 +29,7 @@ const FIXED_EXTRACTION = JSON.stringify({
       sectionTitle: '青云山',
       content: '云雾缭绕的山脉',
       confidence: 'high',
+      evidence: '林远在青云山击败了赵乾',
       reason: '正文出现'
     }
   ],
@@ -88,7 +89,8 @@ describe('WriteService.syncChapterAfterWrite', () => {
       '林远在青云山击败了赵乾，受了轻伤。',
       5,
       expect.any(Array),
-      expect.any(Object)
+      expect.any(Object),
+      expect.any(Array)
     )
 
     const dir = await ps.resolveDir(projectId)
@@ -117,7 +119,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
     const result = await service.syncChapterAfterWrite(
       projectId,
       5,
-      '林远在青云山击败了赵乾。'
+      '林远在青云山击败了赵乾，受了轻伤。'
     )
 
     // 记忆同步关闭时不再返回 null：自检与开关解耦，UI 仍需要拿到写后审查结果。
@@ -151,7 +153,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
     const result = await service.syncChapterAfterWrite(
       projectId,
       5,
-      '林远在青云山击败了赵乾。'
+      '林远在青云山击败了赵乾，受了轻伤。'
     )
 
     expect(result).not.toBeNull()

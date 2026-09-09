@@ -6,6 +6,7 @@ import {
   SettingsMdRepo,
   isPlaceholderSettingBody
 } from '../src/main/data/skill-format/settings-md-repo'
+import { SettingsWriter } from '../src/main/data/settings-writer'
 
 const GENRE_POSITIONING = `# 题材定位
 
@@ -137,6 +138,49 @@ describe('SettingsMdRepo', () => {
     expect(result).not.toBeNull()
     expect(result!.customRules.some((r) => r.name === '核心设定')).toBe(true)
     expect(result!.customRules[0].body).toContain('运势罗盘')
+  })
+
+  it('章节读取只包含更早自动补丁，保留作者基线；无参读取仍显示全部', async () => {
+    await writeFile(path.join(dir, '设定', '世界观', '金手指.md'), WORLDVIEW_JINSHOUZHI)
+    const writer = new SettingsWriter(dir)
+    await writer.applyPatches(3, [{ target: 'worldview', fileName: '金手指', op: 'append_bullet', sectionTitle: '限制', title: '冷却', content: '已经确认每次启动后要等待一炷香。' }])
+    await writer.applyPatches(12, [
+      { target: 'worldview', fileName: '金手指', op: 'append_h2', title: '未来能力解锁', content: '现在能够隔空移动整座仓库。' },
+      { target: 'faction', fileName: '新势力', op: 'append_h2', title: '未来同盟', content: '海上各派已向主角归附。' },
+      { target: 'customRule', fileName: '契约', op: 'append_bullet', title: '未来契约', content: '全员能够共享主角的视野。' },
+      { target: 'relation', fileName: '关系', op: 'append_h2', title: '未来关系', content: '两家已经通过联姻结盟。' }
+    ])
+    const repo = new SettingsMdRepo(dir)
+    const sameChapter = await repo.read(3)
+    expect(sameChapter!.worldview[0].body).toContain('每次使用消耗精神力')
+    expect(sameChapter!.worldview[0].body).not.toContain('一炷香')
+    const priorOnly = await repo.read(12)
+    expect(priorOnly!.worldview[0].body).toContain('一炷香')
+    expect(JSON.stringify(priorOnly)).not.toContain('未来')
+    expect(priorOnly!.factions).toEqual([])
+    expect(priorOnly!.customRules).toEqual([])
+    const after = await repo.read(13)
+    expect(JSON.stringify(after)).toContain('隔空移动整座仓库')
+    expect(JSON.stringify(after)).toContain('通过联姻结盟')
+    expect(await repo.read()).toEqual(after)
+    expect(JSON.stringify(after)).not.toContain('aw-settings-patch')
+  })
+
+  it('未记录章节的旧内容保持作者基线，不从文字里的未来章号猜删', async () => {
+    const baseline = '# 力量体系\n\n## 作者规划\n预计第十二章揭晓暗劲，旧补丁无法确知来源。\n'
+    await writeFile(path.join(dir, '设定', '世界观', '力量体系.md'), baseline)
+    expect((await new SettingsMdRepo(dir).read(2))!.worldview[0].body).toContain('预计第十二章揭晓暗劲')
+  })
+
+  it('按地理表出现章节过滤同章和未来地点，保留无章号行与其他表格', async () => {
+    await writeFile(path.join(dir, '设定', '世界观', '地理.md'), '# 地理\n\n| 地点 | 说明 | 出现章节 |\n|---|---|---|\n| 作者故乡 | 开书基线 | 未注明 |\n| 码头 | 已经到过 | 第 3 章 |\n| 孤岛 | 本章首次出现 | 第 5 章 |\n| 京城 | 未来出现 | 第 12 章 |\n\n## 距离\n| 地点 | 说明 |\n|---|---|\n| 作者故乡 | 距海岸十二里 |\n')
+    const body = (await new SettingsMdRepo(dir).read(5))!.worldview[0].body
+    expect(body).toContain('作者故乡')
+    expect(body).toContain('码头')
+    expect(body).not.toContain('孤岛')
+    expect(body).not.toContain('京城')
+    expect(body).toContain('距海岸十二里')
+    expect((await new SettingsMdRepo(dir).read())!.worldview[0].body).toContain('京城')
   })
 })
 

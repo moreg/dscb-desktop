@@ -2,9 +2,10 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { safeHandle, safeSend } from './safe-handle'
 import { LlmService } from '../data/llm-service'
 import { SecretStore } from '../data/secret-store'
-import { listAntigravityModels } from '../data/antigravity-runner'
+import { listAntigravityModels, sanitizeAgyModel } from '../data/antigravity-runner'
 import { listCodexModels } from '../data/codex-runner'
 import { listGrokModels } from '../data/grok-runner'
+import { listClaudeModels } from '../data/claude-runner'
 import { getCodexReasoningEffort, setCodexReasoningEffort } from '../data/codex-config'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import type { ProviderConfig, ListProvidersResult, ProviderSummary } from '../../shared/types'
@@ -26,7 +27,8 @@ function maskKey(apiKey: string): string {
 
 function summarize(p: ProviderConfig): ProviderSummary {
   const proto = p.protocol ?? 'openai'
-  const isCli = proto === 'antigravity' || proto === 'codex' || proto === 'grok'
+  const isCli =
+    proto === 'antigravity' || proto === 'codex' || proto === 'grok' || proto === 'claude'
   return {
     id: p.id,
     label: p.label,
@@ -35,6 +37,7 @@ function summarize(p: ProviderConfig): ProviderSummary {
     model: p.model,
     protocol: proto,
     temperature: p.temperature,
+    reasoningEffort: p.reasoningEffort,
     // CLI 协议靠本机登录态，无需 apiKey，视为已配置
     hasKey: isCli || Boolean(p.apiKey),
     keyMasked:
@@ -44,7 +47,9 @@ function summarize(p: ProviderConfig): ProviderSummary {
           ? 'codex 登录态'
           : proto === 'grok'
             ? 'grok 登录态'
-            : maskKey(p.apiKey)
+            : proto === 'claude'
+              ? 'claude 登录态'
+              : maskKey(p.apiKey)
   }
 }
 
@@ -59,17 +64,30 @@ function sanitizeProvider(input: unknown): ProviderConfig {
   const apiKeyRaw = typeof o.apiKey === 'string' ? o.apiKey : ''
   const homepage = typeof o.homepage === 'string' ? o.homepage.trim() : undefined
   const protocolRaw = o.protocol
-  const protocol: 'openai' | 'openai-responses' | 'anthropic' | 'antigravity' | 'codex' | 'grok' =
+  const protocol:
+    | 'openai'
+    | 'openai-responses'
+    | 'anthropic'
+    | 'antigravity'
+    | 'codex'
+    | 'grok'
+    | 'claude' =
     protocolRaw === 'anthropic' ? 'anthropic'
     : protocolRaw === 'openai-responses' ? 'openai-responses'
     : protocolRaw === 'antigravity' ? 'antigravity'
     : protocolRaw === 'codex' ? 'codex'
     : protocolRaw === 'grok' ? 'grok'
+    : protocolRaw === 'claude' ? 'claude'
     : 'openai'
   if (!id) throw new Error('PROVIDER_INVALID: missing id')
   if (!label) throw new Error('PROVIDER_INVALID: missing label')
-  // CLI 协议（antigravity/codex/grok）：走本机 CLI，无需 baseUrl/apiKey，model 可空（走默认）
-  if (protocol === 'antigravity' || protocol === 'codex' || protocol === 'grok') {
+  // CLI 协议（antigravity/codex/grok/claude）：走本机 CLI，无需 baseUrl/apiKey，model 可空（走默认）
+  if (
+    protocol === 'antigravity' ||
+    protocol === 'codex' ||
+    protocol === 'grok' ||
+    protocol === 'claude'
+  ) {
     let temperature: number | undefined
     if (
       typeof o.temperature === 'number' &&
@@ -83,16 +101,34 @@ function sanitizeProvider(input: unknown): ProviderConfig {
         ? 'antigravity://local'
         : protocol === 'codex'
           ? 'codex://local'
-          : 'grok://local'
+          : protocol === 'grok'
+            ? 'grok://local'
+            : 'claude://local'
+    // claude 协议：思考强度经 MAX_THINKING_TOKENS 注入子进程，透传 reasoningEffort
+    const cliReasoningEffort =
+      protocol === 'claude' &&
+      (o.reasoningEffort === 'none' ||
+        o.reasoningEffort === 'low' ||
+        o.reasoningEffort === 'medium' ||
+        o.reasoningEffort === 'high' ||
+        o.reasoningEffort === 'xhigh' ||
+        o.reasoningEffort === 'max')
+        ? o.reasoningEffort
+        : undefined
+    let cleanModel = model
+    if (protocol === 'antigravity') {
+      cleanModel = sanitizeAgyModel(model) || (model === 'default' ? 'default' : '')
+    }
     const out: ProviderConfig = {
       id,
       label,
       baseUrl: baseUrl || placeholderUrl,
-      model: model || 'default',
+      model: cleanModel || 'default',
       apiKey: apiKeyRaw,
       protocol,
       ...(homepage ? { homepage } : {}),
-      ...(temperature !== undefined ? { temperature } : {})
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(cliReasoningEffort ? { reasoningEffort: cliReasoningEffort } : {})
     }
     return out
   }
@@ -235,7 +271,13 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
     if (!cfg.activeId) return false
     const p = cfg.providers.find((x) => x.id === cfg.activeId)
     if (!p) return false
-    if (p.protocol === 'antigravity' || p.protocol === 'codex' || p.protocol === 'grok') return true
+    if (
+      p.protocol === 'antigravity' ||
+      p.protocol === 'codex' ||
+      p.protocol === 'grok' ||
+      p.protocol === 'claude'
+    )
+      return true
     return Boolean(p.apiKey)
   })
 
@@ -277,6 +319,11 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   // 列出 grok 可用模型（`grok models`，供前端做模型选择）
   safeHandle('llm:listGrokModels', async (): Promise<string[]> => {
     return listGrokModels()
+  })
+
+  // 列出 Claude Code CLI 可选模型（内置预设 + settings.json 默认）
+  safeHandle('llm:listClaudeModels', async (): Promise<string[]> => {
+    return listClaudeModels()
   })
 
   // 取消进行中的流式生成（续写 / 重写 / 通用 generate）

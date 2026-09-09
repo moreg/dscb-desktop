@@ -172,8 +172,9 @@ async function runAntigravityOnce(
     '--print-timeout',
     `${timeoutSec}s`
   ]
-  if (opts.model && opts.model.trim()) {
-    args.push('--model', opts.model.trim())
+  const sanitizedModel = sanitizeAgyModel(opts.model)
+  if (sanitizedModel) {
+    args.push('--model', sanitizedModel)
   }
 
   return new Promise<AntigravityResult>((resolve, reject) => {
@@ -356,20 +357,82 @@ export async function probeAntigravity(): Promise<string | null> {
 }
 
 /**
+ * 净化 agy 模型参数。
+ * 1. 若传入 undefined、空串或 'default'，返回 undefined（走 agy 默认模型）。
+ * 2. 若传入制表符混杂串（例如从旧版直接存入的 "gemini-3.8-flash-high\tGemini 3.8 Flash (High)"），
+ *    自动剥离，提取有效显示名 "Gemini 3.8 Flash (High)" 或 slug。
+ * 3. 去除 ANSI 转义字符与首尾空白。
+ */
+export function sanitizeAgyModel(raw?: string): string | undefined {
+  if (!raw) return undefined
+  let clean = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim()
+  clean = clean.replace(/^['"]+|['"]+$/g, '').trim()
+  if (!clean || clean === 'default') return undefined
+
+  if (clean.includes('\t')) {
+    const parts = clean.split('\t').map((s) => s.trim()).filter(Boolean)
+    clean = parts[1] || parts[0] || ''
+  } else if (/\s{2,}/.test(clean)) {
+    const parts = clean.split(/\s{2,}/).map((s) => s.trim()).filter(Boolean)
+    if (parts.length >= 2 && /^[a-z0-9-_.]+$/i.test(parts[0])) {
+      clean = parts[1] || parts[0] || ''
+    }
+  }
+  return clean || undefined
+}
+
+/**
+ * 解析 `agy models` 输出中的单行。
+ * agy CLI 输出格式（实测）：
+ * - 第 1 行为提示信息：`Fetching available models...`（需丢弃）
+ * - 随后为各模型行，采用制表符分隔：`[slug]\t[Display Name]`
+ *   例如：`gemini-3.8-flash-high\tGemini 3.8 Flash (High)`
+ * - 失败时可能输出：`Error: Please sign in...`
+ *
+ * 本函数提取用户可读的显示名（含档位信息，如 `Gemini 3.8 Flash (High)`），
+ * 兼容无制表符的纯显示名行，并自动剔除提示行与空行。
+ */
+export function parseAgyModelLine(line: string): string | null {
+  const clean = line.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim()
+  if (!clean) return null
+  // 过滤提示信息与错误行
+  if (/^(?:Fetching|Loading|Checking|Updating|Error:)/i.test(clean)) return null
+
+  if (clean.includes('\t')) {
+    const parts = clean.split('\t').map((s) => s.trim()).filter(Boolean)
+    // parts[0] 为 slug，parts[1] 为显示名；优先返回显示名
+    return parts[1] || parts[0] || null
+  }
+  if (/\s{2,}/.test(clean)) {
+    const parts = clean.split(/\s{2,}/).map((s) => s.trim()).filter(Boolean)
+    if (parts.length >= 2 && /^[a-z0-9-_.]+$/i.test(parts[0])) {
+      return parts[1] || parts[0] || null
+    }
+  }
+  return clean
+}
+
+/**
  * agy / Google 侧常见模型显示名（`agy --model` 用显示名，不是 slug）。
  * 当 `agy models` 因未登录/未安装失败时，作为设置页下拉兜底，
  * 避免只能手输；真实列表仍以 `agy models` 为准并优先展示。
  */
 export const ANTIGRAVITY_KNOWN_MODELS: readonly string[] = [
-  'Gemini 3.6 Flash (Medium)',
+  'Gemini 3.8 Flash (High)',
+  'Gemini 3.8 Flash (Medium)',
+  'Gemini 3.8 Flash (Low)',
+  'Gemini 3.7 Flash (High)',
+  'Gemini 3.7 Flash (Medium)',
+  'Gemini 3.7 Flash (Low)',
   'Gemini 3.6 Flash (High)',
+  'Gemini 3.6 Flash (Medium)',
   'Gemini 3.6 Flash (Low)',
   'Gemini 3.6 Flash (Minimal)',
-  'Gemini 3.5 Flash (Medium)',
   'Gemini 3.5 Flash (High)',
+  'Gemini 3.5 Flash (Medium)',
   'Gemini 3.5 Flash (Low)',
-  'Gemini 3.1 Pro (Low)',
   'Gemini 3.1 Pro (High)',
+  'Gemini 3.1 Pro (Low)',
   'Claude Sonnet 4.6 (Thinking)',
   'Claude Opus 4.6 (Thinking)',
   'GPT-OSS 120B (Medium)'
@@ -380,8 +443,8 @@ export const ANTIGRAVITY_KNOWN_MODELS: readonly string[] = [
  * 优先返回 CLI 实时列表；未登录/未安装/失败时回退到内置 Gemini 等预设（不抛错）。
  *
  * 实测 `agy models` 输出格式（agy 1.1.0+）：
- *   Gemini 3.6 Flash (Medium)
- *   Gemini 3.6 Flash (High)
+ *   Fetching available models...
+ *   gemini-3.8-flash-high\tGemini 3.8 Flash (High)
  *   ...
  * 认证失败时输出 `Error: Please sign in...`（exit 0）。
  */
@@ -410,8 +473,8 @@ export async function listAntigravityModelsLive(): Promise<string[]> {
       }
       const models = trimmed
         .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0 && !/^Error:/i.test(l))
+        .map(parseAgyModelLine)
+        .filter((l): l is string => Boolean(l))
       resolve(models)
     })
   })

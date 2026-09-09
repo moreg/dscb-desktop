@@ -47,6 +47,16 @@ export function isCompletenessItem(id: string): boolean {
   return id === 'core_plot' || id === 'word_count' || id.startsWith('due_fb_')
 }
 
+function isOverLengthItem(item: SelfCheckItemResult): boolean {
+  return item.repairKind === 'over_length' ||
+    (!item.repairKind && item.id === 'word_count' && /上限/.test(item.label) && /超出/.test(item.detail))
+}
+
+/** 超限需要核对压缩，即使章节尚未完成也不能当成「以后补写」项。 */
+export function isDeferredSelfCheckItem(item: SelfCheckItemResult): boolean {
+  return isCompletenessItem(item.id) && !isOverLengthItem(item)
+}
+
 /**
  * 从自检报告生成可执行的写作约束文本。
  * 无问题项时返回空串。
@@ -63,10 +73,8 @@ export function buildTempRequirementsFromSelfCheck(
   const ch = opts.chapterNumber ?? report.chapterNumber
 
   // partial 下完成度项排到最后：本次要落实的项优先占用 maxItems 名额与模型注意力
-  const issues = pickIssueItems(report.items, includeWarn, opts.partialChapter === true).slice(
-    0,
-    maxItems
-  )
+  const allIssues = pickIssueItems(report.items, includeWarn, opts.partialChapter === true)
+  const issues = allIssues.slice(0, maxItems)
   if (issues.length === 0) return ''
 
   const partial = opts.partialChapter === true
@@ -74,17 +82,17 @@ export function buildTempRequirementsFromSelfCheck(
   if (mode === 'rewrite') {
     lines.push(`【按写后自检修订第 ${ch} 章】`)
     lines.push(
-      '请在保留已写剧情与文风的前提下，针对下列未通过项修改正文。不要另起炉灶重写无关段落；能局部修补的就局部修补。'
+      '请在保留已写剧情与文风的前提下，逐条核对下列提示，只有确认正文有问题时才修改。关键词未命中不等于事件没写；已有同义表达或合理安排的段落保持原样。能局部修补的就局部修补。'
     )
   } else {
     lines.push(`【写后自检补写要求 · 第 ${ch} 章】`)
     lines.push(
-      '续写/补写时必须落实下列未通过项；与既有正文衔接，不要重复已写情节，不要抢写下一章。'
+      '续写/补写前逐条核对下列提示，只处理确实遗漏或矛盾的内容；已有同义表达或合理安排不重复补写。与既有正文衔接，不要抢写下一章；需要删改已写内容的提示不能靠续写重复一遍来修复。'
     )
   }
   if (partial) {
     lines.push(
-      '注意：本章尚未写完（仍在分轮续写中）。标【后续】的是"整章写完前必须落实"的完成度项，本次能顺势推进就推进，**不要为了勾掉它们而把本章硬收尾或跳过中间剧情**；标【必须】【建议】的按本次落实。'
+      '注意：本章尚未写完（仍在分轮续写中）。标【后续】的是整章写完前再核对的完成度项，本次能顺势推进就推进，**不要为了勾掉它们而把本章硬收尾或跳过中间剧情**；标【必须】【建议】的本次先核实，再按实际问题处理。'
     )
   }
   lines.push('')
@@ -92,18 +100,17 @@ export function buildTempRequirementsFromSelfCheck(
   let n = 1
   for (const it of issues) {
     const tag =
-      partial && isCompletenessItem(it.id) ? '后续' : it.verdict === 'fail' ? '必须' : '建议'
+      partial && isDeferredSelfCheckItem(it) ? '后续' : it.verdict === 'fail' ? '必须' : '建议'
     const cat = CATEGORY_LABEL[it.category] ?? it.category
     lines.push(`${n}. 【${tag}·${cat}】${it.label}`)
     if (it.detail?.trim()) {
       lines.push(`   依据：${clip(it.detail.trim(), 160)}`)
     }
-    // 自检是字面比对：把「正文里找不到的子事件」原样列出，模型才有明确靶子
+    // 字面匹配只能提出待核对点，不能直接命令重写已用同义表达完成的情节。
     const missing = (it.missing ?? []).map((m) => m.trim()).filter(Boolean)
     if (missing.length > 0) {
       lines.push(
-        `   正文里找不到这些要点，逐条补写：${missing
-          .slice(0, 6)
+        `   待核对的要点（可能已有同义表达，确认遗漏后再处理）：${missing
           .map((m) => `「${clip(m, 60)}」`)
           .join('、')}`
       )
@@ -114,10 +121,14 @@ export function buildTempRequirementsFromSelfCheck(
     n++
   }
 
+  if (issues.length < allIssues.length) {
+    lines.push(`本次列出 ${issues.length}/${allIssues.length} 项提示，其余项尚未纳入本轮要求，不代表已解决。`)
+  }
+
   lines.push(
     partial
-      ? '改完后自检：上列【必须】【建议】项都要在正文中有可见落地，禁止仅用旁白声称「已解决」；【后续】项留到本章写完前落实即可。'
-      : '改完后自检：上列每一项都要在正文中有可见落地，禁止仅用旁白声称「已解决」。'
+      ? '改完后复核：确认存在的问题应由正文中的行动、结果或必要删改解决，禁止仅用旁白声称「已解决」；误报保留原文，【后续】项留到整章写完前核对，伏笔可依因果条件合理延期。'
+      : '改完后复核：确认存在的问题应由正文中的行动、结果或必要删改解决，禁止仅用旁白声称「已解决」；误报保留原文，不能为通过关键词检查重复情节或强行揭底。'
   )
   if (mode === 'rewrite') {
     // 落笔结果是整体替换编辑器正文的（见 ChapterEditor.adjustChapter），
@@ -145,46 +156,56 @@ function pickIssueItems(
   const allowed: SelfCheckVerdict[] = includeWarn ? ['fail', 'warn'] : ['fail']
   const rank: Record<SelfCheckVerdict, number> = { fail: 0, warn: 1, pass: 2, skip: 3 }
   const weight = (i: SelfCheckItemResult): number =>
-    (partialChapter && isCompletenessItem(i.id) ? 10 : 0) + rank[i.verdict]
-  return items.filter((i) => allowed.includes(i.verdict)).sort((a, b) => weight(a) - weight(b))
+    (partialChapter && isDeferredSelfCheckItem(i) ? 10 : 0) + rank[i.verdict]
+  return items.filter((i) => allowed.includes(i.verdict) &&
+    i.id !== 'self_check_error' && i.repairKind !== 'execution_error')
+    .sort((a, b) => weight(a) - weight(b))
 }
 
 /** 按检查 id / 类别给可操作改法提示 */
 function actionHint(item: SelfCheckItemResult): string {
   const id = item.id
-  // ending_form 已从自检引擎移除；保留提示以防旧报告仍带该 id
+  // 旧报告可能保留已移除的形态规则，不能再次强迫正文换成某种结尾。
   if (id === 'ending_form') {
-    return '改写章末 2～4 段：用一句对话或一个突然动作/来人收束，删掉总结式旁白。'
+    return '旧版结尾形态提示仅供核对：正常心理描写、必要总结或对话收束都可保留；只有章末确实空泛或缺少衔接时才局部调整，不强行改成对话或突然动作。'
   }
   if (id === 'ending_taboo') {
-    return '删除章末说教/AI 抒怀句，换成具体事件或未说完的对话。'
+    return '核对命中句是否确为脱离人物语境的说教或空泛抒怀；正常对白和必要叙述保留，确属套话时仅删改对应句。'
   }
   if (id === 'prev_suspense') {
-    return '在章首或前半段用对话/动作回应上章悬念，不要装作无事发生。'
+    return '先核对章首或前半段是否已回应或合理延续上章悬念；确认遗漏后再补必要的对话或动作。'
   }
   if (id.startsWith('unfinished_')) {
     return '在正文中明确处理或推进该未完成事项（对话承诺、动作完成、或合理延后并点明）。'
   }
   if (id === 'char_position') {
-    return '开头交代人物如何从上一地点移动到此处，禁止无过程瞬移。'
+    return '核对人物是否出场及是否已有合理转场；只有地点或行程确实矛盾时才补必要衔接，不为未出场人物强加镜头。'
   }
   if (id === 'core_plot') {
-    return '补写或强化本章核心事件的过程与结果，让事件在正文里真正发生；人名/地名/关键物件沿用细纲原词，别整句换成同义说法。'
+    return '先核对同义表述、实际行动与结果，区分已完成、计划和否定；只有确实遗漏的核心事件才补写，已落实的情节保持原样，不为命中关键词重复或换词重写。'
   }
   if (id.startsWith('due_fb_')) {
-    return '在正文中明确回收该到期伏笔（对话揭示 / 物品出场 / 场景重现 / 点破），不要拖到下章。'
+    return '核对伏笔核心疑问是否真的解决，区分提及、强化、部分揭示和完整回收；到期只是安排提醒，因果条件不足可合理延期，不必强行揭底。若回收记录有误，应核对记录，不能为迎合记录编造回收情节。'
   }
   if (id.startsWith('early_fb_')) {
-    return '删改提前揭穿未到期伏笔的句子，只保留含蓄暗示。'
+    return '先核对是否真的提前揭穿核心疑问；人物、物品出场和含蓄暗示可以保留，仅删改确认提前揭底的内容。'
   }
   if (id === 'power_bound') {
-    return '收回越权能力描写，改回设定边界内的用法（能看什么、不能看什么、消耗与反噬）。'
+    return '结合对应人物、能力边界和局部语境核对是否实际越权；否定、传闻和假设不等于使用能力，仅修正确认越权的行动与结果。'
   }
   if (id === 'volume_spoiler') {
-    return '删掉属于更后章节的大事件揭晓，本章只推进当前细纲节点。'
+    return '核对后续事件是否已在本章实际发生；计划、铺垫和相关人物出场不算抢写，仅调整确认提前发生的节点。'
   }
   if (id === 'word_count') {
-    return '把细纲里尚未充分展开的剧情点写满（环境/心理/动作/对白展开），不要靠注水或复述凑字数。'
+    // 兼容旧报告；新报告用结构化方向，不依赖 detail 的措辞。
+    if (isOverLengthItem(item)) return '在保留关键行动、因果和收束的前提下压缩重复叙述与冗余段落，使篇幅符合细纲上限；不要扩写或新增情节来处理超限。'
+    return '篇幅是参考，先核对剧情与收束是否完整；完整则保留现有长度，只有确实遗漏必要情节才补写，不为凑字扩写环境、心理或重复对白。'
+  }
+  if (id === 'punctuation_rule') {
+    return '只处理提示中的破折号或省略号，按句意替换为合适标点或必要动作断句，保留原有情节；可优先使用一键替换标点。'
+  }
+  if (id === 'ai_tells') {
+    return '结合语境核对提示中的动作是否重复或空泛，必要时替换为具体行为；不要仅因命中模式删除有效情节。'
   }
   if (id === 'meta_narration') {
     return '去掉「第N章」「下章见」「未完待续」等元叙述，改用故事内对话/事件收尾。'
@@ -194,13 +215,13 @@ function actionHint(item: SelfCheckItemResult): string {
     case 'continuity':
       return '补上与上章状态/位置/悬念的衔接句。'
     case 'plot':
-      return '把偏题内容压短，把核心事件写满。'
+      return '核对是否偏离当前情节安排；只有确认偏题或遗漏时才局部调整，保留已完成的情节。'
     case 'foreshadow':
-      return '按伏笔表处理：到期必收，未到期勿爆。'
+      return '核对伏笔的实际推进程度与因果条件，合理保留暗示或延期，不为到期强行揭底。'
     case 'power':
       return '对齐金手指限制，删掉越权表述。'
     case 'structure':
-      return '调整章末形态与节奏，避免空收尾。'
+      return '按依据核对具体结构问题，确认后局部调整，保留正常叙述与原有收束方式。'
     case 'ban':
       return '删除抢写、元叙述或违规提前内容。'
     default:
@@ -229,6 +250,14 @@ export function formatSelfCheckDelta(
   const nw = next.counts.warn
   // 改前本就干净：只报本次结果
   if (pf + pw === 0) return next.summary
+
+  const checkedIds = new Set(next.items.filter((item) => item.verdict !== 'skip').map((item) => item.id))
+  const unverified = previous.items.filter((item) =>
+    (item.verdict === 'fail' || item.verdict === 'warn') &&
+    !checkedIds.has(item.id))
+  if (next.counts.skip > 0 || unverified.length > 0) {
+    return `复检：失败 ${nf}、留意 ${nw}；${next.counts.skip} 项未检查${unverified.length ? `，此前 ${unverified.length} 项问题本次未核验` : ''}，不能据此判断全部通过`
+  }
 
   if (next.ok && nw === 0) {
     return `复检全部通过（此前失败 ${pf}、留意 ${pw}）`

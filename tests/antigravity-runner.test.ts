@@ -64,7 +64,13 @@ function createFakeChild(opts: {
   return child
 }
 
-import { runAntigravity, probeAntigravity, listAntigravityModels } from '../src/main/data/antigravity-runner'
+import {
+  runAntigravity,
+  probeAntigravity,
+  listAntigravityModels,
+  sanitizeAgyModel,
+  parseAgyModelLine
+} from '../src/main/data/antigravity-runner'
 
 beforeEach(() => {
   lastSpawnArgs = null
@@ -101,6 +107,17 @@ describe('runAntigravity', () => {
     const idx = lastSpawnArgs!.args.indexOf('--model')
     expect(idx).toBeGreaterThan(-1)
     expect(lastSpawnArgs!.args[idx + 1]).toBe('Gemini 3.1 Pro (High)')
+  })
+
+  it('opts.model 包含制表符或历史遗留混杂串时自动净化为纯净显示名', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({ stdout: '好', exitCode: 0 })
+
+    await runAntigravity('测试', { model: 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)' })
+
+    const idx = lastSpawnArgs!.args.indexOf('--model')
+    expect(idx).toBeGreaterThan(-1)
+    expect(lastSpawnArgs!.args[idx + 1]).toBe('Gemini 3.8 Flash (High)')
   })
 
   it('model 为空/undefined 时跳过 --model（走 agy 默认）', async () => {
@@ -403,5 +420,70 @@ describe('listAntigravityModels', () => {
     const models = await listAntigravityModels()
     expect(models).toContain('Gemini 3.6 Flash (Medium)')
     expect(models).toContain('Gemini 3.1 Pro (High)')
+  })
+
+  it('真实 agy models 输出含 Fetching 前缀与制表符分隔列 -> 正确过滤并提取显示名', async () => {
+    fakeChildFactory = () =>
+      createFakeChild({
+        stdout:
+          'Fetching available models...\n' +
+          'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n' +
+          'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n' +
+          'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n' +
+          'gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n',
+        exitCode: 0
+      })
+
+    const models = await listAntigravityModels()
+    expect(models).toEqual([
+      'Gemini 3.8 Flash (High)',
+      'Gemini 3.8 Flash (Medium)',
+      'Claude Sonnet 4.6 (Thinking)',
+      'GPT-OSS 120B (Medium)'
+    ])
+    expect(models).not.toContain('Fetching available models...')
+  })
+})
+
+describe('sanitizeAgyModel & parseAgyModelLine', () => {
+  it('sanitizeAgyModel: 剥离制表符、多空格、引号并正确提取有效模型名', () => {
+    expect(sanitizeAgyModel(undefined)).toBeUndefined()
+    expect(sanitizeAgyModel('')).toBeUndefined()
+    expect(sanitizeAgyModel('default')).toBeUndefined()
+    expect(sanitizeAgyModel('  ')).toBeUndefined()
+
+    // 历史存入的 "slug\tDisplay Name" 格式
+    expect(sanitizeAgyModel('gemini-3.8-flash-high\tGemini 3.8 Flash (High)')).toBe(
+      'Gemini 3.8 Flash (High)'
+    )
+
+    // 带有连续空格格式
+    expect(sanitizeAgyModel('gemini-3.8-flash-high   Gemini 3.8 Flash (High)')).toBe(
+      'Gemini 3.8 Flash (High)'
+    )
+
+    // 正常显示名
+    expect(sanitizeAgyModel('Gemini 3.8 Flash (High)')).toBe('Gemini 3.8 Flash (High)')
+
+    // 纯 slug
+    expect(sanitizeAgyModel('gemini-3.8-flash-high')).toBe('gemini-3.8-flash-high')
+
+    // 带有引号包裹
+    expect(sanitizeAgyModel('"Gemini 3.8 Flash (High)"')).toBe('Gemini 3.8 Flash (High)')
+  })
+
+  it('parseAgyModelLine: 忽略提示词与错误行，正确解析制表符行', () => {
+    expect(parseAgyModelLine('Fetching available models...')).toBeNull()
+    expect(parseAgyModelLine('Loading...')).toBeNull()
+    expect(parseAgyModelLine('Error: sign in required')).toBeNull()
+    expect(parseAgyModelLine('   ')).toBeNull()
+
+    expect(parseAgyModelLine('gemini-3.8-flash-high\tGemini 3.8 Flash (High)')).toBe(
+      'Gemini 3.8 Flash (High)'
+    )
+    expect(parseAgyModelLine('gemini-3.8-flash-high   Gemini 3.8 Flash (High)')).toBe(
+      'Gemini 3.8 Flash (High)'
+    )
+    expect(parseAgyModelLine('Gemini 3.8 Flash (High)')).toBe('Gemini 3.8 Flash (High)')
   })
 })

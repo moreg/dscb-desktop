@@ -94,6 +94,14 @@ async function listDir(dir: string): Promise<string[]> {
   }
 }
 
+/** 文件占位不代表已经写作；按编辑器同一读取优先级检查实际正文内容。 */
+async function writtenChapters(dir: string): Promise<Set<number>> {
+  const repo = new ProseRepo(dir)
+  const chapters = await repo.listChapterNumbers()
+  const contents = await Promise.all(chapters.map(async (chapter) => ({ chapter, text: await repo.read(chapter) })))
+  return new Set(contents.filter(({ text }) => text.trim().length > 0).map(({ chapter }) => chapter))
+}
+
 /**
  * 格式体检：对项目内各 v4 真相源文件做解析健康检查。
  *
@@ -250,7 +258,7 @@ export class DiagnosticsService {
     if (!html || !entries) {
       return { kind: 'reset-actualized', changed: 0, message: '没找到可解析的节奏图谱' }
     }
-    const written = new Set(await new ProseRepo(dir).listChapterNumbers())
+    const written = await writtenChapters(dir)
     const next = entries.map((e) =>
       e.actualized && !written.has(e.chapter) ? { ...e, actualized: false } : e
     )
@@ -262,7 +270,7 @@ export class DiagnosticsService {
     return {
       kind: 'reset-actualized',
       changed,
-      message: `${changed} 章改回预测值（actualized=false），${written.size} 章已成稿的保持不变`
+      message: `${changed} 章改回预测值（actualized=false），${written.size} 章已有正文内容的保持不变`
     }
   }
 
@@ -447,7 +455,7 @@ export class DiagnosticsService {
     if (!entries || entries.length === 0) return []
 
     const out: Diagnostic[] = []
-    const written = new Set(await new ProseRepo(dir).listChapterNumbers())
+    const written = await writtenChapters(dir)
 
     // 1. actualized 越权：标了实际值，却没有正文
     const overMarked = entries.filter((e) => e.actualized && !written.has(e.chapter)).map((e) => e.chapter)
@@ -467,8 +475,8 @@ export class DiagnosticsService {
       out.push({
         severity: 'info',
         file: '图解/节奏图谱.html',
-        message: `${unMarked.length} 章正文已成稿，但节奏图谱仍是预测值：${sampleChapters(unMarked)}`,
-        hint: '按成稿实际效果回填 emotion / climax 并置 actualized: true，图谱才能反映真实曲线'
+        message: `${unMarked.length} 章已有正文内容，但节奏图谱仍是预测值：${sampleChapters(unMarked)}`,
+        hint: '若正文已定稿，可按实际效果回填 emotion / climax 并置 actualized: true；未定稿时可继续保留预测值'
       })
     }
 

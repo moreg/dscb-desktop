@@ -1,6 +1,6 @@
 import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
-import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo';
+import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { ProseRepo } from './skill-format/prose-repo'
 import { ChapterRhythmWriter } from './skill-format/chapter-rhythm-writer'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
@@ -9,12 +9,14 @@ import { CharacterRepo } from './memory/character-repo'
 import { countWords } from './words'
 import { CHAPTER_NAME_MAX_LEN, sanitizeChapterName } from '../../shared/parsers'
 import { ChapterRevisionConflictError, contentRevision } from './chapter-revision'
+import { ChapterVersionRepository } from './chapter-version-repository'
 import type {
   ChapterMeta,
   ChapterContent,
-  ChapterDetail
+  ChapterDetail,
+  ChapterSource,
+  RhythmEntry
 } from '../../shared/types'
-import type { RhythmEntry } from '../../shared/types'
 
 /**
  * 章节读写服务。
@@ -162,7 +164,8 @@ export class ChapterService {
     projectId: string,
     n: number,
     content: string,
-    expectedRevision?: string
+    expectedRevision?: string,
+    versionInfo?: { source?: ChapterSource; note?: string; skipVersion?: boolean }
   ): Promise<ChapterMeta> {
     return this.withContentWriteLock(projectId, n, async () => {
       const dir = await this.projectService.resolveDir(projectId)
@@ -177,6 +180,25 @@ export class ChapterService {
       await new ProseRepo(dir).write(n, content, before.meta.title)
       // 正文写完 → rhythmData 标记 actualized=true（预测值转为实际值）
       await new ChapterRhythmWriter(dir).markActualized(n)
+
+      // 自动记录正文历史版本（保留最新 5 个版本，倒序排列）
+      if (!versionInfo?.skipVersion && content.trim()) {
+        try {
+          const versionRepo = new ChapterVersionRepository(dir)
+          const versions = await versionRepo.list(n)
+          const latest = versions[0]
+          if (!latest || latest.content !== content) {
+            await versionRepo.create(n, {
+              source: versionInfo?.source ?? 'manual',
+              content,
+              note: versionInfo?.note ?? (latest ? '正文更新' : '初始正文')
+            })
+          }
+        } catch (err) {
+          console.warn('[ChapterService] auto record version failed:', err)
+        }
+      }
+
       return (await this.getChapter(projectId, n)).meta
     })
   }
@@ -186,7 +208,6 @@ export class ChapterService {
    * - title 走三处同步（rhythmData + 大纲逐章表 + 细纲 H2 标题）。
    *   细纲缺失时**不报错**：只更新前两处（H2 章号块不存在时不抛错）。
    * - title 入参需要先经过 sanitize：
-   *   · 净化后为空 → 静默忽略（标题保持原值）
    *   · 原始输入长度 > CHAPTER_NAME_MAX_LEN（净化前） → 静默忽略（防止 LLM 输出超长直接吞掉）
    *   · 其余正常 → 写盘
    * - status / hook / appearingCharacters 暂无回写（章节进度笔记 Phase 3b）；
@@ -217,6 +238,8 @@ export class ChapterService {
         const msg = (err as Error)?.message || ''
         if (!msg.startsWith('CHAPTER_NOT_FOUND')) throw err
       }
+      // 3) 正文文件同步重命名
+      await new ProseRepo(dir).rename(n, clean)
     }
     return (await this.getChapter(projectId, n)).meta
   }

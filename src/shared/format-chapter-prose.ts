@@ -1,12 +1,13 @@
 /**
  * 章节正文格式化：
- * - 去掉行内空白（半角/全角空格、Tab、nbsp 等；**含英文词间空格**）
+ * - 去掉汉字间与行首尾的多余空白；英文词间空白归一为空格
  * - 去掉空行（连续换行压成单个换行）
  * - **保留**段落换行
  *
- * 产品策略偏激进：优先清掉 AI 在汉字间插入的空格与多余空行。
- * 若正文含英文短语，词间空格也会被去掉（`Hello World` → `HelloWorld`）。
+ * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
+const LATIN_SPACE_NEIGHBOR = /[\p{Script=Latin}\p{M}0-9.,!?;:'"“”‘’–—…()[\]{}@#%&+/\\=<>_-]/u
+
 export function formatChapterProse(text: string): string {
   if (!text) return text
   return (
@@ -14,8 +15,12 @@ export function formatChapterProse(text: string): string {
       // 统一换行
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
-      // 去掉行内空白（不含换行）：空格、Tab、nbsp、全角空格等
-      .replace(/[^\S\n]+/g, '')
+      // 汉字间去空白；英文词、数字与英文标点之间保留一个分词空格。
+      .replace(/[^\S\n]+/g, (space, offset: number, input: string) => {
+        const left = input[offset - 1] ?? ''
+        const right = input[offset + space.length] ?? ''
+        return LATIN_SPACE_NEIGHBOR.test(left) && LATIN_SPACE_NEIGHBOR.test(right) ? ' ' : ''
+      })
       // 连续空行压成单行换行
       .replace(/\n{2,}/g, '\n')
       // 去掉首尾空行
@@ -48,6 +53,11 @@ export function joinContinuation(base: string, addition: string): string {
   // 原文本就以换行结尾 → 作者已经手动分段，尊重它
   const endedWithNewline = /\n[^\S\n]*$/.test(base)
   if (endedWithNewline || SENTENCE_END_RE.test(left)) return left + '\n' + right
+  // 若模型在英文词间断开，接缝上已有的分词空格不能随 trim 一起丢掉。
+  if ((/[^\S\n]$/.test(base) || /^[^\S\n]/.test(addition)) &&
+    LATIN_SPACE_NEIGHBOR.test(left.slice(-1)) && LATIN_SPACE_NEIGHBOR.test(right[0])) {
+    return left + ' ' + right
+  }
   return left + right
 }
 

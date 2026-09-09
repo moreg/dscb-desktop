@@ -44,7 +44,8 @@ npm run package      # 构建并打包成 Windows 安装包（release/*.exe）
 │  ├─ 角色/                     # 角色设定（记忆人物 fallback）
 │  └─ 世界观/                   # 背景 / 力量体系 / 金手指…
 ├─ 正文/
-│  └─ 第001章 标题.md           # 正文（亦兼容 第001章_标题.md / 001.md）
+│  ├─ 第001章 标题.md           # 正文（亦兼容 第001章_标题.md / 001.md）
+│  └─ .versions/                # 章节历史版本（NNN.versions.json，保留最新5个版本，倒序排列）
 ├─ 追踪/                        # 写作过程状态（表格式）
 │  ├─ 伏笔.md                   # 伏笔单一真相源
 │  ├─ 时间线.md
@@ -70,7 +71,6 @@ npm run package      # 构建并打包成 Windows 安装包（release/*.exe）
 
 > **已移除 / 暂未开放**  
 > - 开书向导（脑洞 → 设定/大纲/细纲一键生成）：已下线；设定与大纲请手写或用大纲页「生成细纲」。  
-> - 章节版本历史（`chapters/NNN.versions.json`）：IPC 仍为 stub，编辑器 UI 已隐藏。  
 > - 旧 JSON 记忆（`memory/characters.json` 等）：由 `记忆/*.md` + `追踪/*.md` 取代。  
 > - 旧 v3 目录 `记忆系统/`、`chapters/`：新建项目不再创建；老项目可用 `memory:migrateV3ToV4` 迁移。
 

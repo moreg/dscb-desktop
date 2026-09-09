@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { dialog } from 'electron'
+import { dialog, shell } from 'electron'
 import { CoverService } from '../data/cover-service'
 import { CoverPromptService } from '../data/cover-prompt-service'
 import { SettingsRepository } from '../data/settings-repository'
@@ -134,6 +134,17 @@ export function registerCoverIpc(
     return coverService.readAsDataURL(validated.projectId, validated.fileName)
   })
 
+  /* 在系统资源管理器中定位封面文件 */
+  safeHandle('cover:showInFolder', async (_e, payload: { projectId: string; fileName: string }) => {
+    const validated = validateInput(
+      z.object({ projectId: projectIdSchema, fileName: fileNameSchema }),
+      payload
+    )
+    const fullPath = await coverService.resolveCoverFile(validated.projectId, validated.fileName)
+    shell.showItemInFolder(fullPath)
+    return { ok: true }
+  })
+
   /* 图像配置（脱敏） */
   safeHandle('cover:getConfig', async () => settings.getCoverImageConfigSummary())
 
@@ -142,7 +153,7 @@ export function registerCoverIpc(
     'cover:setConfig',
     async (
       _e,
-      payload: { apiKey?: string; baseUrl?: string; model?: string }
+      payload: { apiKey?: string; baseUrl?: string; model?: string; channel?: 'api' | 'codex' | 'grok' }
     ) => {
       const validated = validateInput(
         z.object({
@@ -152,7 +163,8 @@ export function registerCoverIpc(
             .max(2048)
             .refine((s) => /^https?:\/\//.test(s), 'baseUrl 必须以 http:// 或 https:// 开头')
             .optional(),
-          model: z.string().min(1).max(100).optional()
+          model: z.string().min(1).max(100).optional(),
+          channel: z.enum(['api', 'codex', 'grok']).optional()
         }),
         payload
       )

@@ -7,9 +7,11 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "package": "electron-vite build && electron-builder",
-    "icon": "node scripts/generate-wordmark-icon.mjs",
+    "icon": "node scripts/generate-icon.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "style:baseline": "node scripts/style-baseline.mjs",
+    "deslop:corpus": "vitest run tests/deslop-corpus.test.ts",
     "lint": "eslint src tests",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json"

@@ -1,0 +1,48 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    大神持笔 — 应用图标（矢量参考母版）
+    理念：中式文人 · 朱砂印章。抛弃旧「黑石板 + 金色西式钢笔」。
+      · 实心圆角朱印，印泥朱漆色（深、偏绛、哑光，不橙不艳）
+      · 径向渐晕：中心稍亮、四边积色，仿钤压时印泥沉淀
+      · 碑刻式边栏：外沿压深、内沿提亮
+      · 阴刻「抽象笔尖」——负空间留白，出气孔 + 中缝贯穿到尖；整体 +18° 成「撇」
+    位图（含哑光颗粒、逐尺寸超采样）以 scripts/generate-icon.mjs 为准。
+  -->
+  <defs>
+    <radialGradient id="seal" cx="0.5" cy="0.46" r="0.74">
+      <stop offset="0" stop-color="#a8332b"/>
+      <stop offset="0.5" stop-color="#9c2822"/>
+      <stop offset="1" stop-color="#6f1918"/>
+    </radialGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f1e8d2"/>
+      <stop offset="1" stop-color="#e1d0b0"/>
+    </linearGradient>
+    <clipPath id="sealClip"><rect width="512" height="512" rx="88" ry="88"/></clipPath>
+  </defs>
+
+  <rect width="512" height="512" rx="88" ry="88" fill="url(#seal)"/>
+
+  <g clip-path="url(#sealClip)">
+    <rect x="32" y="32" width="448" height="448" rx="60" ry="60"
+          fill="none" stroke="#5f1515" stroke-opacity="0.55" stroke-width="8"/>
+    <rect x="41" y="41" width="430" height="430" rx="54" ry="54"
+          fill="none" stroke="#a8332b" stroke-opacity="0.3" stroke-width="4"/>
+
+    <g transform="rotate(18 256 266)">
+      <!-- 笔尖留白：左右对称，平顶宽肩 → 内凹收窄 → 一点尖 -->
+      <path fill="url(#paper)" d="
+        M188 74
+        L324 74
+        C340 96 344 150 342 182
+        C346 300 330 374 256 462
+        C182 374 166 300 170 182
+        C168 150 172 96 188 74 Z"/>
+      <!-- 出气孔 + 中缝（阴刻回填） -->
+      <g fill="#781c18">
+        <circle cx="256" cy="150" r="20"/>
+        <path d="M245 150 L267 150 L260 452 L252 452 Z"/>
+      </g>
+    </g>
+  </g>
+</svg>

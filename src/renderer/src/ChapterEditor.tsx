@@ -1,3 +1,4 @@
+import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import {
   useEffect,
   useLayoutEffect,
@@ -14,6 +15,7 @@ import type {
   AuditReport,
   ChapterContent,
   ChapterStatus,
+  ChapterVersion,
   Character,
   Foreshadowing,
   MemoryEntity,
@@ -36,6 +38,7 @@ import {
   ADJUST_REWRITE_KEY,
   FORMAT_PROSE_KEY,
   DESLOP_APPLY_KEY,
+  PUNCT_FIX_KEY,
   isWholeDocRewriteKey,
   type RewriteEntry
 } from '../../main/data/rewrite-history'
@@ -57,6 +60,8 @@ import { analyze, rhythmWarnings, type ChapterStats } from './analyze'
 import type {
   DetailedOutlineItem,
   DeslopScanReport,
+  DeslopStructureDimension,
+  DeslopStructureReport,
   DeslopResult,
   DeslopLevel
 } from '../../shared/types'
@@ -90,6 +95,11 @@ import {
 } from '../../shared/self-check-to-requirements'
 import type { ChapterSelfCheckReport } from '../../shared/types'
 import {
+  createChapterCheckTracker,
+  selfCheckToastType,
+  type ChapterSelfCheckSnapshot
+} from './chapterSelfCheckState'
+import {
   pushSyncHistory,
   popSyncHistory,
   peekSyncHistory,
@@ -106,6 +116,7 @@ import {
   type SyncUndoReceipt
 } from '../../shared/post-write-sync-session'
 import AlertDialog from './AlertDialog'
+import ChapterVersionsDialog from './ChapterVersionsDialog'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
   composeWritingRequirements,
@@ -130,6 +141,19 @@ const DESLOP_LEVEL_NAMES: Record<DeslopLevel, string> = {
   severe: '重度'
 }
 
+/** 结构体检维度的中文名（与 skill-prompts/deslop/structure-judge.ts 的 STRUCTURE_DIMENSIONS 对齐） */
+const DESLOP_STRUCTURE_NAMES: Record<DeslopStructureDimension, string> = {
+  'fake-obstacle': '阻力虚张声势（假危机）',
+  'npc-explainer': '配角/反派交底说明书',
+  'unfounded-emotion-leap': '情绪断层与无因顿悟',
+  'equal-length-cadence': '段落等长与呼吸感缺失',
+  'cognitive-blindspot': '全知视角与缺乏认知偏差',
+  'all-purpose-detail': '细节全都有用（旧）',
+  'closed-unit': '每段自带收束（旧）',
+  'dialogue-always-answers': '对白永远有效（旧）',
+  'uniform-information': '信息密度均匀（旧）'
+}
+
 /**
  * 润色力度可选项。limit 是该档的删除比例上限（与 deslop-service.deleteLimitPct 对齐），
  * 直接标在按钮上——档位的实际作用就只有这个数，不写出来用户没法判断该选哪档。
@@ -152,7 +176,7 @@ interface Props {
 
 /**
  * LLM 错误码 -> 用户可读的中文提示。
- * 覆盖所有协议（openai/anthropic/antigravity/codex/grok）的错误码。
+ * 覆盖所有协议（openai/anthropic/antigravity/codex/grok/claude）的错误码。
  */
 function friendlyLlmError(err: string | undefined): string {
   if (!err) return '生成失败，请重试'
@@ -168,6 +192,10 @@ function friendlyLlmError(err: string | undefined): string {
     LLM_OUTPUT_TRUNCATED: '输出不完整，可点击重试',
     LLM_AGENT_META:
       '模型输出了写作流程说明而非小说正文，已拦截未写入。请直接再点一次「续写」重试',
+    LLM_PROSE_FORMAT: '续写含标题、代码块或占位内容，已撤回本次生成，请重试',
+    LLM_PROSE_REPETITION: '续写大段复制了已有正文，已撤回本次生成，请重试',
+    LLM_EMPTY_PROSE: '模型没有返回正文，请重试',
+    CHAPTER_CONTEXT_TOO_LARGE: '本章已写正文超过4万字符，请先分章后续写，以便完整核对前文',
     LLM_RESPONSE_TOO_LARGE: '生成内容过长，请尝试简化提示词',
     LLM_REQUEST_FAILED: '请求失败，请检查网络连接',
     NETWORK_ERROR: '网络连接失败，请检查网络',
@@ -177,6 +205,9 @@ function friendlyLlmError(err: string | undefined): string {
     CODEX_MODEL_ERROR: 'codex 模型配置有误，请检查模型名',
     GROK_NOT_FOUND: '未检测到 grok CLI，请先安装 Grok',
     GROK_SPAWN_FAILED: 'grok CLI 启动失败，请检查安装',
+    CLAUDE_AUTH_EXPIRED: 'Claude 登录态失效，请在终端运行 claude login',
+    CLAUDE_NOT_FOUND: '未检测到 claude CLI，请先安装 Claude Code',
+    CLAUDE_SPAWN_FAILED: 'claude CLI 启动失败，请检查安装',
     // agy 内部 agent 执行失败的通用错误
     'Agent execution terminated': 'agy 执行出错（模型调用失败或超时），请检查网络连接后重试',
     'exited with code': 'agy 进程异常退出，请重试或检查 CLI 安装',
@@ -193,6 +224,7 @@ function friendlyLlmError(err: string | undefined): string {
   // AGY_ERROR / CODEX_ERROR / GROK_ERROR 带具体信息
   if (err.startsWith('AGY_ERROR: ')) return `agy 执行出错：${err.slice(11).slice(0, 100)}`
   if (err.startsWith('CODEX_ERROR: ')) return `codex 执行出错：${err.slice(13).slice(0, 100)}`
+  if (err.startsWith('CLAUDE_ERROR: ')) return `claude 执行出错：${err.slice(14).slice(0, 100)}`
   if (err.startsWith('GROK_ERROR: ')) {
     const detail = err.slice(12)
     if (/Couldn't create session|unsatisfied requirements|agent building failed/i.test(detail)) {
@@ -300,6 +332,23 @@ export default function ChapterEditor({
   const [draft, setDraftState] = useState('')
   /** 与 textarea DOM 同步的正文镜像；用户输入走非受控，避免 value 回写导致滚动乱跳。 */
   const draftRef = useRef('')
+  const selfCheckTrackerRef = useRef(createChapterCheckTracker({ projectId, chapterNumber, content: '' }))
+  selfCheckTrackerRef.current.update({ projectId, chapterNumber, content: draftRef.current })
+  const memorySyncPendingRef = useRef<symbol | null>(null)
+  const memoryDraftContextRef = useRef({ projectId, chapterNumber })
+  memoryDraftContextRef.current = { projectId, chapterNumber }
+  const invalidatePendingMemory = useCallback((force = false) => {
+    if (!force && !memorySyncPendingRef.current) return
+    memorySyncPendingRef.current = null
+    const context = memoryDraftContextRef.current
+    void window.api.invalidateChapterMemorySync(context.projectId, context.chapterNumber).catch(console.error)
+  }, [])
+  useEffect(() => () => {
+    // Capture the chapter being left; the render-time ref may already point at the next chapter.
+    selfCheckTrackerRef.current.invalidate()
+    ++fixPunctuationRef.current
+    void window.api.invalidateChapterMemorySync(projectId, chapterNumber).catch(console.error)
+  }, [projectId, chapterNumber])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lineGutterRef = useRef<HTMLDivElement>(null)
   const lineGutterInnerRef = useRef<HTMLDivElement>(null)
@@ -338,7 +387,9 @@ export default function ChapterEditor({
   const setDraft = useCallback((value: SetStateAction<string>, opts?: DraftUpdateOptions) => {
     const prev = draftRef.current
     const next = typeof value === 'function' ? (value as (p: string) => string)(prev) : value
+    if (next !== prev) invalidatePendingMemory()
     draftRef.current = next
+    selfCheckTrackerRef.current.update({ ...memoryDraftContextRef.current, content: next })
 
     const el = textareaRef.current
     if (el && el.value !== next) {
@@ -374,7 +425,7 @@ export default function ChapterEditor({
     }
 
     setDraftState(next)
-  }, [])
+  }, [invalidatePendingMemory])
 
   /**
    * 首次打开章节时的竞态修复：
@@ -411,24 +462,41 @@ export default function ChapterEditor({
   const [saving, setSaving] = useState(false)
 
   const [generating, setGenerating] = useState(false)
-  /** 正文生成（chapter 路由）实际使用的 provider，供续写前显示/调整强度。 */
+  /** 正文生成（chapter 路由）实际使用的 provider，供续写前显示/调整强度与模型。 */
   const [chapterProvider, setChapterProvider] = useState<ProviderSummary | null>(null)
+  const [allProviders, setAllProviders] = useState<ProviderSummary[]>([])
+  const [availableModelsByProvider, setAvailableModelsByProvider] = useState<Record<string, string[]>>({})
   const [chapterStrengthSaving, setChapterStrengthSaving] = useState(false)
   const [codexGlobalEffort, setCodexGlobalEffort] = useState<ReasoningEffort>('medium')
   const [chapterAgyModels, setChapterAgyModels] = useState<string[]>([])
+  const [showCustomModelDialog, setShowCustomModelDialog] = useState(false)
+  const [customModelInput, setCustomModelInput] = useState('')
+  const [customModelProviderId, setCustomModelProviderId] = useState('')
 
   const refreshChapterProvider = useCallback(async () => {
     try {
       const cfg = await window.api.listProviders()
-      const routedId = cfg.featureRouting?.chapter?.providerId
-      const provider = cfg.providers.find((provider) => provider.id === routedId) ??
-          cfg.providers.find((provider) => provider.id === cfg.activeId) ??
-          null
-      setChapterProvider(provider)
-      if (provider?.protocol === 'codex') {
+      setAllProviders(cfg.providers)
+      const routing = cfg.featureRouting?.chapter
+      const routedId = routing?.providerId
+      const baseProvider =
+        cfg.providers.find((p) => p.id === routedId) ??
+        cfg.providers.find((p) => p.id === cfg.activeId) ??
+        cfg.providers[0] ??
+        null
+
+      const effectiveProvider = baseProvider
+        ? {
+            ...baseProvider,
+            model: routing?.model?.trim() || baseProvider.model
+          }
+        : null
+
+      setChapterProvider(effectiveProvider)
+      if (effectiveProvider?.protocol === 'codex') {
         setCodexGlobalEffort(await window.api.getCodexReasoningEffort())
       }
-      if (provider?.protocol === 'antigravity') {
+      if (effectiveProvider?.protocol === 'antigravity') {
         try {
           setChapterAgyModels(await window.api.listAntigravityModels())
         } catch {
@@ -437,14 +505,73 @@ export default function ChapterEditor({
       } else {
         setChapterAgyModels([])
       }
+
+      // 异步加载所有 provider 的可选模型列表
+      const modelsMap: Record<string, string[]> = {}
+      await Promise.all(
+        cfg.providers.map(async (p) => {
+          try {
+            if (p.protocol === 'codex') {
+              modelsMap[p.id] = await window.api.listCodexModels()
+            } else if (p.protocol === 'antigravity') {
+              modelsMap[p.id] = await window.api.listAntigravityModels()
+            } else if (p.protocol === 'claude') {
+              modelsMap[p.id] = await window.api.listClaudeModels()
+            } else if (p.protocol === 'grok') {
+              modelsMap[p.id] = await window.api.listGrokModels()
+            } else {
+              modelsMap[p.id] = p.model ? [p.model] : []
+            }
+          } catch {
+            modelsMap[p.id] = p.model ? [p.model] : []
+          }
+        })
+      )
+      setAvailableModelsByProvider(modelsMap)
     } catch {
       setChapterProvider(null)
+      setAllProviders([])
     }
   }, [])
 
   useEffect(() => {
     void refreshChapterProvider()
   }, [refreshChapterProvider])
+
+  const updateChapterModel = async (providerId: string, model: string) => {
+    setChapterStrengthSaving(true)
+    try {
+      const cfg = await window.api.listProviders()
+      const targetProvider = cfg.providers.find((p) => p.id === providerId)
+      if (!targetProvider) return
+
+      const trimmedModel = model.trim()
+
+      // 1. 设置正文生成专属路由
+      await window.api.setFeatureRouting({
+        ...(cfg.featureRouting || {}),
+        chapter: {
+          providerId,
+          ...(trimmedModel ? { model: trimmedModel } : {})
+        }
+      })
+
+      // 2. 若目标 provider 自身 model 不一致，同步更新对应 provider 本身的 model
+      if (trimmedModel && targetProvider.model !== trimmedModel) {
+        await window.api.upsertProvider({
+          ...targetProvider,
+          apiKey: '',
+          model: trimmedModel
+        })
+      }
+
+      await refreshChapterProvider()
+    } catch (err) {
+      setAlertInfo({ message: `切换正文模型失败：${(err as Error).message || '请重试'}` })
+    } finally {
+      setChapterStrengthSaving(false)
+    }
+  }
 
   const updateChapterStrength = async (value: string) => {
     if (!chapterProvider) return
@@ -454,7 +581,10 @@ export default function ChapterEditor({
         const effort = value as ReasoningEffort
         await window.api.setCodexReasoningEffort(effort)
         setCodexGlobalEffort(effort)
-      } else if (chapterProvider.protocol === 'openai-responses') {
+      } else if (
+        chapterProvider.protocol === 'openai-responses' ||
+        chapterProvider.protocol === 'claude'
+      ) {
         await window.api.upsertProvider({
           ...chapterProvider,
           apiKey: '',
@@ -466,6 +596,16 @@ export default function ChapterEditor({
           apiKey: '',
           model: value
         })
+        const cfg = await window.api.listProviders()
+        if (cfg.featureRouting?.chapter) {
+          await window.api.setFeatureRouting({
+            ...cfg.featureRouting,
+            chapter: {
+              ...cfg.featureRouting.chapter,
+              model: value
+            }
+          })
+        }
       } else {
         await window.api.upsertProvider({
           ...chapterProvider,
@@ -616,12 +756,21 @@ export default function ChapterEditor({
   const checkedNonEmptyPlanCount = adjustPlanChecks.filter(
     (x) => x.checked && x.text.trim().length > 0
   ).length
+  // 正文历史版本弹窗（保留最近5个版本，倒序排列）
+  const [showVersionsDialog, setShowVersionsDialog] = useState(false)
   // 正文追问（chat）：全书视野回答写作疑问，不修改正文
   const [showAskDialog, setShowAskDialog] = useState(false)
   const [askQuestion, setAskQuestion] = useState('')
   const [askMessages, setAskMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
   const [asking, setAsking] = useState(false)
   const [deslopScanReport, setDeslopScanReport] = useState<DeslopScanReport | null>(null)
+  /**
+   * 结构体检结果（LLM 判定层）。和 deslopScanReport 分开存：
+   * 扫描是确定性的、瞬时的；体检要调 LLM、要花钱花时间，用户可能只想跑扫描。
+   * 也刻意不接进润色——这几条要改的是「说什么」，得作者自己动笔。
+   */
+  const [deslopStructure, setDeslopStructure] = useState<DeslopStructureReport | null>(null)
+  const [deslopJudging, setDeslopJudging] = useState(false)
   const [deslopScanning, setDeslopScanning] = useState(false)
   const [deslopRunning, setDeslopRunning] = useState(false)
   const [deslopLog, setDeslopLog] = useState('')
@@ -693,6 +842,12 @@ export default function ChapterEditor({
     selfCheck?: import('../../shared/types').ChapterSelfCheckReport | null
   } | null>(null)
   const [selfCheckLoading, setSelfCheckLoading] = useState(false)
+  // Self-check results describe a draft revision, independently of memory-sync receipts/errors.
+  const [selfCheckSnapshot, setSelfCheckSnapshot] = useState<ChapterSelfCheckSnapshot | null>(null)
+  const [selfCheckError, setSelfCheckError] = useState<string | null>(null)
+  const selfCheckReport = selfCheckSnapshot?.source.projectId === projectId &&
+    selfCheckSnapshot.source.chapterNumber === chapterNumber ? selfCheckSnapshot.report : null
+  const selfCheckStale = !!selfCheckSnapshot && !selfCheckTrackerRef.current.matches(selfCheckSnapshot.source)
   /**
    * 上一次续写的模式（主进程按细纲字数预估算出）。
    * 'extend' = 这一章是**故意还没写完**的：写后自检里「核心事件未完成」「到期伏笔未回收」
@@ -938,6 +1093,7 @@ export default function ChapterEditor({
    */
   const askHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const deslopHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const deslopJudgeHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   /**
    * 去 AI 味代数：切章或重新开跑时 +1，丢弃过期 token/结果。
    * 注意「停止润色」**不**加代数——主进程取消后会把已完成的分块合并成结果返回，
@@ -947,8 +1103,10 @@ export default function ChapterEditor({
   const castHandleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
   const abortSideStreams = (): void => {
     deslopGenRef.current += 1
-    for (const ref of [askHandleRef, deslopHandleRef, castHandleRef]) {
-      void ref.current?.abort().catch(() => undefined)
+    for (const ref of [askHandleRef, deslopHandleRef, deslopJudgeHandleRef, castHandleRef]) {
+      if (typeof ref.current?.abort === 'function') {
+        void ref.current.abort().catch(() => undefined)
+      }
       ref.current = null
     }
   }
@@ -1082,6 +1240,12 @@ export default function ChapterEditor({
     setStyleSelection({ mode: 'projectDefault', styleProfileId: null })
     setAutoSyncSeed(null)
     setPostWriteSync(null)
+    selfCheckTrackerRef.current.invalidate()
+    setSelfCheckSnapshot(null)
+    setSelfCheckError(null)
+    setSelfCheckLoading(false)
+    ++fixPunctuationRef.current
+    setFixPunctuationLoading(false)
     setLastContinueMode(null)
     setSkipMemoryOnAutoSyncAll(false)
     setFlowSyncTrigger(0)
@@ -1487,7 +1651,9 @@ export default function ChapterEditor({
     (e: ReactChangeEvent<HTMLTextAreaElement>) => {
       const el = e.target
       const v = el.value
+      invalidatePendingMemory(true)
       draftRef.current = v
+      selfCheckTrackerRef.current.update({ ...memoryDraftContextRef.current, content: v })
 
       const pinTo = pinScrollToRef.current
       if (pinTo != null) {
@@ -1517,7 +1683,7 @@ export default function ChapterEditor({
         setCurrentResultIndex(-1)
       }
     },
-    [findResults.length, stabilizePinnedScroll]
+    [findResults.length, stabilizePinnedScroll, invalidatePendingMemory]
   )
 
   // 全局快捷键：Ctrl+Shift+A 重新质检 + Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo
@@ -1666,6 +1832,22 @@ export default function ChapterEditor({
   }
   saveRef.current = save // P19-A：让 saveAndClearDraft 在保存后清掉 draft
 
+  /** 从历史版本回滚/恢复正文 */
+  const handleRollbackVersion = async (v: ChapterVersion) => {
+    try {
+      const meta = await window.api.rollbackChapter(projectId, chapterNumber, v.versionNumber)
+      setDraft(v.content, { captureScroll: false })
+      setData({ meta, content: v.content })
+      setDirty(false)
+      setAlertInfo({
+        message: `已成功将第 ${chapterNumber} 章正文恢复到版本 #${v.versionNumber}（${v.wordCount} 字）`
+      })
+    } catch (err) {
+      setAlertInfo({ message: `恢复历史版本失败：${(err as Error).message}` })
+      throw err
+    }
+  }
+
   /** 取消续写 / 出建议 / 落笔重写。立即停 UI 与 token 写入，并通知主进程 abort 子进程/请求。 */
   const cancelActiveStream = () => {
     // 流已正常完成且 UI 已空闲：忽略迟到的停止点击，以免误回滚
@@ -1738,7 +1920,7 @@ export default function ChapterEditor({
 
     // 改前自检快照：写后复检对比用（按自检续写补洞时可见改善）
     const previousSelfCheck: ChapterSelfCheckReport | null =
-      postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+      !selfCheckStale ? selfCheckReport : null
     streamBusyRef.current = true
     streamCompletedRef.current = false
     setGenerating(true)
@@ -1754,6 +1936,10 @@ export default function ChapterEditor({
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
+    selfCheckTrackerRef.current.invalidate()
+    setSelfCheckSnapshot(null)
+    setSelfCheckError(null)
+    setSelfCheckLoading(false)
     // 本轮模式由主进程回包给出（依赖细纲字数预估，前端算不出）；失败/取消时保持已清空
     setLastContinueMode(null)
     setSkipMemoryOnAutoSyncAll(false)
@@ -1770,7 +1956,7 @@ export default function ChapterEditor({
     /**
      * await 成功后由本路径独占终态（格式化 + setDraft）。
      * done/token 可能晚到：禁止再写编辑器，否则会盖掉已格式化正文。
-     * 伏笔回执 IPC 仍可在 done 里发（幂等）。
+     * 伏笔状态由统一写后记忆流程依据正文处理，流式回执只做剥离。
      */
     let editorFinalized = false
     /** 本会话仍有效时清理 busy 标志，避免 done 事件与 invoke 回包乱序导致永久「落墨中」 */
@@ -1808,13 +1994,8 @@ export default function ChapterEditor({
               if (!editorFinalized) {
                 setDraft(joinContinuation(initialDraft, stripped), { preserveCaret: false })
               }
-              window.api.applyForeshadowReceipt(targetProjectId, targetChapter, receipt)
-                .then(res => {
-                  if (res.planted > 0 || res.collected > 0) {
-                    setUndoToast({ message: `AI自动记录了伏笔：新增 ${res.planted} 条，回收 ${res.collected} 条`, type: 'warning' })
-                  }
-                })
-                .catch(console.error)
+              // 模型自报“已回收”不是正文证据；交给下方统一写后记忆提取，
+              // 避免在审稿与正文同步之前凭回执直接修改全书伏笔状态。
             }
           }
         }
@@ -1823,7 +2004,7 @@ export default function ChapterEditor({
       trackStreamRequest(stream.requestId)
       // 若在 invoke 前已切章/取消，立刻 abort（pending abort 也会拦住 begin）
       if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
-        void stream.abort().catch(() => undefined)
+        if (typeof stream?.abort === 'function') void stream.abort().catch(() => undefined)
         releaseIfMine()
         return
       }
@@ -1968,7 +2149,7 @@ export default function ChapterEditor({
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
       if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
-        void stream.abort().catch(() => undefined)
+        if (typeof stream?.abort === 'function') void stream.abort().catch(() => undefined)
         releaseIfMine()
         return
       }
@@ -2065,7 +2246,7 @@ export default function ChapterEditor({
         : []
     // 改前自检：落笔后自动复检并对比改善幅度
     const previousSelfCheck =
-      postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+      !selfCheckStale ? selfCheckReport : null
     streamBusyRef.current = true
     streamCompletedRef.current = false
     setShowAdjustDialog(false)
@@ -2079,6 +2260,10 @@ export default function ChapterEditor({
     setFlowSyncTrigger(0)
     setAutoSyncSeed(null)
     setPostWriteSync(null)
+    selfCheckTrackerRef.current.invalidate()
+    setSelfCheckSnapshot(null)
+    setSelfCheckError(null)
+    setSelfCheckLoading(false)
     setSkipMemoryOnAutoSyncAll(false)
     setRewriteHistory([])
     setRedoStack([])
@@ -2123,7 +2308,7 @@ export default function ChapterEditor({
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
       if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) {
-        void stream.abort().catch(() => undefined)
+        if (typeof stream?.abort === 'function') void stream.abort().catch(() => undefined)
         releaseIfMine()
         return
       }
@@ -2279,7 +2464,9 @@ export default function ChapterEditor({
 
   /** 停止进行中的追问回答（保留已生成的部分文本） */
   const stopAsking = (): void => {
-    void askHandleRef.current?.abort().catch(() => undefined)
+    if (typeof askHandleRef.current?.abort === 'function') {
+      void askHandleRef.current.abort().catch(() => undefined)
+    }
     setAsking(false)
   }
 
@@ -2294,6 +2481,24 @@ export default function ChapterEditor({
       const report = await window.api.auditChapter(projectId, finalDraft)
       if (genRef.current !== myGen) return
       setAutoAudit(report)
+      // 普通续写也遵守自动深审开关；以前只有批量/full 流程会读取此设置。
+      try {
+        const { config } = await window.api.getReviewRules()
+        if (genRef.current !== myGen || !config.enabled || !config.autoDeepReview) return
+        // 同步开启时，后端在记忆生效前统一深审，结果随同步返回，避免两次模型调用。
+        if (await window.api.getAutoPostWritePipeline() !== 'off') return
+        const findings = await window.api.runDeepReview(projectId, finalDraft, chapterNumber)
+        if (genRef.current !== myGen || draftRef.current !== finalDraft) return
+        const counts = { ...report.counts }
+        for (const finding of findings) counts[finding.severity]++
+        setAutoAudit({ ...report, counts, violations: [...report.violations, ...findings] })
+      } catch (err) {
+        if (genRef.current !== myGen) return
+        setAutoAudit({ ...report, counts: { ...report.counts, warn: report.counts.warn + 1 },
+          violations: [...report.violations, { category: 'llm_review', severity: 'warn',
+            ruleId: 'review_incomplete:auto', message: '自动深度审稿未完成，文字检查结果已保留',
+            suggestion: `请重试深度审稿。${(err as Error)?.message ?? '连接失败'}` }] })
+      }
     } catch (err) {
       if (genRef.current !== myGen) return
       setAutoAudit(null)
@@ -2427,6 +2632,8 @@ export default function ChapterEditor({
     }
   ) => {
     const contentSnapshot = fullContent
+    if (draftRef.current !== contentSnapshot) return
+    const syncToken = Symbol('memory-sync')
     const attempt = opts?.attempt ?? 0
     const allowAutoRetry = opts?.autoRetry !== false
     const previousSelfCheck = opts?.previousSelfCheck ?? null
@@ -2444,6 +2651,7 @@ export default function ChapterEditor({
           settings: import('../../shared/types').SettingsApplyResult
           extraction: import('../../shared/types').MemoryExtraction
           selfCheck?: ChapterSelfCheckReport | null
+          deepReview?: import('../../shared/types').AuditViolation[]
         } | null>
         selfCheckChapter?: (
           projectId: string,
@@ -2464,52 +2672,8 @@ export default function ChapterEditor({
       }
       if (pipeline === 'off' && !opts?.force) {
         // 记忆同步关闭时仍跑写后自检（纯算法，零 token）
-        if (api.selfCheckChapter) {
-          try {
-            setSelfCheckLoading(true)
-            const sc = await api.selfCheckChapter(
-              projectId,
-              chapterNumber,
-              contentSnapshot
-            )
-            if (genRef.current !== myGen) return
-            const deltaMsg = formatSelfCheckDelta(previousSelfCheck, sc)
-            setPostWriteSync({
-              phase: sc.ok ? 'ok' : 'partial',
-              message: deltaMsg,
-              errors: sc.ok
-                ? []
-                : sc.items
-                    .filter((i) => i.verdict === 'fail')
-                    .map((i) => `${i.label}：${i.detail}`),
-              contentForRetry: contentSnapshot,
-              at: Date.now(),
-              canUndo: syncHistoryRef.current.length > 0,
-              undoDepth: syncHistoryRef.current.length,
-              receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
-              selfCheck: sc
-            })
-            setAutoSyncSeed((prev) =>
-              prev
-                ? { ...prev, selfCheck: sc }
-                : null
-            )
-            setUndoToast({
-              message: deltaMsg,
-              type: sc.ok ? (sc.counts.warn > 0 ? 'info' : 'success') : 'error'
-            })
-            // 仅自检失败时强制打开面板（warn 用 toast，避免打扰）
-            if (!sc.ok) {
-              setFlowPanelOpen(true)
-            }
-          } catch {
-            setPostWriteSync(null)
-          } finally {
-            setSelfCheckLoading(false)
-          }
-        } else {
-          setPostWriteSync(null)
-        }
+        if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
+        await rerunSelfCheck(contentSnapshot, previousSelfCheck)
         return
       }
       if (genRef.current !== myGen) return
@@ -2533,13 +2697,20 @@ export default function ChapterEditor({
         type: 'info'
       })
 
+      if (draftRef.current !== contentSnapshot) return
+      const selfCheckRequest = selfCheckTrackerRef.current.begin()
+      // 自动同步可能还要等待记忆提取。它替代旧请求，但不占用手动自检的忙碌状态，
+      // 用户仍可立即运行零 token 复检；稍后的手动请求会优先于此回包。
+      setSelfCheckLoading(false)
+      memorySyncPendingRef.current = syncToken
       const sync = await api.syncChapterAfterWrite(
         projectId,
         chapterNumber,
         contentSnapshot,
         opts?.force ? { force: true } : undefined
       )
-      if (genRef.current !== myGen) return
+      if (memorySyncPendingRef.current === syncToken) memorySyncPendingRef.current = null
+      if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
       if (sync === null) {
         setUndoToast(null)
         setPostWriteSync({
@@ -2555,16 +2726,29 @@ export default function ChapterEditor({
         return
       }
 
+      if (sync.selfCheck && selfCheckTrackerRef.current.accepts(selfCheckRequest) &&
+        sync.selfCheck.chapterNumber === selfCheckRequest.chapterNumber) {
+        setSelfCheckSnapshot({ report: sync.selfCheck, source: selfCheckRequest })
+        setSelfCheckError(null)
+      }
+
       setAutoSyncSeed({
         extraction: sync.extraction,
         memory: sync.memory,
         settings: sync.settings,
         selfCheck: sync.selfCheck ?? null
       })
+      if (sync.deepReview?.length) {
+        const report = await window.api.auditChapter(projectId, contentSnapshot)
+        if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
+        const counts = { ...report.counts }
+        for (const finding of sync.deepReview) counts[finding.severity]++
+        setAutoAudit({ ...report, counts, violations: [...report.violations, ...sync.deepReview] })
+      }
 
       const summary = summarizePostWriteSync({
         ...sync,
-        selfCheck: sync.selfCheck ?? null
+        selfCheck: null
       })
       const phase: PostWriteSyncPhase = summary.phase
 
@@ -2633,16 +2817,7 @@ export default function ChapterEditor({
       }
 
       const depth = syncHistoryRef.current.length
-      const sc = sync.selfCheck ?? null
-      // 有改前快照时，用复检对比文案替换自检摘要段（保留「已同步…」前缀）
-      if (sc && previousSelfCheck) {
-        const delta = formatSelfCheckDelta(previousSelfCheck, sc)
-        if (message.includes(sc.summary)) {
-          message = message.replace(sc.summary, delta)
-        } else if (!message.includes(delta)) {
-          message = `${message}；${delta}`
-        }
-      }
+      const sc = selfCheckTrackerRef.current.accepts(selfCheckRequest) ? sync.selfCheck ?? null : null
       setPostWriteSync({
         phase,
         message:
@@ -2683,13 +2858,13 @@ export default function ChapterEditor({
           message:
             pipeline === 'full' && !opts?.force
               ? '已同步记忆，正在跑细纲/节奏/图解…'
-              : message,
-          type: sc && previousSelfCheck && sc.ok && sc.counts.warn === 0 ? 'success' : 'info'
+              : sc ? `${message}；${formatSelfCheckDelta(previousSelfCheck, sc)}` : message,
+          type: sc && previousSelfCheck ? selfCheckToastType(sc) : 'info'
         })
       }
     } catch (err) {
       console.warn('[runPostGenerateMemorySync]', err)
-      if (genRef.current !== myGen) return
+      if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
       const msg = err instanceof Error ? err.message : String(err)
       if (allowAutoRetry && attempt < POST_WRITE_SYNC_AUTO_RETRIES) {
         setPostWriteSync({
@@ -2729,12 +2904,23 @@ export default function ChapterEditor({
         message: '记忆同步失败，已入队；可点「重新同步」补跑',
         type: 'warning'
       })
+    } finally {
+      if (memorySyncPendingRef.current === syncToken) memorySyncPendingRef.current = null
     }
   }
 
-  /** 状态条 / 流程面板：对上次正文快照（或失败队列）重新跑同步 */
+  const getSelfCheckForAction = (): ChapterSelfCheckReport | null => {
+    if (!selfCheckSnapshot || selfCheckLoading || selfCheckError ||
+      !selfCheckTrackerRef.current.matches(selfCheckSnapshot.source)) {
+      setUndoToast({ message: '请先重新检查当前正文，再应用自检要求', type: 'info' })
+      return null
+    }
+    return selfCheckSnapshot.report
+  }
+
   const applySelfCheckToRewrite = () => {
-    const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    const sc = getSelfCheckForAction()
+    if (!sc) return
     const text = buildTempRequirementsFromSelfCheck(sc, {
       mode: 'rewrite',
       chapterNumber,
@@ -2776,7 +2962,8 @@ export default function ChapterEditor({
   }
 
   const applySelfCheckToContinue = () => {
-    const sc = postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
+    const sc = getSelfCheckForAction()
+    if (!sc) return
     const text = buildTempRequirementsFromSelfCheck(sc, {
       mode: 'continue',
       chapterNumber,
@@ -2794,7 +2981,10 @@ export default function ChapterEditor({
     })
   }
 
-  const rerunSelfCheck = async () => {
+  const rerunSelfCheck = async (
+    contentSnapshot = draftRef.current,
+    previousSelfCheck: ChapterSelfCheckReport | null = null
+  ): Promise<void> => {
     const api = window.api as {
       selfCheckChapter?: (
         projectId: string,
@@ -2803,45 +2993,33 @@ export default function ChapterEditor({
       ) => Promise<import('../../shared/types').ChapterSelfCheckReport>
     }
     if (!api.selfCheckChapter) return
+    const context = selfCheckTrackerRef.current.capture()
+    if (context.projectId !== projectId || context.chapterNumber !== chapterNumber ||
+      context.content !== contentSnapshot) return
+    const request = selfCheckTrackerRef.current.begin()
+    const myGen = genRef.current
     setSelfCheckLoading(true)
+    setSelfCheckError(null)
     try {
-      const sc = await api.selfCheckChapter(projectId, chapterNumber, draft)
-      setPostWriteSync((prev) =>
-        prev
-          ? {
-              ...prev,
-              selfCheck: sc,
-              message: prev.phase === 'syncing' ? prev.message : `${prev.message.replace(/；写后自检[^；]*/g, '')}；${sc.summary}`.replace(/^；/, '')
-            }
-          : {
-              phase: sc.ok ? 'ok' : 'partial',
-              message: sc.summary,
-              errors: sc.ok
-                ? []
-                : sc.items
-                    .filter((i) => i.verdict === 'fail')
-                    .map((i) => `${i.label}：${i.detail}`),
-              contentForRetry: draft,
-              at: Date.now(),
-              canUndo: syncHistoryRef.current.length > 0,
-              undoDepth: syncHistoryRef.current.length,
-              receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null,
-              selfCheck: sc
-            }
-      )
-      setAutoSyncSeed((prev) => (prev ? { ...prev, selfCheck: sc } : prev))
+      const sc = await api.selfCheckChapter(request.projectId, request.chapterNumber, request.content)
+      if (genRef.current !== myGen || !selfCheckTrackerRef.current.accepts(request)) return
+      if (sc.chapterNumber !== request.chapterNumber) throw new Error('自检返回了其他章节的结果')
+      setSelfCheckSnapshot({ report: sc, source: request })
       setUndoToast({
-        message: sc.summary,
-        type: sc.ok ? (sc.counts.warn > 0 ? 'info' : 'success') : 'error'
+        message: formatSelfCheckDelta(previousSelfCheck, sc),
+        type: selfCheckToastType(sc)
       })
+      if (!sc.ok) setFlowPanelOpen(true)
     } catch (err) {
       console.warn('[rerunSelfCheck]', err)
+      if (genRef.current !== myGen || !selfCheckTrackerRef.current.accepts(request)) return
+      setSelfCheckError('自检未完成，请重新检查。')
       setUndoToast({
         message: '写后自检失败',
         type: 'error'
       })
     } finally {
-      setSelfCheckLoading(false)
+      if (selfCheckTrackerRef.current.isLatest(request)) setSelfCheckLoading(false)
     }
   }
 
@@ -2989,6 +3167,8 @@ export default function ChapterEditor({
     try {
       const report = await window.api.deslopScan(projectId, draft)
       setDeslopScanReport(report)
+      // 体检结果按行号定位，正文重扫说明内容可能变了，旧清单的行号不再可信
+      setDeslopStructure(null)
     } catch (err) {
       setAlertInfo({ message: `扫描失败：${friendlyLlmError((err as Error).message)}` })
     } finally {
@@ -3052,12 +3232,116 @@ export default function ChapterEditor({
    * 合并成结果正常返回。之前这里先 `deslopGenRef.current += 1`，那个结果和收尾日志
    * 全被丢弃，用户跑了十分钟点停止等于一无所获。收尾很快（剩下的块只扫描不调 LLM）。
    */
+  /**
+   * 结构体检：调 LLM 判结构问题，只出清单不改正文。
+   * 失败时不清空已有结果——半份清单也比把用户刚看到的东西抹掉强。
+   */
+  const runDeslopJudge = async (): Promise<void> => {
+    if (!(await window.api.hasLlmKey())) {
+      setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
+      return
+    }
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法体检' })
+      return
+    }
+    setDeslopJudging(true)
+    try {
+      const outlineParts = [
+        chapterOutline?.title ? `标题：${chapterOutline.title}` : '',
+        chapterOutline?.plotSummary ? `核心情节：${chapterOutline.plotSummary}` : '',
+        chapterOutline?.coolPoint ? `爽点打脸：${chapterOutline.coolPoint}` : '',
+        chapterOutline?.emotionPoint ? `情绪起伏：${chapterOutline.emotionPoint}` : '',
+        chapterOutline?.hook ? `章末钩子：${chapterOutline.hook}` : ''
+      ].filter(Boolean)
+      const outlineSummary = outlineParts.length > 0 ? outlineParts.join('；') : undefined
+
+      const stream = window.api.deslopJudgeStream(
+        projectId,
+        draft,
+        () => undefined,
+        outlineSummary ? { outlineSummary } : undefined
+      )
+      deslopJudgeHandleRef.current = stream
+      trackStreamRequest(stream.requestId)
+      try {
+        setDeslopStructure(await stream)
+      } finally {
+        untrackStreamRequest(stream.requestId)
+        deslopJudgeHandleRef.current = null
+      }
+    } catch (err) {
+      setAlertInfo({ message: `结构体检失败：${friendlyLlmError((err as Error).message)}` })
+    } finally {
+      setDeslopJudging(false)
+    }
+  }
+
+  /** 点击结构体检条目时，光标定位到该行并高亮选中 */
+  const jumpToLine = (targetLine: number): void => {
+    const el = textareaRef.current
+    if (!el) return
+    const lines = el.value.split('\n')
+    let pos = 0
+    for (let i = 0; i < Math.min(targetLine - 1, lines.length); i++) {
+      pos += lines[i].length + 1
+    }
+    const endPos = pos + (lines[targetLine - 1]?.length || 0)
+    el.focus()
+    el.setSelectionRange(pos, endPos)
+    const lineHeight = 24
+    el.scrollTop = Math.max(0, (targetLine - 5) * lineHeight)
+  }
+
+  const stopDeslopJudge = (): void => {
+    const handle = deslopJudgeHandleRef.current
+    if (!handle) return
+    if (typeof handle.abort === 'function') void handle.abort().catch(() => undefined)
+  }
+
   const stopDeslop = (): void => {
     const handle = deslopHandleRef.current
     if (!handle) return
     setDeslopStopping(true)
     setDeslopLog((l) => `${l}\n\n🛑 已请求停止：正在收尾，已完成的分块会保留下来供确认…\n`)
-    void handle.abort().catch(() => undefined)
+    if (typeof handle.abort === 'function') void handle.abort().catch(() => undefined)
+  }
+
+  /**
+   * 写后自检「标点守则」的一键修复：确定性替换破折号/省略号，零 LLM。
+   * 走和去 AI 味应用同一套 pushRewrite，所以 Ctrl+Z 能整章还原。
+   */
+  const [fixPunctuationLoading, setFixPunctuationLoading] = useState(false)
+  const fixPunctuationRef = useRef(0)
+  const fixPunctuation = async (): Promise<void> => {
+    const previousSelfCheck = getSelfCheckForAction()
+    if (!previousSelfCheck || fixPunctuationLoading) return
+    const source = selfCheckTrackerRef.current.capture()
+    const before = source.content
+    if (!before.trim()) return
+    const requestId = ++fixPunctuationRef.current
+    const myGen = genRef.current
+    setFixPunctuationLoading(true)
+    try {
+      const r = await window.api.normalizePunctuation(before)
+      if (requestId !== fixPunctuationRef.current || genRef.current !== myGen ||
+        !selfCheckTrackerRef.current.matches(source)) return
+      if (r.changed === 0 || r.text === before) {
+        setUndoToast({ message: '没有可替换的破折号/省略号', type: 'warning' })
+        return
+      }
+      setDraft(r.text, { preserveCaret: false })
+      setDirty(true)
+      pushRewrite(before, r.text, PUNCT_FIX_KEY)
+      setUndoToast({ message: `已替换 ${r.changed} 处标点（Ctrl+Z 可撤销）`, type: 'success' })
+      await rerunSelfCheck(r.text, previousSelfCheck)
+    } catch (err) {
+      if (requestId !== fixPunctuationRef.current || genRef.current !== myGen ||
+        !selfCheckTrackerRef.current.matches(source)) return
+      setAlertInfo({ message: `标点替换失败：${(err as Error).message}` })
+    } finally {
+      if (requestId === fixPunctuationRef.current) setFixPunctuationLoading(false)
+    }
   }
 
   /** 应用去 AI 味结果到正文 */
@@ -3167,9 +3451,10 @@ export default function ChapterEditor({
   } | null>(() => {
     if (!chapterProvider) return null
     const p = chapterProvider.protocol
-    if (p === 'openai-responses') {
+    if (p === 'openai-responses' || p === 'claude') {
       const suggested = strengthSuggestion.effort
-      const current = chapterProvider.reasoningEffort ?? 'medium'
+      // claude 未显式配置时 CLI 原生不思考，兜底 none；responses 兜底 medium
+      const current = chapterProvider.reasoningEffort ?? (p === 'claude' ? 'none' : 'medium')
       return { current, suggested, applyValue: suggested, diverged: current !== suggested, label: suggested }
     }
     if (p === 'codex') {
@@ -3432,7 +3717,7 @@ export default function ChapterEditor({
       if (f) {
         details = {
           title: `伏笔 · ${f.content}`,
-          subtitle: `状态: ${f.status === 'planted' ? '已埋设' : f.status === 'pending' ? '未埋设' : '已回收'}`
+          subtitle: `状态: ${FORESHADOWING_STATUS_LABELS[f.status]}`
         }
       }
     } else if (kind === 'location') {
@@ -4028,10 +4313,89 @@ export default function ChapterEditor({
             style={{ gap: 6, alignItems: 'center', paddingRight: 4 }}
             title="这里调整的是「正文生成」当前路由所用 provider；保存后会用于本章接下来的续写与按要求重写。"
           >
-            <span className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
-              正文模型：{chapterProvider.model || '默认'}
-            </span>
-            {chapterProvider.protocol === 'openai-responses' ? (
+            <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+              正文模型
+            </label>
+            <select
+              className="select"
+              style={{ minWidth: 120, maxWidth: 180, padding: '3px 5px', fontSize: 12 }}
+              value={`${chapterProvider.id}::${chapterProvider.model || 'default'}`}
+              onChange={(e) => {
+                const val = e.target.value
+                if (val === '__custom__') {
+                  setCustomModelProviderId(chapterProvider.id)
+                  setCustomModelInput(chapterProvider.model || '')
+                  setShowCustomModelDialog(true)
+                  return
+                }
+                const [pId, ...rest] = val.split('::')
+                const selectedM = rest.join('::')
+                void updateChapterModel(pId, selectedM === 'default' ? '' : selectedM)
+              }}
+              disabled={chapterStrengthSaving || generating || adjusting}
+              aria-label="正文生成模型"
+              title={`当前正文生成所用模型：${chapterProvider.label} · ${chapterProvider.model || '默认'}（点击可直接切换）`}
+            >
+              {allProviders.length <= 1 ? (
+                (() => {
+                  const p = chapterProvider
+                  const providerModels = availableModelsByProvider[p.id] || (p.model ? [p.model] : [])
+                  const allModels = Array.from(
+                    new Set([
+                      ...(p.model ? [p.model] : []),
+                      ...providerModels
+                    ])
+                  ).filter(Boolean)
+                  return (
+                    <>
+                      {allModels.length === 0 ? (
+                        <option value={`${p.id}::default`}>默认模型</option>
+                      ) : (
+                        allModels.map((m) => (
+                          <option key={m} value={`${p.id}::${m}`}>
+                            {m}
+                          </option>
+                        ))
+                      )}
+                      <option value="__custom__">✏️ 自定义模型…</option>
+                    </>
+                  )
+                })()
+              ) : (
+                <>
+                  {allProviders.map((p) => {
+                    const providerModels = availableModelsByProvider[p.id] || (p.model ? [p.model] : [])
+                    const allModels = Array.from(
+                      new Set([
+                        ...(p.id === chapterProvider.id && chapterProvider.model
+                          ? [chapterProvider.model]
+                          : []),
+                        ...providerModels,
+                        ...(p.model ? [p.model] : [])
+                      ])
+                    ).filter(Boolean)
+                    return (
+                      <optgroup key={p.id} label={`${p.label} (${p.protocol})`}>
+                        {allModels.length === 0 ? (
+                          <option value={`${p.id}::default`}>默认模型</option>
+                        ) : (
+                          allModels.map((m) => (
+                            <option key={`${p.id}::${m}`} value={`${p.id}::${m}`}>
+                              {m}
+                            </option>
+                          ))
+                        )}
+                      </optgroup>
+                    )
+                  })}
+                  <optgroup label="其他">
+                    <option value="__custom__">✏️ 自定义模型…</option>
+                  </optgroup>
+                </>
+              )}
+            </select>
+            {chapterProvider.protocol === 'openai-responses' ||
+            chapterProvider.protocol === 'claude' ? (
               <>
                 <label className="meta" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
                   思考强度
@@ -4039,7 +4403,10 @@ export default function ChapterEditor({
                 <select
                   className="select"
                   style={{ width: 94, padding: '3px 5px', fontSize: 12 }}
-                  value={chapterProvider.reasoningEffort ?? 'medium'}
+                  value={
+                    chapterProvider.reasoningEffort ??
+                    (chapterProvider.protocol === 'claude' ? 'none' : 'medium')
+                  }
                   onChange={(e) => void updateChapterStrength(e.target.value)}
                   disabled={chapterStrengthSaving || generating || adjusting}
                   aria-label="正文生成思考强度"
@@ -4204,6 +4571,13 @@ export default function ChapterEditor({
           {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
         </button>
         <button
+          className="btn btn-sm"
+          onClick={() => setShowVersionsDialog(true)}
+          title="查看正文历史版本（最多保留最新5个，倒序排列），可预览并一键恢复"
+        >
+          📜 历史版本
+        </button>
+        <button
           className={`btn btn-sm ${findBarOpen ? 'btn-primary' : ''}`}
           onClick={() => {
             setFindBarOpen(!findBarOpen)
@@ -4242,7 +4616,7 @@ export default function ChapterEditor({
           className="btn btn-sm"
           onClick={() => formatDraftProse(undefined, { recordHistory: true })}
           disabled={!needsChapterProseFormat(draft) || generating || adjusting}
-          title="去掉行内空格（含英文词间空格）与空行，保留段落换行；续写/重写完成后也会自动执行。Ctrl+Z 可撤销"
+          title="清理中文多余空格与空行，保留英文词间空格和段落换行；续写/重写完成后也会自动执行。Ctrl+Z 可撤销"
         >
           格式化
         </button>
@@ -4329,7 +4703,15 @@ export default function ChapterEditor({
           </button>
           {toolbarMoreOpen ? (
             <div className="toolbar-more-menu">
-              {/* 章节版本功能暂未开放（IPC stub），UI 隐藏避免误触 */}
+              <button
+                className="toolbar-more-item"
+                onClick={() => {
+                  setShowVersionsDialog(true)
+                  setToolbarMoreOpen(false)
+                }}
+              >
+                📜 历史版本（恢复）
+              </button>
               <button
                 className="toolbar-more-item"
                 onClick={() => { reAudit(); setToolbarMoreOpen(false) }}
@@ -4530,7 +4912,7 @@ export default function ChapterEditor({
             ) : null}
             {visibleReinforce.length > 0 ? (
               <ReminderGroup
-                title="待埋 / 待强化"
+                title="强化建议"
                 items={visibleReinforce}
                 tone="cool"
                 onDismiss={(it) => dismissReminder('reinforce', it.content)}
@@ -4538,7 +4920,7 @@ export default function ChapterEditor({
             ) : null}
             {visibleCollect.length > 0 ? (
               <ReminderGroup
-                title="本章待回收"
+                title="回收待核对"
                 items={visibleCollect}
                 tone="emotion"
                 onDismiss={(it) => dismissReminder('collect', it.content)}
@@ -4576,9 +4958,9 @@ export default function ChapterEditor({
                 }
               : null
           }
-          selfCheckReport={
-            postWriteSync?.selfCheck ?? autoSyncSeed?.selfCheck ?? null
-          }
+          selfCheckReport={selfCheckReport}
+          selfCheckStale={selfCheckStale}
+          selfCheckError={selfCheckError}
           partialChapter={lastContinueMode === 'extend'}
           complianceReport={complianceReport}
           complianceChecking={complianceChecking}
@@ -4586,6 +4968,8 @@ export default function ChapterEditor({
           onRerunSelfCheck={() => void rerunSelfCheck()}
           selfCheckLoading={selfCheckLoading}
           onApplySelfCheckToRewrite={applySelfCheckToRewrite}
+          onFixPunctuation={fixPunctuation}
+          fixPunctuationLoading={fixPunctuationLoading}
           onApplySelfCheckToContinue={applySelfCheckToContinue}
           onRetryAutoSync={retryPostWriteSync}
           onUndoAutoSync={
@@ -5269,9 +5653,38 @@ export default function ChapterEditor({
                   <span className="filter-chip">advisory {deslopScanReport.counts.advisory}</span>
                   <span className="filter-chip">{deslopScanReport.wordCount} 字</span>
                   <span className="filter-chip">禁用词密度 {deslopScanReport.metrics.bannedWordDensity.toFixed(1)}/千字</span>
+                  {/* 结构均匀度：CV 越小越像 AI。null = 样本量不足，不显示（显示 0 会被读成「极均匀」） */}
+                  {(
+                    [
+                      ['句长', deslopScanReport.metrics.sentenceLengthCv, 0.45],
+                      ['段长', deslopScanReport.metrics.paragraphLengthCv, 0.4],
+                      ['对白', deslopScanReport.metrics.dialogueLengthCv, 0.45]
+                    ] as [string, number | null, number][]
+                  )
+                    .filter(([, cv]) => cv !== null)
+                    .map(([label, cv, limit]) => (
+                      <span
+                        key={label}
+                        className="filter-chip"
+                        title={`${label}变异系数 ${cv!.toFixed(2)}（低于 ${limit} 视为过于均匀，是 AI 稿的分布特征）`}
+                        style={cv! < limit ? { color: 'var(--danger, #c0392b)' } : undefined}
+                      >
+                        {label}CV {cv!.toFixed(2)}
+                        {cv! < limit ? ' 偏齐' : ''}
+                      </span>
+                    ))}
                 </div>
                 {deslopScanReport.findings.length === 0 ? (
-                  <p className="empty">未检测到 AI 写作痕迹，正文很自然。</p>
+                  <p className="empty" style={{ lineHeight: 1.7 }}>
+                    没有命中规则。
+                    <br />
+                    <span style={{ color: 'var(--ink-2, #666)', fontSize: 12 }}>
+                      注意：这不等于「读起来不像 AI」。本项目写作 prompt 里的负向限制和这里的检测规则
+                      是同一套，所以本 app 生成的正文本来就很少命中——语料实测检出率接近 0。
+                      扫描对<b>外部粘贴进来的文本</b>（别处写的、旧稿、他人稿）才真正有判别力。
+                      详见 tests/fixtures/deslop-corpus/FINDINGS.md。
+                    </span>
+                  </p>
                 ) : (
                   <div style={{ maxHeight: 420, overflow: 'auto', fontSize: 12, marginBottom: 12 }}>
                     {deslopFindingsByGate?.map(({ gate, items }) => {
@@ -5316,6 +5729,79 @@ export default function ChapterEditor({
                     })}
                   </div>
                 )}
+                {/* 结构体检：LLM 判定层。默认不跑——要调 LLM、要花时间，
+                    而且只出诊断不改正文，是给作者看的清单，不是流水线的一环 */}
+                <div
+                  style={{
+                    borderTop: '1px solid var(--line, #ddd)',
+                    paddingTop: 10,
+                    marginTop: 4,
+                    marginBottom: 12
+                  }}
+                >
+                  <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 600, fontSize: 12 }}>结构体检</span>
+                    <span className="meta" style={{ fontSize: 11 }}>
+                      查宏观情节与结构缺陷：阻力虚张声势 / 说明书式NPC / 情绪断层顿悟 / 篇幅等长均分 / 全知认知盲区。结合细纲只出诊断，不改正文。
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'center' }}>
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      onClick={() => void runDeslopJudge()}
+                      disabled={deslopJudging || deslopRunning}
+                      title="调用 LLM 对照细纲判定宏观结构缺陷。这一步会消耗额度，单章整检"
+                    >
+                      {deslopJudging ? '体检中…' : '🩺 开始结构体检'}
+                    </button>
+                    {deslopJudging ? (
+                      <button className="btn btn-sm btn-danger" onClick={stopDeslopJudge}>
+                        ⏹ 停止
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {deslopStructure ? (
+                    <div style={{ marginTop: 8, fontSize: 12 }}>
+                      {deslopStructure.unparsedChunks > 0 ? (
+                        <p className="meta" style={{ color: 'var(--warning)' }}>
+                          ⚠️ {deslopStructure.chunks} 块里有 {deslopStructure.unparsedChunks} 块没解析出结果（模型
+                          输出不是可用 JSON），下面的清单不完整，别当成「这些地方没问题」。可以重跑一次。
+                        </p>
+                      ) : null}
+                      {deslopStructure.findings.length === 0 ? (
+                        <p className="empty">
+                          {deslopStructure.unparsedChunks > 0
+                            ? '可解析的部分没查出结构问题。'
+                            : '未查出宏观结构层的 AI 特征，情节推拉与节奏良好。'}
+                        </p>
+                      ) : (
+                        <div style={{ maxHeight: 320, overflow: 'auto' }}>
+                          {deslopStructure.findings.map((f, i) => (
+                            <div
+                              key={i}
+                              className="diag-item"
+                              style={{ padding: '6px 0', cursor: 'pointer' }}
+                              onClick={() => jumpToLine(f.line)}
+                              title="点击在编辑器中定位并选中该行"
+                            >
+                              <span style={{ fontWeight: 600, color: 'var(--ink-1)' }}>
+                                {DESLOP_STRUCTURE_NAMES[f.dimension] ?? f.dimension}
+                              </span>
+                              <span className="diag-msg" style={{ marginLeft: 8, color: 'var(--primary, #2563eb)' }}>
+                                📍 第{f.line}行 {f.excerpt}
+                              </span>
+                              <div className="diag-hint">{f.why}</div>
+                              <div className="diag-hint" style={{ color: 'var(--ink-2, #666)' }}>
+                                💡 改法：{f.suggestion}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
                 {/* 力度：只影响删除比例上限（轻 15% / 中 25% / 重 35%），
                     默认跟自动判定走；嫌改得不够调高、嫌改得太狠调低 */}
                 <div className="row" style={{ gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}>
@@ -5429,6 +5915,17 @@ export default function ChapterEditor({
                       : `增加 ${(-deslopResult.deleteRatio * 100).toFixed(1)}%`}
                   </span>
                   <span className="filter-chip">剩余问题 {deslopResult.remainingFindings.length}</span>
+                  <span
+                    className="filter-chip"
+                    style={{
+                      color:
+                        deslopResult.remainingFindings.length === 0
+                          ? 'var(--success)'
+                          : 'var(--danger)'
+                    }}
+                  >
+                    {deslopResult.remainingFindings.length === 0 ? '复扫 100% 通过' : '复扫未通过'}
+                  </span>
                   <span className="filter-chip">Gate {deslopResult.processedGates.join('')}</span>
                   {deslopDiffView ? (
                     <span className="filter-chip">
@@ -5610,9 +6107,9 @@ export default function ChapterEditor({
                   )}
                 </div>
 
-                {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length > 0 ? (
+                {deslopResult.remainingFindings.length > 0 ? (
                   <p className="diag-msg" style={{ color: 'var(--danger)', marginTop: 8 }}>
-                    ⚠ 复扫仍剩 {deslopResult.remainingFindings.filter((f) => f.severity === 'blocking').length} 处 blocking，建议人工复核
+                    ⛔ 最终复扫仍剩 {deslopResult.remainingFindings.length} 处问题，结果未达到可检测项 100% 清零，不能直接应用
                   </p>
                 ) : null}
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
@@ -5625,10 +6122,12 @@ export default function ChapterEditor({
                   <button
                     className="btn btn-primary"
                     onClick={applyDeslopResult}
-                    disabled={deslopDiffView?.identical}
+                    disabled={deslopDiffView?.identical || deslopResult.remainingFindings.length > 0}
                     title={
                       deslopDiffView?.identical
                         ? '无改动可应用'
+                        : deslopResult.remainingFindings.length > 0
+                          ? '最终复扫未通过：请重新润色或调整白名单后再试'
                         : deslopDiffView?.staleBaseline
                           ? '注意：会覆盖润色期间对正文的手动编辑'
                           : undefined
@@ -6136,6 +6635,15 @@ export default function ChapterEditor({
           </div>
         </div>
       ) : null}
+      <ChapterVersionsDialog
+        projectId={projectId}
+        chapterNumber={chapterNumber}
+        chapterTitle={data.meta.title}
+        currentDraft={draft}
+        isOpen={showVersionsDialog}
+        onClose={() => setShowVersionsDialog(false)}
+        onRollback={handleRollbackVersion}
+      />
       {alertInfo ? (
         <AlertDialog
           open={true}
@@ -6143,6 +6651,119 @@ export default function ChapterEditor({
           onConfirm={() => setAlertInfo(null)}
         />
       ) : null}
+      <CustomModelDialog
+        open={showCustomModelDialog}
+        providers={allProviders}
+        initialProviderId={customModelProviderId}
+        initialModel={customModelInput}
+        onClose={() => setShowCustomModelDialog(false)}
+        onConfirm={(pId, m) => {
+          setShowCustomModelDialog(false)
+          void updateChapterModel(pId, m)
+        }}
+      />
+    </div>
+  )
+}
+
+function CustomModelDialog({
+  open,
+  providers,
+  initialProviderId,
+  initialModel,
+  onClose,
+  onConfirm
+}: {
+  open: boolean
+  providers: ProviderSummary[]
+  initialProviderId: string
+  initialModel: string
+  onClose: () => void
+  onConfirm: (providerId: string, model: string) => void
+}) {
+  const [providerId, setProviderId] = useState(initialProviderId)
+  const [modelInput, setModelInput] = useState(initialModel)
+
+  useEffect(() => {
+    if (open) {
+      setProviderId(initialProviderId || providers[0]?.id || '')
+      setModelInput(initialModel)
+    }
+  }, [open, initialProviderId, initialModel, providers])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" style={{ width: 420 }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 10px' }}>自定义正文模型</h3>
+        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--ink-2)' }}>
+          输入要用于本章续写与调整的模型名称：
+        </p>
+
+        {providers.length > 1 ? (
+          <div className="field" style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>所属 Provider</label>
+            <select
+              className="select"
+              value={providerId}
+              onChange={(e) => setProviderId(e.target.value)}
+              style={{ width: '100%', padding: '5px 8px' }}
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.protocol})
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+
+        <div className="field" style={{ marginBottom: 18 }}>
+          <label style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>模型名称 (Model Identifier)</label>
+          <input
+            className="input"
+            style={{ width: '100%' }}
+            value={modelInput}
+            onChange={(e) => setModelInput(e.target.value)}
+            placeholder="例如 gpt-6-astra / claude-3-7-sonnet / deepseek-reasoner"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                const trimmed = modelInput.trim()
+                if (trimmed) onConfirm(providerId, trimmed)
+              }
+            }}
+          />
+        </div>
+
+        <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!modelInput.trim()}
+            onClick={() => {
+              const trimmed = modelInput.trim()
+              if (trimmed) onConfirm(providerId, trimmed)
+            }}
+          >
+            应用并切换
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

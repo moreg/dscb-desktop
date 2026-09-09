@@ -6,7 +6,7 @@ import {
   parseBoldFields,
   fieldToStr
 } from '../skill-format/md-parser'
-import { ProseRepo } from '../skill-format/prose-repo'
+import { hashProse, listProseSources, splitProsePassages } from './prose-memory-index'
 import { extractEntityNameFromDoc } from './entity-helpers'
 import type { MemoryEntity } from '../../../shared/types'
 
@@ -17,6 +17,15 @@ export interface PlotChapterSummary {
   title: string
   /** 核心事件摘要（已截断） */
   summary: string
+  source?: 'memory' | 'prose_excerpt'
+  sourcePath?: string
+  /** True only for exact prose or a summary bound to the current prose hash. */
+  verified?: boolean
+  sourceHash?: string
+  startLine?: number
+  endLine?: number
+  /** Legacy summaries without matching source evidence must not become established facts. */
+  unverifiedMemorySummary?: string
 }
 
 /**
@@ -28,33 +37,26 @@ export const RECENT_PLOT_CHAPTERS = 12
 /** 单章摘要最大字符数，防止多剧情点拼接后撑爆 prompt */
 export const PLOT_SUMMARY_MAX_CHARS = 200
 
-/** 摘要缓存 TTL（毫秒）：同进程内短时复用，避免写后自检/续写连打两次 */
-const SUMMARY_CACHE_TTL_MS = 30_000
-
-type CacheEntry = { at: number; value: PlotChapterSummary[] }
-
-const summaryCache = new Map<string, CacheEntry>()
-
 export interface ListSummariesBeforeOptions {
   /**
    * 仅保留「正文/ 已有文件」的章（默认 true）。
    * 避免把未写正文的细纲/剧情点当成既成事实注入续写。
    */
   onlyWithProse?: boolean
-  /** 跳过缓存（测试或强制刷新） */
+  /** 兼容旧调用；当前实现始终从来源刷新。 */
   skipCache?: boolean
 }
 
 /**
- * 剧情点 repo。主源 = 记忆/剧情点/*.md；fallback = 细纲/细纲_第NNN章_*.md。
+ * 剧情点 repo。展示列表兼容细纲；续写记忆只使用有来源证据的摘要或正文摘录。
  */
 export class PlotPointRepo {
   constructor(private readonly projectDir: string) {}
 
   /**
    * 取「写第 chapterNumber 章之前」最近 limit 章的剧情摘要（不含本章）。
-   * 优先 记忆/剧情点；缺章时用 细纲 核心事件补洞。
-   * 默认 onlyWithProse：先找已写正文的最近 limit 章，再按文件名过滤后只读目标章。
+   * 优先采用绑定当前正文哈希的记忆摘要；其余回退真实正文摘录。
+   * 每次重读这几个章节和摘要，不用 TTL 缓存掩盖保存、改写或删除。
    */
   async listSummariesBefore(
     chapterNumber: number,
@@ -65,25 +67,12 @@ export class PlotPointRepo {
     const onlyWithProse = opts.onlyWithProse !== false
     const maxCh = chapterNumber - 1
 
-    const cacheKey = `${this.projectDir}|${chapterNumber}|${limit}|${onlyWithProse ? 1 : 0}`
-    if (!opts.skipCache) {
-      const hit = summaryCache.get(cacheKey)
-      if (hit && Date.now() - hit.at < SUMMARY_CACHE_TTL_MS) {
-        return hit.value
-      }
-    }
-
-    // 目标章号列表：已写正文的最近 limit 章，或简单窗口 [max-limit+1, max]
+    const proseSources = (await listProseSources(this.projectDir)).filter((s) => s.chapterNumber <= maxCh)
+    const sourcesByChapter = new Map(proseSources.map((s) => [s.chapterNumber, s]))
     let targetChapters: number[]
     if (onlyWithProse) {
-      const written = (await new ProseRepo(this.projectDir).listChapterNumbers()).filter(
-        (n) => n >= 1 && n <= maxCh
-      )
-      targetChapters = written.slice(-limit)
-      if (targetChapters.length === 0) {
-        summaryCache.set(cacheKey, { at: Date.now(), value: [] })
-        return []
-      }
+      targetChapters = proseSources.slice(-limit).map((s) => s.chapterNumber)
+      if (targetChapters.length === 0) return []
     } else {
       const minCh = Math.max(1, chapterNumber - limit)
       targetChapters = []
@@ -91,16 +80,7 @@ export class PlotPointRepo {
     }
 
     const targetSet = new Set(targetChapters)
-    const buckets = new Map<number, { titles: string[]; events: string[] }>()
-
-    const ensure = (n: number) => {
-      let b = buckets.get(n)
-      if (!b) {
-        b = { titles: [], events: [] }
-        buckets.set(n, b)
-      }
-      return b
-    }
+    const buckets = new Map<number, { title: string; event: string; sourceHash: string; sourcePath: string }[]>()
 
     // 1) 主源：只枚举顶层文件名，命中目标章才读内容（避免 400+ 全量 deep read）
     const plotDir = join(this.projectDir, '记忆', '剧情点')
@@ -120,76 +100,48 @@ export class PlotPointRepo {
         extractDescBody(doc) ??
         ''
       const title = stripChapterPrefix(entityName, num)
-      const b = ensure(num)
-      if (title && !b.titles.includes(title)) b.titles.push(title)
       const e = event.trim()
-      if (e && !b.events.some((x) => x === e || x.includes(e) || e.includes(x))) {
-        b.events.push(e)
-      }
-    }
-
-    // 2) 细纲补洞：只 readdir 一次，按文件名过滤目标章
-    const outlineDir = join(this.projectDir, '细纲')
-    let outlineFiles: string[]
-    try {
-      outlineFiles = await fs.readdir(outlineDir)
-    } catch {
-      outlineFiles = []
-    }
-    for (const f of outlineFiles) {
-      if (!f.endsWith('.md')) continue
-      const m = f.match(/^细纲_第(\d+)章_(.+)\.md$/)
-      if (!m) continue
-      const num = parseInt(m[1], 10)
-      if (!targetSet.has(num)) continue
-      const existing = buckets.get(num)
-      if (existing && existing.events.length > 0) continue
-      const text = await readText(join(outlineDir, f))
-      if (!text) continue
-      const doc = parseDoc(text)
-      const { fields } = parseBoldFields(
-        doc.sections.map((s) => s.body).join('\n') + '\n' + doc.body
-      )
-      const event = fieldToStr(fields.get('核心事件')) ?? ''
-      const title = m[2]
-      const b = ensure(num)
-      if (title && !b.titles.includes(title)) b.titles.push(title)
-      if (event.trim()) b.events.push(event.trim())
+      if (!e) continue
+      const rows = buckets.get(num) ?? []
+      rows.push({ title, event: e, sourceHash: fieldToStr(fields.get('正文哈希')) ?? '', sourcePath: `记忆/剧情点/${name}` })
+      buckets.set(num, rows)
     }
 
     const out: PlotChapterSummary[] = []
     for (const n of targetChapters) {
-      const b = buckets.get(n)
-      if (b) {
-        const summary = truncateSummary(b.events.join('；'), PLOT_SUMMARY_MAX_CHARS)
-        out.push({
-          chapterNumber: n,
-          title: b.titles[0] ?? '',
-          summary: summary || b.titles[0] || `第 ${n} 章（已写，摘要待同步）`
-        })
-      } else if (onlyWithProse) {
-        out.push({
-          chapterNumber: n,
-          title: '',
-          summary: `第 ${n} 章已有正文（记忆摘要待写后同步）`
-        })
+      const memories = buckets.get(n) ?? []
+      const source = sourcesByChapter.get(n)
+      const prose = source ? await readText(join(this.projectDir, source.sourcePath)) : null
+      if (!prose?.trim()) {
+        // Display callers may explicitly request memories without prose; label them unverified.
+        if (!onlyWithProse && memories.length) out.push({ chapterNumber: n, title: memories[0].title,
+          summary: truncateSummary(memories.map((m) => m.event).join('；'), PLOT_SUMMARY_MAX_CHARS),
+          source: 'memory', sourcePath: memories[0].sourcePath, verified: false })
+        continue
       }
+      const sourceHash = hashProse(prose)
+      const verified = memories.filter((m) => m.sourceHash === sourceHash)
+      if (verified.length) {
+        out.push({ chapterNumber: n, title: verified[0].title,
+          summary: truncateSummary([...new Set(verified.map((m) => m.event))].join('；'), PLOT_SUMMARY_MAX_CHARS),
+          source: 'memory', sourcePath: verified[0].sourcePath, sourceHash, verified: true })
+        continue
+      }
+      const last = splitProsePassages(prose).at(-1)
+      if (!last) continue
+      const summary = last.text.slice(-PLOT_SUMMARY_MAX_CHARS)
+      const offset = last.endOffset - summary.length
+      out.push({ chapterNumber: n, title: source!.title, summary, source: 'prose_excerpt',
+        sourcePath: source!.sourcePath, sourceHash, verified: true,
+        startLine: 1 + (prose.slice(0, offset).match(/\n/g)?.length ?? 0), endLine: last.endLine,
+        ...(memories.length ? { unverifiedMemorySummary: truncateSummary(memories.map((m) => m.event).join('；'), PLOT_SUMMARY_MAX_CHARS) } : {}) })
     }
 
-    summaryCache.set(cacheKey, { at: Date.now(), value: out })
     return out
   }
 
-  /** 写后同步等场景可清缓存，避免读到旧摘要 */
-  static invalidateCache(projectDir?: string): void {
-    if (!projectDir) {
-      summaryCache.clear()
-      return
-    }
-    for (const k of summaryCache.keys()) {
-      if (k.startsWith(projectDir + '|')) summaryCache.delete(k)
-    }
-  }
+  /** 兼容旧写后同步调用；不再保留跨调用摘要缓存。 */
+  static invalidateCache(_projectDir?: string): void { /* Compatibility: summaries now read source evidence every time. */ }
 
   async list(): Promise<MemoryEntity[]> {
     const seen = new Map<number, MemoryEntity>()

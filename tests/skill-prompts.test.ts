@@ -109,10 +109,51 @@ describe('buildSystemPrompt', () => {
 
   it('embeds output rules', () => {
     const prompt = buildSystemPrompt()
-    // 字数不再在 system prompt 写死具体值，改为"以下文目标字数为硬性下限"
+    // 篇幅由写作任务统一给出；生成守则不能额外要求凑够固定长度。
     expect(prompt).not.toContain('2500')
-    expect(prompt).toContain('硬性下限')
+    expect(prompt).not.toContain('2000–2700')
+    expect(prompt).not.toContain('宁可写超也不要写不够')
+    expect(prompt).toContain('剧情完整与可读性优先')
+    expect(prompt).toContain('剩余剧情点已经完整落实时允许提前结束')
     expect(prompt).toContain('Markdown')
+    expect(prompt).toContain('段落之间用空行分隔')
+  })
+
+  it('未提供对标书时也约束原创表达、人物动机与场景变化，并允许有用途的情绪氛围', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('无论是否提供对标书，都必须使用原创表达')
+    expect(prompt).toContain('不得只替换人名、地名、道具做同义改写')
+    expect(prompt).toContain('人物动机、性格、能力和当时可知信息')
+    expect(prompt).toContain('结果须有因果与相应代价')
+    expect(prompt).toContain('以场景为单位检查')
+    expect(prompt).toContain('至少一项出现读者可感知的变化')
+    expect(prompt).toContain('允许必要的情绪消化、关系建立、氛围和留白')
+    expect(prompt).toContain('不要求每段都推进主线')
+    expect(prompt).toContain('重复堆砌、机械扩写或添加无效铺陈')
+  })
+
+  it.each(['extend', 'finish'] as const)('续写 %s 覆盖旧版硬字数规则，先续完句子和进行中剧情点', (mode) => {
+    const legacyOutput = '【用户旧版输出规则】目标字数是硬性下限，宁可写超也不要写不够。'
+    const prompt = buildSystemPrompt(undefined, null, { output: legacyOutput }, null, mode)
+    // 保留用户可编辑内容，但续写专用解释在其后覆盖旧版冲突条款。
+    expect(prompt).toContain(legacyOutput)
+    const continuation = prompt.slice(prompt.indexOf('续写模式覆盖声明（最高优先级）'))
+    expect(continuation).toContain('本次一律改为篇幅参考')
+    expect(continuation).toContain('剩余剧情点已完整落实时可以提前结束')
+    expect(continuation).toContain('先从断点续完')
+    expect(continuation).toContain('不得插入动作或另起一句打断')
+    expect(continuation).toContain('不强制动作起手')
+    expect(continuation).toContain('先续完进行中的剧情点')
+    expect(continuation).not.toContain('第一句必须**立刻切入具体物理动作')
+    expect(continuation).not.toContain('本次要新增**的字数下限')
+  })
+
+  it('对称流水账改写示例保留原有事实，不通过新增具体细节拉长', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('楚弈点进去才发现时标没了，退回列表一看，标题也改了。')
+    expect(prompt).not.toContain('今日下午')
+    expect(prompt).not.toContain('夏季健康提醒')
+    expect(prompt).toContain('只调整表达，不凭空增加原文没有的事实')
   })
 
   it('选用古风时包含古风替换示例，不包含都市口语', () => {

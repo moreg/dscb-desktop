@@ -31,6 +31,10 @@ export interface CharacterStateSnapshot {
   items: string
   /** 关系快照 */
   relations: string
+  /** 按章节记录的性格、定位与身份；旧版状态表可能没有这些列。 */
+  personality?: string
+  role?: string
+  identity?: string
   /** 更新章节号 */
   updateChapter: number
 }
@@ -77,15 +81,15 @@ export class TrackingMdRepo {
     // 4 个文件全空 -> 视为追踪目录不存在
     if (!statesText && !timelineText && !progressText && !issuesText) return null
 
-    const rawTimeline = timelineText ? extractTimelineTable(timelineText) : ''
+    const rawTimeline = timelineText ? filterTimelineBefore(extractTimelineTable(timelineText), chapterNumber) : ''
     // 开书骨架只有表头、无「第 N 章」数据行时视为空，避免续写 prompt 注入空表噪音
     const timeline = hasTimelineDataRows(rawTimeline) ? rawTimeline : ''
 
     const result: TrackingContext = {
-      characterStates: statesText ? parseCharacterStates(statesText) : [],
+      characterStates: statesText ? parseCharacterStatesAt(statesText, chapterNumber) : [],
       stateChanges: statesText ? parseStateChanges(statesText, chapterNumber) : [],
       timeline,
-      recentProgress: progressText ? parseProgress(progressText) : [],
+      recentProgress: progressText ? parseProgress(progressText, chapterNumber) : [],
       openIssues: issuesText ? parseIssues(issuesText) : []
     }
 
@@ -119,7 +123,7 @@ export class TrackingMdRepo {
     if (!statesText && !timelineText && !progressText && !issuesText) return null
 
     return {
-      characterStates: statesText ? parseCharacterStates(statesText) : [],
+      characterStates: statesText ? parseCharacterStatesAt(statesText, Infinity, true) : [],
       stateChanges: statesText ? parseAllStateChanges(statesText) : [],
       timeline: timelineText ? extractTimelineTable(timelineText) : '',
       recentProgress: progressText ? parseAllProgress(progressText) : [],
@@ -145,53 +149,28 @@ export interface TrackingDisplayData {
 /**
  * 解析角色状态快照。
  *
- * 长篇防偏：优先「最新状态」表（如「关键节点最新状态摘要」），
- * 避免早期「当前状态（第 N 章末尾）」初登场快照污染后期续写。
+ * 从所有历史/当前/最新表逐人选取不晚于写作章节的快照。
  *
  * 兼容表头：
  * - 标准：角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节
  * - 最新摘要：角色 | 最新武力 | 最新罗盘 | 最新立场 | 最新目标 | 重要状态章
  */
-function parseCharacterStates(text: string): CharacterStateSnapshot[] {
-  const doc = parseDoc(text)
-  const body = pickCharacterStateBody(doc)
-  return parseCharacterStateTable(body)
-}
-
-/**
- * 选择用于注入续写的状态表正文。
- * 优先级：标题含「最新」的节 → 多个「当前状态」中 updateChapter 均值最高的表 → 首个当前状态 → doc.body
- */
-function pickCharacterStateBody(doc: {
-  body: string
-  sections: { title: string; body: string }[]
-}): string {
-  const latestSecs = doc.sections.filter((s) =>
-    /最新状态|最新.*摘要|当前最新|关键节点最新/.test(s.title)
-  )
-  for (const sec of latestSecs) {
-    const parsed = parseCharacterStateTable(sec.body)
-    if (parsed.length > 0) return sec.body
-  }
-
-  const currentSecs = doc.sections.filter((s) => s.title.includes('当前状态'))
-  if (currentSecs.length === 0) return doc.body
-  if (currentSecs.length === 1) return currentSecs[0].body
-
-  // 多个「当前状态」节：选平均更新章节号最高的一张表（更接近「现在」）
-  let best = currentSecs[0]
-  let bestScore = -1
-  for (const sec of currentSecs) {
-    const rows = parseCharacterStateTable(sec.body)
-    if (rows.length === 0) continue
-    const avg =
-      rows.reduce((sum, r) => sum + (r.updateChapter || 0), 0) / rows.length
-    if (avg >= bestScore) {
-      bestScore = avg
-      best = sec
+export function parseCharacterStatesAt(text: string, chapterNumber: number, includeInvalidated = false): CharacterStateSnapshot[] {
+  const doc = parseDoc(includeInvalidated ? text : excludeInvalidatedStateHistory(text))
+  const sections = [{ title: '', body: doc.body.split(/^##\s+/m)[0] }, ...doc.sections.filter((s) =>
+    /当前状态|最新状态|最新.*摘要|当前最新|关键节点最新|历史快照|历史状态/.test(s.title))]
+  const byName = new Map<string, CharacterStateSnapshot>()
+  for (const sec of sections) {
+    const sectionChapter = latestChapterMention(sec.title) ?? 0
+    for (const row of parseCharacterStateTable(sec.body)) {
+      const candidate = { ...row, updateChapter: row.updateChapter || sectionChapter }
+      if (candidate.updateChapter > chapterNumber) continue
+      const previous = byName.get(candidate.name)
+      // Pick per character, so a newer table that omits someone cannot erase their older state.
+      if (!previous || candidate.updateChapter >= previous.updateChapter) byName.set(candidate.name, candidate)
     }
   }
-  return best.body
+  return [...byName.values()]
 }
 
 /** 从表格 body 解析角色状态行（表头别名兼容） */
@@ -209,6 +188,9 @@ function parseCharacterStateTable(body: string): CharacterStateSnapshot[] {
       (h) => h.includes('道具') || h.includes('罗盘') || h.includes('装备')
     ),
     relations: headers.findIndex((h) => h.includes('关系')),
+    personality: headers.findIndex((h) => h.includes('性格')),
+    role: headers.findIndex((h) => h.includes('定位')),
+    identity: headers.findIndex((h) => h.includes('身份')),
     updateCh: headers.findIndex(
       (h) =>
         (h.includes('更新') && h.includes('章节')) ||
@@ -228,7 +210,7 @@ function parseCharacterStateTable(body: string): CharacterStateSnapshot[] {
   const result: CharacterStateSnapshot[] = []
   for (const row of rows) {
     const name = cell(row, idx.name)
-    if (!name || name === '-') continue
+    if (!name || name === '-' || name === headers[idx.name] || /^第\s*\d+\s*章/.test(name)) continue
     // 跳过表内说明行/加粗汇总行（无实质状态字段）
     const power = cell(row, idx.power)
     const stance = cell(row, idx.stance)
@@ -243,7 +225,10 @@ function parseCharacterStateTable(body: string): CharacterStateSnapshot[] {
       goal,
       items,
       relations,
-      updateChapter: parseChapterNum(cell(row, idx.updateCh)) ?? 0
+      ...(idx.personality >= 0 ? { personality: cell(row, idx.personality) } : {}),
+      ...(idx.role >= 0 ? { role: cell(row, idx.role) } : {}),
+      ...(idx.identity >= 0 ? { identity: cell(row, idx.identity) } : {}),
+      updateChapter: latestChapterMention(cell(row, idx.updateCh)) ?? parseChapterNum(cell(row, idx.updateCh)) ?? 0
     })
   }
   return result
@@ -254,23 +239,13 @@ function parseCharacterStateTable(body: string): CharacterStateSnapshot[] {
  * 表头：章节 | 角色 | 变更内容
  */
 function parseStateChanges(text: string, chapterNumber: number): StateChangeRecord[] {
-  const doc = parseDoc(text)
-  const sec = doc.sections.find((s) => s.title.includes('状态变更') || s.title.includes('变更记录'))
-  if (!sec) return []
-  const { headers, rows } = parseTable(sec.body)
-  if (headers.length < 3) return []
-  const idxCh = headers.findIndex((h) => h.includes('章节'))
-  const idxName = headers.findIndex((h) => h.includes('角色'))
-  const idxChange = headers.findIndex((h) => h.includes('变更'))
-  const result: StateChangeRecord[] = []
-  for (const row of rows) {
-    const ch = parseChapterNum(cell(row, idxCh))
-    if (ch == null || ch > chapterNumber) continue
-    const name = cell(row, idxName)
-    const change = cell(row, idxChange)
-    if (name) result.push({ chapter: ch, name, change })
-  }
-  return result
+  return parseAllStateChanges(excludeInvalidatedStateHistory(text)).filter((s) => s.chapter <= chapterNumber)
+}
+
+/** Preserve disputed author edits on disk/display, but never feed a stale derived snapshot back into generation. */
+function excludeInvalidatedStateHistory(text: string): string {
+  return text.replace(/<!-- writer-state-history:(\d+):start -->[\s\S]*?<!-- writer-state-history:\1:end -->/g,
+    (block) => /<!-- writer-state-invalidated:\d+ -->/.test(block) ? '' : block)
 }
 
 /**
@@ -281,7 +256,7 @@ function parseStateChanges(text: string, chapterNumber: number): StateChangeReco
  * 找不到 H2 节时回退到 doc.body（H1 下的全部正文，含裸表）。
  */
 function extractTimelineTable(text: string): string {
-  const doc = parseDoc(text)
+  const doc = parseDoc(text.replace(/<!-- writer-tracking:(?:timeline|context):\d+:(?:[a-f0-9]{64}|end) -->\r?\n?/g, ''))
   const sec = doc.sections.find((s) => s.title.includes('对照') || s.title.includes('历史事件'))
   if (sec) return sec.body.trim()
   // 回退：H1 下的裸表（开书格式）或第一个 H2 节
@@ -319,32 +294,25 @@ const RECENT_PROGRESS_LIMIT = 8
  * 表头：日期 | 章节 | 进度摘要 | 下一章目标 | 阻塞点
  * 若文件不是进度表（如表头不含「进度/摘要」），返回 []，避免把工程追踪文档误注入。
  */
-function parseProgress(text: string): ProgressEntry[] {
-  const doc = parseDoc(text)
-  const { headers, rows } = parseTable(doc.body)
-  if (headers.length < 4) return []
-  const idx = {
-    date: headers.findIndex((h) => h.includes('日期')),
-    chapter: headers.findIndex((h) => h.includes('章节')),
-    summary: headers.findIndex((h) => h.includes('进度') || h.includes('摘要')),
-    nextGoal: headers.findIndex((h) => h.includes('下一章') || h.includes('目标')),
-    blocker: headers.findIndex((h) => h.includes('阻塞') || h.includes('问题'))
-  }
-  // 非日更表（如细纲批次完成记录）直接丢弃
-  if (idx.date < 0 || idx.summary < 0) return []
-  const entries: ProgressEntry[] = []
-  for (const row of rows) {
-    const date = cell(row, idx.date)
-    if (!date || date === '-') continue
-    entries.push({
-      date,
-      chapter: cell(row, idx.chapter),
-      summary: cell(row, idx.summary),
-      nextGoal: cell(row, idx.nextGoal),
-      blocker: cell(row, idx.blocker)
-    })
-  }
-  return entries.slice(-RECENT_PROGRESS_LIMIT)
+function parseProgress(text: string, chapterNumber: number): ProgressEntry[] {
+  return parseAllProgress(text).filter((p) => {
+    const last = latestChapterMention(p.chapter)
+    return last == null || last <= chapterNumber
+  }).slice(-RECENT_PROGRESS_LIMIT)
+}
+
+/** A range describes everything through its last chapter, not only its first. */
+function latestChapterMention(text: string): number | undefined {
+  const mentions = [...text.matchAll(/第?\s*(\d+)(?:\s*[-–—~～/、]\s*(\d+))*\s*章/g)]
+  const chapters = mentions.flatMap((m) => [...m[0].matchAll(/\d+/g)].map((n) => Number(n[0])))
+  return chapters.length ? Math.max(...chapters) : undefined
+}
+
+function filterTimelineBefore(text: string, chapterNumber: number): string {
+  return text.split(/\r?\n/).filter((line) => {
+    const last = latestChapterMention(line)
+    return last == null || last <= chapterNumber
+  }).join('\n')
 }
 
 /**
@@ -400,22 +368,22 @@ function cell(row: string[], i: number): string {
  */
 function parseAllStateChanges(text: string): StateChangeRecord[] {
   const doc = parseDoc(text)
-  const sec = doc.sections.find((s) => s.title.includes('状态变更') || s.title.includes('变更记录'))
-  if (!sec) return []
-  const { headers, rows } = parseTable(sec.body)
-  if (headers.length < 3) return []
-  const idxCh = headers.findIndex((h) => h.includes('章节'))
-  const idxName = headers.findIndex((h) => h.includes('角色'))
-  const idxChange = headers.findIndex((h) => h.includes('变更'))
   const result: StateChangeRecord[] = []
-  for (const row of rows) {
-    const ch = parseChapterNum(cell(row, idxCh))
-    if (ch == null) continue
-    const name = cell(row, idxName)
-    const change = cell(row, idxChange)
-    if (name) result.push({ chapter: ch, name, change })
+  for (const sec of doc.sections.filter((s) => s.title.includes('状态变更') || s.title.includes('变更记录'))) {
+    const { headers, rows } = parseTable(sec.body)
+    if (headers.length < 3) continue
+    const idxCh = headers.findIndex((h) => h.includes('章节'))
+    const idxName = headers.findIndex((h) => h.includes('角色'))
+    const idxChange = headers.findIndex((h) => h.includes('变更'))
+    for (const row of rows) {
+      const ch = parseChapterNum(cell(row, idxCh))
+      if (ch == null) continue
+      const name = cell(row, idxName)
+      const change = cell(row, idxChange)
+      if (name) result.push({ chapter: ch, name, change })
+    }
   }
-  return result
+  return result.sort((a, b) => a.chapter - b.chapter)
 }
 
 /**
@@ -432,6 +400,7 @@ function parseAllProgress(text: string): ProgressEntry[] {
     nextGoal: headers.findIndex((h) => h.includes('下一章') || h.includes('目标')),
     blocker: headers.findIndex((h) => h.includes('阻塞') || h.includes('问题'))
   }
+  if (idx.date < 0 || idx.summary < 0) return []
   const entries: ProgressEntry[] = []
   for (const row of rows) {
     const date = cell(row, idx.date)

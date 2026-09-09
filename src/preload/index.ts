@@ -35,6 +35,7 @@ import type {
   ScanResult,
   ScanReportSummary,
   DeslopScanReport,
+  DeslopStructureReport,
   DeslopLevel,
   DeslopResult,
   DeslopRulesBundle,
@@ -47,8 +48,25 @@ import type {
   CoverLearningLibrarySummary,
   CoverLearningRunResult,
   ReviewRulesConfig,
-  MobileServerStatus
+  MobileServerStatus,
+  StreamHandleOf
 } from '../shared/types'
+
+function makeStreamHandle<T>(
+  promise: Promise<T>,
+  requestId: string
+): StreamHandleOf<T> {
+  return {
+    then: (onfulfilled?: ((value: T) => unknown) | null, onrejected?: ((reason: unknown) => unknown) | null) =>
+      promise.then(onfulfilled, onrejected),
+    catch: (onrejected?: ((reason: unknown) => unknown) | null) =>
+      promise.catch(onrejected),
+    finally: (onfinally?: (() => void) | null) =>
+      promise.finally(onfinally),
+    requestId,
+    abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
+  } as unknown as StreamHandleOf<T>
+}
 
 const api = {
   listProjects: () => ipcRenderer.invoke('library:list'),
@@ -204,6 +222,8 @@ const api = {
     ipcRenderer.invoke('llm:setCodexReasoningEffort', effort),
   listGrokModels: () =>
     ipcRenderer.invoke('llm:listGrokModels') as Promise<string[]>,
+  listClaudeModels: () =>
+    ipcRenderer.invoke('llm:listClaudeModels') as Promise<string[]>,
   listProviders: () => ipcRenderer.invoke('llm:listProviders'),
   upsertProvider: (p: ProviderConfig) => ipcRenderer.invoke('llm:upsertProvider', p),
   deleteProvider: (id: string) => ipcRenderer.invoke('llm:deleteProvider', id),
@@ -228,10 +248,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   getMainOutline: (id: string) => ipcRenderer.invoke('outline:getMain', id),
   updateMainOutline: (id: string, patch: Partial<MainOutline>) =>
@@ -295,12 +312,10 @@ const api = {
         chapterTargetWords: number
         writtenWords: number
         fromOutline: boolean
+        bound?: 'min' | 'about'
       }
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   planAdjustChapterStream: (
     projectId: string,
@@ -331,10 +346,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   adjustChapterStream: (
     projectId: string,
@@ -367,10 +379,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
   setProjectsRoot: (path: string) => ipcRenderer.invoke('settings:setProjectsRoot', path),
@@ -398,10 +407,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   answerChapterQuestionStream: (
     projectId: string,
@@ -432,10 +438,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   detectCastStream: (
     projectId: string,
@@ -456,10 +459,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   detectRelationshipsStream: (
     projectId: string,
@@ -479,10 +479,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   checkOutlineStream: (
     projectId: string,
@@ -505,10 +502,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   extractMemoryStream: (
     projectId: string,
@@ -529,13 +523,12 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   applyMemory: (projectId: string, extraction: MemoryExtraction) =>
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
+  invalidateChapterMemorySync: (projectId: string, chapterNumber: number) =>
+    ipcRenderer.invoke('write:invalidateChapterMemorySync', { projectId, chapterNumber }),
   syncChapterAfterWrite: (
     projectId: string,
     chapterNumber: number,
@@ -646,10 +639,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   applyRhythmEvaluation: (projectId: string, evaluation: RhythmEvaluation) =>
     ipcRenderer.invoke('write:applyRhythmEvaluation', { projectId, evaluation }),
@@ -672,10 +662,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
   saveFigure: (projectId: string, fileName: string, html: string) =>
     ipcRenderer.invoke('write:saveFigure', { projectId, fileName, html }),
@@ -941,10 +928,7 @@ const api = {
       ok: boolean
       error?: string
     }>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
 
   /* ---- 去 AI 味润色（story-deslop）---- */
@@ -967,11 +951,41 @@ const api = {
     const result = ipcRenderer
       .invoke('deslop:run', { projectId, text, levelOverride, requestId })
       .finally(() => ipcRenderer.removeListener('deslop:token', handler as never)) as Promise<DeslopResult>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
+  /** 结构体检：LLM 判定层，只返回诊断清单，不改正文 */
+  deslopJudgeStream: (
+    projectId: string,
+    text: string,
+    onToken: (token: string, done: boolean) => void,
+    context?: { outlineSummary?: string; chapterGoal?: string }
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _e: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('deslopJudge:token', handler as never)
+    const result = ipcRenderer
+      .invoke('deslop:judge', {
+        projectId,
+        text,
+        requestId,
+        outlineSummary: context?.outlineSummary,
+        chapterGoal: context?.chapterGoal
+      })
+      .finally(() =>
+        ipcRenderer.removeListener('deslopJudge:token', handler as never)
+      ) as Promise<DeslopStructureReport>
+    return makeStreamHandle(result, requestId)
+  },
+  normalizePunctuation: (text: string) =>
+    ipcRenderer.invoke('deslop:normalizePunctuation', { text }) as Promise<{
+      text: string
+      changed: number
+    }>,
   getDeslopWhitelist: (projectId: string) =>
     ipcRenderer.invoke('deslop:getWhitelist', projectId) as Promise<string[]>,
   setDeslopWhitelist: (projectId: string, words: string[]) =>
@@ -999,10 +1013,7 @@ const api = {
     const result = ipcRenderer
       .invoke('deslop:editRulesStream', { instruction, requestId })
       .finally(() => ipcRenderer.removeListener('deslopRules:token', handler as never)) as Promise<string>
-    return Object.assign(result, {
-      requestId,
-      abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
-    })
+    return makeStreamHandle(result, requestId)
   },
 
   /* ---- 封面生成（story-cover）---- */
@@ -1016,6 +1027,8 @@ const api = {
     ipcRenderer.invoke('cover:list', projectId) as Promise<CoverFile[]>,
   readCover: (projectId: string, fileName: string) =>
     ipcRenderer.invoke('cover:read', { projectId, fileName }) as Promise<string | null>,
+  showCoverInFolder: (projectId: string, fileName: string) =>
+    ipcRenderer.invoke('cover:showInFolder', { projectId, fileName }) as Promise<{ ok: true }>,
   getCoverImageConfig: () =>
     ipcRenderer.invoke('cover:getConfig') as Promise<CoverImageConfigSummary>,
   setCoverImageConfig: (cfg: Partial<CoverImageConfigInput>) =>

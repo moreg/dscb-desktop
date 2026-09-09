@@ -92,6 +92,27 @@ describe('ChapterService.updateMeta title persistence', () => {
     expect(detailText).not.toContain('第 2 章：旧2')
   })
 
+  it('updates title in standard skill per-chapter detailed outline file (细纲_第002章_xxx.md)', async () => {
+    await mkdir(path.join(dir, '细纲'), { recursive: true })
+    const oldFile = path.join(dir, '细纲', '细纲_第002章_旧2.md')
+    await writeFile(
+      oldFile,
+      '# 细纲_第002章_旧2.md\n\n' +
+        '## 第 2 章：旧2\n\n' +
+        '> 【7 Gate：A-G + Gate H 通过】二次加密·预算≥75%\n' +
+        '> 三处一致：文件名 == 大纲标题列 == 本节标题\n' +
+        '> 节奏对齐：情绪值 6、爽点类型 2（中打脸）｜所属卷：第 1 卷\n' +
+        '> 对标状态：跳过\n\n' +
+        '- **核心事件**：测试\n',
+      'utf-8'
+    )
+
+    const service = new ChapterService(ps)
+    const meta = await service.updateMeta(projectId, 2, { title: '细纲新标题' })
+
+    expect(meta.title).toBe('细纲新标题')
+  })
+
   it('does NOT throw when detailed outline is absent (only rhythm + outline)', async () => {
     // 注意 beforeEach 没建细纲目录 → 细纲缺失
     const service = new ChapterService(ps)

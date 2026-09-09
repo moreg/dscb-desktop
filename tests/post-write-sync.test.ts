@@ -16,6 +16,18 @@ const emptyApplied = {
 }
 
 describe('summarizePostWriteSync', () => {
+  it('重写撤回旧回收属于实际写入，但不计为新回收', () => {
+    const result = summarizePostWriteSync({
+      memory: { applied: emptyApplied, errors: [], appliedDiffs: [{ applicable: true, collectionAction: 'uncollect' }] },
+      settings: { applied: 0, errors: [] }, extraction: {}
+    })
+    expect(result.hasAutoWrites).toBe(true)
+    expect(result.applied.collected).toBe(0)
+    expect(result.applied.uncollected).toBe(1)
+    expect(result.message).toContain('撤回旧回收 1')
+    expect(result.message).not.toContain('无新增')
+  })
+
   it('ok with auto writes and pending confirms', () => {
     const s = summarizePostWriteSync({
       memory: {

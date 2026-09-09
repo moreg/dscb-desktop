@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { auditChapter } from '../src/main/data/chapter-audit'
 import { DEFAULT_REVIEW_RULES, DEFAULT_REVIEW_THRESHOLDS } from '../src/main/data/skill-prompts'
 import type { ReviewRulesConfig } from '../src/shared/types'
+import { formatChapterProse } from '../src/shared/format-chapter-prose'
 
 /** 拼一段合法的"中段+对话/事件结尾"正文（基线，避免触发 ending/word_count） */
 function makeValidContent(ending = '"我不会让你——"她头也不回地冲了出去'): string {
@@ -254,5 +255,50 @@ describe('chapter-audit (算法层目录完整性)', () => {
       expect(stillThere, `${checkId} 关闭后不应报告`).toBe(false)
     })
   }
+})
+
+describe('续写格式化后的正文质量回归', () => {
+  it('单换行与空行稿采用相同段落口径，短段不会被焊成全章超长段', () => {
+    const text = Array.from({ length: 10 }, (_, i) => String.fromCharCode(0x4e00 + i).repeat(40) + '。').join('\n\n')
+    for (const content of [text, formatChapterProse(text)]) {
+      expect(auditChapter(content, { reviewRules: reviewRulesOn() }).violations
+        .some((v) => v.ruleId === 'long_paragraph')).toBe(false)
+    }
+  })
+
+  it('开篇的突发事件不能替真实章末通过钩子检查', () => {
+    const text = ['他突然推开门。', '桌上有一本旧册。', '窗外的雨停了。', '灯下的纸张发黄。', '夜已经深了。'].join('\n\n')
+    for (const content of [text, formatChapterProse(text)]) {
+      const findings = auditChapter(content, { reviewRules: reviewRulesOn() }).violations
+      expect(findings.some((v) => v.category === 'ending')).toBe(true)
+      expect(findings.some((v) => v.ruleId === 'hook_strength')).toBe(true)
+      expect(findings.find((v) => v.category === 'ending')?.offset).toBe(content.indexOf('窗外'))
+    }
+  })
+
+  it('正常中文弯引号台词能被章末检测识别', () => {
+    const report = auditChapter('“别问了。”', { reviewRules: reviewRulesOn() })
+    expect(report.violations.some((v) => v.category === 'ending' || v.ruleId === 'hook_strength')).toBe(false)
+  })
+
+  it('跨段重复叙述会被定位到再次出现处，单换行与双换行一致', () => {
+    const para = '林舟摸着那枚生锈的铜钥匙，反复琢磨它到底能打开哪一道门。'
+    for (const separator of ['\n', '\n\n']) {
+      const text = [para, '窗边的灯还亮着。', para].join(separator)
+      const hit = auditChapter(text, { reviewRules: reviewRulesOn() }).violations
+        .find((v) => v.ruleId === 'repetition' && v.message.includes('跨段'))
+      expect(hit?.offset).toBe(text.lastIndexOf(para))
+    }
+  })
+
+  it('提示足够长的高度相似段落，短对白与短排比不算水文', () => {
+    const para = '林舟摸着那枚生锈的铜钥匙，反复琢磨它到底能打开哪一道门。他把钥匙搁在掌心，又拿到灯下细看，钥匙上的花纹仍然无法辨认。'
+    const variant = para.replace('生锈', '陈旧').replace('灯下', '窗边')
+    expect(auditChapter(`${para}\n${variant}`, { reviewRules: reviewRulesOn() }).violations
+      .some((v) => v.ruleId === 'repetition' && v.message.includes('高度相似'))).toBe(true)
+    const short = '“走吧。”\n“走吧。”\n他不服。\n他不甘。\n他不退。'
+    expect(auditChapter(short, { reviewRules: reviewRulesOn() }).violations
+      .some((v) => v.ruleId === 'repetition')).toBe(false)
+  })
 })
 

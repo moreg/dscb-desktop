@@ -36,7 +36,13 @@ export class ForeshadowingRepository {
   }
 
   async update(id: string, patch: UpdateForeshadowingInput): Promise<Foreshadowing> {
-    return this.repo().update(id, { ...patch, updatedAt: new Date().toISOString() })
+    const { expectedCollect, note, ...rest } = patch
+    return this.repo().update(id, {
+      ...rest,
+      ...('expectedCollect' in patch ? { expectedCollect: expectedCollect ?? undefined } : {}),
+      ...('note' in patch ? { note: note ?? undefined } : {}),
+      updatedAt: new Date().toISOString()
+    })
   }
 
   async plant(id: string, chapterNumber: number): Promise<Foreshadowing> {

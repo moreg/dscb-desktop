@@ -85,6 +85,21 @@ export class ProseRepo {
   }
 
   /**
+   * 重命名正文文件：若存在本章的正文文件，将其重命名为新标题格式。
+   */
+  async rename(n: number, newTitle: string): Promise<void> {
+    const skillFile = await this.findSkillFile(n)
+    if (!skillFile) return
+    const target = this.skillFile(n, newTitle)
+    if (skillFile === target) return
+    try {
+      await fs.rename(skillFile, target)
+    } catch {
+      // 重命名失败不阻断主流程
+    }
+  }
+
+  /**
    * 枚举 正文/ 目录中已有正文文件的章号（升序去重）。
    * 用于中程记忆：只注入「已写过」的章摘要，避免把未写细纲当成既成事实。
    */

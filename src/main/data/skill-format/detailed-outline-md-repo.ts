@@ -1,4 +1,4 @@
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { promises as fs } from 'fs'
 import {
   readText,
@@ -14,6 +14,30 @@ import {
 } from './md-parser'
 import type { ChapterDetail, DetailedOutlineRaw, OutlineProseSection } from '../../../shared/types'
 import { composeWritingRequirements } from '../../../shared/writing-requirement-templates'
+
+type OutlineDoc = ReturnType<typeof parseDoc>
+interface CachedOutlineFile {
+  revision: string
+  doc: OutlineDoc
+  chapterSections: Map<number, OutlineDoc['sections'][number]>
+  details: Map<number, ChapterDetail>
+}
+
+// 自检会逐次新建 Repo；缓存需跨实例复用，同时限制打开多个项目后的内存占用。
+const chapterReadCache = new Map<string, CachedOutlineFile>()
+const CHAPTER_READ_CACHE_LIMIT = 128
+
+function fileRevision(stat: Awaited<ReturnType<typeof fs.stat>>): string {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+}
+
+function cacheOutlineFile(path: string, entry: CachedOutlineFile): void {
+  chapterReadCache.delete(path)
+  chapterReadCache.set(path, entry)
+  while (chapterReadCache.size > CHAPTER_READ_CACHE_LIMIT) {
+    chapterReadCache.delete(chapterReadCache.keys().next().value!)
+  }
+}
 
 /**
  * 细纲读取。支持双格式：
@@ -31,6 +55,74 @@ import { composeWritingRequirements } from '../../../shared/writing-requirement-
  */
 export class DetailedOutlineMdRepo {
   constructor(private readonly projectDir: string) {}
+
+  /**
+   * 按章读取；标准每章文件先按文件名筛选，旧卷文件按 H2 章号定位后仅解析目标章。
+   * 每次重新枚举文件并校验文件版本，外部编辑、增删或改名无需手动清缓存。
+   * 同章有多个来源时，沿用 listAll().find() 的文件名排序优先级。
+   */
+  async readChapter(chapterNumber: number): Promise<ChapterDetail | null> {
+    const dir = resolve(this.projectDir, '细纲')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw err
+    }
+    for (const file of files.sort()) {
+      if (!file.endsWith('.md')) continue
+      const namedChapter = file.match(/^细纲_第(\d+)章/)
+      if (namedChapter && Number(namedChapter[1]) !== chapterNumber) continue
+      const entry = await this.readChapterFile(join(dir, file))
+      if (!entry) continue
+      let detail = entry.details.get(chapterNumber)
+      if (!detail) {
+        detail = this.parseFile(file, entry.doc, chapterNumber, entry.chapterSections)[0]
+        if (detail) entry.details.set(chapterNumber, detail)
+      }
+      // 不把共享缓存里的可变字段/数组交给调用方。
+      if (detail) return structuredClone(detail)
+    }
+    return null
+  }
+
+  private async readChapterFile(path: string): Promise<CachedOutlineFile | null> {
+    try {
+      const before = fileRevision(await fs.stat(path))
+      const cached = chapterReadCache.get(path)
+      if (cached?.revision === before) {
+        cacheOutlineFile(path, cached)
+        return cached
+      }
+      const text = await readText(path)
+      if (!text) {
+        chapterReadCache.delete(path)
+        return null
+      }
+      const after = fileRevision(await fs.stat(path))
+      const doc = parseDoc(text)
+      const chapterSections: CachedOutlineFile['chapterSections'] = new Map()
+      for (const section of doc.sections) {
+        const number = parseChapterHeadingNumber(section.title)
+        if (number != null && !chapterSections.has(number)) chapterSections.set(number, section)
+      }
+      const entry: CachedOutlineFile = {
+        revision: before,
+        doc,
+        chapterSections,
+        details: new Map()
+      }
+      // 读盘期间发生写入时不缓存这份快照；下一次读取会重新校验并加载。
+      if (before === after) cacheOutlineFile(path, entry)
+      else chapterReadCache.delete(path)
+      return entry
+    } catch (err) {
+      chapterReadCache.delete(path)
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw err
+    }
+  }
 
   /** 读取所有章的细纲，合并为 ChapterDetail[]（自动识别双格式） */
   async listAll(): Promise<ChapterDetail[]> {
@@ -108,8 +200,13 @@ export class DetailedOutlineMdRepo {
     return all.filter((d) => d.volume === volume)
   }
 
-  private parseFile(fileName: string, text: string): ChapterDetail[] {
-    const doc = parseDoc(text)
+  private parseFile(
+    fileName: string,
+    source: string | OutlineDoc,
+    chapterNumber?: number,
+    chapterSections?: CachedOutlineFile['chapterSections']
+  ): ChapterDetail[] {
+    const doc = typeof source === 'string' ? parseDoc(source) : source
     const volumeFromH1 = parseVolumeNumber(doc.h1Title) ?? undefined
 
     // 判断文件格式：
@@ -150,17 +247,23 @@ export class DetailedOutlineMdRepo {
       if (!d) return []
       // 文件名章号优先
       d.chapterNumber = fileNameChapter
-      // 文件名标题更精确
-      if (titleFromFile) d.title = titleFromFile
+      // 当章节 H2 未提供标题时，由文件名/H1 提取的标题作为兜底
+      if (!d.title && titleFromFile) d.title = titleFromFile
       // 从引用块提取卷号和节奏对齐信息
       applyReferenceBlock(doc, d)
-      return [d]
+      return chapterNumber === undefined || d.chapterNumber === chapterNumber ? [d] : []
     }
 
     // 旧格式：每卷一文件，所有 H2 都是章号块
+    if (chapterNumber !== undefined && chapterSections) {
+      const section = chapterSections.get(chapterNumber)
+      const detail = section ? parseChapterBlock(section.title, section.body, volumeFromH1) : null
+      return detail ? [detail] : []
+    }
     const chapters = doc.sections.filter((s) => parseChapterHeadingNumber(s.title) != null)
     const details: ChapterDetail[] = []
     for (const ch of chapters) {
+      if (chapterNumber !== undefined && parseChapterHeadingNumber(ch.title) !== chapterNumber) continue
       const d = parseChapterBlock(ch.title, ch.body, volumeFromH1)
       if (d) details.push(d)
     }
@@ -505,11 +608,21 @@ function applyReferenceBlock(doc: ReturnType<typeof parseDoc>, detail: ChapterDe
       if (n != null) detail.volume = n
     }
   }
-  // 引用块形如 "> 节奏对齐：情绪值 7、爽点类型 2"
-  const rhythmMatch = body.match(/节奏对齐[：:]\s*情绪值\s*(\d+(?:\.\d+)?)[，,、]\s*爽点类型\s*(\d+(?:\.\d+)?)/)
-  if (rhythmMatch) {
-    if (detail.emotion === undefined) detail.emotion = Number(rhythmMatch[1])
-    if (detail.climax === undefined) detail.climax = Number(rhythmMatch[2])
+  // 只读取明确的节奏元信息行，允许章号说明、冒号和分号，不从剧情段落猜数值。
+  for (const line of body.split(/\r?\n/)) {
+    if (!/^\s*>\s*节奏对齐\s*[：:]/.test(line)) continue
+    const emotion = line.match(/情绪值\s*[：:]?\s*(\d+(?:\.\d+)?)/)
+    const climax = line.match(/爽点类型\s*[：:]?\s*(\d+(?:\.\d+)?)/)
+    if (detail.emotion === undefined && emotion) detail.emotion = Number(emotion[1])
+    if (detail.climax === undefined && climax) detail.climax = Number(climax[1])
+  }
+  // 全书同步记录是备用来源，不能覆盖显式字段或节奏对齐引用块。
+  for (const line of body.split(/\r?\n/)) {
+    if (!/^\s*>\s*全书同步校验\s*[：:]/.test(line)) continue
+    const emotion = line.match(/\bemotion\s*=\s*(\d+(?:\.\d+)?)/)
+    const climax = line.match(/\bclimax\s*=\s*(\d+(?:\.\d+)?)/)
+    if (detail.emotion === undefined && emotion) detail.emotion = Number(emotion[1])
+    if (detail.climax === undefined && climax) detail.climax = Number(climax[1])
   }
 }
 

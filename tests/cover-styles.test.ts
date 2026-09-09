@@ -8,7 +8,7 @@ import {
   COMPOSITION_DESC,
   GENRE_RULES
 } from '../src/main/data/skill-prompts/cover/cover-styles'
-import { CoverService } from '../src/main/data/cover-service'
+import { CoverService, DEFAULT_COVER_OUTPUT_SIZE } from '../src/main/data/cover-service'
 import type { CoverGenre, CoverPlatform, CoverStylePreset } from '../src/shared/types'
 
 describe('inferGenre 书名题材推断', () => {
@@ -92,12 +92,19 @@ describe('PLATFORM_STYLES 平台风格完整', () => {
 
   it('番茄有上传尺寸 600x800', () => {
     expect(PLATFORM_STYLES.fanqie.uploadSize).toBe('600x800')
-    expect(PLATFORM_STYLES.fanqie.ratio).toBe('9:16')
+    expect(PLATFORM_STYLES.fanqie.ratio).toBe('3:4')
   })
 
   it('其他平台无固定上传尺寸', () => {
     expect(PLATFORM_STYLES.qidian.uploadSize).toBeUndefined()
     expect(PLATFORM_STYLES.zhihu.uploadSize).toBeUndefined()
+  })
+})
+
+describe('封面成品尺寸', () => {
+  it('默认输出严格为 3:4', () => {
+    const [width, height] = DEFAULT_COVER_OUTPUT_SIZE.split('x').map(Number)
+    expect(width * 4).toBe(height * 3)
   })
 })
 
@@ -264,6 +271,17 @@ describe('buildCoverPrompt 完整提示词构建', () => {
     expect(prompt).toContain("'青椒炒肉'")
   })
 
+  it('作者名后带「著」落款后缀', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '剑道独尊',
+      authorName: '青椒炒肉',
+      platform: 'fanqie',
+      genre: 'xianxia',
+      composition: 'closeup'
+    })
+    expect(prompt).toContain("'青椒炒肉' immediately followed by the single Simplified Chinese character '著'")
+  })
+
   it('包含平台风格', () => {
     const prompt = buildCoverPrompt({
       bookName: '测试',
@@ -345,15 +363,15 @@ describe('buildCoverPrompt 完整提示词构建', () => {
     expect(prompt).toContain('add snow background')
   })
 
-  it('所有平台的主封面默认使用 9:16', () => {
+  it('所有平台的主封面默认使用 3:4', () => {
     const fanqiePrompt = buildCoverPrompt({
       bookName: 't', authorName: 'a', platform: 'fanqie', genre: 'urban', composition: 'closeup'
     })
     const qidianPrompt = buildCoverPrompt({
       bookName: 't', authorName: 'a', platform: 'qidian', genre: 'urban', composition: 'closeup'
     })
-    expect(fanqiePrompt).toContain('9:16')
-    expect(qidianPrompt).toContain('9:16')
+    expect(fanqiePrompt).toContain('3:4')
+    expect(qidianPrompt).toContain('3:4')
   })
 })
 
@@ -395,6 +413,30 @@ describe('CoverService.resolvePrompt 手改优先', () => {
 
   it('首尾空白被裁掉', () => {
     expect(service.resolvePrompt({ ...base, promptOverride: '  hello  ' })).toBe('hello')
+  })
+
+  it('忽略旧学习库里的 9:16 规则，避免与 3:4 成品冲突', async () => {
+    const learningLibrary = {
+      load: async () => ({
+        library: {
+          globalRules: [
+            'Use a portrait 9:16 master canvas.',
+            'Keep the title readable at thumbnail size.'
+          ]
+        }
+      }),
+      resolveStyle: () => ({ key: 'fanqie_impact', definition: COVER_STYLE_PRESETS.fanqie_impact })
+    }
+    const serviceWithOldLibrary = new CoverService(
+      null as unknown as ConstructorParameters<typeof CoverService>[0],
+      null as unknown as ConstructorParameters<typeof CoverService>[1],
+      learningLibrary as unknown as ConstructorParameters<typeof CoverService>[2]
+    )
+
+    const prompt = await serviceWithOldLibrary.resolvePromptWithLibrary(base)
+    expect(prompt).toContain('3:4')
+    expect(prompt).not.toContain('9:16')
+    expect(prompt).toContain('Keep the title readable at thumbnail size.')
   })
 })
 

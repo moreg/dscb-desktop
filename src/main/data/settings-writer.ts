@@ -4,6 +4,7 @@ import { writeTextAtomic } from './atomic'
 import { withFileLock } from './file-lock'
 import { readText } from './skill-format/md-parser'
 import { appendH2Section, appendTableRow } from './skill-format/md-writer'
+import { settingPatchDigest, wrapSettingPatch, removeSettingPatchBlock } from './skill-format/settings-patch-blocks'
 import type {
   SettingsApplyDiffItem,
   SettingsApplyPreview,
@@ -113,7 +114,7 @@ export class SettingsWriter {
     let reverted = 0
     for (const d of diffs) {
       try {
-        const ok = await this.revertOne(d)
+        const ok = await this.revertOne(d, chapterNumber)
         if (ok) {
           reverted++
           await this.markEvolutionReverted(chapterNumber, d)
@@ -126,7 +127,7 @@ export class SettingsWriter {
   }
 
   /** 读近期设定演进（续写注入） */
-  async readRecentEvolution(limit = 5): Promise<SettingsEvolutionEntry[]> {
+  async readRecentEvolution(limit = 5, beforeChapter?: number): Promise<SettingsEvolutionEntry[]> {
     const file = join(this.projectDir, '追踪', '设定演进.md')
     const text = await readText(file)
     if (!text) return []
@@ -150,7 +151,11 @@ export class SettingsWriter {
         status: cells[5] ?? '已应用'
       })
     }
-    return entries.slice(-limit)
+    const applicable = beforeChapter == null ? entries : entries.filter((e) => {
+      const n = Number(e.chapter.match(/\d+/)?.[0])
+      return n > 0 && n < beforeChapter && !/撤销|未应用|待确认|失败/.test(e.status)
+    })
+    return applicable.slice(-limit)
   }
 
   private async applyOne(p: SettingsPatch, chapterNumber: number): Promise<boolean> {
@@ -181,6 +186,10 @@ export class SettingsWriter {
       }
 
       let next: string
+      const chapter = Math.max(1, Math.floor(chapterNumber || 1))
+      const mark = (body: string): string => wrapSettingPatch(chapter, patchId(p, chapter), body)
+      const appendMarkedSection = (title: string, body: string): string =>
+        `${text.trimEnd()}\n\n${mark(`## ${title}\n\n${body}`)}\n`
       if (p.target === 'geography' || (p.target === 'worldview' && p.fileName === '地理')) {
         const chLabel = `第 ${Math.max(1, chapterNumber || 1)} 章`
         next = appendTableRow(
@@ -195,21 +204,20 @@ export class SettingsWriter {
           next = appendBulletToH2(
             text,
             title,
-            p.content.startsWith('-') ? p.content : formatBullet(undefined, p.content)
+            mark(p.content.startsWith('-') ? p.content : formatBullet(undefined, p.content))
           )
         } else {
-          next = appendH2Section(text, title, p.content)
+          next = appendMarkedSection(title, p.content)
         }
       } else {
         // append_bullet
         const section = (p.sectionTitle || p.title || '').trim()
         if (section && findH2Exists(text, section)) {
-          next = appendBulletToH2(text, section, formatBullet(p.title, p.content))
+          next = appendBulletToH2(text, section, mark(formatBullet(p.title, p.content)))
         } else if (section) {
-          next = appendH2Section(text, section, formatBullet(p.title, p.content))
+          next = appendMarkedSection(section, formatBullet(p.title, p.content))
         } else {
-          next = appendH2Section(
-            text,
+          next = appendMarkedSection(
             p.title || '正文揭晓补充',
             formatBullet(undefined, p.content)
           )
@@ -254,7 +262,7 @@ export class SettingsWriter {
     return abs
   }
 
-  private async revertOne(d: SettingsApplyDiffItem): Promise<boolean> {
+  private async revertOne(d: SettingsApplyDiffItem, chapterNumber: number): Promise<boolean> {
     const patchLike: SettingsPatch = {
       target: d.target,
       fileName: d.fileName,
@@ -271,30 +279,22 @@ export class SettingsWriter {
       const content = (d.content || '').trim()
       if (!content) return false
 
-      // 地理表：删含地点名的行
+      // 地理表已有来源章节；必须同时匹配地点、完整说明与章节，不能按名字猜删。
       if (d.target === 'geography' || d.fileName === '地理') {
         const title = (d.title || '').trim()
         const lines = text.split(/\r?\n/)
         const next = lines.filter((line) => {
           if (!line.trim().startsWith('|') || line.includes('---')) return true
-          if (title && (line.includes(`| ${title} |`) || line.includes(`|${title}|`))) {
-            return false
-          }
-          if (!title && content && line.includes(content.slice(0, 40))) return false
-          return true
+          const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim())
+          return !(cells[0] === title && cells[1] === content &&
+            cells[2] === `第 ${Math.max(1, Math.floor(chapterNumber || 1))} 章`)
         })
         text = next.join('\n')
       } else {
-        const bullet = formatBullet(d.title !== d.fileName ? d.title : undefined, content).trim()
-        const lines = text.split(/\r?\n/)
-        const next = lines.filter((line) => {
-          const t = line.trim()
-          if (bullet && (t === bullet || t.includes(bullet))) return false
-          if (content.length >= 8 && t.includes(content)) return false
-          if (d.title && t === `## ${d.title}`) return false
-          return true
-        })
-        text = next.join('\n')
+        const chapter = Math.max(1, Math.floor(chapterNumber || 1))
+        const next = removeSettingPatchBlock(text, chapter, patchId(normalizePatch(patchLike), chapter))
+        if (next == null) return false // 无标记的旧补丁无法与作者基线可靠区分，绝不猜删。
+        text = next
       }
 
       if (text === before) return false
@@ -364,6 +364,12 @@ export class SettingsWriter {
       await writeTextAtomic(file, lines.join('\n'))
     })
   }
+}
+
+function patchId(p: SettingsPatch, chapter: number): string {
+  return settingPatchDigest(JSON.stringify([
+    chapter, p.target, p.fileName, p.op, p.title || p.sectionTitle || p.fileName, p.content
+  ]))
 }
 
 function normalizePatch(p: SettingsPatch): SettingsPatch {
@@ -456,6 +462,10 @@ function appendBulletToH2(text: string, h2Title: string, bullet: string): string
   for (let i = start + 1; i < lines.length; i++) {
     if (/^## /.test(lines[i]) && !/^###/.test(lines[i])) {
       end = i
+      // 下节的标题可能属于自动块；插入点必须在它的来源标记之前，避免嵌套污染。
+      let preceding = i - 1
+      while (preceding > start && !lines[preceding].trim()) preceding--
+      if (/^<!-- aw-settings-patch chapter=/.test(lines[preceding])) end = preceding
       break
     }
   }

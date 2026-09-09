@@ -80,17 +80,36 @@ describe('evaluateChapterSelfCheck', () => {
     expect(r.ok).toBe(true)
   })
 
-  it('章末说教模板 → ending_taboo fail', () => {
+  it('章末旁白说教模板只提醒核对，不把文风判断作为硬失败', () => {
     const r = evaluateChapterSelfCheck({
       chapterNumber: 1,
       content: '他想了很多。\n人生就是这样。\n或许这就是命运。\n他明白了一个道理。'
     })
-    expect(r.ok).toBe(false)
+    expect(r.ok).toBe(true)
     const ending = r.items.find((i) => i.id === 'ending_taboo')
-    expect(ending?.verdict).toBe('fail')
+    expect(ending?.verdict).toBe('warn')
+    expect(ending?.detail).toContain('或许这就是')
   })
 
-  it('到期伏笔无关键词 → fail', () => {
+  it('正常对白中的「才刚开始」不误报章末说教', () => {
+    for (const content of ['“比赛才刚开始，急什么？”林舟提剑迎了上去。', '"比赛才刚开始。"林舟提剑迎了上去。']) {
+      const report = evaluateChapterSelfCheck({ chapterNumber: 1, content })
+      expect(report.items.find((item) => item.id === 'ending_taboo')?.verdict).toBe('pass')
+      expect(report.ok).toBe(true)
+    }
+  })
+
+  it('单段长正文只检查末尾，长对白也不会把章中旁白带进检查范围', () => {
+    for (const content of [
+      '或许这就是命运。' + '林舟提剑追赶对手。'.repeat(100) + '门外传来急促的敲门声。',
+      '或许这就是命运。“' + '林舟提剑追赶对手。'.repeat(100) + '”门外传来急促的敲门声。'
+    ]) {
+      expect(evaluateChapterSelfCheck({ chapterNumber: 1, content }).items
+        .find((item) => item.id === 'ending_taboo')?.verdict).toBe('pass')
+    }
+  })
+
+  it('到期伏笔无关键词只提醒安排，不强行回收', () => {
     const r = evaluateChapterSelfCheck({
       chapterNumber: 5,
       content:
@@ -104,8 +123,8 @@ describe('evaluateChapterSelfCheck', () => {
       ]
     })
     const due = r.items.find((i) => i.id.startsWith('due_fb'))
-    expect(due?.verdict).toBe('fail')
-    expect(r.ok).toBe(false)
+    expect(due?.verdict).toBe('warn')
+    expect(r.ok).toBe(true)
   })
 
   /**
@@ -113,6 +132,63 @@ describe('evaluateChapterSelfCheck', () => {
    * 旧实现整句一把抓、关键词只覆盖句首，导致「后半句一字未写」照样过、
    * 「前半句换同义说法」照样判死——用户按自检改完正文仍是同一条失败。
    */
+  describe('punctuation_rule / ai_tells：写完即查', () => {
+    const pick = (content: string, id: string) =>
+      evaluateChapterSelfCheck({ chapterNumber: 2, content }).items.find((i) => i.id === id)
+    const punct = (c: string) => pick(c, 'punctuation_rule')
+    const tell = (c: string) => pick(c, 'ai_tells')
+
+    it('干净正文两项都 pass', () => {
+      const t = '林远走进山门。赵乾挡在面前。\n“你输了。”林远收剑。'
+      expect(punct(t)?.verdict).toBe('pass')
+      expect(tell(t)?.verdict).toBe('pass')
+      expect(tell(t)?.category).toBe('ban')
+    })
+
+    // 标点归标点、痕迹归痕迹：破折号是「守则第 9 条没照做」，不是 AI 味判断，
+    // 而且可确定性替换。混成一条时用户无从知道哪个能一键改、哪个要动笔。
+    it('破折号进 punctuation_rule，不进 ai_tells', () => {
+      const t = '第一行没问题。\n他想说什么——话到嘴边又咽了回去。'
+      expect(punct(t)?.verdict).toBe('warn')
+      expect(punct(t)?.detail).toContain('第 2 行')
+      expect(punct(t)?.detail).toContain('确定性替换')
+      expect(tell(t)?.verdict).toBe('pass')
+    })
+
+    it('省略号同样进 punctuation_rule', () => {
+      expect(punct('他愣住了……半天没说话。')?.verdict).toBe('warn')
+    })
+
+    it('道具停止式进 ai_tells（全系统唯一 AI 多于真人的规则）', () => {
+      const t = '账房先生抬起头。\n他手里的算盘停了。'
+      expect(tell(t)?.verdict).toBe('warn')
+      expect(tell(t)?.detail).toContain('第 2 行')
+      expect(punct(t)?.verdict).toBe('pass')
+    })
+
+    it('两类同时出现时各报各的行号', () => {
+      const t = '他手里的算盘停了。\n他想说什么——又忍住了。'
+      expect(tell(t)?.detail).toContain('第 1 行')
+      expect(punct(t)?.detail).toContain('第 2 行')
+    })
+
+    it('不误报真实停止与具体动作', () => {
+      const t = '雨停了。车在门口停了下来。他一颗珠子拨过了头。'
+      expect(tell(t)?.verdict).toBe('pass')
+      expect(punct(t)?.verdict).toBe('pass')
+    })
+
+    // 这几条在语料上方向相反或无判别力，刻意不进自检——加进来会天天报在自己的稿子上。
+    // 见 tests/fixtures/deslop-corpus/FINDINGS.md
+    it('不查禁用词密度（AUC 0.097，真人用得比 AI 多）', () => {
+      expect(tell('他缓缓走向前，微微皱眉，眼中闪过一丝无奈。')?.verdict).toBe('pass')
+    })
+
+    it('不查「不是A而是B」（AUC 0.428，反向）', () => {
+      expect(tell('他不是冷漠，而是绝望。')?.verdict).toBe('pass')
+    })
+  })
+
   describe('core_plot 子事件覆盖率', () => {
     const corePlot = (content: string) =>
       evaluateChapterSelfCheck({
@@ -144,6 +220,85 @@ describe('evaluateChapterSelfCheck', () => {
       expect(item?.missing?.length).toBeGreaterThan(0)
     })
 
+    it('否定或只在计划中出现事件词，不能报告事件完成', () => {
+      for (const content of [
+        '林舟从未取得密室钥匙。他也没有救出被囚的妹妹。对寻找密室钥匙和救出妹妹的计划，他连想都没想过。',
+        '林舟打算取得密室钥匙。他计划救出被囚妹妹。'
+      ]) {
+        const item = evaluateChapterSelfCheck({ chapterNumber: 2, content,
+          plotSummary: '林舟取得密室钥匙；林舟救出被囚妹妹'
+        }).items.find((i) => i.id === 'core_plot')
+        expect(item?.verdict).toBe('warn')
+        expect(item?.detail).toContain('不能判为已落实')
+      }
+    })
+
+    it('有文字痕迹也明确区分与语义完成核验', () => {
+      const item = evaluateChapterSelfCheck({ chapterNumber: 1, content: '林舟取得密室钥匙。',
+        plotSummary: '林舟取得密室钥匙'
+      }).items.find((i) => i.id === 'core_plot')
+      expect(item?.verdict).toBe('pass')
+      expect(item?.detail).toContain('关键词不能证明事件完成')
+      expect(item?.label).toContain('非完成核验')
+      expect(item?.repairKind).toBe('verify_plot')
+    })
+
+    it('已经完成的动作不受随后另一个动作的计划或否定污染', () => {
+      for (const content of [
+        '林舟取得密室钥匙，打算明天救人。',
+        '林舟取得密室钥匙，没有惊动门外的守卫。',
+        '林舟取得密室钥匙后没有停留。',
+        '林舟取得密室钥匙。他打算把密室钥匙交给妹妹。',
+        '林舟没有犹豫便取得密室钥匙。'
+      ]) {
+        const item = evaluateChapterSelfCheck({ chapterNumber: 2, content,
+          plotSummary: '林舟取得密室钥匙'
+        }).items.find((i) => i.id === 'core_plot')
+        expect(item?.verdict).toBe('pass')
+        expect(item?.missing ?? []).toEqual([])
+      }
+    })
+
+    it('明确未完成之后，重复物品名不能把事件洗成通过', () => {
+      for (const content of [
+        '林舟没有取得密室钥匙。密室钥匙躺在守卫腰间。',
+        '林舟未取得密室钥匙。林舟盯着密室钥匙。'
+      ]) {
+        const item = evaluateChapterSelfCheck({ chapterNumber: 2, content,
+          plotSummary: '林舟取得密室钥匙'
+        }).items.find((i) => i.id === 'core_plot')
+        expect(item?.verdict).toBe('warn')
+        expect(item?.missing).toEqual(['林舟取得密室钥匙'])
+      }
+    })
+
+    it('先失败后实际取得的后续证据可以解除待核对状态', () => {
+      const item = evaluateChapterSelfCheck({ chapterNumber: 2,
+        content: '林舟没有取得密室钥匙。第二次潜入时，林舟终于取得了密室钥匙。',
+        plotSummary: '林舟取得密室钥匙'
+      }).items.find((i) => i.id === 'core_plot')
+      expect(item?.verdict).toBe('pass')
+    })
+
+    it('后文明确否认同一动作时保留疑问，不能借前文肯定假通过', () => {
+      const item = evaluateChapterSelfCheck({ chapterNumber: 2,
+        content: '林舟取得密室钥匙。叙述者纠正道，林舟没有取得密室钥匙。',
+        plotSummary: '林舟取得密室钥匙'
+      }).items.find((i) => i.id === 'core_plot')
+      expect(item?.verdict).toBe('warn')
+    })
+
+    it('疑问句不能冲掉明确未取得的证据', () => {
+      for (const question of ['林舟取得密室钥匙了吗？', '林舟是否取得密室钥匙？']) {
+        const item = evaluateChapterSelfCheck({ chapterNumber: 2,
+          content: '林舟没有取得密室钥匙。' + question,
+          plotSummary: '林舟取得密室钥匙'
+        }).items.find((i) => i.id === 'core_plot')
+        expect(item?.verdict).toBe('warn')
+        expect(item?.detail).toContain('疑问')
+      }
+    })
+
     it('伏笔编号这类元信息不计入分母（正文不可能出现 FB-016）', () => {
       const item = corePlot(
         '邹英按部队里的规矩清点人数，秩序很快立住。\n' +
@@ -173,12 +328,17 @@ describe('evaluateChapterSelfCheck', () => {
       expect(wordItem('甲'.repeat(2000), 'about')?.verdict).toBe('pass')
     })
 
-    it('同样的字数在下限口径下仍判 fail', () => {
-      expect(wordItem('甲'.repeat(2000), 'min')?.verdict).toBe('fail')
+    it('篇幅参考不足只提醒，不强迫用水文补到目标', () => {
+      const item = wordItem('甲'.repeat(2000), 'min')
+      expect(item?.verdict).toBe('warn')
+      expect(item?.detail).toContain('以剧情完整为先')
+      expect(item?.detail).toContain('不要为凑字机械扩写')
+      expect(item?.repairKind).toBe('short_length')
     })
 
     it('上限口径下超出较多 → warn', () => {
       expect(wordItem('甲'.repeat(3600), 'about')?.verdict).toBe('warn')
+      expect(wordItem('甲'.repeat(3600), 'about')?.repairKind).toBe('over_length')
     })
   })
 
@@ -205,16 +365,17 @@ describe('evaluateChapterSelfCheck', () => {
       const due = r.items.find((i) => i.id.startsWith('due_fb'))
       expect(due?.verdict).toBe('fail')
       expect(due?.detail).toContain('回执')
+      expect(due?.repairKind).toBe('verify_foreshadow')
     })
 
-    it('回执自称回收且正文有痕迹 → pass', () => {
+    it('回执自称回收且正文有痕迹也不能仅凭关键词判通过', () => {
       const r = evaluateChapterSelfCheck({
         chapterNumber: 5,
         content:
           '"山本一夫要找的从来不是宝物。"苏九把纸摊开，"他要找的是能改变国运的人。"',
         foreshadowings: [fb({ status: 'collected', actualCollect: 5, expectedCollect: 5 })]
       })
-      expect(r.items.find((i) => i.id.startsWith('due_fb'))?.verdict).toBe('pass')
+      expect(r.items.find((i) => i.id.startsWith('due_fb'))?.verdict).toBe('warn')
     })
 
     it('正文只是顺带提了个人名，不算回收', () => {
@@ -223,7 +384,7 @@ describe('evaluateChapterSelfCheck', () => {
         content: '街口的告示是山本贴的。苏九看了一眼就走了，没多问一句。',
         foreshadowings: [fb({ status: 'planted', expectedCollect: 5 })]
       })
-      expect(r.items.find((i) => i.id.startsWith('due_fb'))?.verdict).toBe('fail')
+      expect(r.items.find((i) => i.id.startsWith('due_fb'))?.verdict).toBe('warn')
     })
   })
 
@@ -255,6 +416,23 @@ describe('evaluateChapterSelfCheck', () => {
     expect(miss?.verdict).toBe('warn')
   })
 
+  it('人物互换地点不能借任一地点词通过，角色未出场也不假通过', () => {
+    const prevEndingState = {
+      chapterNumber: 1, characterPositions: [
+        { name: '林舟', location: '书房', action: '站着' },
+        { name: '苏月', location: '城门', action: '站着' }
+      ], characterStates: [], timePoint: '夜里', unfinished: [], suspense: '', props: []
+    }
+    for (const content of ['林舟站在城门，苏月坐在书房。两人都没有离开过原地。', '书房与城门都静悄悄的。', '林舟并不在书房，苏月也不在城门。']) {
+      const item = evaluateChapterSelfCheck({ chapterNumber: 2, content, prevEndingState })
+        .items.find((i) => i.id === 'char_position')
+      expect(item?.verdict).toBe('warn')
+      expect(item?.detail).toContain('无法确认')
+    }
+    expect(evaluateChapterSelfCheck({ chapterNumber: 2, content: '林舟站在书房，苏月守在城门。', prevEndingState })
+      .items.find((i) => i.id === 'char_position')?.verdict).toBe('pass')
+  })
+
   /**
    * 结尾状态是只读缓存，拿不到时那三项整条不进报告——
    * counts/ok 在更小的集合上算，用户看不出有项没跑。
@@ -269,6 +447,8 @@ describe('evaluateChapterSelfCheck', () => {
     expect(skipped?.verdict).toBe('skip')
     expect(skipped?.detail).toContain('不等于通过')
     expect(r.counts.skip).toBeGreaterThan(0)
+    expect(r.summary).toContain(`${r.counts.skip} 项未检查`)
+    expect(r.summary).not.toContain('写后自检通过')
   })
 
   it('第 1 章不记 skip（本来就没有上一章）', () => {
@@ -285,5 +465,91 @@ describe('evaluateChapterSelfCheck', () => {
     })
     const power = r.items.find((i) => i.id === 'power_bound')
     expect(power?.verdict).toBe('warn')
+  })
+
+  it('明确否定常见能力表述时不误报越权', () => {
+    const report = evaluateChapterSelfCheck({ chapterNumber: 1,
+      content: '林舟无法预知未来，更不可能改变命运。',
+      powerBoundaryBullets: ['无法预知未来，不能改变命运']
+    })
+    expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('pass')
+  })
+
+  it('否定犹豫或人物身份不等于否定后续能力行为', () => {
+    for (const content of ['林舟没有犹豫便控制天气。', '林舟并非凡人所以能够控制天气。']) {
+      const report = evaluateChapterSelfCheck({ chapterNumber: 1, content,
+        powerBoundaryBullets: ['不能控制天气']
+      })
+      expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('warn')
+    }
+  })
+
+  it('直接否定能力及明确没有能力的表述仍不误报', () => {
+    for (const content of ['林舟没有控制天气。', '林舟没有能力控制天气。', '林舟无法真正控制天气。']) {
+      const report = evaluateChapterSelfCheck({ chapterNumber: 1, content,
+        powerBoundaryBullets: ['不能控制天气']
+      })
+      expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('pass')
+    }
+  })
+
+  it('前面遵守边界的否定不能豁免后面的越权，包括同句第二次施展', () => {
+    for (const content of [
+      '师父说他不能控制天气。林舟抬起手，成功控制天气，把暴雨化成晴空。',
+      '师父说他不能控制天气但林舟最终控制天气。'
+    ]) {
+      const report = evaluateChapterSelfCheck({ chapterNumber: 1, content,
+        powerBoundaryBullets: ['不能控制天气']
+      })
+      expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('warn')
+    }
+  })
+
+  it('常见能力表述也逐次判断，首处否定不会遮住后续肯定', () => {
+    const report = evaluateChapterSelfCheck({ chapterNumber: 1,
+      content: '过去林舟无法预知未来。如今他能够预知未来。',
+      powerBoundaryBullets: ['无法预知未来']
+    })
+    expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('warn')
+  })
+
+  it('到期伏笔全量检查，第七条虚假回收记录也必须被发现', () => {
+    const report = evaluateChapterSelfCheck({ chapterNumber: 5, content: '林舟睡着了。',
+      foreshadowings: [
+        ...Array.from({ length: 6 }, (_,index) => ({
+          content: `第${index}份密信藏着皇陵入口`, status: 'planted', expectedCollect: 5
+        })),
+        { content: '山本一夫的真正目的是寻找改变国运的奇人', status: 'collected', actualCollect: 5 }
+      ]
+    })
+    expect(report.items.filter((item) => item.id.startsWith('due_fb_'))).toHaveLength(7)
+    expect(report.items.find((item) => item.id === 'due_fb_6')?.verdict).toBe('fail')
+    expect(report.ok).toBe(false)
+    expect(report.summary).toContain('项未检查')
+  })
+
+  it('未到期伏笔和未完成事项超过五条时仍全部进入报告', () => {
+    const report = evaluateChapterSelfCheck({ chapterNumber: 5,
+      content: '玉佩之中藏着藏宝地图，藏宝地图标出皇陵入口。',
+      foreshadowings: Array.from({ length: 6 }, () => ({
+        content: '玉佩之中藏着藏宝地图，藏宝地图标出皇陵入口', status: 'planted', expectedCollect: 20
+      })),
+      prevEndingState: { chapterNumber: 4, characterPositions: [], characterStates: [],
+        timePoint: '', unfinished: Array.from({ length: 6 }, (_, index) => `处理第${index}份投递事项`),
+        suspense: '', props: [] }
+    })
+    expect(report.items.filter((item) => item.id.startsWith('early_fb_'))).toHaveLength(6)
+    expect(report.items.find((item) => item.id === 'early_fb_5')?.verdict).toBe('warn')
+    expect(report.items.filter((item) => item.id.startsWith('unfinished_'))).toHaveLength(6)
+  })
+
+  it('第九条卷内提示和第七条能力边界也参与核对', () => {
+    const report = evaluateChapterSelfCheck({ chapterNumber: 1,
+      content: '玉佩之中藏着藏宝地图，藏宝地图标出皇陵入口。林舟控制天气，把暴雨化成晴空。',
+      doNotAdvanceHints: [...Array(8).fill('江边码头失火引来巡捕追查'), '玉佩之中藏着藏宝地图，藏宝地图标出皇陵入口'],
+      powerBoundaryBullets: [...Array(6).fill('不能穿越墙壁'), '不能控制天气']
+    })
+    expect(report.items.find((item) => item.id === 'volume_spoiler')?.verdict).toBe('warn')
+    expect(report.items.find((item) => item.id === 'power_bound')?.verdict).toBe('warn')
   })
 })

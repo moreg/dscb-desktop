@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { SettingsWriter, patchesFromWorldLocations } from '../src/main/data/settings-writer'
+import { SettingsMdRepo } from '../src/main/data/skill-format/settings-md-repo'
 import type { SettingsPatch } from '../src/shared/types'
 
 describe('SettingsWriter', () => {
@@ -44,6 +45,8 @@ describe('SettingsWriter', () => {
     const raw = readFileSync(join(dir, '设定', '世界观', '力量体系.md'), 'utf-8')
     expect(raw).toContain('暗劲圆满')
     expect(raw).toContain('可短时外放')
+    expect(raw).toMatch(/<!-- aw-settings-patch chapter=12 id=[a-f0-9]{16} checksum=[a-f0-9]{16} -->/)
+    expect(raw.indexOf('## 境界')).toBeLessThan(raw.indexOf('<!-- aw-settings-patch'))
 
     const log = readFileSync(join(dir, '追踪', '设定演进.md'), 'utf-8')
     expect(log).toContain('第 12 章')
@@ -146,5 +149,49 @@ describe('SettingsWriter', () => {
     const entries = await writer.readRecentEvolution(1)
     expect(entries).toHaveLength(1)
     expect(entries[0].summary).toBe('乙')
+  })
+
+  it('撤销只删除该章标记内的补丁，保留既有作者标题和内容', async () => {
+    const file = join(dir, '设定', '世界观', '力量体系.md')
+    mkdirSync(join(dir, '设定', '世界观'), { recursive: true })
+    const baseline = '# 力量体系\n\n## 境界\n\n- **明劲**：作者事先规划的基础能力。\n'
+    writeFileSync(file, baseline)
+    const result = await writer.applyPatches(12, [{ target: 'worldview', fileName: '力量体系', op: 'append_bullet', sectionTitle: '境界', title: '暗劲', content: '本章首次掌握隔物发力。' }])
+    const wrongChapter = await writer.revertPatches(11, result.appliedDiffs)
+    expect(wrongChapter.reverted).toBe(0)
+    const reverted = await writer.revertPatches(12, result.appliedDiffs)
+    expect(reverted.reverted).toBe(1)
+    expect(readFileSync(file, 'utf-8').trim()).toBe(baseline.trim())
+    expect(await writer.revertPatches(12, result.appliedDiffs)).toEqual({ reverted: 0, errors: [] })
+  })
+
+  it('补丁被作者修改后拒绝自动撤销，缺少来源标记的旧内容也不猜删', async () => {
+    const content = '本章确认青帮负责码头收费。'
+    const result = await writer.applyPatches(3, [{ target: 'faction', fileName: '青帮', op: 'append_h2', title: '码头', content }])
+    const file = join(dir, '设定', '势力', '青帮.md')
+    writeFileSync(file, readFileSync(file, 'utf-8').replace(content, content + '作者补充了收费例外。'))
+    const edited = await writer.revertPatches(3, result.appliedDiffs)
+    expect(edited.reverted).toBe(0)
+    expect(edited.errors[0]).toContain('已被编辑')
+    expect(readFileSync(file, 'utf-8')).toContain('作者补充了收费例外')
+    const oldBaseline = `# 青帮\n\n## 码头\n${content}\n`
+    writeFileSync(file, oldBaseline)
+    expect((await writer.revertPatches(3, result.appliedDiffs)).reverted).toBe(0)
+    expect(readFileSync(file, 'utf-8')).toBe(oldBaseline)
+  })
+
+  it('在已有节补写时不会插入到下一个未来补丁标记内部', async () => {
+    mkdirSync(join(dir, '设定', '世界观'), { recursive: true })
+    const file = join(dir, '设定', '世界观', '金手指.md')
+    writeFileSync(file, '# 金手指\n\n## 起始功能\n作者规定只能辨认方向。\n')
+    const future = await writer.applyPatches(12, [{ target: 'worldview', fileName: '金手指', op: 'append_h2', title: '隔空取物', content: '第十二章取得遥控物体的能力。' }])
+    const earlier = await writer.applyPatches(3, [{ target: 'worldview', fileName: '金手指', op: 'append_bullet', sectionTitle: '起始功能', title: '辨距', content: '第三章开始可以判断物体距离。' }])
+    const beforeFourth = await new SettingsMdRepo(dir).read(4)
+    expect(beforeFourth!.worldview[0].body).toContain('判断物体距离')
+    expect(beforeFourth!.worldview[0].body).not.toContain('隔空取物')
+    // 后续插入没有改变未来块校验值；分别撤销都能精确定位。
+    expect((await writer.revertPatches(12, future.appliedDiffs)).reverted).toBe(1)
+    expect((await writer.revertPatches(3, earlier.appliedDiffs)).reverted).toBe(1)
+    expect(readFileSync(file, 'utf-8').trim()).toBe('# 金手指\n\n## 起始功能\n作者规定只能辨认方向。')
   })
 })

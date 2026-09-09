@@ -44,6 +44,7 @@ import { formatSyncErrorHint } from '../../shared/post-write-sync'
 import ChapterAuditPanel from './ChapterAuditPanel'
 import { useStreamAborter } from './hooks/useStreamAborter'
 import ChapterSelfCheckPanel from './ChapterSelfCheckPanel'
+import { createChapterCheckTracker, type ChapterSelfCheckSnapshot } from './chapterSelfCheckState'
 
 /** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
 function friendlyFlowError(err: string): string {
@@ -139,6 +140,8 @@ interface Props {
   } | null
   /** 编辑器持有的写后自检报告（与 banner 同源） */
   selfCheckReport?: ChapterSelfCheckReport | null
+  selfCheckStale?: boolean
+  selfCheckError?: string | null
   /**
    * 上轮续写是 extend：本章是**故意还没写完**的半成品。
    * 自检面板据此提示"完成度类项暂不作数"，避免用户把正常状态当成缺陷去修。
@@ -155,6 +158,9 @@ interface Props {
   selfCheckLoading?: boolean
   /** 自检失败项 → 按要求重写 */
   onApplySelfCheckToRewrite?: () => void
+  /** 一键标点兜底（确定性替换，零 LLM），挂在自检的 punctuation_rule 项上 */
+  onFixPunctuation?: () => void | Promise<void>
+  fixPunctuationLoading?: boolean
   /** 自检失败项 → 续写临时要求 */
   onApplySelfCheckToContinue?: () => void
   /** 失败 / 部分失败 / 手动补跑：重新跑记忆与设定同步 */
@@ -198,6 +204,8 @@ export default function ChapterFlowPanel(props: Props) {
     skipMemoryOnAutoSyncAll,
     postWriteSyncBanner,
     selfCheckReport,
+    selfCheckStale,
+    selfCheckError,
     partialChapter,
     complianceReport,
     complianceChecking,
@@ -205,6 +213,8 @@ export default function ChapterFlowPanel(props: Props) {
     onRerunSelfCheck,
     selfCheckLoading,
     onApplySelfCheckToRewrite,
+    onFixPunctuation,
+    fixPunctuationLoading,
     onApplySelfCheckToContinue,
     onRetryAutoSync,
     onUndoAutoSync,
@@ -247,9 +257,13 @@ export default function ChapterFlowPanel(props: Props) {
   const [newItemResult, setNewItemResult] = useState<number | null>(null)
   const [newForeshadowingResult, setNewForeshadowingResult] = useState<number | null>(null)
 
-  // 写后自检（优先用 props；autoSyncSeed 注入时覆盖本地）
-  const [localSelfCheck, setLocalSelfCheck] = useState<ChapterSelfCheckReport | null>(null)
+  // An explicitly supplied null report also takes precedence over local results.
+  const [localSelfCheck, setLocalSelfCheck] = useState<ChapterSelfCheckSnapshot | null>(null)
   const [localSelfCheckLoading, setLocalSelfCheckLoading] = useState(false)
+  const [localSelfCheckError, setLocalSelfCheckError] = useState<string | null>(null)
+  const localSelfCheckTracker = useRef(createChapterCheckTracker({ projectId, chapterNumber, content: draft }))
+  localSelfCheckTracker.current.update({ projectId, chapterNumber, content: draft })
+  useEffect(() => () => localSelfCheckTracker.current.invalidate(), [])
 
   // 节奏评估状态
   const [rhythmEvaluating, setRhythmEvaluating] = useState(false)
@@ -375,6 +389,8 @@ export default function ChapterFlowPanel(props: Props) {
     setNewForeshadowingResult(null)
     setLocalSelfCheck(null)
     setLocalSelfCheckLoading(false)
+    setLocalSelfCheckError(null)
+    localSelfCheckTracker.current.invalidate()
     setRhythmEvaluating(false)
     setRhythmEvaluation(null)
     setRhythmError('')
@@ -591,38 +607,14 @@ export default function ChapterFlowPanel(props: Props) {
       setMemoryExtraction(extraction)
       onCompleteMemory?.()
 
-      // 预览 diff + 自动应用状态/情节/伏笔回收（新增角色等仍需确认）
+      // Extraction is a preview. Applying it goes through the backend source/review gate.
       try {
         const preview = await window.api.previewMemoryApply(projectId, extraction)
         if (stale()) return
         setMemoryPreview(preview)
-        const hasAuto =
-          extraction.characterStateChanges.length > 0 ||
-          extraction.newPlotPoints.length > 0 ||
-          extraction.collectedForeshadowings.length > 0
-        if (hasAuto && preview.applicableCount > 0) {
-          setMemoryApplying(true)
-          const result = await window.api.applyMemory(projectId, extraction)
-          if (stale()) return
-          setMemoryResult(result)
-          if (result.appliedDiffs?.length) {
-            setMemoryPreview({
-              diffs: result.appliedDiffs,
-              applicableCount: result.appliedDiffs.length,
-              confirmCount: preview.confirmCount
-            })
-          }
-        }
-        // 设定演进：预览 + 高置信自动应用
         const sPreview = await window.api.previewSettingsApply(projectId, extraction)
         if (stale()) return
         setSettingsPreview(sPreview)
-        if (sPreview.autoCount > 0) {
-          setSettingsApplying(true)
-          const sResult = await window.api.applySettingsPatches(projectId, extraction, true)
-          if (stale()) return
-          setSettingsResult(sResult)
-        }
       } catch (e) {
         if (stale()) return
         setMemoryError(friendlyFlowError((e as Error).message))
@@ -919,12 +911,10 @@ export default function ChapterFlowPanel(props: Props) {
     setMemoryResult(autoSyncSeed.memory)
     setSettingsResult(autoSyncSeed.settings)
     setMemoryExtracting(false)
-    if (autoSyncSeed.selfCheck) {
-      setLocalSelfCheck(autoSyncSeed.selfCheck)
-    }
 
     const allErrors = [
       ...(autoSyncSeed.memory.errors ?? []),
+      ...(autoSyncSeed.memory.reviewRequired ?? []).map((issue) => `记忆待核对：${issue}`),
       ...(autoSyncSeed.settings.errors ?? [])
     ]
       .filter(Boolean)
@@ -1076,11 +1066,16 @@ export default function ChapterFlowPanel(props: Props) {
         ) : null}
 
         <ChapterSelfCheckPanel
-          report={selfCheckReport ?? localSelfCheck}
+          report={selfCheckReport !== undefined ? selfCheckReport : localSelfCheck?.report ?? null}
+          stale={selfCheckReport !== undefined ? selfCheckStale :
+            !!localSelfCheck && !localSelfCheckTracker.current.matches(localSelfCheck.source)}
+          error={selfCheckReport !== undefined ? selfCheckError : localSelfCheckError}
           partialChapter={partialChapter}
           defaultExpanded
           rerunLoading={selfCheckLoading || localSelfCheckLoading}
           onApplyToRewrite={onApplySelfCheckToRewrite}
+          onFixPunctuation={onFixPunctuation}
+          fixPunctuationLoading={fixPunctuationLoading}
           onApplyToContinue={onApplySelfCheckToContinue}
           onRerun={
             onRerunSelfCheck
@@ -1094,14 +1089,20 @@ export default function ChapterFlowPanel(props: Props) {
                     ) => Promise<ChapterSelfCheckReport>
                   }
                   if (!api.selfCheckChapter) return
+                  const request = localSelfCheckTracker.current.begin()
                   setLocalSelfCheckLoading(true)
+                  setLocalSelfCheckError(null)
                   try {
-                    const r = await api.selfCheckChapter(projectId, chapterNumber, draft)
-                    setLocalSelfCheck(r)
+                    const r = await api.selfCheckChapter(request.projectId, request.chapterNumber, request.content)
+                    if (!localSelfCheckTracker.current.accepts(request)) return
+                    if (r.chapterNumber !== request.chapterNumber) throw new Error('自检返回了其他章节的结果')
+                    setLocalSelfCheck({ report: r, source: request })
                   } catch (err) {
+                    if (!localSelfCheckTracker.current.accepts(request)) return
+                    setLocalSelfCheckError('自检未完成，请重新检查。')
                     console.warn('[ChapterFlowPanel] selfCheck failed:', err)
                   } finally {
-                    setLocalSelfCheckLoading(false)
+                    if (localSelfCheckTracker.current.isLatest(request)) setLocalSelfCheckLoading(false)
                   }
                 }
           }
@@ -1398,7 +1399,7 @@ export default function ChapterFlowPanel(props: Props) {
             </div>
           </div>
           <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-            提取后自动写入：状态/设定变化 · 情节 · 伏笔回收（可看下方 diff）。需确认：新增角色 /
+            提取后先预览变更；应用时核验正文依据，未通过的保留待核对。新增角色 /
             地点 / 道具 / 伏笔。续写成功后会自动同步；失败可点「补跑同步」。
           </p>
           {memoryError ? (
@@ -1511,6 +1512,8 @@ export default function ChapterFlowPanel(props: Props) {
                   <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
                     ✓ 已应用：状态 {memoryResult.applied.stateChanges} · 情节{' '}
                     {memoryResult.applied.plotPoints} · 伏笔 {memoryResult.applied.collected}
+                    {memoryResult.appliedDiffs?.some((diff) => diff.collectionAction === 'uncollect')
+                      ? ` · 撤回旧回收 ${memoryResult.appliedDiffs.filter((diff) => diff.collectionAction === 'uncollect').length}` : ''}
                     {memoryResult.errors.length > 0 ? (
                       <span className="err">（{memoryResult.errors.length} 项失败）</span>
                     ) : null}

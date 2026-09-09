@@ -36,6 +36,40 @@ const sampleProvider = {
   apiKey: 'sk-test'
 }
 
+describe('LlmService cache identity', () => {
+  it('uses effective review routing and invalidates on model, endpoint, sampling and account changes', async () => {
+    const config = { activeId: 'p_test', providers: [sampleProvider], featureRouting: { review: { providerId: 'p_test', model: 'review-model' } } }
+    const store = { read: vi.fn(async () => config) } as unknown as SecretStore
+    const service = new LlmService(store)
+    const base = await service.getCacheIdentity('deepReview:logic_hole')
+    expect(base).toMatch(/^[a-f0-9]{64}$/)
+    expect(base).not.toContain(sampleProvider.apiKey)
+    expect(await service.getCacheIdentity('deepReview:hook_grade')).toBe(base)
+    expect(await service.getCacheIdentity('chapter')).not.toBe(base)
+    config.featureRouting.review.model = 'review-model-2'
+    expect(await service.getCacheIdentity('deepReview:logic_hole')).not.toBe(base)
+    config.featureRouting.review.model = 'review-model'
+    config.providers = [{ ...sampleProvider, apiKey: 'rotated-key' }]
+    expect(await service.getCacheIdentity('deepReview:logic_hole')).not.toBe(base)
+    config.providers = [{ ...sampleProvider, baseUrl: 'https://another.example/v1' }]
+    expect(await service.getCacheIdentity('deepReview:logic_hole')).not.toBe(base)
+  })
+
+  it('skips unconfigured/default models and externally configured CLI routes', async () => {
+    const read = vi.fn()
+    const service = new LlmService({ read } as unknown as SecretStore)
+    for (const provider of [
+      { ...sampleProvider, model: 'default' }, { ...sampleProvider, model: '' },
+      { ...sampleProvider, apiKey: '' }, { ...sampleProvider, protocol: 'codex' }
+    ]) {
+      read.mockResolvedValue({ activeId: 'p_test', providers: [provider] })
+      expect(await service.getCacheIdentity('deepReview:logic_hole')).toBeNull()
+    }
+    read.mockResolvedValue({ activeId: null, providers: [] })
+    expect(await service.getCacheIdentity('deepReview:logic_hole')).toBeNull()
+  })
+})
+
 describe('LlmService', () => {
   let store: SecretStore
   let service: LlmService

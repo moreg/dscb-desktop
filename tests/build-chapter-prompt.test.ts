@@ -96,8 +96,8 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('下笔前先自检一次')
     expect(user).toContain('林远')
     // 未填细纲字数预估 → 兜底 2500，且为强约束"不少于"
-    expect(user).toContain('正文不少于 2500 字')
-    expect(user).not.toContain('约 2500 字')
+    expect(user).toContain('正文目标约 2500 字')
+    expect(user).toContain('剧情完整优先')
   })
 
   it('falls back to outlines/main.json synopsis when 大纲.md has empty 主线剧情走向', async () => {
@@ -176,7 +176,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).not.toContain('上一章正文结尾')
   })
 
-  it('includes pending and due-now foreshadowings with section labels', async () => {
+  it('reminds due foreshadowings without injecting unrelated pending plans', async () => {
     const dir = await ps.resolveDir(projectId)
     await new ForeshadowingRepository(dir).create({
       content: '神秘玉佩的来历',
@@ -193,9 +193,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 3)
     expect(user).toContain('师父留下的字条')
-    expect(user).toContain('本章必须回收的伏笔')
-    expect(user).toContain('神秘玉佩的来历')
-    expect(user).toContain('建议本章铺垫的伏笔')
+    expect(user).toContain('到期与逾期伏笔')
+    expect(user).not.toContain('神秘玉佩的来历')
+    expect(user).not.toContain('本章必须回收')
   })
 
   it('splits characters into appearing vs other based on chapter detail', async () => {
@@ -223,7 +223,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(otherSection).toContain('赵乾')
   })
 
-  it('parses wordEstimate from chapter detail into a hard minimum and exposes targetWords', async () => {
+  it('parses wordEstimate from chapter detail into a reference budget and exposes targetWords', async () => {
     const dir = await ps.resolveDir(projectId)
     await new OutlineRepository(dir).upsertDetailed({
       chapterNumber: 2,
@@ -236,7 +236,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
 
     // 细纲填了 3000 → 强约束用 3000，不再是兜底的 2500
     expect(targetWords).toBe(3000)
-    expect(user).toContain('正文不少于 3000 字')
+    expect(user).toContain('正文目标约 3000 字')
     expect(user).not.toContain('不少于 2500 字')
     // system prompt 不应再写死 2500（避免与 user prompt 的具体字数打架）
     expect(system).not.toContain('2500')
@@ -252,7 +252,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user, targetWords } = await service.buildChapterPrompt(projectId, 2)
     expect(targetWords).toBe(3000)
-    expect(user).toContain('正文不少于 3000 字')
+    expect(user).toContain('正文目标约 3000 字')
   })
 })
 
@@ -402,9 +402,9 @@ describe('buildChapterPrompt with new skill-format context (outline md / trackin
 
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 6)
-    // FB-101 应该作为「本章必须回收的伏笔」注入
+    // FB-101 应该作为「到期与逾期伏笔」注入
     expect(user).toContain('三日血光之灾')
-    expect(user).toContain('本章必须回收的伏笔')
+    expect(user).toContain('到期与逾期伏笔')
     // FB-001 应该作为「已埋设但未到本章回收」注入
     expect(user).toContain('罗盘来历')
   })

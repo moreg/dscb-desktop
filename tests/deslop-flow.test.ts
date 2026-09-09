@@ -402,6 +402,12 @@ describe('DeslopService 分块改写', () => {
 })
 
 describe('DeslopService.scan isTail 语义', () => {
+  it('中文弯引号结尾视为完整正文，不误报截断', async () => {
+    const svc = new DeslopService({} as unknown as LlmService)
+    const report = await svc.scan('女人说：\n“有些真相，由不得你。”')
+    expect(report.findings.some((f) => f.type === 'truncation')).toBe(false)
+  })
+
   it('非末块不做截断检测（否则每块末行都会误报）', async () => {
     const svc = new DeslopService({} as unknown as LlmService)
     const text = '他走进屋子，把门关上。\n她抬头看了他一眼'
@@ -419,6 +425,40 @@ describe('DeslopService.scan isTail 语义', () => {
     expect(tail.findings.some((f) => f.type === 'sublimation' && f.severity === 'blocking')).toBe(true)
     expect(mid.findings.some((f) => f.type === 'sublimation')).toBe(true)
     expect(mid.findings.some((f) => f.type === 'sublimation' && f.severity === 'blocking')).toBe(false)
+  })
+})
+
+describe('DeslopService.deslop 全 Gate 最终复扫', () => {
+  it('后置 Pass 新引入前置 Gate 问题时会跨 Gate 最终清理到 0', async () => {
+    const source = '他把门关上。\n这一刻，他终于明白了一切。'
+    const introduced = '他把门关上。\n他知道这事还没结束。'
+    const clean = '他把门关上。\n门外又响了三下。'
+    let calls = 0
+    const llm = {
+      generateStream: async (): Promise<string> => {
+        calls += 1
+        const rewritten = calls === 1 ? introduced : clean
+        return `【改写后】\n${rewritten}\n\n【改动说明】\n- 清理残留`
+      }
+    } as unknown as LlmService
+    const result = await new DeslopService(llm).deslop(source)
+    expect(calls).toBe(2)
+    expect(result.rewritten).toBe(clean)
+    expect(result.remainingFindings).toHaveLength(0)
+  })
+
+  it('最终两轮仍清不掉时保留 finding，不伪装成完成', async () => {
+    const source = '他把门关上。\n这一刻，他终于明白了一切。'
+    const stillDirty = '他把门关上。\n他知道这事还没结束。'
+    const log: string[] = []
+    const llm = {
+      generateStream: async (): Promise<string> =>
+        `【改写后】\n${stillDirty}\n\n【改动说明】\n- 未能清理`,
+    } as unknown as LlmService
+    const result = await new DeslopService(llm).deslop(source, { onToken: (t) => log.push(t) })
+    expect(result.remainingFindings.length).toBeGreaterThan(0)
+    expect(log.join('')).toContain('最终复扫未通过')
+    expect(log.join('')).not.toContain('最终复扫 100% 通过')
   })
 })
 

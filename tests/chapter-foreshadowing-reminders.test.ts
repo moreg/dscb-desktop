@@ -12,97 +12,80 @@ const baseForeshadowing = {
 }
 
 describe('buildForeshadowingReminders', () => {
-  it('groups plant/reinforce/collect reminders with new schema', () => {
-    const outline: DetailedOutlineItem = {
-      chapterNumber: 12,
-      foreshadowings: ['窗外黑影', '旧钥匙']
-    }
-    const foreshadowings: Foreshadowing[] = [
-      {
-        ...baseForeshadowing,
-        id: 'FB-001',
-        content: '旧钥匙',
-        status: 'pending',
-        plantChapter: 12
-      },
-      {
-        ...baseForeshadowing,
-        id: 'FB-002',
-        content: '铃声三响',
-        status: 'planted',
-        expectedCollect: 12
-      },
-      {
-        ...baseForeshadowing,
-        id: 'FB-003',
-        content: '下卷才回收',
-        status: 'planted',
-        expectedCollect: 30
-      }
-    ]
-
-    const result = buildForeshadowingReminders(12, outline, foreshadowings)
-    expect(result.plant).toHaveLength(2)
-    expect(result.plant.map((r) => r.content)).toEqual(['窗外黑影', '旧钥匙'])
-    expect(result.reinforce).toHaveLength(1)
-    expect(result.reinforce[0].id).toBe('FB-001')
-    expect(result.collect).toHaveLength(1)
-    expect(result.collect[0].id).toBe('FB-002')
+  const f = (id: string, patch: Partial<Foreshadowing> = {}): Foreshadowing => ({
+    ...baseForeshadowing, id, content: id, status: 'planted', plantChapter: 1, ...patch
   })
 
-  it('filters reinforce by plantChapter', () => {
-    const outline: DetailedOutlineItem = {
-      chapterNumber: 5,
-      foreshadowings: []
-    }
-    const foreshadowings: Foreshadowing[] = [
-      {
-        ...baseForeshadowing,
-        id: 'FB-001',
-        content: '本章伏笔',
-        status: 'pending',
-        plantChapter: 5
-      },
-      {
-        ...baseForeshadowing,
-        id: 'FB-002',
-        content: '其他章节伏笔',
-        status: 'pending',
-        plantChapter: 10
-      },
-      {
-        ...baseForeshadowing,
-        id: 'FB-003',
-        content: '无指定章节',
-        status: 'pending'
-      }
-    ]
-
-    const result = buildForeshadowingReminders(5, outline, foreshadowings)
-    expect(result.reinforce).toHaveLength(1)
-    expect(result.reinforce[0].content).toBe('本章伏笔')
+  it('distinguishes a new planting plan, a mentioned existing thread, and a collection reminder', () => {
+    const outline: DetailedOutlineItem = { chapterNumber: 12, foreshadowings: ['窗外黑影', '旧钥匙'] }
+    const result = buildForeshadowingReminders(12, outline, [
+      f('FB-001', { content: '旧钥匙', plantChapter: 3 }),
+      f('FB-002', { content: '铃声三响', expectedCollect: 12 }),
+      f('FB-003', { content: '下卷才回收', plantChapter: 10, expectedCollect: 30 })
+    ])
+    expect(result.plant.map((item) => item.content)).toEqual(['窗外黑影'])
+    expect(result.reinforce.map((item) => item.id)).toEqual(['FB-001'])
+    expect(result.collect.map((item) => item.id)).toEqual(['FB-002'])
+    expect(result.collect[0].overdue).toBe(false)
   })
 
-  it('deduplicates blank and repeated reminders', () => {
-    const outline: DetailedOutlineItem = {
-      chapterNumber: 3,
-      foreshadowings: ['  铜镜  ', '', '铜镜']
-    }
-    const foreshadowings: Foreshadowing[] = [
-      {
-        ...baseForeshadowing,
-        id: 'FB-001',
-        content: ' 铜镜 ',
-        status: 'pending',
-        plantChapter: 3
-      }
-    ]
+  it('puts pending plans in plant and does not pretend an unplanted thread can be reinforced', () => {
+    const result = buildForeshadowingReminders(5, null, [
+      f('本章计划', { status: 'pending', plantChapter: 5 }),
+      f('他章计划', { status: 'pending', plantChapter: 10 }),
+      f('未安排', { status: 'pending', plantChapter: undefined })
+    ])
+    expect(result.plant.map((item) => item.id)).toEqual(['本章计划'])
+    expect(result.reinforce).toEqual([])
+  })
 
-    const result = buildForeshadowingReminders(3, outline, foreshadowings)
-    // outline + pending 都含"铜镜"，但 plant 段去重
+  it('deduplicates the same library record without merging distinct IDs with identical wording', () => {
+    const result = buildForeshadowingReminders(3, { chapterNumber: 3, foreshadowings: [' 铜镜 ', '', '铜镜'] }, [
+      f('one', { content: ' 铜镜 ', status: 'pending', plantChapter: 3 })
+    ])
     expect(result.plant).toHaveLength(1)
-    expect(result.plant[0].content).toBe('铜镜')
-    expect(result.reinforce).toHaveLength(1)
+    expect(result.plant[0]).toMatchObject({ id: 'one', content: '铜镜' })
+    const due = buildForeshadowingReminders(3, null, [
+      f('one', { content: '铜镜', expectedCollect: 3 }), f('two', { content: '铜镜', expectedCollect: 3 })
+    ])
+    expect(due.collect.map((item) => item.id)).toEqual(['one', 'two'])
+  })
+
+  it('keeps overdue threads visible, including partial/reinforced, but leaves deferred threads paused', () => {
+    const result = buildForeshadowingReminders(20, null, [
+      f('overdue', { status: 'partial', expectedCollect: 15, partialCollectChapters: [12] }),
+      f('due', { status: 'reinforced', expectedCollect: 20, reinforcementChapters: [14] }),
+      f('paused', { status: 'deferred', expectedCollect: 10 }),
+      f('closed', { status: 'collected', expectedCollect: 20, actualCollect: 19 })
+    ])
+    expect(result.collect.map((item) => item.id)).toEqual(['overdue', 'due'])
+    expect(result.collect[0].overdue).toBe(true)
+    expect(result.reinforce).toEqual([])
+  })
+
+  it('restores a later collection when viewing an earlier chapter and excludes future planting', () => {
+    const result = buildForeshadowingReminders(10, null, [
+      f('futureCollected', { status: 'collected', expectedCollect: 10, actualCollect: 30, reinforcementChapters: [7, 22] }),
+      f('futurePlanted', { status: 'planted', plantChapter: 20, expectedCollect: 10 })
+    ])
+    expect(result.collect.map((item) => item.id)).toEqual(['futureCollected'])
+    expect(result.reinforce).toEqual([])
+  })
+
+  it('reminds about long-silent planted threads, respects recent progress, and caps background suggestions', () => {
+    const result = buildForeshadowingReminders(30, { chapterNumber: 30, foreshadowings: ['本章相关'] }, [
+      ...Array.from({ length: 10 }, (_, index) => f(`old-${index}`, { plantChapter: index + 1 })),
+      f('relevant', { content: '本章相关', plantChapter: 28 }),
+      f('recent', { reinforcementChapters: [27] }),
+      f('partialRecent', { status: 'partial', partialCollectChapters: [25] })
+    ])
+    expect(result.reinforce).toHaveLength(8)
+    expect(result.reinforce[0].id).toBe('relevant')
+    expect(result.reinforce.some((item) => item.id === 'recent' || item.id === 'partialRecent')).toBe(false)
+    expect(result.reinforce[1].id).toBe('old-0')
+    const required = Array.from({ length: 10 }, (_, index) => f(`required-${index}`, { plantChapter: 20 }))
+    expect(buildForeshadowingReminders(30, { chapterNumber: 30, foreshadowings: required.map((item) => item.content) }, required).reinforce)
+      .toHaveLength(10)
   })
 })
 
@@ -124,32 +107,42 @@ describe('parseForeshadowReceipt', () => {
     expect(stripped).toBe(input)
   })
 
-  it('returns empty arrays when JSON is invalid but tag exists', () => {
+  it('preserves the original text when the receipt JSON is invalid', () => {
     const input = '正文【本章伏笔回执】{invalid json}'
     const { receipt, stripped } = parseForeshadowReceipt(input)
-    expect(receipt).not.toBeNull()
-    expect(receipt!.planted).toEqual([])
-    expect(receipt!.collected).toEqual([])
-    expect(stripped).toBe('正文')
+    expect(receipt).toBeNull()
+    expect(stripped).toBe(input)
   })
 
-  it('filters out non-string items in planted/collected', () => {
+  it('does not silently accept malformed receipt fields', () => {
     const input = '正文【本章伏笔回执】{"planted":["a", 123, null],"collected":[456]}'
-    const { receipt } = parseForeshadowReceipt(input)
-    expect(receipt).not.toBeNull()
-    expect(receipt!.planted).toEqual(['a'])
-    expect(receipt!.collected).toEqual([])
+    const { receipt, stripped } = parseForeshadowReceipt(input)
+    expect(receipt).toBeNull()
+    expect(stripped).toBe(input)
   })
 
-  it('handles receipt tag embedded in the middle of text', () => {
+  it('preserves all prose following an embedded receipt-like JSON', () => {
     const input = `前段
 【本章伏笔回执】{"planted":["伏笔"]}
 后段`
     const { receipt, stripped } = parseForeshadowReceipt(input)
-    expect(receipt).not.toBeNull()
-    expect(receipt!.planted).toEqual(['伏笔'])
-    // 后段应被保留（strip 只从标签开始截断）
-    expect(stripped).toBe('前段')
+    expect(receipt).toBeNull()
+    expect(stripped).toBe(input)
+  })
+
+  it('does not truncate prose that mentions the tag before the real terminal receipt', () => {
+    const body = '信封上写着“【本章伏笔回执】”。林舟把它塞进口袋。\n\n\n门外有人喊他的名字。'
+    const input = body + '\n【本章伏笔回执】' + JSON.stringify({
+      planted: ['信封上印着【本章伏笔回执】', '符号 } 与引号 " 都在信上'], collected: []
+    })
+    const { receipt, stripped } = parseForeshadowReceipt(input)
+    expect(stripped).toBe(body)
+    expect(receipt?.planted).toEqual(['信封上印着【本章伏笔回执】', '符号 } 与引号 " 都在信上'])
+  })
+
+  it.each(['{}', '[]', '{"other":[]}', '{"planted":"正文"}'])('preserves invalid receipt shape %s', (json) => {
+    const input = '正文。\n【本章伏笔回执】' + json
+    expect(parseForeshadowReceipt(input)).toEqual({ receipt: null, stripped: input })
   })
 })
 

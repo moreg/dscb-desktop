@@ -3,6 +3,7 @@ import { ForeshadowingMdRepo } from '../data/skill-format/foreshadowing-md-repo'
 import { safeHandle } from './safe-handle'
 import type { TrackingView } from '../../shared/types'
 import type { ProjectService } from '../data/project-service'
+import { isOpenForeshadowing } from '../../shared/foreshadowing-state'
 
 /**
  * 追踪 IPC：读取 `追踪/` 目录的聚合展示数据。
@@ -21,6 +22,7 @@ export function registerTrackingIpc(projectService: ProjectService): void {
       pending: 0,
       planted: 0,
       collected: 0,
+      deferred: 0,
       missed: 0
     }
     try {
@@ -28,8 +30,9 @@ export function registerTrackingIpc(projectService: ProjectService): void {
       foreshadowingSummary = {
         total: list.length,
         pending: list.filter((f) => f.status === 'pending').length,
-        planted: list.filter((f) => f.status === 'planted').length,
+        planted: list.filter(isOpenForeshadowing).length,
         collected: list.filter((f) => f.status === 'collected').length,
+        deferred: list.filter((f) => f.status === 'deferred').length,
         missed: list.filter((f) => f.status === 'missed').length
       }
     } catch (err) {

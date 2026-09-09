@@ -31,9 +31,16 @@ import {
   type PlotChapterSummary
 } from './memory/plot-point-repo'
 import { evaluateChapterSelfCheck } from './chapter-self-check'
+import { ProseMemoryIndex, hashProse, type ProseMemoryHit } from './memory/prose-memory-index'
+import { buildCharacterAliasGroups, projectCharactersForChapter, type CharacterAliasGroup } from './memory/character-memory-context'
+import { ChapterMemoryCoordinator, type MemorySyncTicket } from './chapter-memory-coordinator'
+import { normalizeMemoryEvidence, validateMemoryCandidate } from './memory-evidence-validator'
+import { writeJsonAtomic } from './atomic'
 import { extractPowerBoundaryBullets } from './power-boundary'
 import { readText, parseDoc } from './skill-format/md-parser'
-import { isForeshadowMatch } from '../../shared/parsers'
+import { parseForeshadowReceipt } from '../../shared/parsers'
+import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
+import { formatChapterProse } from '../../shared/format-chapter-prose'
 import { DeslopService, hasRealChange } from './deslop/deslop-service'
 import {
   resolveDeslopTextOverrides,
@@ -127,6 +134,7 @@ export interface ChapterPromptMeta {
   writtenWords: number
   /** 整章目标是否真的来自细纲；false 表示走了兜底，前端应提示补细纲 */
   fromOutline: boolean
+  bound: 'min' | 'about'
 }
 
 export interface ChapterPrompt {
@@ -177,9 +185,7 @@ const ASK_ADJACENT_MAX_CHARS = 10_000
  * 反复点续写会让前部单调增长，每轮全量重发；这里只保留开头（防重复写）与
  * 结尾（保衔接），中间省略。
  */
-const EXISTING_TEXT_MAX_CHARS = 6000
-/** 超限时保留的开头字符数（其余额度留给结尾）。 */
-const EXISTING_TEXT_HEAD_CHARS = 2000
+const EXISTING_TEXT_MAX_CHARS = 40_000
 
 /**
  * 续写「继续展开」模式的最小增量字数。
@@ -206,6 +212,13 @@ function tokensForWords(words: number): number {
 }
 
 export class WriteService {
+  private readonly memoryCoordinator = new ChapterMemoryCoordinator()
+
+  /** Draft edits/undo invalidate in-flight extraction before it can commit. */
+  invalidateChapterMemorySync(projectId: string, chapterNumber: number): void {
+    this.memoryCoordinator.invalidate(projectId, chapterNumber)
+  }
+
   constructor(
     private readonly projectService: ProjectService,
     private readonly llm: LlmService,
@@ -237,6 +250,10 @@ export class WriteService {
     /** 续写模式；无 existingText 时为 undefined。供调用方（写后自检降级）判断本章是否还没写完 */
     continueMode?: 'extend' | 'finish'
   }> {
+    // 同章上下文必须完整；过大时显式要求分章，不能删掉中段后假装知道剧情进度。
+    if ((existingText?.trim().length ?? 0) > EXISTING_TEXT_MAX_CHARS) {
+      throw new Error('CHAPTER_CONTEXT_TOO_LARGE')
+    }
     const dir = await this.projectService.resolveDir(projectId)
     const project = await this.projectService.getProjectData(projectId)
     const style = await this.loadStyleProfile(
@@ -288,7 +305,9 @@ export class WriteService {
         targetWords = remaining
       } else {
         continueMode = 'finish'
-        targetWords = CONTINUE_FINISH_WORDS
+        targetWords = wordTarget.bound === 'about'
+          ? Math.min(CONTINUE_FINISH_WORDS, Math.max(0, remaining))
+          : CONTINUE_FINISH_WORDS
       }
     }
 
@@ -318,6 +337,7 @@ export class WriteService {
       characters: ctx.characters,
       tracking: ctx.tracking,
       recentPlotSummaries: ctx.recentPlotSummaries,
+      recalledProse: await this.recallChapterEvidence(dir, chapterNumber, ctx, existingText, tempContext),
       chapterNumber,
       targetWords,
       chapterTargetWords,
@@ -338,6 +358,8 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    this.invalidateChapterMemorySync(projectId, chapterNumber)
+    await this.memoryCoordinator.exclusive(projectId, async () => undefined)
     const prompt = await this.buildChapterPrompt(
       projectId,
       chapterNumber,
@@ -354,15 +376,23 @@ export class WriteService {
       targetWords,
       chapterTargetWords: prompt.chapterTargetWords,
       writtenWords: prompt.writtenWords,
-      fromOutline: prompt.wordTarget.fromOutline
+      fromOutline: prompt.wordTarget.fromOutline,
+      bound: prompt.wordTarget.bound
     })
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
-    })
-    return full
+    }, opts.existingText)
+    // 批量/手机端拿返回值，编辑器拿流式token；两条路径都只保留正文。
+    const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
+    const dir = await this.projectService.resolveDir(projectId)
+    const previousPassages = await new ProseMemoryIndex(dir).searchBefore(chapterNumber,
+      prose, { maxChars: 4800, maxResults: 8 })
+    // 高置信大段复用也检查跨章；短对白、必要呼应由守卫豁免。
+    if (previousPassages.length) assertNovelProse(prose, previousPassages.map((p) => p.text).join('\n\n'))
+    return prose
   }
 
   /**
@@ -464,6 +494,8 @@ export class WriteService {
     confirmedPlan?: string | null
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    this.invalidateChapterMemorySync(projectId, chapterNumber)
+    await this.memoryCoordinator.exclusive(projectId, async () => undefined)
     const prompt = await this.buildAdjustChapterPrompt(
       projectId,
       chapterNumber,
@@ -489,7 +521,8 @@ export class WriteService {
    */
   private async generateProseStream(
     userPrompt: string,
-    opts: GenerateOptions
+    opts: GenerateOptions,
+    existingText?: string
   ): Promise<string> {
     const controller = new AbortController()
     const onUserAbort = (): void => {
@@ -521,7 +554,7 @@ export class WriteService {
         }
       })
       if (metaHit) throw new Error(LLM_AGENT_META_ERROR)
-      assertNovelProse(full)
+      assertNovelProse(full, existingText)
       return full
     } catch (err) {
       if (metaHit) throw new Error(LLM_AGENT_META_ERROR, { cause: err })
@@ -619,8 +652,8 @@ export class WriteService {
 
   /**
    * LLM 深度审稿（M3）：跑角色崩坏/逻辑漏洞等语义检查项。
-   * 启用项由 settings.reviewRules.checks 决定（llm 类 checkId）；为空 = 全部 llm 项都跑。
-   * 失败兜底为空数组，永不 reject。角色卡/细纲从磁盘读取（用于语义对照）。
+   * 启用项由 settings.reviewRules.checks 决定；未指定时跑全部，显式空数组不跑。
+   * 读取历史或执行审稿失败时返回未完成诊断，避免误报通过。
    */
   async runDeepReview(
     projectId: string,
@@ -632,8 +665,11 @@ export class WriteService {
     let enabledChecks: ReviewCheckId[] | undefined
     let characterCards = ''
     let outline = ''
+    let continuityContext = ''
     let customLlmChecks: CustomReviewCheck[] | undefined
     const dir = await this.projectService.resolveDir(projectId).catch(() => null)
+    if (!dir) return [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:context',
+      message: '深度审稿未完成：无法读取项目历史证据', suggestion: '请确认项目仍可访问后重试审稿。' }]
 
     try {
       genre = (await this.projectService.getProjectData(projectId)).genre
@@ -696,11 +732,32 @@ export class WriteService {
       } catch {
         // skip
       }
+      // 审稿与写作使用同一份有来源的历史证据；否则跨章矛盾无法核对。
+      try {
+        const ctx = await this.loadChapterContext(dir, chapterNumber)
+        const evidence = await this.recallChapterEvidence(dir, chapterNumber, ctx, content)
+        characterCards = ctx.characters
+          .filter((c) => content.includes(c.name) || ctx.detail?.charactersAppearing?.includes(c.name))
+          .map(renderCharacterDetail).join('\n')
+        outline = ctx.detail ? renderChapterDetail(ctx.detail, '本章细纲（计划，不能当成已发生）') : outline
+        continuityContext = [
+          '正文原文优先于摘要；细纲是计划。引文中的猜测、否定、谎言或计划不能直接当成已发生事实。',
+          `上一章实际正文末尾：\n${ctx.prevTail || '（无可用正文）'}`,
+          ...renderRecentPlotSummaries(ctx.recentPlotSummaries, chapterNumber),
+          ...(ctx.tracking ? renderTrackingSection(ctx.tracking, chapterNumber) : []),
+          ...renderRecalledProse(evidence),
+          ...ctx.settingsEvolution.map((e) => `已揭晓设定变更 ${e.chapter}：${e.summary}`)
+        ].join('\n\n')
+      } catch (err) {
+        return [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:context',
+          message: '深度审稿未完成：历史正文或状态读取失败',
+          suggestion: `请重试审稿；不能将本次当作通过。${(err as Error).message}` }]
+      }
     }
 
     return this.reviewFlow.runDeepReview(
       content,
-      { chapterNumber, genre, enabledChecks, characterCards, outline, customLlmChecks },
+      { chapterNumber, genre, enabledChecks, characterCards, outline, customLlmChecks, continuityContext },
       { ...opts, meta: { feature: 'deepReview', projectId, ...opts.meta } }
     )
   }
@@ -886,7 +943,8 @@ export class WriteService {
         // skip
       }
     }
-    return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, opts)
+    const knownForeshadowings = await new ForeshadowingMdRepo(dir).list()
+    return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, opts, knownForeshadowings)
   }
 
   /**
@@ -896,11 +954,21 @@ export class WriteService {
    */
   async applyMemory(
     projectId: string,
-    extraction: MemoryExtraction
+    extraction: MemoryExtraction,
+    sourceContent?: string
   ): Promise<MemoryApplyResult> {
     const dir = await this.projectService.resolveDir(projectId)
+    if (sourceContent === undefined) {
+      // UI/API entry points use the same source/version/review gate as post-write synchronization.
+      const content = await new ProseRepo(dir).read(extraction.chapterNumber)
+      const result = await this.syncChapterAfterWrite(projectId, extraction.chapterNumber, content, {
+        extraction, skipIfDisabled: false, memoryOnly: true
+      })
+      if (!result) throw new Error('记忆核验未完成，请重新提取')
+      return result.memory
+    }
     const writer = new MemoryWriter(dir)
-    return writer.applyAutomatic(extraction)
+    return writer.applyAutomatic(extraction, { sourceContent })
   }
 
   /**
@@ -914,6 +982,14 @@ export class WriteService {
       memory: MemoryApplyResult
       settings: SettingsApplyResult
     }
+  ): Promise<import('../../shared/types').ChapterSyncUndoResult> {
+    this.invalidateChapterMemorySync(projectId, payload.extraction.chapterNumber)
+    return this.memoryCoordinator.exclusive(projectId, () => this.revertChapterSync(projectId, payload))
+  }
+
+  private async revertChapterSync(
+    projectId: string,
+    payload: { extraction: MemoryExtraction; memory: MemoryApplyResult; settings: SettingsApplyResult }
   ): Promise<import('../../shared/types').ChapterSyncUndoResult> {
     const dir = await this.projectService.resolveDir(projectId)
     const extraction = payload.extraction
@@ -999,8 +1075,8 @@ export class WriteService {
         await Promise.all([
           this.loadSelfCheckDetail(dir, chapterNumber),
           this.loadSelfCheckForeshadowings(dir),
-          new SettingsMdRepo(dir).read().catch(() => null),
-          new SettingsWriter(dir).readRecentEvolution(5).catch(() => [] as SettingsEvolutionEntry[]),
+          new SettingsMdRepo(dir).read(chapterNumber + 1).catch(() => null),
+          new SettingsWriter(dir).readRecentEvolution(5, chapterNumber + 1).catch(() => [] as SettingsEvolutionEntry[]),
           chapterNumber > 1
             ? new ProseRepo(dir).read(chapterNumber - 1).then((t) => tail(t, PREV_TAIL_CHARS)).catch(() => '')
             : Promise.resolve(''),
@@ -1042,6 +1118,7 @@ export class WriteService {
             category: 'structure',
             label: '自检执行',
             verdict: 'fail',
+            repairKind: 'execution_error',
             detail: `自检未完成：${(err as Error).message}`
           }
         ],
@@ -1111,8 +1188,7 @@ export class WriteService {
     chapterNumber: number
   ): Promise<{ plotSummary?: string; hook?: string; wordEstimate?: string } | undefined> {
     try {
-      const all = await new DetailedOutlineMdRepo(dir).listAll()
-      const d = all.find((x) => x.chapterNumber === chapterNumber)
+      const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       if (d) return { plotSummary: d.plotSummary, hook: d.hook, wordEstimate: d.wordEstimate }
     } catch {
       /* fall through */
@@ -1190,9 +1266,8 @@ export class WriteService {
           const n = parseInt(m[1], 10)
           if (n > chapterNumber) {
             const t = line.replace(/^[-*]\s*/, '').trim()
-            if (t) hints.push(t.slice(0, 120))
+            if (t) hints.push(t)
           }
-          if (hints.length >= 8) return hints
         }
       }
       return hints
@@ -1209,13 +1284,20 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts?: { skipIfDisabled?: boolean }
+    opts?: { skipIfDisabled?: boolean; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
+      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean }
   ): Promise<{
     memory: MemoryApplyResult
     settings: SettingsApplyResult
     extraction: MemoryExtraction
     selfCheck?: ChapterSelfCheckReport | null
+    deepReview?: AuditViolation[]
   } | null> {
+    const ticket = opts?.ticket ?? this.memoryCoordinator.begin(projectId, chapterNumber)
+    try {
+    const dir = await this.projectService.resolveDir(projectId)
+    const sourceHash = hashProse(content)
+    const savedBefore = opts?.savedBefore ?? hashProse(await new ProseRepo(dir).read(chapterNumber))
     const skipIfDisabled = opts?.skipIfDisabled !== false
     let memorySyncDisabled = false
     try {
@@ -1259,8 +1341,8 @@ export class WriteService {
     }
 
     // 写后自检始终尝试（与记忆同步开关解耦）
-    let selfCheck: ChapterSelfCheckReport | null = null
-    if (content?.trim()) {
+    let selfCheck: ChapterSelfCheckReport | null = opts?.selfCheck ?? null
+    if (opts?.selfCheck === undefined && content?.trim()) {
       try {
         selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
       } catch (err) {
@@ -1288,7 +1370,6 @@ export class WriteService {
     }
 
     try {
-      const dir = await this.projectService.resolveDir(projectId)
       let knownCharacters: string[] = []
       try {
         const list = await new CharacterRepo(dir).list()
@@ -1304,26 +1385,66 @@ export class WriteService {
         }
       }
 
-      const memRaw = await this.flow.extractMemoryStream(
+      const memRaw = opts?.extraction ? '' : await this.flow.extractMemoryStream(
         content,
         chapterNumber,
         knownCharacters,
-        { meta: { feature: 'autoMemorySync', projectId, chapterNumber } }
+        { signal: ticket.controller.signal, meta: { feature: 'autoMemorySync', projectId, chapterNumber } },
+        await new ForeshadowingMdRepo(dir).list()
       )
-      const extraction = parseMemoryExtractionJson(memRaw, chapterNumber)
+      const extraction = normalizeMemoryEvidence(content, opts?.extraction ?? parseMemoryExtractionJson(memRaw, chapterNumber))
 
-      let memory = emptyMemory
+      let deepReview = opts?.deepReview ?? []
+      if (opts?.deepReview === undefined && this.settings) {
+        try {
+          const rules = await this.settings.getReviewRules()
+          if (rules.enabled && rules.autoDeepReview && this.memoryCoordinator.current(ticket)) {
+            deepReview = await this.runDeepReview(projectId, content, chapterNumber, { signal: ticket.controller.signal })
+          }
+        } catch {
+          deepReview = [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:memory',
+            message: '记忆生效前的审稿未完成，请重试核对' }]
+        }
+      }
+      const issues = validateMemoryCandidate(content, extraction, deepReview, selfCheck, await new ForeshadowingMdRepo(dir).list())
+      if (!selfCheck) issues.push('写后自检未完成，记忆暂不自动生效')
+      return await this.memoryCoordinator.exclusive(projectId, async () => {
+      const stillCurrent = async (): Promise<boolean> => {
+        const savedNow = hashProse(await new ProseRepo(dir).read(chapterNumber))
+        return this.memoryCoordinator.current(ticket) && (savedNow === savedBefore || savedNow === sourceHash)
+      }
+      if (!(await stillCurrent())) {
+        return { memory: { ...emptyMemory, superseded: true }, settings: emptySettings, extraction, selfCheck, deepReview }
+      }
+      const candidateFile = join(dir, '.cache', 'memory-candidates', `chapter-${chapterNumber}.json`)
+      const candidate = { chapterNumber, sourceHash, extraction, issues, updatedAt: new Date().toISOString() }
+      await writeJsonAtomic(candidateFile, { ...candidate, status: issues.length ? 'pending' : 'validated' })
+      if (issues.length) {
+        return { memory: { ...emptyMemory, reviewRequired: issues }, settings: emptySettings, extraction, selfCheck, deepReview }
+      }
+      // Recheck after persistence as a new draft may have arrived while the candidate was being written.
+      if (!(await stillCurrent())) {
+        return { memory: { ...emptyMemory, superseded: true }, settings: emptySettings, extraction, selfCheck, deepReview }
+      }
+
+      let memory: MemoryApplyResult
       try {
-        memory = await this.applyMemory(projectId, extraction)
+        memory = await this.applyMemory(projectId, extraction, content)
       } catch (err) {
         const msg = (err as Error).message
         console.warn('[syncChapterAfterWrite] applyMemory failed:', err)
         memory = { ...emptyMemory, errors: [msg] }
       }
 
-      let settings = emptySettings
+      if (!(await stillCurrent())) {
+        const reverted = await this.revertChapterSync(projectId, { extraction, memory, settings: emptySettings })
+        await writeJsonAtomic(candidateFile, { ...candidate, status: 'superseded', rollbackErrors: reverted.memory.errors })
+        return { memory: { ...emptyMemory, superseded: true, errors: reverted.memory.errors }, settings: emptySettings, extraction, selfCheck, deepReview }
+      }
+
+      let settings: SettingsApplyResult
       try {
-        settings = await this.applySettingsPatches(projectId, extraction, {
+        settings = opts?.memoryOnly ? emptySettings : await this.applySettingsPatches(projectId, extraction, {
           onlyAuto: true
         })
       } catch (err) {
@@ -1332,8 +1453,19 @@ export class WriteService {
         settings = { ...emptySettings, errors: [msg] }
       }
 
-      return { memory, settings, extraction, selfCheck }
+      if (!(await stillCurrent())) {
+        const reverted = await this.revertChapterSync(projectId, { extraction, memory, settings })
+        await writeJsonAtomic(candidateFile, { ...candidate, status: 'superseded', rollbackErrors: [...reverted.memory.errors, ...reverted.settings.errors] })
+        return { memory: { ...emptyMemory, superseded: true, errors: reverted.memory.errors }, settings: { ...emptySettings, errors: reverted.settings.errors }, extraction, selfCheck, deepReview }
+      }
+
+      await writeJsonAtomic(candidateFile, { ...candidate, status: memory.errors.length || settings.errors.length ? 'partial' : 'applied' })
+      return { memory, settings, extraction, selfCheck, deepReview }
+      })
     } catch (err) {
+      if (!this.memoryCoordinator.current(ticket)) {
+        return { memory: { ...emptyMemory, superseded: true }, settings: emptySettings, extraction: emptyExtraction, selfCheck }
+      }
       const msg = (err as Error).message
       console.warn('[syncChapterAfterWrite] failed:', err)
       return {
@@ -1342,6 +1474,9 @@ export class WriteService {
         extraction: emptyExtraction,
         selfCheck
       }
+    }
+    } finally {
+      this.memoryCoordinator.finish(ticket)
     }
   }
 
@@ -1474,64 +1609,18 @@ export class WriteService {
     return new MemoryWriter(dir).applyNewForeshadowings(fs)
   }
 
-  /**
-   * 应用伏笔回执：把 LLM 在正文末尾写下的【本章伏笔回执】同步到伏笔库。
-   * - planted：先去伏笔库里找匹配（content 包含 / 被包含），找不到则新建 pending
-   * - collected：按内容匹配现有 planted 伏笔，标记为 collected
-   * - 返回实际变更条数，便于 UI 反馈
-   */
+  /** Legacy receipts have no source evidence; they may never mutate actual story state. */
   async applyForeshadowReceipt(
-    projectId: string,
-    chapterNumber: number,
+    _projectId: string,
+    _chapterNumber: number,
     receipt: { planted?: string[]; collected?: string[] }
   ): Promise<{ planted: number; collected: number; skipped: string[] }> {
-    const dir = await this.projectService.resolveDir(projectId)
-    const repo = new ForeshadowingMdRepo(dir)
-    const result = { planted: 0, collected: 0, skipped: [] as string[] }
-
-    let list = await repo.list()
-
-    // 1. 处理回收：用严格匹配规则（长度比 + 包含关系），调用 collect()
-    for (const text of receipt.collected ?? []) {
-      const t = text.trim()
-      if (!t) continue
-      const found = list.find(
-        (x) => x.status === 'planted' && isForeshadowMatch(x.content, t)
-      )
-      if (!found) {
-        result.skipped.push(`回收未匹配：${t}`)
-        continue
-      }
-      try {
-        await repo.collect(found.id, chapterNumber)
-        result.collected++
-        list = await repo.list()
-      } catch (e) {
-        result.skipped.push(`回收失败：${t} (${(e as Error).message})`)
-      }
+    return {
+      planted: 0,
+      collected: 0,
+      skipped: [...(receipt.planted ?? []), ...(receipt.collected ?? [])]
+        .filter((text) => text.trim()).map((text) => `回执缺少正文依据，未改动实际状态，请通过写后记忆核验：${text}`)
     }
-
-    // 2. 处理埋设：先尝试匹配已有 pending 伏笔（更新 plantChapter），找不到则新建
-    for (const text of receipt.planted ?? []) {
-      const t = text.trim()
-      if (!t) continue
-      const found = list.find(
-        (x) => x.status === 'pending' && isForeshadowMatch(x.content, t)
-      )
-      try {
-        if (found) {
-          await repo.plant(found.id, chapterNumber)
-        } else {
-          await repo.create({ content: t, expectedCollect: undefined, note: undefined })
-        }
-        result.planted++
-        list = await repo.list()
-      } catch (e) {
-        result.skipped.push(`埋设失败：${t} (${(e as Error).message})`)
-      }
-    }
-
-    return result
   }
 
   /**
@@ -1661,13 +1750,19 @@ export class WriteService {
      * 只透传 signal，不透传 onToken——那些步骤的 JSON 输出不该刷进编辑器。
      */
     const flowOpts = (feature: string): GenerateOptions => ({
-      signal: opts.signal,
+      signal: memoryTicket.controller.signal,
       meta: { feature, projectId, chapterNumber }
     })
 
     // 1. 生成正文（流式 token 由 opts.onToken 推送）
     onProgress('generating')
     const content = await this.generateChapterStream(projectId, chapterNumber, opts)
+    const memoryTicket = this.memoryCoordinator.begin(projectId, chapterNumber)
+    const savedBefore = hashProse(await new ProseRepo(dir).read(chapterNumber))
+    const cancelMemory = (): void => { memoryTicket.controller.abort() }
+    opts.signal?.addEventListener('abort', cancelMemory, { once: true })
+    if (opts.signal?.aborted) cancelMemory()
+    try {
 
     // 2. 质检 + 写后自检清单对照
     onProgress('audit')
@@ -1759,29 +1854,16 @@ export class WriteService {
         content,
         chapterNumber,
         knownCharacters,
-        flowOpts('batchMemory')
+        flowOpts('batchMemory'),
+        await new ForeshadowingMdRepo(dir).list()
       )
       memory = parseMemoryExtractionJson(memRaw, chapterNumber)
     } catch (err) {
       console.warn('[runFullFlowForChapter] Failed to extract memory:', err)
-      // skip
+      memory.parseError = `记忆提取失败：${(err as Error).message}`
     }
 
-    // 4.5 自动落盘记忆与设定（与单章 syncChapterAfterWrite 一致；受 autoMemorySync 控制）
-    if (await this.isAutoMemorySyncEnabled()) {
-      onProgress('memoryApply')
-      try {
-        await this.applyMemory(projectId, memory)
-      } catch (err) {
-        console.warn('[runFullFlowForChapter] Failed to apply memory:', err)
-      }
-      onProgress('settingsApply')
-      try {
-        await this.applySettingsPatches(projectId, memory, { onlyAuto: true })
-      } catch (err) {
-        console.warn('[runFullFlowForChapter] Failed to apply settings patches:', err)
-      }
-    }
+    // 记忆在深审完成后统一核对提交，提取阶段不改变全书状态。
 
     // 5. 节奏评估（直接传 content）
     onProgress('rhythmEval')
@@ -1839,10 +1921,14 @@ export class WriteService {
         }
       } catch (err) {
         console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
-        // skip
+        deepReview = [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:batch',
+          message: '深度审稿未完成，记忆暂不自动生效' }]
       }
     }
 
+    if (await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
+    const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
+      { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore })
     onProgress('done')
     return {
       chapterNumber,
@@ -1850,10 +1936,15 @@ export class WriteService {
       audit,
       outlineDiff,
       memory,
+      memoryApply: sync?.memory,
       rhythm,
       figure,
       deepReview,
       selfCheck
+    }
+    } finally {
+      opts.signal?.removeEventListener('abort', cancelMemory)
+      this.memoryCoordinator.finish(memoryTicket)
     }
   }
 
@@ -2333,6 +2424,30 @@ export class WriteService {
     }
   }
 
+  private async recallChapterEvidence(
+    dir: string,
+    chapterNumber: number,
+    ctx: ChapterContext,
+    existingText = '',
+    instruction = ''
+  ): Promise<ProseMemoryHit[]> {
+    const appearing = ctx.detail?.charactersAppearing ?? []
+    const activeNames = ctx.characters.filter((c) =>
+      appearing.includes(c.name) || existingText.slice(-4000).includes(c.name)
+    ).map((c) => c.name)
+    return new ProseMemoryIndex(dir).searchBefore(chapterNumber, {
+      text: [ctx.detail?.plotSummary, ctx.detail?.hook, ctx.detail?.writingRequirements,
+        instruction, existingText.slice(-2000)].filter(Boolean).join('\n'),
+      characters: [...new Set([...activeNames, ...appearing])],
+      characterAliases: ctx.characterAliases,
+      props: ctx.prevEndingState?.props ?? [],
+      foreshadowings: ctx.foreshadowings.filter((f) =>
+        isOpenForeshadowing(f) && ((f.expectedCollect != null && f.expectedCollect <= chapterNumber) ||
+          existingText.includes(f.content))
+      ).map((f) => f.content)
+    }, { maxChars: 4800, maxResults: 8 })
+  }
+
   /**
    * 加载续写所需的全部上下文。
    * 优先读 skill-format md 仓储（细纲/节奏图谱/角色卡/伏笔/正文），
@@ -2514,7 +2629,7 @@ export class WriteService {
     // 设定目录（题材定位/世界观/势力/规则）
     let settings: SettingsContext | null = null
     try {
-      settings = await new SettingsMdRepo(dir).read()
+      settings = await new SettingsMdRepo(dir).read(chapterNumber)
     } catch (err) {
       console.warn('[loadChapterContext] Failed to load settings:', err)
       // skip
@@ -2523,10 +2638,14 @@ export class WriteService {
     // 近期设定演进（正文已揭晓补丁，优先于旧底稿冲突项）
     let settingsEvolution: SettingsEvolutionEntry[] = []
     try {
-      settingsEvolution = await new SettingsWriter(dir).readRecentEvolution(5)
+      settingsEvolution = await new SettingsWriter(dir).readRecentEvolution(5, chapterNumber)
     } catch (err) {
       console.warn('[loadChapterContext] Failed to load settings evolution:', err)
     }
+
+    const laterProseExists = (await new ProseRepo(dir).listChapterNumbers()).some((n) => n >= chapterNumber)
+    const characterAliases = buildCharacterAliasGroups(characters, chapterNumber, { excludeUndated: laterProseExists })
+    characters = projectCharactersForChapter(characters, chapterNumber, tracking?.characterStates ?? [], laterProseExists)
 
     return {
       mainSynopsis,
@@ -2538,8 +2657,9 @@ export class WriteService {
       prevTail,
       prevEndingState,
       rhythmEntry,
-      foreshadowings,
+      foreshadowings: foreshadowingsBeforeChapter(foreshadowings, chapterNumber),
       characters,
+      characterAliases,
       tracking,
       recentPlotSummaries
     }
@@ -2625,6 +2745,7 @@ export class WriteService {
 }
 
 interface ChapterContext {
+  characterAliases?: CharacterAliasGroup[]
   mainSynopsis: string
   volumeOutline?: VolumeOutline
   settings: SettingsContext | null
@@ -2642,18 +2763,11 @@ interface ChapterContext {
 }
 
 /**
- * 截断续写时注入的「本章已写正文前部」。
- * 保留开头（模型据此避免重复已写情节）与结尾（衔接靠这段），中间省略并标注省略字数，
- * 避免反复续写时把整章前部一轮轮全量重发。
+ * 验证本章前文预算并保留全文；超预算明确失败，不删除中段事实。
  */
-function clipExistingText(s: string): string {
-  if (s.length <= EXISTING_TEXT_MAX_CHARS) return s
-  const head = s.slice(0, EXISTING_TEXT_HEAD_CHARS)
-  const tailPart = s.slice(-(EXISTING_TEXT_MAX_CHARS - EXISTING_TEXT_HEAD_CHARS))
-  const omitted = s.length - head.length - tailPart.length
-  // 标记刻意不用「（此处省略…）」这种括号省略句式：deslop 的占位符硬规则会拦这个形状
-  // （check-degeneration.ts PLACEHOLDER_PATTERNS），模型照着仿写一句回吐就是 blocking。
-  return `${head}\n\n【已写正文·省略本章中段 ${omitted} 字：这段情节已经发生过，不要重写也不要复述】\n\n${tailPart}`
+function validateExistingText(s: string): string {
+  if (s.length > EXISTING_TEXT_MAX_CHARS) throw new Error('CHAPTER_CONTEXT_TOO_LARGE')
+  return s
 }
 
 /** 取尾部 n 字符（按字符数，不按字节） */
@@ -2679,9 +2793,11 @@ interface RenderInput {
   tracking?: TrackingContext | null
   /** 中程记忆：本章之前最近若干章剧情摘要 */
   recentPlotSummaries?: PlotChapterSummary[]
+  /** 从本章之前的正文召回，保留章号、原文和来源定位。 */
+  recalledProse?: ProseMemoryHit[]
   chapterNumber: number
   /**
-   * 本次要写的目标字数（用于强约束 LLM 写够）。
+   * 本次新增篇幅的参考预算，不能用它强迫模型填充已完成的剧情。
    * 续写时是「还要再写多少」，不是整章字数。
    */
   targetWords: number
@@ -2938,33 +3054,34 @@ function renderUserPrompt(input: RenderInput): string {
   if (input.recentPlotSummaries && input.recentPlotSummaries.length > 0) {
     parts.push(...renderRecentPlotSummaries(input.recentPlotSummaries, input.chapterNumber))
   }
+  parts.push(...renderRecalledProse(input.recalledProse ?? []))
 
-  // 6. 伏笔
+  // 6. Actual state and planning dates serve different purposes.
   if (input.foreshadowings.length > 0) {
-    parts.push('---')
-    parts.push('# 伏笔追踪')
-    const planted = input.foreshadowings.filter((f) => f.status === 'planted')
-    const pending = input.foreshadowings.filter((f) => f.status === 'pending')
-    const dueNow = planted.filter((f) => f.expectedCollect === input.chapterNumber)
+    parts.push('---', '# 伏笔追踪')
+    const planted = input.foreshadowings.filter(isOpenForeshadowing)
+    const dueNow = planted.filter((f) => f.expectedCollect != null && f.expectedCollect <= input.chapterNumber)
     if (dueNow.length > 0) {
-      parts.push(`**【硬性约束 · 本章必须回收的伏笔（${dueNow.length} 条）】**`)
-      parts.push('必须在正文中给出明确回收：')
-      parts.push('- 对话揭示（角色主动说出）或物品出场 / 场景重现 / 角色回忆 / 旁白点破均可')
-      parts.push('- 若主线剧情实在无法回收，也必须在章末用一句"对话"或"事件"明确点破伏笔内容')
-      parts.push('禁止把必须回收的伏笔继续留到下一章。')
-      for (const f of dueNow) parts.push(`- ${f.content}`)
+      parts.push(`**【到期与逾期伏笔 · 核对推进安排（${dueNow.length} 条）】**`)
+      parts.push('预计回收章是计划窗口。因果与人物认知条件成熟时回应原问题；条件不足时可强化、部分揭示或合理延期，保留未解问题，不为赶日期强行揭底。')
+      parts.push('完整回收必须回答原伏笔的核心疑问或兑现承诺；提到道具、回忆、场景重现和猜测仅是线索，不能当作已回收。')
+      for (const f of dueNow.slice(0, 12)) parts.push(`- [${f.id}] ${f.content}（原计划第 ${f.expectedCollect} 章；${f.status === 'partial' ? '仅部分揭示' : f.status === 'reinforced' ? '已强化' : '已埋设'}）`)
     }
+    const pending = input.foreshadowings.filter((f) => f.status === 'pending' &&
+      input.chapterDetail?.foreshadowings?.some((plan) => plan.includes(f.id) || plan.includes(f.content)))
     if (pending.length > 0) {
-      parts.push('**【软约束 · 建议本章铺垫的伏笔】**')
-      parts.push('如本章剧情合适，请顺势埋下 1-2 条（不要堆砌，避免生硬）：')
-      for (const f of pending.slice(0, 8)) parts.push(`- ${f.content}`)
+      parts.push('**【细纲计划铺设】**', '仅在本章场景需要时自然埋设，不堆砌；细纲记录不代表正文已经埋下。')
+      for (const f of pending.slice(0, 8)) parts.push(`- [${f.id}] ${f.content}`)
     }
-    const otherPlanted = planted.filter((f) => !dueNow.includes(f))
-    if (otherPlanted.length > 0) {
-      parts.push('**【硬性约束 · 已埋设但未到本章回收的伏笔】**')
-      parts.push('必须避免在本章意外暴露、提前回收或矛盾：')
-      for (const f of otherPlanted.slice(0, 8))
-        parts.push(`- ${f.content}（埋设于第 ${f.plantChapter ?? '?'} 章，预计第 ${f.expectedCollect ?? '?'} 章回收）`)
+    const later = planted.filter((f) => !dueNow.includes(f))
+    if (later.length > 0) {
+      parts.push('**【开放伏笔 · 保持一致】**', '本章需要时可推进线索；遵守细纲的揭示范围和人物信息差，不泄漏尚未获得的真相，不反复展示同一线索充数。')
+      for (const f of later.slice(0, 8)) parts.push(`- [${f.id}] ${f.content}（实际埋设第 ${f.plantChapter ?? '?'} 章，计划回收${f.expectedCollect == null ? '未定' : `第 ${f.expectedCollect} 章`}）`)
+    }
+    const deferred = input.foreshadowings.filter((f) => f.status === 'deferred')
+    if (deferred.length) {
+      parts.push('**【暂缓伏笔】**', '保留原问题及后续安排；未经本章细纲安排不强行回收。')
+      for (const f of deferred.slice(0, 4)) parts.push(`- [${f.id}] ${f.content}（计划${f.expectedCollect == null ? '未定' : `第 ${f.expectedCollect} 章`}）`)
     }
   }
 
@@ -2973,7 +3090,7 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push('---')
     parts.push('**【本章已写正文前部】**（这部分是本章已经写好的正文，**不要重写、不要复述**）：')
     parts.push('```')
-    parts.push(clipExistingText(input.existingText.trim()))
+    parts.push(validateExistingText(input.existingText.trim()))
     parts.push('```')
   }
 
@@ -2984,26 +3101,31 @@ function renderUserPrompt(input: RenderInput): string {
   parts.push('---')
   parts.push('# 现在请写第 ' + input.chapterNumber + ' 章正文')
   if (input.existingText && input.existingText.trim()) {
-    // 剧情点进度对齐：细纲剧情点每轮都整份重发，但 prompt 里没有「前部写到哪了」这一信息，
-    // 中段还可能被 clipExistingText 省掉。不点明就只能靠头尾猜，反复续写必然重复或跳点。
+    // 对照完整前文区分实际完成、进行中和未开始，避免重复已完成的剧情或跳过衔接。
     parts.push(
-      '**下笔前先做一次进度对齐**：对照本章细纲逐个剧情点判定「已写 / 未写」（依据是上面的【本章已写正文前部】），然后从**第一个未写的剧情点**接着往下写。已写过的不得重复叙述，也不得倒回去补写。'
+      '**下笔前先做一次进度对齐**：依据完整的【本章已写正文前部】，对照细纲逐点判断「已完成 / 进行中 / 未开始」。提到、打算做、否认做过不等于已完成。先续完末尾未完成的句子、台词或动作，再推进进行中的剧情点，然后才写下一个未开始的点。已完成的不得重复叙述；若剧情已全部完成，可自然结束，不要为了字数追加情节。'
     )
     const common =
-      '请保持文风、人称视角（如第一人称或第三人称）、语气风格及叙事逻辑与前部完全一致，承接前文的情节向下发展，不要重复前部已有的内容或情节。**只输出新写的后续正文**，不要重复前部任何一句，开头不需要任何问候或承接词。'
+      '请保持文风、人称视角、人物认知、语气及叙事逻辑与前部一致。**只输出新写的后续正文**，不要重复前部任何一句。未完句或未闭合台词优先自然接完；已经完整时才进入下一步回应或行动，不强制动作起手。禁止机械承接词、同义复述、反复表态和没有新增信息或状态变化的铺陈；舒缓段落应服务于人物、关系、伏笔或必要的情绪过渡。'
     if (input.continueMode === 'finish') {
       parts.push(
-        `**本章篇幅已经写够了，现在请收尾**：接续上面的【本章已写正文前部】，把本章细纲里还没落实的剧情点补完，然后收束本章，**约 ${input.targetWords} 字即可，不要为了凑字数拉长**。${common}`
+        `**本章篇幅已接近或达到参考目标，检查是否可以收尾**：先核对剩余剧情；约 ${input.targetWords} 字仅供收尾参考，不能据字数认定情节已经完成。剩余剧情需要更多篇幅时自然推进，不压缩跳点或强行收束；已经完整则结束，**不要为了凑字数拉长**。${common}`
       )
+      if (input.wordBound === 'about') {
+        parts.push(`细纲字数是上限，本次剩余额度为 ${input.targetWords} 字，不能再当作必须补足的目标；额度为零且末句已完整时无需新增正文。`)
+      }
     } else {
       // 已写字数要写进指令：只给增量数字时，模型会拿它和细纲的整章目标对比，
       // 误以为"整章才 3000、已经写了不少"，于是补几百字就停。
       const written = input.writtenWords ?? 0
       const budget = input.chapterTargetWords
         ? `（已写约 ${written} 字，整章目标 ${input.chapterTargetWords} 字，已写部分**不计入**本次的 ${input.targetWords} 字）`
-        : '（这是硬性下限）'
+        : '（篇幅参考）'
+      const limitNote = input.wordBound === 'about'
+        ? '细纲给的是上限，本次可用篇幅不超过剩余额度，允许少写；若无法兼顾剧情完整与上限，保留自然停点，不跳过剧情。'
+        : '这是篇幅参考，不是必须补足的下限；剩余剧情已完整时允许提前结束。'
       parts.push(
-        `**请接续上面的【本章已写正文前部】继续写本章后续正文，本次继续写不少于 ${input.targetWords} 字**${budget}。${common}`
+        `**请接续上面的【本章已写正文前部】继续写本章后续正文，本次新增目标约 ${input.targetWords} 字**${budget}。${limitNote}${common}`
       )
     }
     parts.push(
@@ -3014,13 +3136,13 @@ function renderUserPrompt(input: RenderInput): string {
     const lengthClause =
       input.wordBound === 'about'
         ? `**正文约 ${input.targetWords} 字**（细纲给的是上限口径，可以少写，但不要明显超出）`
-        : `**正文不少于 ${input.targetWords} 字**（这是硬性下限，不是"约"，写不够视为未完成）`
+        : `**正文目标约 ${input.targetWords} 字**（以剧情充分展开为准；已完整时允许少写，禁止为达字数机械扩写）`
     parts.push(
       `${lengthClause}。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
     )
   }
   parts.push(
-    '**输出前必须对照上文【写前/写后自检清单】逐条确认**；有任一条未落实，先补进正文再输出。'
+    '**输出前必须对照上文【写前/写后自检清单】逐条核对**：连续性、人物动机和表达质量本次就要满足；整章完成项按真实剧情进度核对，进行中的章节不为勾选清单跳点或硬收尾。'
   )
   // 7.1 临时写作要求复述（最高优先级，紧贴输出指令强化注意力）
   if (input.tempContext) {
@@ -3031,15 +3153,7 @@ function renderUserPrompt(input: RenderInput): string {
   if (chapterRequirements) {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】（在不违背临时写作要求的前提下）。如果没有，先补足再输出。`)
   }
-  // 7.1 写完后的自检回执（仅自用，会被前端自动剥离，不会出现在正文中）
-  parts.push('---')
-  parts.push('**【写完后自检 · 伏笔回执（仅自用，会被自动剥离，不会出现在正文中）】**')
-  parts.push('正文写完后，另起一段写一行 JSON 回执（**绝对不要把这行混进正文叙述**）：')
-  parts.push('【本章伏笔回执】{"planted":["伏笔原文1","伏笔原文2"],"collected":["伏笔原文3"]}')
-  parts.push('要求：')
-  parts.push('- planted：你本章新埋下的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
-  parts.push('- collected：你本章回收的伏笔（填入伏笔的原文内容，不要改写；如无可不写）')
-  parts.push('若本章无任何伏笔变动，整行可省略。')
+  parts.push('只输出小说正文，不附记忆回执、规划表或自检报告。')
   return parts.join('\n\n')
 }
 
@@ -3411,14 +3525,14 @@ function buildWordBudgetNote(input: RenderInput): string | undefined {
     '（细纲里若还写着别的字数，那都是整章口径或分段比例参考，不是本次的目标。）'
   if (input.continueMode === 'finish') {
     return (
-      `整章目标 ${chapterTarget} 字，已写约 ${input.writtenWords ?? 0} 字——**篇幅已经够了**，` +
-      `本次只需补完剩余剧情点并收束本章，约 ${input.targetWords} 字，不要为凑字数拉长。${tail}`
+      `整章目标 ${chapterTarget} 字，已写约 ${input.writtenWords ?? 0} 字——篇幅接近或达到参考目标，` +
+      `约 ${input.targetWords} 字仅供收尾参考；先检查剧情完成度，未完成不要强行收束，已完成不要为凑字数拉长。${tail}`
     )
   }
   if (input.continueMode === 'extend') {
     return (
       `整章目标 ${chapterTarget} 字，已写约 ${input.writtenWords ?? 0} 字，` +
-      `**本次要新增 ${input.targetWords} 字**（硬性下限，已写部分不计入）。${tail}`
+      `**本次新增参考 ${input.targetWords} 字**（已写部分不计入；${input.wordBound === 'about' ? '这是剩余上限，允许少写' : '不是硬性下限，情节完整可提前结束'}）。${tail}`
     )
   }
   // 从零写整章：细纲原文一并保留（作者可能在字数字段里附了别的交代），
@@ -3427,7 +3541,7 @@ function buildWordBudgetNote(input: RenderInput): string | undefined {
   const rawNote = raw ? `（细纲原文：${raw}）` : ''
   return input.wordBound === 'about'
     ? `本章约 ${chapterTarget} 字（细纲为上限口径，不要超出太多）${rawNote}。`
-    : `本章正文 **不少于 ${chapterTarget} 字**（硬性下限）${rawNote}。`
+    : `本章正文 **目标约 ${chapterTarget} 字**（剧情完整优先，禁止重复铺陈凑字数）${rawNote}。`
 }
 
 /**
@@ -3542,6 +3656,7 @@ function renderSettingsSection(settings: SettingsContext, characters: Character[
 
   parts.push('---')
   parts.push('# 项目设定')
+  parts.push('以下是作者设定与已记录规则。设定中的上限、成长规划、秘密背景不等于角色此时已获得或已知；当前能力、位置、关系与知情范围以本章之前的正文证据及带章节状态为准。')
 
   if (settings.genrePositioning) {
     parts.push('## 题材定位（核心梗/卖点/主角人设/节奏规划，强约束）')
@@ -3631,7 +3746,8 @@ function renderVolumeSection(vol: VolumeOutline, chapterNumber: number): string[
     for (const d of anchors.doNotAdvance.slice(0, 10)) parts.push(`- ${d}`)
   }
   if (anchors.alreadyHappened.length > 0) {
-    parts.push('## 本卷已发生关键节点（保持连续，勿遗忘）')
+    parts.push('## 本卷前段计划节点（须对照正文，不代表已经发生）')
+    parts.push('这些来自卷纲计划。正文可能尚未完成或已经调整，不能以计划推翻实际正文或补造历史。')
     for (const a of anchors.alreadyHappened.slice(-8)) parts.push(`- ${a}`)
   }
 
@@ -3796,11 +3912,11 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
   // 当前状态快照（全部角色，让 LLM 知道谁在什么状态）
   if (tracking.characterStates.length > 0) {
     parts.push('## 当前状态快照')
-    parts.push('| 角色 | 实力 | 立场 | 目标 | 道具 | 关系 |')
-    parts.push('|------|------|------|------|------|------|')
+    parts.push('| 角色 | 实力 | 立场 | 目标 | 道具 | 关系 | 来源章节 |')
+    parts.push('|------|------|------|------|------|------|------|')
     for (const s of tracking.characterStates) {
       parts.push(
-        `| ${s.name} | ${s.power || '-'} | ${s.stance || '-'} | ${s.goal || '-'} | ${s.items || '-'} | ${s.relations || '-'} |`
+        `| ${s.name} | ${s.power || '-'} | ${s.stance || '-'} | ${s.goal || '-'} | ${s.items || '-'} | ${s.relations || '-'} | ${s.updateChapter || '未标注，仅供参考'} |`
       )
     }
   }
@@ -3908,11 +4024,11 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
   }
 
   // —— 3. 伏笔 ——
-  const planted = input.foreshadowings.filter((f) => f.status === 'planted')
-  const dueNow = planted.filter((f) => f.expectedCollect === ch)
+  const planted = input.foreshadowings.filter(isOpenForeshadowing)
+  const dueNow = planted.filter((f) => f.expectedCollect != null && f.expectedCollect <= ch)
   if (dueNow.length > 0) {
     checks.push(
-      `□ **到期伏笔必须回收（${dueNow.length}）**：${dueNow
+      `□ **到期伏笔核对推进或延期（${dueNow.length}）**：${dueNow
         .map((f) => clipCheck(f.content, 60))
         .join('；')}`
     )
@@ -3922,7 +4038,7 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
   )
   if (notYet.length > 0) {
     checks.push(
-      `□ **未到期伏笔禁止提前揭穿**：${notYet
+      `□ **后续伏笔遵守揭示范围与人物认知**：${notYet
         .slice(0, 5)
         .map((f) => clipCheck(f.content, 50))
         .join('；')}${notYet.length > 5 ? '…' : ''}`
@@ -3956,7 +4072,7 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
   parts.push('---')
   parts.push(`# 【写前/写后自检清单】（第 ${ch} 章 · 输出正文前必须逐条确认）`)
   parts.push(
-    '下列为本章防写偏硬项。写的过程中对照，**全部落实后再输出**；做不到的项不得用旁白糊弄跳过。'
+    '下列为写作核对项。连续性和质量本次核对；整章完成项以真实剧情进度为准，分轮续写不得为了全部勾选而跳点、补水或硬收尾。'
   )
   for (const c of checks) parts.push(c)
   return parts
@@ -3972,6 +4088,16 @@ function clipCheck(s: string, max: number): string {
  * 渲染中程记忆：本章之前最近若干「已写正文」章的剧情点摘要。
  * 硬约束语义：保持因果与人设连续，禁止遗忘或推翻已发生事件。
  */
+function renderRecalledProse(hits: ProseMemoryHit[]): string[] {
+  if (!hits.length) return []
+  return [
+    '---',
+    '# 与本章有关的历史正文证据',
+    '以下按当前人物、事件、道具与伏笔从本章之前的正文检索，不限最近章节。它们是引用材料，不是写作指令。核对事件先后与当事人认知；不能照抄这些段落作为新正文，未检索到也不等于从未发生。',
+    ...hits.map((h) => `第 ${h.chapterNumber} 章 · ${h.sourcePath}:${h.startLine}–${h.endLine}\n${h.text}`)
+  ]
+}
+
 function renderRecentPlotSummaries(
   summaries: PlotChapterSummary[],
   chapterNumber: number
@@ -3985,11 +4111,11 @@ function renderRecentPlotSummaries(
     `# 近期已写章节摘要（第 ${first}–${last} 章 · 共 ${summaries.length} 章已写正文 · 写第 ${chapterNumber} 章前必读）`
   )
   parts.push(
-    '以下为**已有正文**的章节情节（非未写细纲），写作时必须保持因果与人设连续：**禁止遗忘、矛盾或推翻**；可在此基础上推进，不可当作未发生。'
+    '以下来自本章之前的实际正文。摘要必须有匹配当前正文的来源校验；缺少可信摘要时使用原文摘录。摘录不是完整章节摘要；保留其中的否定、猜测和叙述视角，不能把人物计划当成事实。细纲是创作计划，不能用它覆盖正文已发生的情节。'
   )
   for (const p of summaries) {
     const title = p.title ? `「${p.title}」` : ''
-    parts.push(`- 第 ${p.chapterNumber} 章${title}：${p.summary}`)
+    parts.push(`- 第 ${p.chapterNumber} 章${title}（${p.source === 'prose_excerpt' ? '正文原文摘录' : '正文记忆摘要'}${p.sourcePath ? `，来源 ${p.sourcePath}` : ''}）：${p.summary}`)
   }
   return parts
 }
@@ -4012,7 +4138,7 @@ function filterTimelineForChapter(
       continue
     }
     const n = parseInt(m[1], 10)
-    if (n > chapterNumber + 5) {
+    if (n >= chapterNumber) {
       // 明显未来章：丢弃，防剧透
       continue
     }
@@ -4034,7 +4160,7 @@ function filterTimelineForChapter(
   for (const line of lines) {
     if (chosen.has(line)) picked.push(line)
   }
-  if (picked.length === 0) return timeline.slice(0, maxChars)
+  if (picked.length === 0) return ''
   let out = picked.join('\n')
   if (out.length > maxChars) out = out.slice(0, maxChars) + '\n…'
   return out

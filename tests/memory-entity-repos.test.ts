@@ -473,17 +473,14 @@ describe('PlotPointRepo', () => {
     expect(summaries.every((s) => s.chapterNumber !== 10)).toBe(true)
   })
 
-  it('listSummariesBefore 缺剧情点时用细纲补洞', async () => {
+  it('listSummariesBefore 不把只有细纲的计划当作已发生情节', async () => {
     await writeFile(
       path.join(dir, '细纲', '细纲_第002章_码头风云.md'),
       `# 第 2 章\n\n## 字段\n\n- **核心事件**：码头发生火并前奏\n`,
       'utf-8'
     )
     const summaries = await repo.listSummariesBefore(3, 5, { onlyWithProse: false })
-    expect(summaries).toHaveLength(1)
-    expect(summaries[0].chapterNumber).toBe(2)
-    expect(summaries[0].summary).toContain('火并')
-    expect(summaries[0].title).toContain('码头风云')
+    expect(summaries).toEqual([])
   })
 
   it('listSummariesBefore 默认仅保留已写正文的章', async () => {
@@ -505,8 +502,9 @@ describe('PlotPointRepo', () => {
 
     const summaries = await repo.listSummariesBefore(4, 12)
     expect(summaries.map((s) => s.chapterNumber)).toEqual([1, 3])
-    expect(summaries[0].summary).toContain('重生摆摊')
-    expect(summaries[1].summary).toContain('改运')
+    expect(summaries[0].summary).toBe('第一章正文')
+    expect(summaries[1].summary).toBe('第三章正文')
+    expect(summaries[0].unverifiedMemorySummary).toContain('重生摆摊')
     expect(summaries.every((s) => s.chapterNumber !== 2)).toBe(true)
   })
 

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { LlmService } from '../llm-service'
 import { scanAiPatterns } from './check-ai-patterns'
 import { scanDegeneration } from './check-degeneration'
+import { computeUniformity } from './check-uniformity'
 import { normalizePunctuation, countPunctuationIssues } from './normalize-punctuation'
 import { ALL_BANNED_WORDS, PARALLELISM_PATTERNS } from './banned-words'
 import {
@@ -16,6 +17,7 @@ import {
   extractRewritten,
   extractChangeSummary
 } from '../skill-prompts/deslop/anti-ai-methods'
+import { buildStructureJudgePrompt, parseStructureJudgeOutput } from '../skill-prompts/deslop/structure-judge'
 import { countWords } from '../words'
 import { summarizeTextDiff } from '../../../shared/text-diff'
 import { guardLanguageLeak } from './language-guard'
@@ -25,6 +27,8 @@ import type {
   DeslopMetrics,
   DeslopResult,
   DeslopScanReport,
+  DeslopStructureFinding,
+  DeslopStructureReport,
   DeslopStyleContext
 } from '../../../shared/types'
 
@@ -66,6 +70,9 @@ export interface DeslopOptions {
 
 /** 改写/清理被护栏拒绝时写进 changeSummary 的前缀（用于区分「真改动」与「没改成」） */
 const REJECTED_PREFIX = '- [已拒绝]'
+
+/** 全 Gate 终检的固定顺序；与 anti-ai-methods 的 Gate 定义保持一致。 */
+const ALL_GATES = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
 
 /** changeSummary 里是否存在真正的改动条目（排除 [已拒绝] 记录） */
 export function hasRealChange(changeSummary: string[]): boolean {
@@ -114,7 +121,7 @@ export class DeslopService {
       advisory: findings.filter((f) => f.severity === 'advisory').length
     }
     const wordCount = countWords(text)
-    const metrics = this.computeMetrics(findings, wordCount)
+    const metrics = this.computeMetrics(findings, wordCount, text)
     // level 一并算出来：前端「力度=自动」要显示自动判定的档位，
     // 不带出去的话渲染层就得复刻一份 classify 阈值，迟早和这里漂移
     return { findings, counts, metrics, wordCount, level: this.classify(metrics, counts) }
@@ -133,9 +140,79 @@ export class DeslopService {
     const parallel = metrics.parallelismCount
     const blocking = counts.blocking
 
-    if (density > 15 || blocking > 20 || (density > 10 && parallel >= 2)) return 'severe'
-    if (density > 5 || parallel >= 1 || blocking > 5) return 'moderate'
-    return 'mild'
+    const lexical: DeslopLevel =
+      density > 15 || blocking > 20 || (density > 10 && parallel >= 2)
+        ? 'severe'
+        : density > 5 || parallel >= 1 || blocking > 5
+          ? 'moderate'
+          : 'mild'
+
+    // 结构均匀度曾经参与升档（2 项以上过于均匀 → mild 升 moderate），已按语料实测撤掉：
+    // 19 篇真人稿 vs 19 篇未润色 AI 稿上，句长 CV AUC 0.468、段长 CV 0.285（反向）、
+    // 对白 CV 0.486，三项都没有判别力，段长那项甚至是 AI 更参差。
+    // 三个 CV 仍然计算并在扫描面板显示（信息有用、成本为零），但不再影响判档。
+    // 详见 tests/fixtures/deslop-corpus/FINDINGS.md。
+    return lexical
+  }
+
+  /* =========================================================
+     结构体检：LLM 判定层（只出诊断，不改正文）
+     ========================================================= */
+
+  /**
+   * 结构体检。查词表和 CV 都够不着的那一层——人物认知盲区、细节是否全都有用、
+   * 对白会不会答非所问。见 skill-prompts/deslop/structure-judge.ts 的模块注释。
+   *
+   * **刻意不接进 deslop() 的改写流水线。** 这几条要修就得改「说什么」，
+   * 而改写器的铁律是只改「怎么说」。让它去修等于授权它动情节，所以这里只返回清单。
+   *
+   * 长文按 splitForDeslop 切块逐块送检，行号用 chunk.startLine 校正回全局。
+   * 某块解析失败只计入 unparsedChunks，不中断其余块——半份清单也比没有强，
+   * 但调用方必须把 unparsedChunks 显示出来，否则用户会把残缺结果当成「体检通过」。
+   */
+  async judgeStructure(
+    text: string,
+    opts: {
+      signal?: AbortSignal
+      onToken?: (token: string) => void
+      systemPrompt?: string
+      meta?: { feature?: string; projectId?: string; chapterNumber?: number }
+      context?: { outlineSummary?: string; chapterGoal?: string }
+    } = {}
+  ): Promise<DeslopStructureReport> {
+    const chunks = splitForDeslop(text)
+    const findings: DeslopStructureFinding[] = []
+    let unparsedChunks = 0
+
+    for (const chunk of chunks) {
+      const maxLine = chunk.startLine + chunk.text.split('\n').length - 1
+      const prompt = buildStructureJudgePrompt(chunk.text, chunk.startLine, opts.context)
+      const output = await this.llm.generateStream(prompt, {
+        systemPrompt: opts.systemPrompt,
+        maxTokens: STRUCTURE_JUDGE_MAX_TOKENS,
+        meta: { ...opts.meta, feature: opts.meta?.feature ?? 'deslop:judgeStructure' },
+        onToken: opts.onToken,
+        signal: opts.signal
+      })
+      const parsed = parseStructureJudgeOutput(output, chunk.startLine, maxLine)
+      if (parsed === null) {
+        unparsedChunks += 1
+        continue
+      }
+      findings.push(...parsed)
+    }
+
+    // 同一维度在同一行只留一条：分块边界附近模型偶尔会重复报
+    const seen = new Set<string>()
+    const deduped = findings.filter((f) => {
+      const key = `${f.dimension}@${f.line}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    deduped.sort((a, b) => a.line - b.line || a.dimension.localeCompare(b.dimension))
+
+    return { findings: deduped, chunks: chunks.length, unparsedChunks }
   }
 
   /* =========================================================
@@ -281,7 +358,6 @@ export class DeslopService {
     const effectiveSystemPrompt = opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT
     const allChangeSummary: string[] = []
     let finalText = text
-    let lastReport = report
 
     if (report.counts.blocking > 0 || report.counts.advisory > 0) {
       // =====================================================
@@ -306,7 +382,6 @@ export class DeslopService {
         const passFindings = passScan.findings.filter((f) => passGates.includes(f.gate))
         if (passFindings.length === 0) {
           emit(`   ✔️ 本遍 Gate 无命中项，跳过。\n`)
-          lastReport = passScan
           continue
         }
 
@@ -314,6 +389,8 @@ export class DeslopService {
         const prompt = buildDeslopPrompt(finalText, level, passFindings, passGates, opts.styleContext, {
           textOverrides: opts.textOverrides?.gates,
           bannedWords: opts.bannedWords
+          // uniformityNote 已移除：它让模型「拉开长短句落差」，但语料实测 AI 稿的句长/段长 CV
+          // 本来就高于真人稿，这条指令方向是反的。见 FINDINGS.md。
         })
         const llmOutput = await this.llm.generateStream(prompt, {
           systemPrompt: effectiveSystemPrompt,
@@ -329,7 +406,6 @@ export class DeslopService {
         if (!verdict.ok) {
           emit(`\n   ⛔ 本遍改写结果被拒绝（${verdict.reason}），保留改写前正文。\n`)
           allChangeSummary.push(`${REJECTED_PREFIX} Pass${passNum} 改写结果不可用：${verdict.reason}`)
-          lastReport = passScan
           continue
         }
 
@@ -377,13 +453,6 @@ export class DeslopService {
         if (cleaned.changes.length > 0) {
           allChangeSummary.push(...cleaned.changes)
         }
-
-        // 记录最后一次复扫结果（供 Phase 4 报告）——必须带 whitelist，否则豁免词会以"剩余问题"回到报告里
-        lastReport = await this.scan(finalText, {
-          whitelist: opts.whitelist,
-          bannedWords: opts.bannedWords,
-          isTail
-        })
       }
     } else {
       emit(`\n✔️ 无 AI 味问题，跳过改写。\n`)
@@ -399,7 +468,32 @@ export class DeslopService {
       finalText = tailNorm.text
       allChangeSummary.push(tailNormLine)
       emit(`\n🧹 ${tailNormLine.replace(/^-\s*/, '')}\n`)
-      // 复扫，否则报告里会留着刚被兜底修掉的 em-dash/省略号当"剩余问题"
+    }
+
+    // Phase 3.7：全 Gate 终检。
+    // 各 Pass 的二次清理只看本 Pass Gate；后面的 Pass 可能重新引入前面 Gate 的问题。
+    // 例如 Gate F 删除章末升华后，新结尾可能触发 Gate D 截断，旧流程只报警却仍显示“润色完成”。
+    // 终检覆盖 blocking + advisory，程序能检测到的残留必须再清一轮，不能拿“0 blocking”冒充全通过。
+    let lastReport = await this.scan(finalText, {
+      whitelist: opts.whitelist,
+      bannedWords: opts.bannedWords,
+      isTail
+    })
+    if (lastReport.findings.length > 0) {
+      emit(`\n🔒 Phase 3.7：全 Gate 终检发现 ${lastReport.findings.length} 处残留，启动最终清理…\n`)
+      const finalCleaned = await this.cleanupPass(
+        finalText,
+        ALL_GATES,
+        'final',
+        level,
+        effectiveSystemPrompt,
+        opts,
+        emit,
+        isTail,
+        true
+      )
+      finalText = finalCleaned.text
+      if (finalCleaned.changes.length > 0) allChangeSummary.push(...finalCleaned.changes)
       lastReport = await this.scan(finalText, {
         whitelist: opts.whitelist,
         bannedWords: opts.bannedWords,
@@ -430,12 +524,14 @@ export class DeslopService {
 
     const afterWords = countWords(finalText)
     const deleteRatio = beforeWords > 0 ? 1 - afterWords / beforeWords : 0
-    const remainingBlocking = lastReport.findings.filter((f) => f.severity === 'blocking')
-    if (remainingBlocking.length > 0) {
-      emit(`\n⚠️ 复扫后仍剩 ${remainingBlocking.length} 处 blocking（建议人工复核）：\n`)
-      remainingBlocking.slice(0, 5).forEach((f) => emit(`   - 第${f.line}行 [${f.type}]: ${f.excerpt}\n`))
+    if (lastReport.findings.length > 0) {
+      emit(`\n⛔ 最终复扫未通过：仍剩 ${lastReport.findings.length} 处问题，本次结果不得标记为 100% 完成：\n`)
+      lastReport.findings.slice(0, 5).forEach((f) => emit(`   - 第${f.line}行 [${f.severity}/${f.type}]: ${f.excerpt}\n`))
+      emit(`\n📊 Phase 4：润色未通过最终复扫（${beforeWords} -> ${afterWords} 字，删除比例 ${(deleteRatio * 100).toFixed(1)}%）\n`)
+    } else {
+      emit(`\n✅ 最终复扫 100% 通过：blocking 0 / advisory 0\n`)
+      emit(`\n📊 Phase 4：润色完成（${beforeWords} -> ${afterWords} 字，删除比例 ${(deleteRatio * 100).toFixed(1)}%）\n`)
     }
-    emit(`\n📊 Phase 4：润色完成（${beforeWords} -> ${afterWords} 字，删除比例 ${(deleteRatio * 100).toFixed(1)}%）\n`)
 
     return {
       rewritten: finalText,
@@ -449,38 +545,43 @@ export class DeslopService {
   }
 
   /**
-   * 单遍二次清理（Phase 3.6）：复扫后对本遍 Gate 范围内剩余 blocking 再改，上限 2 轮。
-   * 与 buildCleanupPrompt 复用：只处理「本遍 Gate 范围」内的 blocking，不跨 Gate 清理。
+   * 单遍二次清理（Phase 3.6）：复扫后对指定 Gate 范围内的残留再改，上限 2 轮。
+   * 普通 Pass 只处理 blocking；全 Gate 终检传 includeAdvisory=true，要求所有可检测项清零。
    */
   private async cleanupPass(
     text: string,
     passGates: string[],
-    passNum: number,
+    passNum: number | 'final',
     level: DeslopLevel,
     effectiveSystemPrompt: string,
     opts: Pick<DeslopOptions, 'styleContext' | 'textOverrides' | 'bannedWords' | 'whitelist' | 'meta' | 'signal'>,
     emit: (t: string) => void,
-    isTail: boolean
+    isTail: boolean,
+    includeAdvisory = false
   ): Promise<{ text: string; changes: string[] }> {
     const MAX_CLEANUP_ROUNDS = 2
     let result = text
     let round = 0
     const changes: string[] = []
-    // 复扫，只看本遍 Gate 范围内的 blocking
+    const scopeLabel = passNum === 'final' ? '最终清理' : `Pass${passNum}`
+    const issueLabel = includeAdvisory ? '问题' : 'blocking'
+    const matchesScope = (f: DeslopFinding): boolean =>
+      passGates.includes(f.gate) && (includeAdvisory || f.severity === 'blocking')
+    // 普通 Pass 只看本遍 Gate 范围内的 blocking；最终清理看全 Gate 全部 finding
     let scan = await this.scan(result, {
       whitelist: opts.whitelist,
       bannedWords: opts.bannedWords,
       isTail
     })
-    let remaining = scan.findings.filter((f) => f.severity === 'blocking' && passGates.includes(f.gate))
+    let remaining = scan.findings.filter(matchesScope)
     if (remaining.length === 0) {
-      emit(`   ✔️ 本遍复扫无 blocking 残留，跳过二次清理。\n`)
+      emit(`   ✔️ ${scopeLabel}复扫无${issueLabel}残留，跳过二次清理。\n`)
       return { text: result, changes }
     }
     while (remaining.length > 0 && round < MAX_CLEANUP_ROUNDS) {
       throwIfAborted(opts.signal)
       round += 1
-      emit(`   🔄 二次清理 ${round}/${MAX_CLEANUP_ROUNDS}（Pass${passNum} 剩余 ${remaining.length} 处 blocking）...\n`)
+      emit(`   🔄 二次清理 ${round}/${MAX_CLEANUP_ROUNDS}（${scopeLabel}剩余 ${remaining.length} 处${issueLabel}）...\n`)
       const cleanupPrompt = buildCleanupPrompt(
         result,
         level,
@@ -492,7 +593,7 @@ export class DeslopService {
       const cleanupOutput = await this.llm.generateStream(cleanupPrompt, {
         systemPrompt: effectiveSystemPrompt,
         maxTokens: tokensForDeslop(result),
-        meta: { feature: `deslop:cleanup:pass${passNum}:${round}`, ...opts.meta },
+        meta: { feature: `deslop:cleanup:${passNum === 'final' ? 'final' : `pass${passNum}`}:${round}`, ...opts.meta },
         onToken: emit,
         signal: opts.signal
       })
@@ -501,7 +602,7 @@ export class DeslopService {
       if (!verdict.ok) {
         emit(`   ⛔ 第 ${round} 轮清理结果被拒绝（${verdict.reason}），保留上一版正文并停止清理。\n`)
         changes.push(
-          `${REJECTED_PREFIX} Pass${passNum} 第 ${round} 轮清理结果不可用：${verdict.reason}`
+          `${REJECTED_PREFIX} ${scopeLabel}第 ${round} 轮清理结果不可用：${verdict.reason}`
         )
         break
       }
@@ -519,7 +620,7 @@ export class DeslopService {
       }
       // 标点兜底
       const reNorm = normalizePunctuation(cleanupRewritten)
-      const reNormLine = punctuationSummaryLine(reNorm.changes, `Pass${passNum} 第 ${round} 轮清理`)
+      const reNormLine = punctuationSummaryLine(reNorm.changes, `${scopeLabel}第 ${round} 轮清理`)
       if (reNormLine) {
         changes.push(reNormLine)
         emit(`   🧹 ${reNormLine.replace(/^-\s*/, '')}\n`)
@@ -531,12 +632,12 @@ export class DeslopService {
         bannedWords: opts.bannedWords,
         isTail
       })
-      remaining = scan.findings.filter((f) => f.severity === 'blocking' && passGates.includes(f.gate))
+      remaining = scan.findings.filter(matchesScope)
     }
     if (remaining.length > 0) {
-      emit(`   ⚠️ Pass${passNum} 二次清理后仍剩 ${remaining.length} 处 blocking\n`)
+      emit(`   ⚠️ ${scopeLabel}二次清理后仍剩 ${remaining.length} 处${issueLabel}\n`)
     } else {
-      emit(`   ✔️ Pass${passNum} blocking 已清零（${round} 轮）\n`)
+      emit(`   ✔️ ${scopeLabel}${issueLabel}已清零（${round} 轮）\n`)
     }
     return { text: result, changes }
   }
@@ -545,12 +646,13 @@ export class DeslopService {
      私有：指标计算 + 白名单
      ========================================================= */
 
-  /** 只算 classify() 真正读的两项；其余问题由 findings 逐条呈现，不需要聚合数字 */
-  private computeMetrics(findings: DeslopFinding[], wordCount: number): DeslopMetrics {
+  /** 只算 classify() 真正读的项：两项词表指标 + 三项结构均匀度；其余问题由 findings 逐条呈现 */
+  private computeMetrics(findings: DeslopFinding[], wordCount: number, text: string): DeslopMetrics {
     const bannedHits = findings.filter((f) => f.type === 'banned-word').length
     return {
       bannedWordDensity: wordCount > 0 ? (bannedHits / wordCount) * 1000 : 0,
-      parallelismCount: findings.filter((f) => f.type === 'parallelism').length
+      parallelismCount: findings.filter((f) => f.type === 'parallelism').length,
+      ...computeUniformity(text)
     }
   }
 
@@ -717,6 +819,12 @@ function tagChunkSummary(entry: string, index: number, total: number, lineOffset
 }
 
 /** 改写调用的 token 下限（短章节沿用原值，保证行为不变） */
+/**
+ * 结构体检的输出是一小段 JSON 清单，和正文长度无关，所以用固定预算，
+ * 不走 tokensForDeslop（那是按正文字数算改写输出的，用在这里会白买十倍额度）。
+ */
+const STRUCTURE_JUDGE_MAX_TOKENS = 4096
+
 const DESLOP_MIN_MAX_TOKENS = 12288
 /** token 上限，防止有人把整本书粘进来时算出荒唐的请求值 */
 const DESLOP_MAX_MAX_TOKENS = 32768

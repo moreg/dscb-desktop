@@ -1,8 +1,9 @@
-import { join } from 'path'
+import { join, basename, dirname } from 'path'
 import { promises as fs } from 'fs'
 import {
   readText,
   parseDoc,
+  parseChapterNumber,
   parseChapterHeadingNumber,
   parseBoldFields,
   BOLD_FIELD_HEAD,
@@ -82,8 +83,56 @@ export class DetailedOutlineWriter {
     if (!text) return false
 
     const doc = parseDoc(text)
+    const fileName = basename(file)
+    const isPerChapterFile =
+      /^细纲_第\d+章/.test(fileName) ||
+      /^细纲_第\d+章/.test(doc.h1Title) ||
+      /^细纲\s*[：:]\s*第\s*\d+\s*章/.test(doc.h1Title)
+
     const chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) === chapterNumber)
-    if (!chSec) return false
+    if (!chSec) {
+      if (
+        isPerChapterFile &&
+        (parseChapterNumber(fileName) === chapterNumber ||
+          parseChapterNumber(doc.h1Title) === chapterNumber)
+      ) {
+        // 变体单章文件（无 H2 章号块）：更新 H1 与文件名
+        let nextText = text
+        if (patch.title !== undefined) {
+          const safeTitle =
+            patch.title.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim() || '未命名'
+          if (/^#\s*细纲_第\d+章/m.test(nextText)) {
+            nextText = nextText.replace(
+              /^#\s*细纲_第\d+章[_\s]*([^\n]*?)(?:\.md)?\s*$/m,
+              `# 细纲_第${String(chapterNumber).padStart(3, '0')}章_${safeTitle}.md`
+            )
+          } else if (/^#\s*细纲\s*[：:]\s*第\s*\d+\s*章/m.test(nextText)) {
+            nextText = nextText.replace(
+              /^#\s*细纲\s*[：:]\s*第\s*\d+\s*章[^\n]*$/m,
+              `# 细纲：第 ${chapterNumber} 章 ${patch.title}`
+            )
+          }
+        }
+        const safeTitle =
+          patch.title !== undefined
+            ? patch.title.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim() || '未命名'
+            : undefined
+        const newFileName = safeTitle
+          ? `细纲_第${String(chapterNumber).padStart(3, '0')}章_${safeTitle}.md`
+          : fileName
+        const targetFile = join(dirname(file), newFileName)
+        await writeTextAtomic(targetFile, nextText)
+        if (targetFile !== file) {
+          try {
+            await fs.unlink(file)
+          } catch {
+            // ignore
+          }
+        }
+        return true
+      }
+      return false
+    }
 
     // 解析现有字段
     const bodyLines = chSec.body.split(/\r?\n/)
@@ -96,10 +145,12 @@ export class DetailedOutlineWriter {
     // 更新标题（如果在 patch 中）
     let newTitle = chSec.title
     if (patch.title !== undefined) {
-      // 标题格式: "第 N 章：标题"
-      const numMatch = chSec.title.match(/^(第\s*\d+\s*章)[：:]/)
+      // 标题格式: "第 N 章：标题" 或 "第 N 章 标题"
+      const numMatch = chSec.title.match(/^(第\s*\d+\s*章)(?:\s*[：:]\s*|\s+)?/)
       if (numMatch) {
         newTitle = `${numMatch[1]}：${patch.title}`
+      } else {
+        newTitle = `第 ${chapterNumber} 章：${patch.title}`
       }
     }
 
@@ -158,7 +209,36 @@ export class DetailedOutlineWriter {
     const newBody = this.renderBody(nextBodyLines, newFields, newOrder, fields)
 
     // 替换 section body
-    const nextText = this.replaceSectionBody(text, chSec.title, newTitle, newBody)
+    let nextText = this.replaceSectionBody(text, chSec.title, newTitle, newBody)
+
+    // 单章独立文件：同步更新 H1 标题并重命名文件，保持「三处一致」
+    if (isPerChapterFile && patch.title !== undefined) {
+      const safeTitle =
+        patch.title.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim() || '未命名'
+      if (/^#\s*细纲_第\d+章/m.test(nextText)) {
+        nextText = nextText.replace(
+          /^#\s*细纲_第\d+章[_\s]*([^\n]*?)(?:\.md)?\s*$/m,
+          `# 细纲_第${String(chapterNumber).padStart(3, '0')}章_${safeTitle}.md`
+        )
+      } else if (/^#\s*细纲\s*[：:]\s*第\s*\d+\s*章/m.test(nextText)) {
+        nextText = nextText.replace(
+          /^#\s*细纲\s*[：:]\s*第\s*\d+\s*章[^\n]*$/m,
+          `# 细纲：第 ${chapterNumber} 章 ${patch.title}`
+        )
+      }
+      const newFileName = `细纲_第${String(chapterNumber).padStart(3, '0')}章_${safeTitle}.md`
+      const targetFile = join(dirname(file), newFileName)
+      await writeTextAtomic(targetFile, nextText)
+      if (targetFile !== file) {
+        try {
+          await fs.unlink(file)
+        } catch {
+          // ignore
+        }
+      }
+      return true
+    }
+
     await writeTextAtomic(file, nextText)
     return true
   }

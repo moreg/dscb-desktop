@@ -14,6 +14,8 @@ import {
   isAdjustRewriteKey,
   isFormatProseKey,
   isWholeDocRewriteKey,
+  isPunctFixKey,
+  PUNCT_FIX_KEY,
   ADJUST_REWRITE_KEY,
   FORMAT_PROSE_KEY,
   REWRITE_HISTORY_CAP,
@@ -676,6 +678,28 @@ describe('正文格式化（整章）撤销 key / 守卫', () => {
     expect(isWholeDocRewriteKey(FORMAT_PROSE_KEY)).toBe(true)
     expect(isWholeDocRewriteKey(ADJUST_REWRITE_KEY)).toBe(true)
     expect(isWholeDocRewriteKey('ai-review-0')).toBe(false)
+  })
+
+  // 写后自检的「一键替换标点」也是整章替换：漏了它 Ctrl+Z 会走片段 indexOf 回滚，
+  // 而标点替换散落全文没有可定位片段，撤销会静默失败。
+  it('isPunctFixKey / 标点兜底算整章替换', () => {
+    expect(isPunctFixKey(PUNCT_FIX_KEY)).toBe(true)
+    expect(isPunctFixKey('punct-fix:3')).toBe(true)
+    expect(isPunctFixKey(FORMAT_PROSE_KEY)).toBe(false)
+    expect(isPunctFixKey(undefined)).toBe(false)
+    expect(isWholeDocRewriteKey(PUNCT_FIX_KEY)).toBe(true)
+  })
+
+  it('标点兜底 undo 全文还原', () => {
+    const oldDraft = '他想说什么——话到嘴边又咽了回去。\n她愣住了……没接话。'
+    const newDraft = '他想说什么，话到嘴边又咽了回去。\n她愣住了。没接话。'
+    const stack = pushEntry([], oldDraft, newDraft, Date.now(), PUNCT_FIX_KEY)
+    expect(stack[0].violationKey).toBe(PUNCT_FIX_KEY)
+    expect(isWholeDocRewriteKey(stack[0].violationKey)).toBe(true)
+
+    const restored = revertInDraft(newDraft, newDraft, oldDraft)
+    expect(restored).toBe(oldDraft)
+    expect(applyToDraft(restored, oldDraft, newDraft)).toBe(newDraft)
   })
 
   it('整章格式化 undo/redo 全文还原', () => {

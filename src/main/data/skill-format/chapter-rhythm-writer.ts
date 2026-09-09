@@ -179,14 +179,20 @@ function replaceChapterRowInPlace(lines: string[], chapter: number, newRowCells:
   const padded = [...newRowCells]
   while (padded.length < colCount - 2) padded.push('')
   const newRowText = `| ${padded.join(' | ')} |`
-  const needle = `第 ${chapter} 章`
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
     if (!l.trim().startsWith('|')) continue
     if (l.includes('---')) continue
-    if (l.includes(needle)) {
-      lines[i] = newRowText
-      return
+    const cells = l
+      .split('|')
+      .map((c) => c.trim())
+      .filter((_, idx, arr) => idx > 0 && idx < arr.length - 1)
+    if (cells.length > 0) {
+      const m = cells[0].match(/(\d+)/)
+      if (m && parseInt(m[1], 10) === chapter) {
+        lines[i] = newRowText
+        return
+      }
     }
   }
 }

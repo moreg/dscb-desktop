@@ -17,11 +17,15 @@ import type {
   CreateChapterVersionInput
 } from '../../shared/types'
 import { z } from 'zod'
+import { ChapterVersionRepository } from '../data/chapter-version-repository'
+import { ProseRepo } from '../data/skill-format/prose-repo'
 import {
   validateInput,
   projectIdSchema,
   chapterNumberSchema,
-  chapterContentSchema
+  chapterContentSchema,
+  versionNumberSchema,
+  createChapterVersionInputSchema
 } from './validation'
 
 const NOT_IMPLEMENTED = '该操作需 Phase 3（编辑回写 .md）支持，当前为只读阶段。'
@@ -215,18 +219,65 @@ export function registerChaptersIpc(
     }
   )
 
-  // 章节版本：v3.2 无此概念，Phase 4+ 作为 app 独占扩展重做
-  safeHandle('chapters:listVersions', async () => [])
-  safeHandle('chapters:getVersion', async () => {
-    throw new Error(NOT_IMPLEMENTED)
+  // 章节版本：保留最新 5 个版本，倒序排序，支持正文恢复
+  safeHandle('chapters:listVersions', async (_e, id: string, n: number) => {
+    const projectId = validateInput(projectIdSchema, id)
+    const chapterNumber = validateInput(chapterNumberSchema, n)
+    const dir = await service.resolveDir(projectId)
+    const repo = new ChapterVersionRepository(dir)
+    let versions = await repo.list(chapterNumber)
+    // 若尚未创建过版本文件，但当前正文已有内容，自动初始化版本 1，确保用户随时可回滚
+    if (versions.length === 0) {
+      const current = await new ProseRepo(dir).read(chapterNumber)
+      if (current.trim()) {
+        await repo.create(chapterNumber, {
+          source: 'manual',
+          content: current,
+          note: '初始正文'
+        })
+        versions = await repo.list(chapterNumber)
+      }
+    }
+    return versions
   })
-  safeHandle('chapters:createVersion', async (_e, _id, _n, _input: CreateChapterVersionInput) => {
-    throw new Error(NOT_IMPLEMENTED)
+
+  safeHandle('chapters:getVersion', async (_e, id: string, n: number, vn: number) => {
+    const projectId = validateInput(projectIdSchema, id)
+    const chapterNumber = validateInput(chapterNumberSchema, n)
+    const versionNumber = validateInput(versionNumberSchema, vn)
+    const dir = await service.resolveDir(projectId)
+    return new ChapterVersionRepository(dir).get(chapterNumber, versionNumber)
   })
-  safeHandle('chapters:deleteVersion', async () => {
-    throw new Error(NOT_IMPLEMENTED)
+
+  safeHandle(
+    'chapters:createVersion',
+    async (_e, id: string, n: number, input: CreateChapterVersionInput) => {
+      const projectId = validateInput(projectIdSchema, id)
+      const chapterNumber = validateInput(chapterNumberSchema, n)
+      const validatedInput = validateInput(createChapterVersionInputSchema, input)
+      const dir = await service.resolveDir(projectId)
+      return new ChapterVersionRepository(dir).create(chapterNumber, validatedInput)
+    }
+  )
+
+  safeHandle('chapters:deleteVersion', async (_e, id: string, n: number, vn: number) => {
+    const projectId = validateInput(projectIdSchema, id)
+    const chapterNumber = validateInput(chapterNumberSchema, n)
+    const versionNumber = validateInput(versionNumberSchema, vn)
+    const dir = await service.resolveDir(projectId)
+    await new ChapterVersionRepository(dir).delete(chapterNumber, versionNumber)
   })
-  safeHandle('chapters:rollback', async () => {
-    throw new Error(NOT_IMPLEMENTED)
+
+  safeHandle('chapters:rollback', async (_e, id: string, n: number, vn: number) => {
+    const projectId = validateInput(projectIdSchema, id)
+    const chapterNumber = validateInput(chapterNumberSchema, n)
+    const versionNumber = validateInput(versionNumberSchema, vn)
+    const dir = await service.resolveDir(projectId)
+    const repo = new ChapterVersionRepository(dir)
+    const targetVersion = await repo.get(chapterNumber, versionNumber)
+    return chapters.updateContent(projectId, chapterNumber, targetVersion.content, undefined, {
+      source: targetVersion.source,
+      note: `恢复到版本 #${versionNumber}${targetVersion.note ? `（${targetVersion.note}）` : ''}`
+    })
   })
 }

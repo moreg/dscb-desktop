@@ -15,17 +15,17 @@ import type {
 } from '../../shared/types'
 
 const COVER_DIR = '封面'
-/** 图像接口普遍支持的竖图尺寸；生成后再居中裁成精确的 9:16。 */
+/** 图像接口普遍支持的竖图尺寸；生成后再居中裁成精确的 3:4。 */
 export const COVER_GENERATION_SIZE = '1024x1536'
-/** 由 1024×1536 横向居中裁切得到，不放大、不拉伸。 */
-export const DEFAULT_COVER_OUTPUT_SIZE = '864x1536'
+/** 由 1024×1536 居中裁切得到，不放大、不拉伸；1023:1364 精确等于 3:4。 */
+export const DEFAULT_COVER_OUTPUT_SIZE = '1023x1364'
 
 /**
  * 封面生成服务（编排 Step 1-4）。
  *
  * Step 1-1.5：题材判定（书名关键词推断）
  * Step 2：构建英文提示词（文字层 + 风格层 + 画面层）
- * Step 3：调 ImageService 出图 + 无拉伸裁成默认 9:16 + 落盘（自增版本号）+ 保存 prompt 副本
+ * Step 3：调 ImageService 出图 + 无拉伸裁成默认 3:4 + 落盘（自增版本号）+ 保存 prompt 副本
  * Step 3.5：平台上传尺寸居中裁剪（番茄 600×800）
  *
  * 产物结构（项目目录下）：
@@ -86,7 +86,8 @@ export class CoverService {
       typography: input.typography,
       styleHint: input.styleHint,
       learningPreset: learned.definition,
-      learningRules: library.globalRules
+      // 旧版学习库可能仍保存 9:16 主画布规则；成品比例是硬约束，不能让旧规则与 3:4 冲突。
+      learningRules: library.globalRules.filter((rule) => !/\b9\s*:\s*16\b/i.test(rule))
     })
   }
 
@@ -209,6 +210,20 @@ export class CoverService {
     } catch {
       return null
     }
+  }
+
+  /** 解析并校验封面文件绝对路径，供系统资源管理器定位文件。 */
+  async resolveCoverFile(projectId: string, fileName: string): Promise<string> {
+    const dir = await this.resolveCoverDir(projectId)
+    const full = resolve(dir, fileName)
+    if (full === dir || !full.startsWith(dir + sep)) {
+      throw new Error('非法封面文件路径')
+    }
+    if (!/^封面_v\d+(?:_上传)?\.png$/.test(fileName)) {
+      throw new Error('非法封面文件名')
+    }
+    await fs.access(full)
+    return full
   }
 
   /* =========================================================

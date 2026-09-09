@@ -81,7 +81,7 @@ const ENDING_TABOO_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 ]
 
 /** 引号台词正则（中文/英文/日式/嵌套都覆盖） */
-const DIALOGUE_PATTERN = /["'""「『][^"'""」』\n]{1,200}["'""」』]/
+const DIALOGUE_PATTERN = /["'“‘「『][^"'“”‘’「」『』\n]{1,200}["'”’」』]/
 
 /**
  * 事件描述启发式（关键词 + 动作/悬念句式）。
@@ -301,9 +301,9 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
     return
   }
 
-  const ending = paragraphs.slice(-ENDING_PARA_COUNT).join('\n\n')
+  const endingStart = paragraphEntries(content).slice(-ENDING_PARA_COUNT)[0].offset
+  const ending = content.slice(endingStart).trimEnd()
   const snippet = truncate(ending, ENDING_SNIPPET_MAX)
-  const endingStart = Math.max(0, content.lastIndexOf(ending))
 
   // 1. 先查"说教/AI 味抒怀"模板——命中直接 error
   for (const taboo of ENDING_TABOO_PATTERNS) {
@@ -337,10 +337,14 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
 }
 
 function splitParagraphs(content: string): string[] {
-  return content
-    .split(/\r?\n\s*\r?\n+/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0)
+  return paragraphEntries(content).map((p) => p.text)
+}
+
+function paragraphEntries(content: string): Array<{ text: string; offset: number }> {
+  // 单/双换行均视作分段；保存原始偏移，避免格式化或重复段使定位漂移。
+  return [...content.matchAll(/[^\r\n]+/g)]
+    .filter((m) => m[0].trim().length > 0)
+    .map((m) => ({ text: m[0].trim(), offset: m.index! + m[0].length - m[0].trimStart().length }))
 }
 
 function truncate(s: string, n: number): string {
@@ -684,15 +688,22 @@ function pushRepetitionViolations(
 ): void {
   if (!isCheckOn(rules, 'repetition')) return
   const len = Math.max(4, thresholds.repetitionLen)
+  const paragraphs = splitParagraphs(content)
+  let scanFrom = 0
   // 按段落扫描，避免跨段误判
-  for (const para of splitParagraphs(content)) {
+  for (const para of paragraphs) {
+    const paraOffset = content.indexOf(para, scanFrom)
+    scanFrom = paraOffset + para.length
     if (para.length < len * 2) continue
+    // 短对白和刻意复沓不按水文处理；只比较叙述部分。
+    const narrative = para.replace(/[“「『"'][^”」』"']*[”」』"']/g, (s) => ' '.repeat(s.length))
     const seen = new Set<string>()
     let reported = false
-    for (let i = 0; i + len <= para.length && !reported; i++) {
-      const gram = para.slice(i, i + len)
+    for (let i = 0; i + len <= narrative.length && !reported; i++) {
+      const gram = narrative.slice(i, i + len)
+      if (/\s/.test(gram) || !/[一-鿿A-Za-z0-9]/.test(gram)) continue
       if (seen.has(gram)) {
-        const idx = content.indexOf(gram)
+        const idx = paraOffset + i
         if (idx >= 0) {
           out.push({
             category: 'toxic',
@@ -708,6 +719,57 @@ function pushRepetitionViolations(
         }
       } else {
         seen.add(gram)
+      }
+    }
+  }
+
+  // 跨段复用不能依赖空行是否已被格式化。精确重复全章索引；近似重复用
+  // 三字片段倒排选候选，只提示足够长且大部分文字相同的叙述段，不判定抄袭。
+  const exact = new Map<string, number>()
+  const prior: Array<{ text: string; grams: Set<string> }> = []
+  const index = new Map<string, number[]>()
+  scanFrom = 0
+  let reported = 0
+  for (const para of paragraphs) {
+    const offset = content.indexOf(para, scanFrom)
+    scanFrom = offset + para.length
+    const normalized = para
+      .replace(/[“「『"'][^”」』"']*[”」』"']/g, '')
+      .replace(/[^一-鿿A-Za-z0-9]/g, '')
+    if (normalized.length < 16) continue
+    const grams = new Set<string>()
+    for (let i = 0; i + 3 <= normalized.length; i++) grams.add(normalized.slice(i, i + 3))
+    let similar = exact.has(normalized)
+    if (!similar && normalized.length >= 35 && grams.size >= 15) {
+      const candidates = new Map<number, number>()
+      for (const gram of grams) {
+        for (const id of index.get(gram) ?? []) candidates.set(id, (candidates.get(id) ?? 0) + 1)
+      }
+      similar = [...candidates].some(([id, common]) => {
+        const other = prior[id]
+        const lengthRatio = Math.min(other.text.length, normalized.length) / Math.max(other.text.length, normalized.length)
+        return lengthRatio >= 0.75 && 2 * common / (other.grams.size + grams.size) >= 0.82
+      })
+    }
+    if (similar && reported < 5) {
+      out.push({
+        category: 'toxic', severity: 'warn', ruleId: 'repetition', offset,
+        message: exact.has(normalized) ? '跨段重复：较长叙述段已在本章出现' : '跨段高度相似：本段与前文大部分表述相同',
+        snippet: truncate(para, 100),
+        suggestion: '核对本段是否带来新的行动、信息或局势变化；合并重复叙述。刻意呼应可保留，本项不等于缺乏原创性。'
+      })
+      reported++
+    }
+    exact.set(normalized, offset)
+    const id = prior.length
+    prior.push({ text: normalized, grams })
+    if (normalized.length >= 35) {
+      for (const gram of grams) {
+        const ids = index.get(gram) ?? []
+        // 常见片段保留最近候选，防止很长的正文形成平方级比较。
+        if (ids.length >= 40) ids.shift()
+        ids.push(id)
+        index.set(gram, ids)
       }
     }
   }
@@ -1018,7 +1080,7 @@ function pushHookStrengthViolations(
     /这件事.*不简单|没那么简单/
   ]
   // 对话留白：末尾是对话
-  const dialoguePattern = /[""「].+?[""」]\s*$/
+  const dialoguePattern = /["“「].+?["”」]\s*$/
 
   const hasStrong = strongPatterns.some((re) => re.test(tail))
   const hasMedium = mediumPatterns.some((re) => re.test(tail))

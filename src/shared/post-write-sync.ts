@@ -10,6 +10,7 @@ export interface PostWriteSyncApplied {
   plotPoints: number
   collected: number
   settings: number
+  uncollected?: number
 }
 
 export interface PostWriteSyncPending {
@@ -22,7 +23,7 @@ export interface PostWriteSyncPending {
 }
 
 export interface PostWriteSyncSummary {
-  phase: 'ok' | 'partial' | 'failed'
+  phase: 'ok' | 'partial' | 'failed' | 'skipped'
   /** 短句：状态条 / toast 主文案 */
   message: string
   /** 已自动写入计数 */
@@ -39,6 +40,8 @@ export interface PostWriteSyncSummary {
 
 export interface PostWriteSyncInput {
   memory: {
+    reviewRequired?: string[]
+    superseded?: boolean
     applied: {
       stateChanges: number
       plotPoints: number
@@ -49,6 +52,7 @@ export interface PostWriteSyncInput {
       foreshadowings?: number
     }
     errors: string[]
+    appliedDiffs?: { applicable: boolean; collectionAction?: 'collect' | 'uncollect' }[]
   }
   settings: {
     applied: number
@@ -98,6 +102,7 @@ function formatAppliedParts(a: PostWriteSyncApplied): string[] {
   if (a.stateChanges > 0) parts.push(`状态 ${a.stateChanges}`)
   if (a.plotPoints > 0) parts.push(`情节 ${a.plotPoints}`)
   if (a.collected > 0) parts.push(`伏笔 ${a.collected}`)
+  if (a.uncollected) parts.push(`撤回旧回收 ${a.uncollected}`)
   if (a.settings > 0) parts.push(`设定 ${a.settings}`)
   return parts
 }
@@ -120,11 +125,13 @@ function formatPendingParts(p: PostWriteSyncPending): string[] {
  * - ok：无错误
  */
 export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSyncSummary {
+  const uncollected = input.memory.appliedDiffs?.filter((diff) => diff.applicable && diff.collectionAction === 'uncollect').length ?? 0
   const applied: PostWriteSyncApplied = {
     stateChanges: n(input.memory.applied.stateChanges),
     plotPoints: n(input.memory.applied.plotPoints),
     collected: n(input.memory.applied.collected),
-    settings: n(input.settings.applied)
+    settings: n(input.settings.applied),
+    ...(uncollected ? { uncollected } : {})
   }
   const pending = countPendingConfirms(input.extraction)
   const errors = [
@@ -133,7 +140,7 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
   ].filter((e) => typeof e === 'string' && e.trim().length > 0)
 
   const hasAutoWrites =
-    applied.stateChanges + applied.plotPoints + applied.collected + applied.settings > 0
+    applied.stateChanges + applied.plotPoints + applied.collected + applied.settings + uncollected > 0
   const hasPendingConfirms =
     pending.characters +
       pending.locations +
@@ -144,7 +151,11 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
     0
 
   let phase: PostWriteSyncSummary['phase']
-  if (errors.length > 0 && !hasAutoWrites) {
+  if (input.memory.superseded && errors.length === 0) {
+    phase = 'skipped'
+  } else if (input.memory.reviewRequired?.length) {
+    phase = 'partial'
+  } else if (errors.length > 0 && !hasAutoWrites) {
     phase = 'failed'
   } else if (errors.length > 0) {
     phase = 'partial'
@@ -156,7 +167,11 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
   const pendingParts = formatPendingParts(pending)
   let message: string
 
-  if (phase === 'failed') {
+  if (phase === 'skipped') {
+    message = '正文已变化，旧版本同步已跳过'
+  } else if (input.memory.reviewRequired?.length) {
+    message = `记忆待核对，尚未生效：${input.memory.reviewRequired[0]}（共 ${input.memory.reviewRequired.length} 项）`
+  } else if (phase === 'failed') {
     const first = errors[0] ?? '未知错误'
     message =
       first.length > 80

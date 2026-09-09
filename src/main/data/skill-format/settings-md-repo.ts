@@ -1,6 +1,7 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import { readText, parseDoc } from './md-parser'
+import { filterSettingPatchBlocks } from './settings-patch-blocks'
 
 /**
  * 写作前的设定上下文（来自 `设定/` 目录）。
@@ -37,7 +38,8 @@ export interface SettingsDoc {
 export class SettingsMdRepo {
   constructor(private readonly projectDir: string) {}
 
-  async read(): Promise<SettingsContext | null> {
+  /** 不传章节时显示全部设定；传入时自动补丁仅取先于该章的内容。 */
+  async read(beforeChapter?: number): Promise<SettingsContext | null> {
     const dir = join(this.projectDir, '设定')
     let exists = true
     try {
@@ -48,10 +50,10 @@ export class SettingsMdRepo {
     if (!exists) return null
 
     const [genrePositioning, worldview, factions, customRules] = await Promise.all([
-      readGenrePositioning(dir),
-      readSubDirDocs(dir, '世界观'),
-      readSubDirDocs(dir, '势力'),
-      readTopLevelRules(dir)
+      readGenrePositioning(dir, beforeChapter),
+      readSubDirDocs(dir, '世界观', beforeChapter),
+      readSubDirDocs(dir, '势力', beforeChapter),
+      readTopLevelRules(dir, beforeChapter)
     ])
 
     // 过滤空 body 与「待完善」占位模板（避免每章 prompt 注入空壳设定浪费 token）
@@ -122,15 +124,15 @@ export function isPlaceholderSettingBody(body: string): boolean {
 }
 
 /** 读取 题材定位.md 的 body（H1 后全部内容） */
-async function readGenrePositioning(settingsDir: string): Promise<string> {
+async function readGenrePositioning(settingsDir: string, beforeChapter?: number): Promise<string> {
   const text = await readText(join(settingsDir, '题材定位.md'))
   if (!text) return ''
-  const doc = parseDoc(text)
+  const doc = parseDoc(filterSettingPatchBlocks(text, beforeChapter))
   return doc.body.trim()
 }
 
 /** 读取指定子目录下所有 .md 文件，每个返回 { name, body } */
-async function readSubDirDocs(settingsDir: string, subDir: string): Promise<SettingsDoc[]> {
+async function readSubDirDocs(settingsDir: string, subDir: string, beforeChapter?: number): Promise<SettingsDoc[]> {
   const dir = join(settingsDir, subDir)
   let files: string[]
   try {
@@ -145,7 +147,8 @@ async function readSubDirDocs(settingsDir: string, subDir: string): Promise<Sett
     if (!f.endsWith('.md')) continue
     const text = await readText(join(dir, f))
     if (!text) continue
-    const doc = parseDoc(text)
+    const applicable = filterSettingPatchBlocks(text, beforeChapter)
+    const doc = parseDoc(f === '地理.md' ? filterGeographyRows(applicable, beforeChapter) : applicable)
     docs.push({
       name: f.replace(/\.md$/, ''),
       body: doc.body.trim()
@@ -155,7 +158,7 @@ async function readSubDirDocs(settingsDir: string, subDir: string): Promise<Sett
 }
 
 /** 读取 设定/ 顶层 .md 文件（排除 题材定位.md），归入自创规则 */
-async function readTopLevelRules(settingsDir: string): Promise<SettingsDoc[]> {
+async function readTopLevelRules(settingsDir: string, beforeChapter?: number): Promise<SettingsDoc[]> {
   let files: string[]
   try {
     files = await fs.readdir(settingsDir)
@@ -168,11 +171,32 @@ async function readTopLevelRules(settingsDir: string): Promise<SettingsDoc[]> {
     if (f === '题材定位.md') continue
     const text = await readText(join(settingsDir, f))
     if (!text) continue
-    const doc = parseDoc(text)
+    const doc = parseDoc(filterSettingPatchBlocks(text, beforeChapter))
     docs.push({
       name: f.replace(/\.md$/, ''),
       body: doc.body.trim()
     })
   }
   return docs
+}
+
+/** 旧地理补丁已在表格记录出现章；无章节的作者基线保留，不猜测其生效时间。 */
+function filterGeographyRows(text: string, beforeChapter?: number): string {
+  if (beforeChapter == null) return text
+  let chapterColumn = -1
+  return text.split(/\r?\n/).filter((line) => {
+    if (!line.trim().startsWith('|')) {
+      chapterColumn = -1
+      return true
+    }
+    const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim())
+    const headerIndex = cells.findIndex((cell) => /^(?:首次)?出现章(?:节)?$/.test(cell.replace(/\*\*/g, '')))
+    if (headerIndex >= 0) {
+      chapterColumn = headerIndex
+      return true
+    }
+    if (chapterColumn < 0) return true
+    const chapter = Number(cells[chapterColumn]?.match(/\d+/)?.[0])
+    return !Number.isFinite(chapter) || chapter <= 0 || chapter < beforeChapter
+  }).join('\n')
 }

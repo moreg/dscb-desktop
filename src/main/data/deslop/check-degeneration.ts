@@ -198,8 +198,10 @@ function findTruncation(content: ContentLine[]): DeslopFinding[] {
     const c = content[i]
     if (!isContent(c.trimmed)) continue
     const last = c.trimmed
-    // 正常结尾：句号/感叹号/问号/引号闭合
-    if (/[。！？!?"'」』）)】]$/.test(last)) return findings
+    // 正常结尾：句号/感叹号/问号/闭合引号或闭合括号。
+    // 中文正文最常见的是弯引号 ”，旧规则只认直引号 " 和书名号式引号 」』，
+    // 导致完整对白 `“……。”` 被误报为截断。
+    if (/[。！？!?"'”’」』）》〉〕】]$/.test(last)) return findings
     findings.push({
       line: c.lineNo,
       column: last.length,

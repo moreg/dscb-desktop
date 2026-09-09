@@ -23,6 +23,8 @@ export interface NormalizeResult {
     ellipsis: number
     /** 单省略号 … 改为句号 */
     singleEllipsis: number
+    /** 台词说话中间的句号改为逗号 */
+    dialoguePeriod?: number
   }
 }
 
@@ -43,7 +45,8 @@ export function normalizePunctuation(input: string): NormalizeResult {
     dash: 0,
     doubleHyphen: 0,
     ellipsis: 0,
-    singleEllipsis: 0
+    singleEllipsis: 0,
+    dialoguePeriod: 0
   }
 
   // 六点省略号 ……（两个 U+2026）→ 句号
@@ -68,12 +71,17 @@ export function normalizePunctuation(input: string): NormalizeResult {
     // 后接句号/感叹号/问号 → 删（已是断句）；否则用逗号
     const next = text[offset + match.length]
     if (next && /[。！？!？]/.test(next)) return ''
+    // 若后接闭合引号/括号或换行/句末（例如被打断台词“你——”），属于句末断句，转为句号，严禁转成逗号导致闭合引号前挂逗号
+    if (!next || /[”"」』’'）)】\r\n]/.test(next)) return '。'
     return '，'
   })
 
-  // 单破折号 —（U+2014）→ 逗号（避免误伤数字范围，但中文正文里罕见）
-  text = text.replace(/(?<![0-9])—(?![0-9])/g, () => {
+  // 单破折号 —（U+2014）→ 句末用句号，句中用逗号（避免误伤数字范围，但中文正文里罕见）
+  text = text.replace(/(?<![0-9])—(?![0-9])/g, (match, offset) => {
     changes.dash += 1
+    const next = text[offset + match.length]
+    if (next && /[。！？!？]/.test(next)) return ''
+    if (!next || /[”"」』’'）)】\r\n]/.test(next)) return '。'
     return '，'
   })
 
@@ -84,12 +92,34 @@ export function normalizePunctuation(input: string): NormalizeResult {
     .map((line) =>
       isDividerLine(line)
         ? line
-        : line.replace(/--+/g, () => {
+        : line.replace(/--+/g, (match, offset) => {
             changes.doubleHyphen += 1
+            const next = line[offset + match.length]
+            if (next && /[。！？!？]/.test(next)) return ''
+            if (!next || /[”"」』’'）)】]/.test(next)) return '。'
             return '，'
           })
     )
     .join('\n')
+
+  // 引号内台词说话中间的句号 → 逗号（说话中间不落句号，保持口语连贯）
+  text = text.replace(/([“"「])([^”"」\n]+?)([”"」])/g, (_match, open, content, close) => {
+    let subChanged = 0
+    const replaced = content.replace(/。(?!\s*$)/g, () => {
+      subChanged += 1
+      return '，'
+    })
+    if (subChanged > 0) {
+      changes.dialoguePeriod = (changes.dialoguePeriod ?? 0) + subChanged
+    }
+    return open + replaced + close
+  })
+
+  // 清理闭合引号前的非法悬空逗号（台词闭合前严禁以逗号收尾，如被打断台词误转成的 "你，" 统一校正为 "你。"）
+  text = text.replace(/，(?=[”"」』’'])/g, () => {
+    changes.dialoguePeriod = (changes.dialoguePeriod ?? 0) + 1
+    return '。'
+  })
 
   return { text, changes }
 }

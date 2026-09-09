@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { migrateProjectV3ToV4 } from '../src/main/data/memory/migration-v3-to-v4'
+import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
 
 // 构造老版 v3 项目（带 记忆系统/ 与 chapters/）
 async function setupV3Project(root: string): Promise<string> {
@@ -212,6 +213,55 @@ describe('migrate-v3-to-v4', () => {
     // FB-001 的两个版本合并为一行（FB-001）
     const matches = merged.match(/FB-001/g) ?? []
     expect(matches.length).toBeGreaterThanOrEqual(1)
+    const detail = await readFile(path.join(dir, '记忆', '伏笔', 'FB-001.md'), 'utf8')
+    expect(detail).toContain('孢子污染源（追踪版）')
+    expect(detail).toContain('**实际回收章节**：第 50 章')
+  })
+
+  it('合并不同列顺序和多表时保留追踪原文，旧条目按字段补入', async () => {
+    const dir = await setupV3Project(root)
+    const tracking = `# 伏笔追踪\n\n作者注：保留本段和原编号，勿重排。\n\n## 主表\n\n| 伏笔编号 | 原编号 | 伏笔内容 | 状态 | 埋设章节 | 实际回收章节 | 预计回收章节 |\n|---|---|---|---|---|---|---|\n| FB-001 | FB-OLD-9 | 罗盘真正来源 | 已回收 | 第 1 章 | 第 50 章 | 第 60 章 |\n\n## 另一张表\n\n| 伏笔编号 | 内容 | 埋设章节 | 预计回收章节 | 状态 |\n|---|---|---|---|---|\n| FB-003 | 铜铃的声音 | 第 3 章 | 第 80 章 | 已强化 |\n\n## 细纲回收计划\n\n| 伏笔编号 | 内容 | 回收章节 | 回收机制 |\n|---|---|---|---|\n| FB-003 | 计划在终战揭晓 | 第 80 章 | 拆开铜铃 |\n`
+    await writeFile(path.join(dir, '记忆系统', '伏笔追踪.md'), V3_FORESHA)
+    await writeFile(path.join(dir, '追踪', '伏笔.md'), tracking)
+
+    await migrateProjectV3ToV4(dir)
+
+    const merged = await readFile(path.join(dir, '追踪', '伏笔.md'), 'utf8')
+    expect(merged.startsWith(tracking.trimEnd())).toBe(true)
+    const items = await new ForeshadowingMdRepo(dir).list()
+    expect(items.find((f) => f.id === 'FB-001')).toMatchObject({ content: '罗盘真正来源', status: 'collected', actualCollect: 50 })
+    expect(items.find((f) => f.id === 'FB-002')).toMatchObject({ content: '徐昭昭的相机', expectedCollect: 30 })
+    expect(items.find((f) => f.id === 'FB-003')).toMatchObject({ content: '铜铃的声音', status: 'reinforced' })
+    expect(items.find((f) => f.id === 'FB-003')?.actualCollect).toBeUndefined()
+    expect(items).toHaveLength(3)
+  })
+
+  it('旧文件的编号映射和细纲计划表不会迁移成实际回收条目', async () => {
+    const dir = await setupV3Project(root)
+    const legacy = `${V3_FORESHA}\n## 编号映射\n\n| 局部编号 | 局部内容 | 全局编号 |\n|---|---|---|\n| FB-880 | 映射说明 | FB-001 |\n\n## 细纲回收计划\n\n| 伏笔编号 | 内容 | 回收章节 | 回收机制 |\n|---|---|---|---|\n| FB-990 | 尚未写到的揭晓 | 第 99 章 | 预计在终战完成 |\n`
+    await writeFile(path.join(dir, '记忆系统', '伏笔追踪.md'), legacy)
+    await migrateProjectV3ToV4(dir)
+
+    const items = await new ForeshadowingMdRepo(dir).list()
+    expect(items.map((f) => f.id).sort()).toEqual(['FB-001', 'FB-002'])
+    const details = await readdir(path.join(dir, '记忆', '伏笔'))
+    expect(details.sort()).toEqual(['FB-001.md', 'FB-002.md'])
+    const archives = await readdir(path.join(dir, '记忆', '.migration-v3'))
+    expect(archives).toHaveLength(1)
+    expect(await readFile(path.join(dir, '记忆', '.migration-v3', archives[0]), 'utf8')).toBe(legacy)
+  })
+
+  it('追踪将同编号改为计划后，不从旧文件复活其实际回收记录', async () => {
+    const dir = await setupV3Project(root)
+    const planned = '# 伏笔追踪\n\n## 细纲回收计划\n\n| 伏笔编号 | 内容 | 回收章节 | 回收机制 |\n|---|---|---|---|\n| FB-001 | 孢子污染源待重写 | 第 80 章 | 将来重写揭晓 |\n'
+    await writeFile(path.join(dir, '记忆系统', '伏笔追踪.md'), V3_TRACKING_FS)
+    await writeFile(path.join(dir, '追踪', '伏笔.md'), planned)
+
+    await migrateProjectV3ToV4(dir)
+
+    expect(await readFile(path.join(dir, '追踪', '伏笔.md'), 'utf8')).toBe(planned)
+    expect(await new ForeshadowingMdRepo(dir).list()).toEqual([])
+    expect(await readdir(path.join(dir, '记忆', '伏笔'))).toEqual([])
   })
 
   it('重命名 参考资料/ → 资料/', async () => {

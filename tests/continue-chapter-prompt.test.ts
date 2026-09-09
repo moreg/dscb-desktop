@@ -47,12 +47,12 @@ describe('续写 prompt', () => {
     )
   }
 
-  it('无 existingText 时按整章字数下限出指令', async () => {
+  it('无 existingText 时按整章参考字数出指令', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
     const prompt = await service.buildChapterPrompt(projectId, 1)
     expect(prompt.targetWords).toBe(2500)
-    expect(prompt.user).toContain('正文不少于 2500 字')
+    expect(prompt.user).toContain('正文目标约 2500 字')
     expect(prompt.user).not.toContain('本章已写正文前部')
   })
 
@@ -63,8 +63,8 @@ describe('续写 prompt', () => {
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
     expect(prompt.targetWords).toBe(1500)
-    expect(prompt.user).toContain('本次继续写不少于 1500 字')
-    expect(prompt.user).not.toContain('本章篇幅已经写够了')
+    expect(prompt.user).toContain('本次新增目标约 1500 字')
+    expect(prompt.user).not.toContain('本章篇幅已接近或达到参考目标')
     expect(prompt.user).toContain('本章已写正文前部')
   })
 
@@ -75,7 +75,7 @@ describe('续写 prompt', () => {
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
     // 回归：旧逻辑 max(500, 2500-2400) 会强制再写 500 字，章节永远收不了尾
-    expect(prompt.user).toContain('本章篇幅已经写够了')
+    expect(prompt.user).toContain('本章篇幅已接近或达到参考目标')
     expect(prompt.user).toContain('收尾')
     expect(prompt.user).not.toContain('这是硬性下限')
     expect(prompt.targetWords).toBeLessThan(500)
@@ -88,10 +88,10 @@ describe('续写 prompt', () => {
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
     expect(prompt.targetWords).toBeGreaterThan(0)
-    expect(prompt.user).toContain('本章篇幅已经写够了')
+    expect(prompt.user).toContain('本章篇幅已接近或达到参考目标')
   })
 
-  it('超长已写前部被截断，保留头尾并标注省略字数', async () => {
+  it('长章保留完整前文，避免遗漏中段事件', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
     const head = '头'.repeat(100)
@@ -100,11 +100,11 @@ describe('续写 prompt', () => {
     const existing = head + middle + tail
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
-    expect(prompt.user).toContain('省略本章中段')
+    expect(prompt.user).not.toContain('省略本章中段')
     expect(prompt.user).toContain(head)
     expect(prompt.user).toContain(tail)
-    // 整段前部不应被原样塞进 prompt
-    expect(prompt.user).not.toContain(existing)
+    // 同章前文必须完整，不能只发头尾
+    expect(prompt.user).toContain(existing)
   })
 
   it('短前部不截断', async () => {
@@ -251,6 +251,11 @@ describe('续写 prompt', () => {
       expect(prompt.system).toContain('本次要新增')
       // 与 CONTINUITY_RULES「本章开头必须回应或延续」冲突的改写
       expect(prompt.system).toContain('禁止重写、复述或另起一个开头')
+      // 接缝起手硬性铁律与去 AI 报表句断言
+      expect(prompt.system).toContain('接缝起手硬性铁律')
+      expect(prompt.system).toContain('严禁首句复述前文末尾台词')
+      expect(prompt.system).toContain('禁止机械双联报表句')
+      expect(prompt.user).toContain('未完句或未闭合台词优先自然接完')
     })
 
     it('finish：明确宣布「字数硬性下限」本次不适用，且要求收尾', async () => {
@@ -322,7 +327,7 @@ describe('续写 prompt', () => {
     )
 
     expect(prompt.user).toContain('进度对齐')
-    expect(prompt.user).toContain('第一个未写的剧情点')
+    expect(prompt.user).toContain('已完成 / 进行中 / 未开始')
   })
 
   it('中段省略标记不采用括号省略句式（deslop 占位符硬规则会拦这个形状）', async () => {
@@ -336,7 +341,7 @@ describe('续写 prompt', () => {
       '中'.repeat(9000)
     )
 
-    expect(prompt.user).toContain('省略本章中段')
+    expect(prompt.user).not.toContain('省略本章中段')
     // check-degeneration.ts PLACEHOLDER_PATTERNS 的括号省略正则
     expect(prompt.user).not.toMatch(/[（(](此处|以下|这里|下文|后续)?\s*(省略|略)(去|过)?[^）)]{0,10}[）)]/)
   })
@@ -384,7 +389,7 @@ describe('续写 prompt', () => {
       expect(prompt.continueMode).toBe('extend')
       expect(prompt.targetWords).toBe(2000)
       expect(prompt.user).toContain('整章目标 3000 字，已写约 1000 字')
-      expect(prompt.user).toContain('本次要新增 2000 字')
+      expect(prompt.user).toContain('本次新增参考 2000 字')
       // 整章口径的字数字段不得再单独出现，否则又是两个数字打架
       expect(prompt.user).not.toContain('字数目标：约 3000 字')
       expect(prompt.user).not.toContain('预算合计：约 3000 字')
@@ -401,7 +406,7 @@ describe('续写 prompt', () => {
         '甲'.repeat(1000)
       )
 
-      expect(prompt.user).toContain('本次继续写不少于 2000 字')
+      expect(prompt.user).toContain('本次新增目标约 2000 字')
       expect(prompt.user).toContain('已写部分**不计入**')
     })
 
@@ -417,17 +422,17 @@ describe('续写 prompt', () => {
       )
 
       expect(prompt.continueMode).toBe('finish')
-      expect(prompt.user).toContain('篇幅已经够了')
+      expect(prompt.user).toContain('篇幅接近或达到参考目标')
       expect(prompt.user).not.toContain('预算合计：约 3000 字')
     })
 
-    it('非续写：整章字数只出现一次口径，仍是硬性下限', async () => {
+    it('非续写：整章字数统一为参考，剧情完整优先', async () => {
       await writeOutlineWithBudget()
       const service = new WriteService(ps, mockLlm(''))
       const prompt = await service.buildChapterPrompt(projectId, 1)
 
       expect(prompt.chapterTargetWords).toBe(3000)
-      expect(prompt.user).toContain('正文不少于 3000 字')
+      expect(prompt.user).toContain('正文目标约 3000 字')
       expect(prompt.user).not.toContain('字数目标：约 3000 字')
       expect(prompt.user).not.toContain('预算合计：约 3000 字')
       // 分段比例参考保留（节奏信息），但已声明只是参考
@@ -448,7 +453,7 @@ describe('续写 prompt', () => {
 
     expect(prompt.writtenWords).toBe(1000)
     expect(prompt.targetWords).toBe(1500)
-    expect(prompt.user).toContain('本次继续写不少于 1500 字')
+    expect(prompt.user).toContain('本次新增目标约 1500 字')
   })
 
   /**
@@ -461,7 +466,7 @@ describe('续写 prompt', () => {
 
     expect(prompt.chapterTargetWords).toBe(3000)
     expect(prompt.wordTarget.fromOutline).toBe(true)
-    expect(prompt.user).toContain('正文不少于 3000 字')
+    expect(prompt.user).toContain('正文目标约 3000 字')
   })
 
   it('细纲字数解析不出时兜底，并回报 fromOutline=false 供上层提示', async () => {
@@ -479,7 +484,7 @@ describe('续写 prompt', () => {
     const prompt = await service.buildChapterPrompt(projectId, 1)
 
     expect(prompt.user).toContain('正文约 3000 字')
-    expect(prompt.user).not.toContain('正文不少于 3000 字')
+    expect(prompt.user).not.toContain('正文目标约 3000 字')
   })
 
   /**
@@ -487,13 +492,13 @@ describe('续写 prompt', () => {
    * 模型写少了全链路没人发现。
    */
   describe('写后自检的篇幅达标项', () => {
-    it('写不够时判 fail，并给出缺口', async () => {
+    it('写不够时只提醒篇幅参考，不鼓励机械补足', async () => {
       await writeOutline('3000')
       const service = new WriteService(ps, mockLlm(''))
       const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(1500))
 
       const item = report.items.find((i) => i.id === 'word_count')
-      expect(item?.verdict).toBe('fail')
+      expect(item?.verdict).toBe('warn')
       expect(item?.detail).toContain('1500')
       expect(item?.detail).toContain('3000')
     })

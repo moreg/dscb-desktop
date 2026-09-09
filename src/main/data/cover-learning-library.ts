@@ -109,7 +109,7 @@ export const DEFAULT_COVER_LEARNING_LIBRARY: CoverLearningLibrary = {
     note: '提炼构图、色彩、字体层级和媒介质感等共性，不复刻具体作品。'
   },
   globalRules: [
-    'Use a portrait 9:16 master canvas and keep essential text inside the central 85% safe area.',
+    'Use a portrait 3:4 master canvas and keep essential text inside the central 85% safe area.',
     'Design for mobile thumbnail recognition with one dominant focal point and a clear silhouette.',
     'Make the Chinese title the primary visual layer, normally occupying 20 to 35 percent of the cover.',
     'For long titles, group the exact text into 2 to 4 semantic lines instead of shrinking it.',
@@ -750,7 +750,7 @@ function deriveLearnedRules(samples: LearnedCoverSample[]): string[] {
     rules.push(`Observed local library: ${Math.round(aggregate.portraitShare * 100)}% of tracked covers use portrait composition; prioritize a tall mobile-first silhouette.`)
   }
   if (aggregate.nineSixteenShare >= 0.45) {
-    rules.push(`Observed local library: ${Math.round(aggregate.nineSixteenShare * 100)}% cluster near 9:16; preserve the 9:16 master ratio and central safe area.`)
+    rules.push(`Observed local library: ${Math.round(aggregate.nineSixteenShare * 100)}% cluster near 9:16; adapt those composition patterns to the required 3:4 master ratio and central safe area.`)
   }
   rules.push(aggregate.saturation >= 0.45
     ? 'Observed local library favors saturated color separation; keep the focal subject and typography strongly differentiated.'

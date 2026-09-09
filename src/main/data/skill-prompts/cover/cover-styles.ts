@@ -55,7 +55,7 @@ export function inferGenre(bookName: string): CoverGenre {
    ========================================================= */
 
 /** 应用内封面的默认成品比例。平台只改变视觉风格，不再改变主封面的画幅。 */
-export const DEFAULT_COVER_RATIO = '9:16'
+export const DEFAULT_COVER_RATIO = '3:4'
 
 export const PLATFORM_STYLES: Record<CoverPlatform, { label: string; ratio: string; prompt: string; uploadSize?: string }> = {
   fanqie: {
@@ -545,8 +545,8 @@ export const AUTHOR_FONT_STYLES: Record<Exclude<CoverAuthorFontStyle, 'auto'>, s
 }
 
 export const AUTHOR_POSITIONS: Record<Exclude<CoverAuthorPosition, 'auto'>, string> = {
-  bottom_center: 'at the bottom center inside the safe area, clearly separated from the title',
-  bottom_right: 'at the lower right inside the safe area, aligned to a short divider line',
+  bottom_center: 'centered in the lower area, clearly separated from the title and kept a generous margin above the bottom edge',
+  bottom_right: 'at the lower right inside the safe area, aligned to a short divider line and kept a generous margin above the bottom edge',
   vertical_side: 'set vertically near the outer side of the title, inside the safe area and visually secondary'
 }
 
@@ -630,7 +630,7 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     : preset?.authorFont ?? style.authorFont
   const authorPosition = typography?.authorPosition && typography.authorPosition !== 'auto'
     ? AUTHOR_POSITIONS[typography.authorPosition]
-    : preset?.authorPosition ?? 'at the bottom center inside the safe area, clearly separated from the title'
+    : preset?.authorPosition ?? 'centered in the lower area, clearly below the title with a visible gap, and kept a generous margin above the bottom edge'
 
   const lines: string[] = []
   // 风格层
@@ -645,10 +645,13 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   // 文字层
   lines.push(`Title text '${args.bookName}' ${titlePosition}, in ${titleFont}, with ${titleEffect}.`)
   lines.push(
-    `Author name '${args.authorName}' ${authorPosition}, in ${authorFont}.`
+    `Author byline: the author name '${args.authorName}' immediately followed by the single Simplified Chinese character '著' rendered as a smaller suffix glyph, roughly 55 to 70 percent of the name's height, with a small gap before it and no other punctuation; the byline sits ${authorPosition}, in ${authorFont}; it must be rendered in full and stay completely inside the frame.`
   )
   lines.push(
-    'Typography hierarchy: the title is the largest and most readable text, usually occupying 20 to 35 percent of the cover area; for a long Chinese title, use intentional 2-to-4-line grouping at semantic phrase boundaries instead of shrinking it; the author name is clearly secondary; render the exact Simplified Chinese characters once only, with correct spelling, no duplicated glyphs, and keep the background behind both text areas visually uncluttered.'
+    'Typography hierarchy: the title is the largest and most readable text, occupying about 20 to 30 percent of the cover area; for a long Chinese title, use intentional 2-to-4-line grouping at semantic phrase boundaries instead of shrinking it; the title must not extend into the bottom eighth of the cover, leaving a clear band there for the author byline; the author name is clearly secondary; render the exact Simplified Chinese characters once only, with correct spelling, no duplicated glyphs, and keep the background behind both text areas visually uncluttered.'
+  )
+  lines.push(
+    'Frame safety: the finished cover will be cropped slightly on all four sides for platform upload, so every glyph of both the title and the author byline must sit well within a safe margin — at least 6 percent of the cover height from the top and bottom edges and 6 percent of the width from the sides. No text may touch, overlap, or run off any edge; the author byline in particular must float clearly above the bottom edge, never flush against it.'
   )
   if (args.learningRules?.length) {
     lines.push(`Learned cover rules: ${args.learningRules.join(' ')}`)

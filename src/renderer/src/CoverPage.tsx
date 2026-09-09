@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import type {
   CoverFile,
   CoverGenre,
@@ -16,13 +17,13 @@ import type {
 } from '../../shared/types'
 
 const PLATFORM_OPTIONS: { value: CoverPlatform; label: string }[] = [
-  { value: 'fanqie', label: '番茄小说（默认 9:16）' },
-  { value: 'qidian', label: '起点（默认 9:16）' },
-  { value: 'jjwxc', label: '晋江（默认 9:16）' },
-  { value: 'zhihu', label: '知乎盐言（默认 9:16）' },
-  { value: 'qimao', label: '七猫（默认 9:16）' },
-  { value: 'ciweimao', label: '刺猬猫（默认 9:16）' },
-  { value: 'other', label: '其他（默认 9:16）' }
+  { value: 'fanqie', label: '番茄小说（默认 3:4）' },
+  { value: 'qidian', label: '起点（默认 3:4）' },
+  { value: 'jjwxc', label: '晋江（默认 3:4）' },
+  { value: 'zhihu', label: '知乎盐言（默认 3:4）' },
+  { value: 'qimao', label: '七猫（默认 3:4）' },
+  { value: 'ciweimao', label: '刺猬猫（默认 3:4）' },
+  { value: 'other', label: '其他（默认 3:4）' }
 ]
 
 const GENRE_OPTIONS: { value: CoverGenre; label: string }[] = [
@@ -242,10 +243,19 @@ function describeError(err: unknown): string {
     return '模型没有按要求返回 JSON。重试一次，或在设置里给「辅助提取」换一个更稳的模型。'
   }
   if (raw.includes('LLM_NOT_CONFIGURED')) {
-    return '还没有可用的文本模型。到全局设置里配置 API Key，或接入 codex / grok CLI。'
+    return '还没有可用的文本模型。到全局设置里配置 API Key，或接入 codex / grok / claude CLI。'
   }
   if (raw.includes('LLM_TIMEOUT')) {
     return '提炼超时。素材较多时可先精简大纲，或换一个更快的模型。'
+  }
+  if (raw.includes('IMAGE_CLI_NOT_FOUND')) {
+    return '未检测到本机 codex / grok CLI。请先安装并完成登录（终端运行 codex login 或 grok login）。'
+  }
+  if (raw.includes('IMAGE_CLI_TIMEOUT')) {
+    return 'CLI 生图超时（上限 10 分钟）。请重试一次；反复超时可改用「API」通道。'
+  }
+  if (raw.includes('IMAGE_CLI_GENERATE_FAILED')) {
+    return 'CLI 生图失败：模型没有产出图片文件。请确认 CLI 登录态有效后重试（详情见原始报错）。'
   }
   return raw.replace(/^Error:\s*/, '')
 }
@@ -403,8 +413,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       setError('提示词不能为空')
       return
     }
-    if (!config?.hasKey) {
-      setError('请先配置图像生成 API（点右上「封面配置」）')
+    if (!config || (config.channel === 'api' && !config.hasKey)) {
+      setError('请先配置图像生成（点右上「封面配置」：API Key 或 codex / grok CLI 通道）')
       return
     }
     setGenerating(true)
@@ -434,7 +444,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
     try {
       const hasLlm = await window.api.hasLlmKey()
       if (!hasLlm) {
-        throw new Error('请先在全局设置中配置文本模型（API Key 或 codex / grok CLI 均可）')
+        throw new Error('请先在全局设置中配置文本模型（API Key 或 codex / grok / claude CLI 均可）')
       }
       const draft = await window.api.extractCoverPrompt({
         projectId,
@@ -491,7 +501,11 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-ghost" onClick={() => setShowConfig(true)}>
               ⚙ 封面配置
-              {config?.hasKey ? (
+              {config?.channel === 'codex' ? (
+                <span style={{ marginLeft: 6, color: 'var(--success)' }}>●codex CLI</span>
+              ) : config?.channel === 'grok' ? (
+                <span style={{ marginLeft: 6, color: 'var(--success)' }}>●grok CLI</span>
+              ) : config?.hasKey ? (
                 <span style={{ marginLeft: 6, color: 'var(--success)' }}>●已配置</span>
               ) : (
                 <span style={{ marginLeft: 6, color: 'var(--danger)' }}>●未配置</span>
@@ -501,13 +515,16 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
         </div>
       </div>
 
-      {config && !config.hasKey ? (
+      {config && !config.hasKey && config.channel === 'api' ? (
         <div className="placeholder" style={{ marginTop: 16 }}>
           <p style={{ margin: '0 0 6px', fontSize: 14, color: 'var(--danger)' }}>
-            图像生成 API 未配置。出图需要 OpenAI Images API 或兼容代理的 Key（gpt-image-2）。
+            图像生成 API 未配置。出图需要 OpenAI Images API 或兼容代理的 Key（gpt-image-2），
+            或直接改用本机 codex / grok CLI（登录态即可，无需 Key）。
           </p>
           <p className="meta" style={{ margin: '0 0 12px' }}>
-            codex / grok 这类 CLI 只能生成文本，不能出图；下方「提炼画面要素」可以先用它们把提示词调好。
+            推荐流程：1）先用 codex / grok / claude 这类 CLI（或任意文本模型）点「提炼画面要素」把提示词调好；
+            2）点「前往配置」选「codex CLI」或「grok CLI」通道（无需 Key），或填入任一兼容图像的 API Key；
+            3）最后点「生成封面」出图。
           </p>
           <button className="btn btn-primary" onClick={() => setShowConfig(true)}>
             前往配置
@@ -516,7 +533,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       ) : null}
 
       {/* 生成表单 */}
-      <div className="dialog" style={{ maxWidth: 'none', margin: '12px 0', boxShadow: 'none' }}>
+        <div className="dialog" style={{ maxWidth: 'none', width: '100%', margin: '12px 0', boxShadow: 'none' }}>
         <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div className="field" style={{ flex: '2 1 200px' }}>
             <label htmlFor="cover-book-name">书名 *</label>
@@ -825,6 +842,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
 
 function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string }): React.ReactElement {
   const [dataUrl, setDataUrl] = useState<string | null>(null)
+  const [locationError, setLocationError] = useState('')
+  const [zoomed, setZoomed] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -836,20 +855,41 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
     }
   }, [projectId, cover.fileName])
 
+  useEffect(() => {
+    if (!zoomed) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setZoomed(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomed])
+
+  const handleShowInFolder = async (): Promise<void> => {
+    setLocationError('')
+    try {
+      await window.api.showCoverInFolder(projectId, cover.fileName)
+    } catch (err) {
+      setLocationError(describeError(err))
+    }
+  }
+
   return (
     <div className="project-card" style={{ padding: 8, cursor: 'default' }}>
       <div
         style={{
           width: '100%',
-          aspectRatio: cover.isUploadSize ? '3 / 4' : '9 / 16',
+          aspectRatio: '3 / 4',
           background: 'var(--surface-2)',
           borderRadius: 6,
           overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          marginBottom: 8
+          marginBottom: 8,
+          cursor: dataUrl ? 'zoom-in' : 'default'
         }}
+        onClick={() => dataUrl && setZoomed(true)}
+        title={dataUrl ? '点击放大查看' : undefined}
       >
         {dataUrl ? (
           <img src={dataUrl} alt={cover.fileName} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -857,14 +897,70 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
           <span className="meta">加载中…</span>
         )}
       </div>
+      {zoomed && dataUrl
+        ? createPortal(
+            <div
+              onClick={() => setZoomed(false)}
+              style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 90,
+                background: 'rgba(0, 0, 0, 0.82)',
+                backdropFilter: 'blur(4px)',
+                WebkitBackdropFilter: 'blur(4px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 32,
+                cursor: 'zoom-out',
+                animation: 'fadeIn 0.15s ease-out'
+              }}
+            >
+              <img
+                src={dataUrl}
+                alt={cover.fileName}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  objectFit: 'contain',
+                  borderRadius: 8,
+                  boxShadow: 'var(--shadow-lg)',
+                  cursor: 'default'
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setZoomed(false)}
+                style={{ position: 'fixed', top: 20, right: 24, fontSize: 13 }}
+              >
+                关闭 ✕
+              </button>
+            </div>,
+            document.body
+          )
+        : null}
       <div style={{ fontSize: 12 }}>
-        <div style={{ fontWeight: 600 }}>
-          v{cover.version}
-          {cover.isUploadSize ? ' · 上传版' : ''}
+        <div className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+          <div style={{ fontWeight: 600 }}>
+            v{cover.version}
+            {cover.isUploadSize ? ' · 上传版' : ''}
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ padding: '2px 8px', minHeight: 24, fontSize: 11 }}
+            onClick={() => void handleShowInFolder()}
+            title="在系统资源管理器中定位这张图片"
+          >
+            打开位置
+          </button>
         </div>
         <div className="meta">
           {GENRE_LABELS[cover.genre]} · {(cover.size / 1024).toFixed(0)} KB
         </div>
+        {locationError ? <div style={{ color: 'var(--danger)', marginTop: 4 }}>{locationError}</div> : null}
       </div>
     </div>
   )
@@ -882,6 +978,7 @@ function CoverConfigDialog({
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState(config.baseUrl)
   const [model, setModel] = useState(config.model)
+  const [channel, setChannel] = useState<'api' | 'codex' | 'grok'>(config.channel)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -892,7 +989,8 @@ function CoverConfigDialog({
       await window.api.setCoverImageConfig({
         apiKey: apiKey || undefined,
         baseUrl: baseUrl.trim() || undefined,
-        model: model.trim() || undefined
+        model: model.trim() || undefined,
+        channel
       })
       onSaved()
     } catch (err) {
@@ -902,41 +1000,76 @@ function CoverConfigDialog({
     }
   }
 
+  const channelLabel: Record<'api' | 'codex' | 'grok', string> = {
+    api: 'API Key（OpenAI / 兼容代理）',
+    codex: 'codex CLI（ChatGPT 登录态，无需 Key）',
+    grok: 'grok CLI（Grok 登录态，无需 Key）'
+  }
+
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <h3>封面配置</h3>
         <p className="meta" style={{ marginTop: 4 }}>
-          封面生成调用 OpenAI Images API（gpt-image-2）或兼容代理。独立于文本 LLM provider。
+          出图通道二选一：图像 API（OpenAI Images API / 兼容代理），或本机 CLI（codex / grok 登录态，无需 Key）。
         </p>
+
         <div className="field">
-          <label>API Key {config.hasKey ? `（当前 ${config.keyMasked}，留空保留）` : '*'}</label>
-          <input
-            className="input"
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={config.hasKey ? '留空保留当前 key' : 'sk-...'}
-          />
+          <label>出图通道</label>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            {(['api', 'codex', 'grok'] as const).map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`btn ${channel === c ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setChannel(c)}
+                style={{ fontSize: 12 }}
+              >
+                {channelLabel[c]}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="field">
-          <label>Base URL</label>
-          <input
-            className="input"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-          />
-        </div>
-        <div className="field">
-          <label>模型</label>
-          <input
-            className="input"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="gpt-image-2"
-          />
-        </div>
+
+        {channel === 'api' ? (
+          <>
+            <div className="field">
+              <label>API Key {config.hasKey ? `（当前 ${config.keyMasked}，留空保留）` : '*'}</label>
+              <input
+                className="input"
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={config.hasKey ? '留空保留当前 key' : 'sk-...'}
+              />
+            </div>
+            <div className="field">
+              <label>Base URL</label>
+              <input
+                className="input"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            </div>
+            <div className="field">
+              <label>模型</label>
+              <input
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="gpt-image-2"
+              />
+            </div>
+          </>
+        ) : (
+          <p className="meta" style={{ margin: '6px 0 10px' }}>
+            {channel === 'codex'
+              ? '内容与封面图均由本机 codex CLI 生成（ChatGPT 登录态），需要已执行过 codex login。出图约需 1-5 分钟。'
+              : '内容与封面图均由本机 grok CLI 生成（Grok 登录态），需要已登录 grok。出图约需 1-5 分钟。'}
+            {channel === 'grok' ? ' 参考图生图暂不支持，仅文生图。' : ''}
+          </p>
+        )}
         {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
           <button className="btn btn-ghost" onClick={onClose}>

@@ -3,284 +3,250 @@ import pngToIco from 'png-to-ico'
 import { mkdirSync, writeFileSync } from 'fs'
 
 /**
- * 打开的书 + 斜放钢笔
- * 圆角方形背景(深紫→紫红渐变)+ 翻开的书本(米色页面 + 文字线)+ 金尖钢笔 + 星点装饰
- * 设计原则:文学感、温暖、精致
+ * 大神持笔 — 应用图标生成器（全新理念）
+ *
+ * 旧理念（已废弃）：黑色石板 + 金色西式钢笔，冷硬、与 App 内部宣纸/朱砂风格割裂。
+ * 新理念：中式文人 · 朱砂印章
+ *   · 一枚实心圆角朱印（朱砂红竖向渐变 + 内框线），像一方钤在宣纸上的名章
+ *   · 阴刻「抽象笔尖」——不用汉字，用负空间留白拼出一支笔尖 / 一撇
+ *   · 笔尖保留出气孔 + 中缝两个经典符号，16px 也读得出「笔」
+ *   · 笔尖正下方一点留白 = 落笔的第一个字
+ *   · 配色对齐 design.css：--vermilion #b8331f / --vermilion-2 #d4452e，宣纸白 #f4ebd6
+ *
+ * 实现：每个目标尺寸独立以 4× 超采样渲染再盒式降采样，保证小尺寸边缘干净。
+ * 矢量母版见 build/icon-source.svg。
  */
 
-// 配色:温暖文学风
-const BG_TOP = [0x2a, 0x18, 0x4d]     // 深紫
-const BG_BOT = [0x6b, 0x21, 0x54]     // 紫红
-const BOOK_PAGE = [0xf5, 0xeb, 0xd0]  // 米色书页
-const BOOK_PAGE_DK = [0xd9, 0xc9, 0xa3] // 书页暗部
-const BOOK_SPINE = [0x7a, 0x52, 0x2d] // 书脊棕
-const TEXT_LINE = [0x9b, 0x8a, 0x6a]  // 文字线
-const PEN_BODY = [0x1f, 0x29, 0x37]   // 深色笔杆
-const PEN_HI = [0x3a, 0x4a, 0x62]     // 笔杆高光
-const PEN_CAP = [0x12, 0x1a, 0x24]    // 笔尾深色
-const PEN_NIB = [0xe6, 0xc2, 0x4a]    // 金色笔尖
-const PEN_NIB_DK = [0xb8, 0x90, 0x20] // 金色暗部
-const SLIT = [0x0a, 0x0a, 0x14]       // 笔尖缝
-const STAR = [0xff, 0xe6, 0x80]       // 星点金色
+// ---- 配色（印泥朱漆：深、偏绛、哑光，不橙不艳）------------------------
+const SEAL_BASE = [0xa1, 0x28, 0x21] // 印面主色（近「美丽朱砂」印泥）
+const SEAL_EDGE = [0x7b, 0x18, 0x16] // 四边积色（偏氧化牛血红）
+const SEAL_LIFT = [0xb0, 0x35, 0x2b] // 中心极轻提亮
+const PAPER_TOP = [0xf1, 0xe8, 0xd2] // 留白：象牙色，非纯白
+const PAPER_BOT = [0xe1, 0xd0, 0xb0] // 留白近尖压暗
+const CARVE = [0x78, 0x1c, 0x18] // 阴刻回填（比主色更沉，像刻得更深）
+const FRAME = [0x5f, 0x15, 0x15] // 边栏凹槽色
 
-function setPx(png, x, y, size, [r, g, b], a = 0xff) {
-  if (x < 0 || x >= size || y < 0 || y >= size) return
-  const idx = (size * y + x) << 2
-  if (a < 0xff && png.data[idx + 3] === 0) return
-  png.data[idx] = r
-  png.data[idx + 1] = g
-  png.data[idx + 2] = b
-  png.data[idx + 3] = Math.max(png.data[idx + 3], a)
+const GRAIN_SEAL = 7 // 印面哑光颗粒振幅
+const GRAIN_PAPER = 4 // 留白颗粒振幅
+
+const SS = 4 // 超采样倍数
+const SIZES = [256, 128, 64, 48, 32, 16]
+
+// ---- 基础几何 ---------------------------------------------------------
+function lerp(a, b, t) {
+  return a + (b - a) * t
+}
+function lerpColor(a, b, t) {
+  return [
+    Math.round(lerp(a[0], b[0], t)),
+    Math.round(lerp(a[1], b[1], t)),
+    Math.round(lerp(a[2], b[2], t))
+  ]
+}
+function smoothstep(t) {
+  const x = t < 0 ? 0 : t > 1 ? 1 : t
+  return x * x * (3 - 2 * x)
+}
+/** 确定性 2D 噪声，0..1；用于哑光颗粒 */
+function hash2(x, y) {
+  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) ^ 0x9e3779b9
+  h = Math.imul(h ^ (h >>> 13), 1274126177)
+  h ^= h >>> 16
+  return (h >>> 0) / 4294967295
 }
 
-function fillCircle(png, size, cx, cy, r, color) {
-  const r2 = r * r
-  const x0 = Math.max(0, Math.floor(cx - r))
-  const x1 = Math.min(size - 1, Math.ceil(cx + r))
-  const y0 = Math.max(0, Math.floor(cy - r))
-  const y1 = Math.min(size - 1, Math.ceil(cy + r))
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x - cx
-      const dy = y - cy
-      if (dx * dx + dy * dy <= r2) setPx(png, x, y, size, color)
-    }
-  }
+/** 三次贝塞尔取点 */
+function bezier(p0, p1, p2, p3, t) {
+  const u = 1 - t
+  const w0 = u * u * u
+  const w1 = 3 * u * u * t
+  const w2 = 3 * u * t * t
+  const w3 = t * t * t
+  return [
+    w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0],
+    w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1]
+  ]
 }
 
-/** 填一个凸多边形(shoelace 扫描线) */
-function fillPolygon(png, size, pts, color) {
-  let minY = Infinity, maxY = -Infinity
-  for (const [, y] of pts) {
-    if (y < minY) minY = y
-    if (y > maxY) maxY = y
+/** 把一串三次贝塞尔段采样成折线点列 */
+function sampleBeziers(segments, per = 48) {
+  const pts = []
+  for (const [p0, p1, p2, p3] of segments) {
+    for (let i = 0; i < per; i++) pts.push(bezier(p0, p1, p2, p3, i / per))
   }
-  minY = Math.max(0, Math.floor(minY))
-  maxY = Math.min(size - 1, Math.ceil(maxY))
-  for (let y = minY; y <= maxY; y++) {
-    let left = Infinity
-    let right = -Infinity
-    const n = pts.length
-    for (let i = 0; i < n; i++) {
-      const [ax, ay] = pts[i]
-      const [bx, by] = pts[(i + 1) % n]
-      if ((ay <= y && by > y) || (by <= y && ay > y)) {
-        const t = (y - ay) / (by - ay)
-        const x = ax + t * (bx - ax)
-        if (x < left) left = x
-        if (x > right) right = x
-      }
-    }
-    if (left <= right) {
-      for (let x = Math.ceil(left); x <= Math.floor(right); x++) setPx(png, x, y, size, color)
-    }
-  }
+  return pts
 }
 
-/** 圆角矩形检测 */
-function inRoundedRect(x, y, size, r) {
-  if (x < 0 || x >= size || y < 0 || y >= size) return false
-  const inCornerX = (x < r) || (x > size - 1 - r)
-  const inCornerY = (y < r) || (y > size - 1 - r)
-  if (!inCornerX || !inCornerY) return true
-  const ccx = x < r ? r : size - 1 - r
-  const ccy = y < r ? r : size - 1 - r
-  const dx = x - ccx
-  const dy = y - ccy
+/** 点是否在多边形内（射线法） */
+function pointInPoly(x, y, poly) {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0]
+    const yi = poly[i][1]
+    const xj = poly[j][0]
+    const yj = poly[j][1]
+    const hit = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi
+    if (hit) inside = !inside
+  }
+  return inside
+}
+
+/** 圆角矩形内部判定；也可用于环形（内外半径）框线 */
+function inRoundedRect(x, y, x0, y0, w, h, r) {
+  const x1 = x0 + w
+  const y1 = y0 + h
+  if (x < x0 || x > x1 || y < y0 || y > y1) return false
+  const cx = x < x0 + r ? x0 + r : x > x1 - r ? x1 - r : x
+  const cy = y < y0 + r ? y0 + r : y > y1 - r ? y1 - r : y
+  const dx = x - cx
+  const dy = y - cy
   return dx * dx + dy * dy <= r * r
 }
 
-/** 旋转多边形并填充(本地坐标→世界坐标) */
-function fillPolygonRotated(png, size, pts, color, cx, cy, angle) {
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const rotated = pts.map(([x, y]) => [
-    cx + x * cos - y * sin,
-    cy + x * sin + y * cos
+// ---- 归一化坐标下的形状（0..1，原点左上，y 向下）-----------------------
+// 整支笔尖绕中心旋转，成一道自右上向左下的「撇」——既是钢笔尖，也是一笔起手。
+const PIVOT = [0.5, 0.5]
+const NIB_ANGLE = (17 * Math.PI) / 180 // 顺时针：笔尖甩向左下
+const NIB_SCALE = 1.03
+
+function xform([x, y]) {
+  const dx = (x - PIVOT[0]) * NIB_SCALE
+  const dy = (y - PIVOT[1]) * NIB_SCALE
+  const c = Math.cos(NIB_ANGLE)
+  const s = Math.sin(NIB_ANGLE)
+  return [PIVOT[0] + dx * c - dy * s, PIVOT[1] + dx * s + dy * c]
+}
+
+// 抽象笔尖轮廓（直立时）：平直顶边 → 宽肩 → 近直的内凹收窄 → 一点尖
+// 左右严格对称（x 关于 0.5 镜像），旋转后自然成「撇」势
+const NIB_OUTLINE = (() => {
+  const topL = [0.414, 0.19]
+  const topR = [0.586, 0.19]
+  const tip = [0.5, 0.85]
+  const shoulderR = [0.63, 0.33]
+  const shoulderL = [0.37, 0.33]
+  const top = sampleBeziers([[topL, [0.446, 0.172], [0.554, 0.172], topR]], 20)
+  const right = sampleBeziers([
+    [topR, [0.616, 0.212], [0.628, 0.268], shoulderR],
+    [shoulderR, [0.63, 0.46], [0.582, 0.66], tip]
   ])
-  fillPolygon(png, size, rotated, color)
-}
+  const left = sampleBeziers([
+    [tip, [0.418, 0.66], [0.37, 0.46], shoulderL],
+    [shoulderL, [0.372, 0.268], [0.384, 0.212], topL]
+  ])
+  return top.concat(right, left).map(xform)
+})()
 
-/** 旋转圆并填充 */
-function fillCircleRotated(png, size, lx, ly, r, color, cx, cy, angle) {
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const wx = cx + lx * cos - ly * sin
-  const wy = cy + lx * sin + ly * cos
-  fillCircle(png, size, wx, wy, r, color)
-}
+// 中缝：自出气孔一路贯穿到笔尖，把笔尖劈成两瓣（上端封在气孔里，顶边保持完整）
+const SLIT_POLY = [
+  [0.487, 0.3],
+  [0.513, 0.3],
+  [0.504, 0.83],
+  [0.496, 0.83]
+].map(xform)
 
-function makePng(size) {
+const BREATHER_C = xform([0.5, 0.3]) // 出气孔（中缝上端终点）
+const BREATHER_R = 0.032 * NIB_SCALE
+
+// ---- 渲染单个尺寸 ---------------------------------------------------------
+function renderSize(size) {
+  const S = size * SS
   const png = new PNG({ width: size, height: size })
-  const cx = size / 2
-  const cy = size / 2
+  const acc = new Float64Array(size * size * 4)
 
-  // 1) 圆角方形背景:深紫→紫红渐变
-  const radius = size * 0.16
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      if (!inRoundedRect(x, y, size, radius)) continue
-      const t = y / size
-      const idx = (size * y + x) << 2
-      png.data[idx] = Math.round(BG_TOP[0] * (1 - t) + BG_BOT[0] * t)
-      png.data[idx + 1] = Math.round(BG_TOP[1] * (1 - t) + BG_BOT[1] * t)
-      png.data[idx + 2] = Math.round(BG_TOP[2] * (1 - t) + BG_BOT[2] * t)
-      png.data[idx + 3] = 0xff
+  const radius = S * 0.172 // 更接近「一方章」的方正
+  const drawFrame = size >= 40 // 极小尺寸省掉边栏，避免糊成一团
+  const frameOuterInset = S * 0.062
+  const frameW = S * 0.016
+
+  const nib = NIB_OUTLINE.map(([nx, ny]) => [nx * S, ny * S])
+  const slit = SLIT_POLY.map(([nx, ny]) => [nx * S, ny * S])
+  const bcx = BREATHER_C[0] * S
+  const bcy = BREATHER_C[1] * S
+  const br = BREATHER_R * S
+
+  let nibMinY = Infinity
+  let nibMaxY = -Infinity
+  for (const [, y] of nib) {
+    if (y < nibMinY) nibMinY = y
+    if (y > nibMaxY) nibMaxY = y
+  }
+
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      // 1) 印章圆角方形
+      if (!inRoundedRect(x, y, 0, 0, S - 1, S - 1, radius)) continue
+
+      // 1) 印面：径向渐晕——中心稍亮，四边积色（仿印泥钤压时边缘沉淀）
+      const nx = x / S - 0.5
+      const ny = y / S - 0.5
+      const d = Math.min(1, Math.hypot(nx, ny) / 0.7)
+      let col = lerpColor(SEAL_BASE, SEAL_EDGE, smoothstep(d) * 0.62)
+      const lift = Math.max(0, 0.16 * (1 - d * 1.5))
+      if (lift > 0) col = lerpColor(col, SEAL_LIFT, lift)
+      let grain = GRAIN_SEAL
+
+      // 2) 边栏凹槽（碑刻式：外沿压深一线，内沿提亮一线）
+      if (drawFrame) {
+        const inO = inRoundedRect(x, y, frameOuterInset, frameOuterInset, S - 1 - 2 * frameOuterInset, S - 1 - 2 * frameOuterInset, radius * 0.8)
+        const inM = inRoundedRect(x, y, frameOuterInset + frameW, frameOuterInset + frameW, S - 1 - 2 * (frameOuterInset + frameW), S - 1 - 2 * (frameOuterInset + frameW), radius * 0.72)
+        const inI = inRoundedRect(x, y, frameOuterInset + frameW * 2, frameOuterInset + frameW * 2, S - 1 - 2 * (frameOuterInset + frameW * 2), S - 1 - 2 * (frameOuterInset + frameW * 2), radius * 0.64)
+        if (inO && !inM) col = lerpColor(col, FRAME, 0.5)
+        else if (inM && !inI) col = lerpColor(col, SEAL_LIFT, 0.28)
+      }
+
+      // 3) 抽象笔尖留白
+      if (y >= nibMinY && y <= nibMaxY && pointInPoly(x, y, nib)) {
+        const nt = (y - nibMinY) / (nibMaxY - nibMinY)
+        col = lerpColor(PAPER_TOP, PAPER_BOT, nt)
+        grain = GRAIN_PAPER
+
+        const ddx = x - bcx
+        const ddy = y - bcy
+        if (ddx * ddx + ddy * ddy <= br * br) col = CARVE.slice() // 出气孔
+        if (pointInPoly(x, y, slit)) col = CARVE.slice() // 中缝：贯穿到尖
+      }
+
+      // 4) 哑光颗粒（按最终像素定位，保证降采样后仍留存）
+      const fx = Math.floor(x / SS)
+      const fy = Math.floor(y / SS)
+      const g = (hash2(fx, fy) - 0.5) * grain
+
+      const oi = (fy * size + fx) << 2
+      acc[oi] += col[0] + g
+      acc[oi + 1] += col[1] + g * 0.88
+      acc[oi + 2] += col[2] + g * 0.78
+      acc[oi + 3] += 255
     }
   }
 
-  // 2) 背景星点装饰
-  fillCircle(png, size, cx - size * 0.30, cy - size * 0.32, size * 0.012, STAR)
-  fillCircle(png, size, cx + size * 0.32, cy - size * 0.28, size * 0.010, STAR)
-  fillCircle(png, size, cx - size * 0.34, cy + size * 0.05, size * 0.008, STAR)
-  fillCircle(png, size, cx + size * 0.34, cy + size * 0.10, size * 0.009, STAR)
-
-  // 3) 打开的书本(中下部)
-  const bookCx = cx
-  const bookCy = cy + size * 0.14
-  const bookW = size * 0.58
-  const bookH = size * 0.26
-
-  // 书本投影(柔和阴影)
-  const shadow = [
-    [bookCx - bookW / 2 - size * 0.015, bookCy + bookH * 0.85],
-    [bookCx + bookW / 2 + size * 0.015, bookCy + bookH * 0.85],
-    [bookCx + bookW / 2 + size * 0.03, bookCy + bookH * 1.02],
-    [bookCx - bookW / 2 - size * 0.03, bookCy + bookH * 1.02]
-  ]
-  fillPolygon(png, size, shadow, [0x1a, 0x0d, 0x2a])
-
-  // 左页(梯形:书脊在中间最高)
-  const leftPage = [
-    [bookCx - bookW / 2, bookCy + bookH * 0.20],
-    [bookCx, bookCy],
-    [bookCx, bookCy + bookH],
-    [bookCx - bookW / 2, bookCy + bookH * 0.80]
-  ]
-  fillPolygon(png, size, leftPage, BOOK_PAGE)
-
-  // 右页
-  const rightPage = [
-    [bookCx, bookCy],
-    [bookCx + bookW / 2, bookCy + bookH * 0.20],
-    [bookCx + bookW / 2, bookCy + bookH * 0.80],
-    [bookCx, bookCy + bookH]
-  ]
-  fillPolygon(png, size, rightPage, BOOK_PAGE)
-
-  // 右页暗部(右侧轻微阴影,增加立体感)
-  const rightPageDk = [
-    [bookCx + bookW * 0.30, bookCy + bookH * 0.24],
-    [bookCx + bookW / 2, bookCy + bookH * 0.20],
-    [bookCx + bookW / 2, bookCy + bookH * 0.80],
-    [bookCx + bookW * 0.30, bookCy + bookH * 0.76]
-  ]
-  fillPolygon(png, size, rightPageDk, BOOK_PAGE_DK)
-
-  // 书脊(中间 V 形凹陷)
-  const spine = [
-    [bookCx - size * 0.006, bookCy],
-    [bookCx + size * 0.006, bookCy],
-    [bookCx + size * 0.004, bookCy + bookH],
-    [bookCx - size * 0.004, bookCy + bookH]
-  ]
-  fillPolygon(png, size, spine, BOOK_SPINE)
-
-  // 页面文字线(左页)
-  for (let i = 0; i < 4; i++) {
-    const ly = bookCy + bookH * 0.28 + i * bookH * 0.15
-    const lx1 = bookCx - bookW * 0.44
-    const lx2 = bookCx - bookW * 0.10
-    const line = [
-      [lx1, ly],
-      [lx2, ly],
-      [lx2, ly + Math.max(1, size * 0.008)],
-      [lx1, ly + Math.max(1, size * 0.008)]
-    ]
-    fillPolygon(png, size, line, TEXT_LINE)
+  const per = SS * SS
+  const clamp = (v) => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v))
+  for (let i = 0; i < size * size; i++) {
+    const o = i << 2
+    png.data[o] = clamp(acc[o] / per)
+    png.data[o + 1] = clamp(acc[o + 1] / per)
+    png.data[o + 2] = clamp(acc[o + 2] / per)
+    png.data[o + 3] = clamp(acc[o + 3] / per)
   }
-  // 右页文字线
-  for (let i = 0; i < 4; i++) {
-    const ly = bookCy + bookH * 0.28 + i * bookH * 0.15
-    const lx1 = bookCx + bookW * 0.10
-    const lx2 = bookCx + bookW * 0.44
-    const line = [
-      [lx1, ly],
-      [lx2, ly],
-      [lx2, ly + Math.max(1, size * 0.008)],
-      [lx1, ly + Math.max(1, size * 0.008)]
-    ]
-    fillPolygon(png, size, line, TEXT_LINE)
-  }
-
-  // 4) 钢笔(斜放在书上方,笔尖朝右下指向书页)
-  //    本地坐标系:笔尾在左,笔尖在右;旋转 +28° 后笔尖指向右下
-  const penCx = cx - size * 0.04
-  const penCy = cy - size * 0.10
-  const penAngle = 28 * Math.PI / 180
-
-  const bodyLen = size * 0.40
-  const bodyW = size * 0.052   // 笔杆半宽
-  const nibLen = size * 0.085
-  const nibW = size * 0.048
-
-  // 笔尾圆头(深色帽)
-  fillCircleRotated(png, size, -bodyLen / 2, 0, bodyW * 0.95, PEN_CAP, penCx, penCy, penAngle)
-
-  // 笔杆(收腰梯形:笔尾略细,中段粗,接笔尖处收窄)
-  const penBody = [
-    [-bodyLen / 2 + size * 0.005, -bodyW * 0.75],
-    [-bodyLen * 0.05, -bodyW],
-    [bodyLen / 2 - nibLen * 0.4, -bodyW * 0.85],
-    [bodyLen / 2 - nibLen * 0.4, bodyW * 0.85],
-    [-bodyLen * 0.05, bodyW],
-    [-bodyLen / 2 + size * 0.005, bodyW * 0.75]
-  ]
-  fillPolygonRotated(png, size, penBody, PEN_BODY, penCx, penCy, penAngle)
-
-  // 笔杆高光(上沿细亮线)
-  const penHi = [
-    [-bodyLen * 0.35, -bodyW * 0.55],
-    [bodyLen * 0.30, -bodyW * 0.62],
-    [bodyLen * 0.30, -bodyW * 0.40],
-    [-bodyLen * 0.35, -bodyW * 0.35]
-  ]
-  fillPolygonRotated(png, size, penHi, PEN_HI, penCx, penCy, penAngle)
-
-  // 笔尖(金色三角)
-  const penNib = [
-    [bodyLen / 2 - nibLen * 0.4, -nibW],
-    [bodyLen / 2 + nibLen, 0],
-    [bodyLen / 2 - nibLen * 0.4, nibW]
-  ]
-  fillPolygonRotated(png, size, penNib, PEN_NIB, penCx, penCy, penAngle)
-
-  // 笔尖下半暗部(金属质感)
-  const penNibDk = [
-    [bodyLen / 2 - nibLen * 0.4, nibW * 0.15],
-    [bodyLen / 2 + nibLen * 0.55, 0],
-    [bodyLen / 2 - nibLen * 0.4, nibW]
-  ]
-  fillPolygonRotated(png, size, penNibDk, PEN_NIB_DK, penCx, penCy, penAngle)
-
-  // 笔尖中缝(劈尖)
-  const slitPts = [
-    [bodyLen / 2 - nibLen * 0.3, -size * 0.004],
-    [bodyLen / 2 + nibLen * 0.88, 0],
-    [bodyLen / 2 - nibLen * 0.3, size * 0.004]
-  ]
-  fillPolygonRotated(png, size, slitPts, SLIT, penCx, penCy, penAngle)
-
-  // 笔尖呼吸孔(小圆点)
-  fillCircleRotated(png, size, bodyLen / 2 - nibLen * 0.15, 0, size * 0.008, SLIT, penCx, penCy, penAngle)
-
-  return PNG.sync.write(png)
+  return png
 }
 
+// ---- 输出 --------------------------------------------------------------
 mkdirSync('build', { recursive: true })
-const sizes = [256, 128, 64, 48, 32, 16]
-const buffers = sizes.map(makePng)
-writeFileSync('build/icon.png', buffers[0])
-const ico = await pngToIco(buffers)
-writeFileSync('build/icon.ico', ico)
-console.log('icon generated: build/icon.ico, build/icon.png')
+
+const pngs = SIZES.map((s) => ({ s, png: renderSize(s) }))
+const buffers = pngs.map(({ png }) => PNG.sync.write(png))
+
+writeFileSync('build/icon.png', buffers[0]) // 256
+writeFileSync('build/icon-32-preview.png', buffers[SIZES.indexOf(32)])
+writeFileSync('build/icon.ico', await pngToIco(buffers))
+
+// 高分母版（1024）用于商店 / 安装器展示
+writeFileSync('build/icon-master.png', PNG.sync.write(renderSize(1024)))
+
+console.log('icon generated (朱砂印章 · 抽象笔尖):')
+console.log('  build/icon.ico   ', SIZES.join('/'))
+console.log('  build/icon.png    256')
+console.log('  build/icon-master.png 1024')
+console.log('  build/icon-source.svg  (矢量母版)')

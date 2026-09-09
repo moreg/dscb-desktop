@@ -344,8 +344,9 @@ export default function TrackingPage({ projectId, onOpenForeshadowings }: Props)
                     <strong style={{ fontSize: 16 }}>状态分布</strong>
                     <div className="memory-stats" style={{ marginTop: 8, flexWrap: 'wrap' as const }}>
                       <span className="chip">待埋 {data.foreshadowingSummary.pending}</span>
-                      <span className="chip chip-warning">已埋 {data.foreshadowingSummary.planted}</span>
+                      <span className="chip chip-warning">进行中 {data.foreshadowingSummary.planted}</span>
                       <span className="chip chip-success">已收 {data.foreshadowingSummary.collected}</span>
+                      <span className="chip">暂缓 {data.foreshadowingSummary.deferred ?? 0}</span>
                       <span className="chip chip-danger">遗漏 {data.foreshadowingSummary.missed}</span>
                     </div>
                   </div>

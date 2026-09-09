@@ -557,4 +557,64 @@ describe('registerLlmIpc handlers', () => {
     const result = (await handler!(null)) as boolean
     expect(result).toBe(true)
   })
+
+  /* ---- claude 协议（Claude Code CLI 登录）---- */
+
+  it('llm:upsertProvider accepts claude protocol without baseUrl/apiKey and keeps reasoningEffort', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_claude',
+      label: 'Claude',
+      baseUrl: '',
+      model: 'claude-opus-5',
+      apiKey: '',
+      protocol: 'claude',
+      reasoningEffort: 'high'
+    })
+    const cfg = await store.read()
+    const p = cfg.providers[0]
+    expect(p.protocol).toBe('claude')
+    expect(p.apiKey).toBe('')
+    expect(p.baseUrl).toBe('claude://local')
+    expect(p.reasoningEffort).toBe('high')
+  })
+
+  it('llm:upsertProvider drops invalid reasoningEffort for claude protocol', async () => {
+    const handler = handlers.get('llm:upsertProvider')
+    await handler!(null, {
+      id: 'p_claude',
+      label: 'Claude',
+      baseUrl: '',
+      model: 'default',
+      apiKey: '',
+      protocol: 'claude',
+      reasoningEffort: 'bogus'
+    })
+    const cfg = await store.read()
+    expect(cfg.providers[0].reasoningEffort).toBeUndefined()
+  })
+
+  it('llm:listProviders surfaces claude reasoningEffort and 登录态', async () => {
+    await store.write({
+      activeId: 'p_claude',
+      providers: [
+        {
+          id: 'p_claude',
+          label: 'Claude',
+          baseUrl: 'claude://local',
+          model: 'claude-opus-5',
+          apiKey: '',
+          protocol: 'claude',
+          reasoningEffort: 'medium'
+        }
+      ]
+    })
+    const handler = handlers.get('llm:listProviders')
+    const out = (await handler!(null)) as {
+      providers: Array<{ keyMasked: string; protocol: string; reasoningEffort?: string }>
+    }
+    expect(out.providers[0].protocol).toBe('claude')
+    expect(out.providers[0].keyMasked).toBe('claude 登录态')
+    expect(out.providers[0].reasoningEffort).toBe('medium')
+  })
 })

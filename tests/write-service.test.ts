@@ -80,12 +80,13 @@ describe('WriteService', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 5)
     expect(user).toContain('近期已写章节摘要')
-    expect(user).toContain('已有正文')
+    expect(user).toContain('实际正文')
     expect(user).toContain('第 3 章')
     expect(user).toContain('击败赵乾')
     expect(user).toContain('第 4 章')
-    expect(user).toContain('收徒')
-    expect(user).toContain('禁止遗忘')
+    expect(user).toContain('林远离开大殿')
+    expect(user).not.toContain('林远拒绝并立下赌约')
+    expect(user).toContain('不能用它覆盖正文已发生的情节')
   })
 
   it('buildChapterPrompt injects chapter self-check checklist (suspense, foreshadow, power bounds)', async () => {
@@ -762,7 +763,8 @@ describe('WriteService', () => {
         knownContent,        // ← 关键
         1,
         expect.any(Array),   // knownCharacters
-        expect.any(Object)
+        expect.any(Object),
+      expect.any(Array)
       )
       expect(rhythmSpy).toHaveBeenCalledWith(
         knownContent,        // ← 关键
@@ -839,16 +841,15 @@ describe('WriteService', () => {
       const steps: string[] = []
       await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
 
-      // autoMemorySync 默认 true → 提取后立即 apply
+      // 自动提交移动到审稿之后，提取时不改全书状态。
       expect(steps).toEqual([
         'generating',
         'audit',
         'outlineCheck',
         'memoryExtract',
-        'memoryApply',
-        'settingsApply',
         'rhythmEval',
         'figureGen',
+        'memoryApply',
         'done'
       ])
 
@@ -859,19 +860,20 @@ describe('WriteService', () => {
       const llm = mockLlm('')
       const settings = {
         getProjectsRoot: async (fallback: string) => fallback,
+        getReviewRules: async () => ({ enabled: false }),
         get: async () => ({ autoMemorySync: true, settingsEvolution: 'auto_high' })
       } as unknown as SettingsRepository
       const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
 
       const genSpy = vi
         .spyOn(service, 'generateChapterStream')
-        .mockResolvedValue('正文内容')
+        .mockResolvedValue('林远打开木门走进院子。')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const flow = (service as unknown as { flow: any }).flow
       vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
       vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(
         JSON.stringify({
-          newPlotPoints: [{ title: '事件', event: '发生了', coolPoint: '' }],
+          newPlotPoints: [{ title: '事件', event: '林远进院', coolPoint: '', evidence: '林远打开木门走进院子。' }],
           characterStateChanges: [],
           newCharacters: [],
           newLocations: [],
@@ -904,6 +906,7 @@ describe('WriteService', () => {
       const llm = mockLlm('')
       const settings = {
         getProjectsRoot: async (fallback: string) => fallback,
+        getReviewRules: async () => ({ enabled: false }),
         get: async () => ({ autoMemorySync: false, settingsEvolution: 'auto_high' })
       } as unknown as SettingsRepository
       const service = new WriteService(ps, llm, undefined, undefined, undefined, settings)

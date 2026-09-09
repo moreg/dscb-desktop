@@ -177,7 +177,7 @@ describe('buildDeslopPrompt 构建', () => {
     expect(DESLOP_SYSTEM_PROMPT).toContain('三条替换通路')
     expect(DESLOP_SYSTEM_PROMPT).toContain('静态描述→可观察变化')
     expect(DESLOP_SYSTEM_PROMPT).toContain('作者总结→角色感知')
-    expect(DESLOP_SYSTEM_PROMPT).toContain('统计平均感')
+    expect(DESLOP_SYSTEM_PROMPT).toContain('不要为了显得自然故意打乱结构、截断因果')
   })
 
   it('系统铁律与改写原则含语言锁定（禁止中译英）', () => {

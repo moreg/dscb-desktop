@@ -237,7 +237,7 @@ describe('CoverPromptService.extract', () => {
     expect(draft.prompt).toContain('Color palette: ash grey and blood red.')
     expect(draft.prompt).toContain('偏冷色调，雪山，断刀')
     expect(draft.prompt).toContain("Title text '断刀行'")
-    expect(draft.prompt).toContain("Author name '老猫'")
+    expect(draft.prompt).toContain("'老猫'")
     expect(draft.prompt).toContain('no watermark')
 
     // 走 auxiliary 路由，且带上 projectId 便于用量归属

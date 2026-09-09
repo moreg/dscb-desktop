@@ -1,5 +1,6 @@
 import type { LlmService, GenerateOptions } from './llm-service'
-import type { PrevEndingState } from '../../shared/types'
+import type { Foreshadowing, PrevEndingState } from '../../shared/types'
+import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
 
 // 纯解析函数从 shared/parsers re-export，供 main 测试与 renderer 共享
 export {
@@ -125,14 +126,12 @@ export class WriteFlowService {
     content: string,
     chapterNumber: number,
     knownCharacters: string[],
-    opts: GenerateOptions = {}
+    opts: GenerateOptions = {},
+    knownForeshadowings: Foreshadowing[] = []
   ): Promise<string> {
-    // 超长正文整段塞进 prompt 会挤占输出预算，模型易以 finish_reason=length 截断 JSON。
-    // 与节奏评估类似做尾部截断；记忆更偏「本章新增」，保留前部+尾部更稳。
-    const body =
-      content.length > 12_000
-        ? `${content.slice(0, 8_000)}\n…（中部略）\n${content.slice(-3_000)}`
-        : content
+    // 空提取会替换同章自动记忆，不能在漏掉中段的情况下声称提取完整。
+    if (content.length > 40_000) throw new Error('记忆提取正文超过 40000 字符，请分章后同步；未清理原有记忆')
+    const body = content
     const prompt = [
       `请从下面的小说正文中提取本章新增的记忆信息。`,
       ``,
@@ -143,16 +142,24 @@ export class WriteFlowService {
       `- newLocations: [{ name, category, notes, scope? }]（新地点；scope=scene 场景点 / world 常驻地理）`,
       `- newItems: [{ name, category, notes }]（本章首次出现的新道具/物品，如法宝、兵器、灵物、信物）`,
       `- newForeshadowings: [{ content, expectedCollect?, note? }]（本章新埋设的伏笔）`,
-      `- newPlotPoints: [{ title, event, coolPoint? }]（本章核心情节）`,
-      `- characterStateChanges: [{ name, field, oldValue, newValue }]（既有角色的状态或设定变化）`,
+      `- newPlotPoints: [{ title, event, coolPoint?, evidence }]（本章核心情节）`,
+      `- characterStateChanges: [{ name, field, oldValue, newValue, evidence }]（既有角色的状态或设定变化）`,
       `  field 优先用标准名：伤势 / 情绪 / 位置 / 当前状态 / 身份 / 性格 / 能力 / 境界 / 外貌 / 关系 / 持有物`,
       `  若本章揭晓了身份真相、性格侧面、能力边界、外貌特征、关系质变，也必须写入（不要只记伤势）`,
-      `- collectedForeshadowings: [{ content, chapter }]（本章回收的伏笔）`,
-      `- settingsPatches: [{ target, fileName, op, sectionTitle?, title?, content, reason?, confidence? }]`,
+      `- collectedForeshadowings: [{ foreshadowingId, content, chapter, evidence }]（本章完整回收的既有伏笔，沿用下表编号和原内容，chapter 必须为 ${chapterNumber}）`,
+      `完整回收必须回答原伏笔的核心疑问或兑现原承诺。再次出现道具、回忆、线索强化、部分揭示和细纲的计划回收都不能标成完整回收；不确定则输出空数组。无对应编号时不得编造或借用相似伏笔。`,
+      `以下是待核对的伏笔台账，只提供原始问题，不是回收已发生的证据：`,
+      JSON.stringify(foreshadowingsBeforeChapter(knownForeshadowings, chapterNumber).filter((f) =>
+        f.status !== 'collected' && f.status !== 'missed'
+      ).map((f) => ({ id: f.id, content: f.content, status: f.status, plantChapter: f.plantChapter }))),
+      `- settingsPatches: [{ target, fileName, op, sectionTitle?, title?, content, reason?, confidence?, evidence }]`,
       `  正文揭晓的可复用设定增量（只增不改旧文）。target: worldview|faction|relation|customRule|geography`,
       `  fileName 如「力量体系」「金手指」「青帮」；op: append_h2|append_bullet；confidence: high|medium|low`,
       `  例：新境界、金手指新规则、新势力名、常驻地理。题材定位/核心卖点不要放这里。`,
       `- settingsSuggestions: [{ topic, reason, suggestedPath }]（仅建议手改底稿，如题材定位；可空）`,
+      `evidence 必须逐字引用本章连续原文（至少6字符），保留主体、动作、结果及否定词。不能只引用名字或道具名；不能截掉“没有”“打算”等词来制造既成事实。`,
+      `evidence 字段值不要额外套中文引号或补标点：直接复制正文片段；只有正文原本存在的引号才能保留。`,
+      `只提取已经实际发生的变化；传闻、台词里的猜测、谎言、计划、梦境和假设不能直接更新客观状态。无法确认时留空或写入 settingsSuggestions，不补造。`,
       `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。字段值尽量简短，避免冗长复述正文。`,
       ``,
       `------ 第 ${chapterNumber} 章正文 ------`,

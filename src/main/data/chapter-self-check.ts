@@ -13,6 +13,7 @@ import type {
 } from '../../shared/types'
 import type { SettingsContext } from './skill-format/settings-md-repo'
 import { extractPowerBoundaryBullets } from './power-boundary'
+import { TOXIC_PATTERNS } from './deslop/banned-words'
 
 export type {
   ChapterSelfCheckReport,
@@ -26,7 +27,7 @@ export interface SelfCheckForeshadowInput {
   status: string
   expectedCollect?: number
   plantChapter?: number
-  /** 实际回收章号：模型写的伏笔回执会把状态置为已回收并填这个 */
+  /** 实际回收章号：以经过核验的记忆或作者记录为准 */
   actualCollect?: number
 }
 
@@ -46,7 +47,7 @@ export interface ChapterSelfCheckInput {
   doNotAdvanceHints?: string[]
   /**
    * 整章目标字数（细纲「字数预估」口径）。给了才跑字数项。
-   * 分轮续写的中间轮里这项失败是正常的——它被登记为完成度项，会被降级为「待写完」。
+   * 仅提供篇幅参考；写不满时提醒核实情节，不因字数少强制扩写。
    */
   targetWords?: number
   /** 目标字数是否真的来自细纲；false 表示是兜底值，字数项只提示不判死 */
@@ -131,7 +132,7 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
 
   // 4) 未完成事项
   const unfinished = input.prevEndingState?.unfinished ?? []
-  unfinished.slice(0, 5).forEach((u, i) => {
+  unfinished.forEach((u, i) => {
     if (!u?.trim()) return
     items.push(
       checkKeywordPresence({
@@ -141,7 +142,7 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
         source: u,
         haystack: content,
         failVerdict: 'warn',
-        passDetail: `可能已处理：${clip(u, 40)}`,
+        passDetail: `出现事项相关文字，尚需核实处理结果：${clip(u, 40)}`,
         failDetail: `可能未处理：${clip(u, 60)}`
       })
     )
@@ -150,19 +151,33 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
   // 5) 人物位置（弱信号）
   const positions = input.prevEndingState?.characterPositions ?? []
   if (positions.length > 0) {
-    const locs = positions.map((p) => p.location).filter((x) => x && x.length >= 2)
     const head = content.slice(0, 800)
-    const hit = locs.some((loc) => isLocationMentioned(loc, head))
+    const clauses = head.split(/[。！？!?，,；;\r\n]+/).map((s) => s.trim()).filter(Boolean)
+    const checkable = positions.filter((p) => p.name?.trim() && p.location?.length >= 2)
+    const uncertain = checkable.filter((p) => {
+      const first = clauses.findIndex((s) => s.includes(p.name))
+      if (first < 0) return true
+      const own = clauses[first]
+      if (/不在|没在|并非|尚未|想起|听说|望向|看向|打算|计划/.test(own)) return true
+      // 不能借用同句另一个角色的地点；只认本人的明确位置描述。
+      const hasOther = checkable.some((other) => other.name !== p.name && own.includes(other.name))
+      if (!hasOther && isLocationMentioned(p.location, own) &&
+          /(?:站在|坐在|身处|位于|守在|留在|待在|蹲在|靠在|就在|仍在|在)/.test(own)) return false
+      // 场景先行句可提供地点，前提是没有其他人物/移动动作介入。
+      const scene = clauses[first - 1]
+      return !scene || hasOther || checkable.some((other) => scene.includes(other.name)) ||
+        /走向|赶往|离开|回到|前往|远处|想起|听说|望向/.test(scene) ||
+        !isLocationMentioned(p.location, scene)
+    })
     items.push({
       id: 'char_position',
       category: 'continuity',
-      label: '人物位置连续',
-      verdict: hit ? 'pass' : locs.length ? 'warn' : 'skip',
-      detail: hit
-        ? `开头附近出现上章地点（${locs.slice(0, 3).join('、')}）`
-        : locs.length
-          ? `开头未出现上章地点词（${locs.slice(0, 3).join('、')}），请人工确认是否瞬移`
-          : '无位置信息'
+      label: '人物位置对应线索',
+      verdict: !checkable.length ? 'skip' : uncertain.length ? 'warn' : 'pass',
+      detail: !checkable.length ? '缺少可对应的人物或地点，未核验位置连续性'
+        : uncertain.length
+          ? `无法确认人物与上章地点的对应：${uncertain.map((p) => `${p.name}—${p.location}`).join('、')}；核对转场或交给深度审稿，不能只凭地点出现判通过`
+          : '开头有人物与原地点对应的文字线索；本项不核验转场时间与全过程'
     })
   }
 
@@ -174,18 +189,18 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
   // 7) 到期伏笔（含「模型回执自称本章已回收」的，见 isDueForeshadow）
   const fores = input.foreshadowings ?? []
   const due = fores.filter((f) => isDueForeshadow(f, ch))
-  due.slice(0, 6).forEach((f, i) => {
+  due.forEach((f, i) => {
     items.push(checkForeshadowRecovery(f, i, ch, content))
   })
 
   // 8) 未到期伏笔误爆（高命中 → warn）
   const notYet = fores.filter(
     (f) =>
-      (f.status === 'planted' || f.status === '已埋设') &&
+      PLANTED_STATUSES.has(f.status) &&
       f.expectedCollect != null &&
       f.expectedCollect > ch
   )
-  notYet.slice(0, 5).forEach((f, i) => {
+  notYet.forEach((f, i) => {
     const kws = extractKeywords(f.content)
     const hits = kws.filter((k) => content.includes(k)).length
     // 关键词很多且命中率高，可能提前揭穿
@@ -214,7 +229,7 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
   // 10) 卷内禁抢写提示（弱）
   if (input.doNotAdvanceHints?.length) {
     let worst: SelfCheckItemResult | null = null
-    for (const hint of input.doNotAdvanceHints.slice(0, 8)) {
+    for (const hint of input.doNotAdvanceHints) {
       const kws = extractKeywords(hint).filter((k) => k.length >= 2)
       const hits = kws.filter((k) => content.includes(k)).length
       if (kws.length >= 3 && hits >= 3) {
@@ -241,6 +256,10 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
 
   // 11) 元叙述 / 章号泄露
   items.push(checkMetaNarration(content))
+
+  // 写完即查的 AI 痕迹。只放语料实测有正向判别力的两条，见 tests/fixtures/deslop-corpus/FINDINGS.md
+  items.push(checkPunctuationRule(content))
+  items.push(checkAiTells(content))
 
   // 12) 篇幅达标（对照细纲「字数预估」）
   if (input.targetWords && input.targetWords > 0) {
@@ -275,53 +294,57 @@ function checkCorePlot(content: string, plotSummary: string): SelfCheckItemResul
   const base = {
     id: 'core_plot',
     category: 'plot' as SelfCheckCategory,
-    label: '本章核心事件有落地'
+    label: '本章核心事件文字痕迹（非完成核验）',
+    repairKind: 'verify_plot' as const
   }
   const clauses = splitEventClauses(plotSummary).filter(isCheckableClause)
   if (clauses.length === 0) {
     return { ...base, verdict: 'skip', detail: '核心事件句无可判定的关键词' }
   }
   const missing = clauses.filter((c) => !isClauseCovered(c, content))
+  const uncertain = clauses.filter((c) => hasUnresolvedUnfinishedMention(c, content))
   const hit = clauses.length - missing.length
   const coverage = hit / clauses.length
   const scale = `${hit}/${clauses.length}`
-  if (coverage >= CORE_PLOT_PASS_COVERAGE) {
+  if (coverage >= CORE_PLOT_PASS_COVERAGE && uncertain.length === 0) {
     return {
       ...base,
       verdict: 'pass',
       detail: missing.length
-        ? `核心事件要点覆盖 ${scale}，仅下列未见落地`
-        : `核心事件要点全部覆盖（${scale}）`,
+        ? `相关文字痕迹 ${scale}，下列要点未见明确叙述；关键词不能证明事件完成，请核对行动与结果`
+        : `相关文字痕迹 ${scale}；关键词不能证明事件完成，请核对行动、结果与因果关系`,
       ...(missing.length ? { missing } : {})
     }
   }
   return {
     ...base,
-    verdict: coverage < CORE_PLOT_FAIL_COVERAGE ? 'fail' : 'warn',
-    detail: `核心事件要点只覆盖 ${scale}，下列要点在正文里找不到落地痕迹`,
+    verdict: uncertain.length ? 'warn' : coverage < CORE_PLOT_FAIL_COVERAGE ? 'fail' : 'warn',
+    detail: uncertain.length
+      ? `相关要点有否定、疑问、计划或尚未完成的表述，其他提及不足以解除疑问，不能判为已落实；可确认文字痕迹 ${scale}，请核对实际行动与结果`
+      : `相关文字痕迹 ${scale}，下列要点未找到；先核对同义表述与情节结果，避免按关键词机械补写`,
     missing
   }
 }
 
-const PLANTED_STATUSES = new Set(['planted', '已埋设'])
+const PLANTED_STATUSES = new Set(['planted', 'reinforced', 'partial', '已埋设', '已强化', '强化', '部分回收'])
 const COLLECTED_STATUSES = new Set(['collected', '已回收'])
 
 /**
  * 本章要验的伏笔：到期未收的，**以及回执自称本章刚回收的**。
  *
- * 续写完成时会按模型写的【本章伏笔回执】把状态改成 collected；若这里只筛 planted，
- * 模型只要在回执里声称回收（正文里一个字没写），就能把检查它的这一项关掉。
+ * 也核对既有/导入的本章回收记录，防止错误的已回收状态把检查关闭。
  */
 function isDueForeshadow(f: SelfCheckForeshadowInput, ch: number): boolean {
-  if (PLANTED_STATUSES.has(f.status) && f.expectedCollect === ch) return true
+  if (f.plantChapter != null && f.plantChapter > ch) return false
+  if (PLANTED_STATUSES.has(f.status) && f.expectedCollect != null && f.expectedCollect <= ch) return true
   return COLLECTED_STATUSES.has(f.status) && f.actualCollect === ch
 }
 
 /**
  * 到期伏笔是否在正文里有回收痕迹。
  *
- * 判定用子事件口径（1 个 ≥3 字片段，或 2 个 2 字片段），不再是「命中池子里任意 1 个片段」——
- * 那个口径下正文随便出现个人名就算「已回收」，而这是一条 fail 级检查，假通过比假失败更伤。
+ * 关键词只提供线索，不足以证明核心疑问已解决。到期未推进只提醒；
+ * 本章记录已回收但完全无对应文字才判失败，语义结论交由正文证据核验。
  */
 function checkForeshadowRecovery(
   f: SelfCheckForeshadowInput,
@@ -333,7 +356,8 @@ function checkForeshadowRecovery(
   const base = {
     id: `due_fb_${index}`,
     category: 'foreshadow' as SelfCheckCategory,
-    label: claimed ? '伏笔回执与正文一致' : '到期伏笔回收迹象'
+    label: claimed ? '伏笔回收待核实' : '到期伏笔推进待核对',
+    repairKind: 'verify_foreshadow' as const
   }
   const clauses = splitEventClauses(f.content).filter(isCheckableClause)
   if (clauses.length === 0) {
@@ -343,18 +367,19 @@ function checkForeshadowRecovery(
   if (missing.length < clauses.length) {
     return {
       ...base,
-      verdict: 'pass',
+      verdict: 'warn',
       detail: claimed
-        ? `回执称本章回收，正文有对应痕迹：${clip(f.content, 40)}`
-        : `可能已回收：${clip(f.content, 40)}`
+        ? `回执称本章回收，但关键词只能证明提及，不能确认核心疑问已解决：${clip(f.content, 40)}`
+        : `正文有相关线索，需区分强化、部分揭示与完整回收：${clip(f.content, 40)}`,
+      ...(missing.length ? { missing } : {})
     }
   }
   return {
     ...base,
-    verdict: 'fail',
+    verdict: claimed ? 'fail' : 'warn',
     detail: claimed
       ? `回执声称本章已回收（伏笔库状态已被改写），但正文未见回收迹象：${clip(f.content, 60)}`
-      : `到期伏笔未见回收迹象：${clip(f.content, 60)}`,
+      : `到期伏笔未见推进迹象，可核对后续安排或合理延期，不必强行揭底：${clip(f.content, 60)}`,
     ...(clauses.length >= 2 ? { missing } : {})
   }
 }
@@ -374,17 +399,13 @@ function isLocationMentioned(loc: string, haystack: string): boolean {
   return short.some((k) => !GENERIC_PLACE_RE.test(k) && haystack.includes(k))
 }
 
-/** 达标线：低于目标 5% 内算通过，低于 20% 判失败 */
+/** 篇幅参考线：低于目标 5% 内不提醒，不以字数判失败 */
 const WORD_COUNT_PASS_RATIO = 0.95
-const WORD_COUNT_FAIL_RATIO = 0.8
 /** 上限口径下超出多少才提示 */
 const WORD_COUNT_OVER_RATIO = 1.15
 
 /**
- * 篇幅达标检查。
- *
- * 模型算不准中文字数，写不够是常态；此前全链路没有任何地方核对过实际字数
- * （审稿的 word_count 提醒已废弃、自检也没有这一项），于是写少了根本没人发现。
+ * 篇幅参考检查，剧情与收束完整优先，字数不足不判失败。
  *
  * bound='about' 是上限口径（细纲写「不超过 3000 字」「3000 字以内」）：写不够不是问题，
  * 写超了才提示。写正文的 prompt 一直认这个口径，自检以前不认，于是听话写少的章被判死。
@@ -404,6 +425,7 @@ function checkWordCount(
     return {
       id: 'word_count',
       category: 'structure',
+      repairKind: 'over_length',
       label: '篇幅符合细纲上限',
       verdict: ratio > WORD_COUNT_OVER_RATIO ? 'warn' : 'pass',
       detail:
@@ -416,20 +438,20 @@ function checkWordCount(
     return {
       id: 'word_count',
       category: 'structure',
-      label: '篇幅达到细纲目标',
+      repairKind: 'short_length',
+      label: '篇幅参考',
       verdict: 'pass',
-      detail: `实际 ${actual} 字 / ${source}目标 ${targetWords} 字`
+      detail: `实际 ${actual} 字 / ${source}参考 ${targetWords} 字；字数不代表剧情完整或质量合格`
     }
   }
-  // 兜底目标（细纲没写字数）只提示不判死：这个数不是作者定的
-  const verdict: SelfCheckItemResult['verdict'] =
-    ratio < WORD_COUNT_FAIL_RATIO && fromOutline ? 'fail' : 'warn'
+  // 篇幅是参考，不能用硬性失败驱动模型机械补字；剧情完整优先。
   return {
     id: 'word_count',
     category: 'structure',
-    label: '篇幅达到细纲目标',
-    verdict,
-    detail: `实际 ${actual} 字，比${source}目标 ${targetWords} 字少 ${gap} 字（${Math.round(ratio * 100)}%）`
+    repairKind: 'short_length',
+    label: '篇幅参考',
+    verdict: 'warn',
+    detail: `实际 ${actual} 字，比${source}参考 ${targetWords} 字少 ${gap} 字（${Math.round(ratio * 100)}%）；以剧情完整为先，事件与收束已完成可提前结束，不要为凑字机械扩写`
   }
 }
 
@@ -443,6 +465,9 @@ function finalize(chapterNumber: number, items: SelfCheckItemResult[]): ChapterS
   } else if (counts.fail > 0) {
     const first = items.find((i) => i.verdict === 'fail')
     summary = `写后自检未通过：${counts.fail} 项失败${first ? `（${first.label}）` : ''}`
+    if (counts.skip > 0) summary += `；${counts.skip} 项未检查`
+  } else if (counts.skip > 0) {
+    summary = `写后自检完成（通过 ${counts.pass} 项${counts.warn ? `，${counts.warn} 项需留意` : ''}，${counts.skip} 项未检查）`
   } else if (counts.warn > 0) {
     summary = `写后自检通过（${counts.warn} 项需留意）`
   } else {
@@ -460,19 +485,20 @@ function finalize(chapterNumber: number, items: SelfCheckItemResult[]): ChapterS
 }
 
 function checkEndingTaboo(content: string): SelfCheckItemResult {
-  const paras = content
-    .split(/\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-  const tail = paras.slice(-4).join('\n')
+  // 保留原字符位置再截尾，避免长对白被删后把章中旁白带进检查范围。
+  // 对白中的「比赛才刚开始」等属于人物发言，不能据此判断旁白说教。
+  const narrative = content.replace(/“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"/g,
+    (speech) => speech.replace(/[^\r\n]/g, ' '))
+  const tail = narrative.slice(-600)
   for (const t of ENDING_TABOO) {
-    if (t.re.test(tail)) {
+    const match = tail.match(t.re)
+    if (match) {
       return {
         id: 'ending_taboo',
         category: 'structure',
         label: '章末无说教/AI 抒怀',
-        verdict: 'fail',
-        detail: t.reason
+        verdict: 'warn',
+        detail: `章末旁白出现「${match[0]}」（${t.reason}），请结合语境核对，不凭套话判定正文失败`
       }
     }
   }
@@ -489,7 +515,7 @@ function checkPowerOverclaim(
   content: string,
   boundaries: string[]
 ): SelfCheckItemResult {
-  const m = content.match(POWER_OVERCLAIM_RE)
+  const m = findAffirmativePowerMention(content, POWER_OVERCLAIM_RE)
   if (m) {
     return {
       id: 'power_bound',
@@ -502,15 +528,11 @@ function checkPowerOverclaim(
     }
   }
   // 边界句含「不能X」且正文像在做 X（极弱）
-  for (const b of boundaries.slice(0, 6)) {
+  for (const b of boundaries) {
     const neg = b.match(/(?:不能|无法|不可|禁止)([^，。；\n]{2,12})/)
     if (!neg) continue
     const forbidden = neg[1].replace(/[的了吗呢吧]/g, '').trim()
-    if (forbidden.length >= 2 && content.includes(forbidden)) {
-      // 若正文同时出现「不能/无法」则更像在遵守边界
-      if (new RegExp(`(不能|无法|不可).{0,6}${escapeReg(forbidden)}`).test(content)) {
-        continue
-      }
+    if (forbidden.length >= 2 && findAffirmativePowerMention(content, new RegExp(escapeReg(forbidden)))) {
       return {
         id: 'power_bound',
         category: 'power',
@@ -527,6 +549,23 @@ function checkPowerOverclaim(
     verdict: boundaries.length ? 'pass' : 'skip',
     detail: boundaries.length ? '未命中常见越权套话' : '无金手指边界材料，跳过'
   }
+}
+
+/** 每次能力表述分别核对局部前缀；一处否定不能豁免另一处实际施展。 */
+function findAffirmativePowerMention(content: string, pattern: RegExp): RegExpMatchArray | undefined {
+  for (const clause of content.split(/[。！？!?，,；;\r\n]+/)) {
+    const matches = [...clause.matchAll(new RegExp(pattern.source, 'g'))]
+    for (const [index, match] of matches.entries()) {
+      const previousEnd = index > 0 ? matches[index - 1].index! + matches[index - 1][0].length : 0
+      // 只看本次命中之前、上一次能力表述之后的短语，防止远处否定词串过来。
+      const prefix = clause.slice(Math.max(previousEnd, match.index! - 16), match.index)
+      // 只接受直接否定能力，或「没有能力」「无法真正」等受限连接。
+      // 「没有犹豫便控制天气」「并非凡人所以能够控制天气」都在实际施展能力。
+      if (/(?:不能|无法|不可|禁止|不可能|没能|未能|不曾|从未|并非|尚未|没有|不会|不具备)(?:真的?|真正|直接|完全|随意|任意|轻易|长期|继续|再次|再|去|够|能够|做到|拥有|使用|具备|实现|使出|获得|学会|掌握|能力|本领|本事|神通|手段|权限|办法|的){0,4}$/.test(prefix)) continue
+      return match
+    }
+  }
+  return undefined
 }
 
 function checkMetaNarration(content: string): SelfCheckItemResult {
@@ -547,6 +586,80 @@ function checkMetaNarration(content: string): SelfCheckItemResult {
     verdict: 'pass',
     detail: '未见章末元叙述'
   }
+}
+
+/**
+ * 标点守则自检：正文里的破折号 / 省略号。
+ *
+ * **这不是 AI 味判断，是指令遵守检查。** 写作守则第 9 条明写禁用这两样，
+ * 出现即模型没照做。而且它是确定性可修的——deslop 的 normalize-punctuation
+ * 会把 ——/— 和 ……/… 直接替换成句号/逗号，不需要走 LLM 改写。
+ *
+ * 顺带一提，语料实测它同时也是最强的单一 AI 信号（AUC 0.639，真人稿中位 0 处，
+ * 自产 AI 稿中位 6.3 处/万字）。但对自己的稿子，「像不像 AI」这个信息没有用，
+ * 「哪几行要改」才有用，所以这条按守则违规呈现，不按痕迹检测呈现。
+ */
+function checkPunctuationRule(content: string): SelfCheckItemResult {
+  const id = 'punctuation_rule'
+  const label = '标点守则（破折号/省略号）'
+  const lines: number[] = []
+  content.split(/\r?\n/).forEach((line, i) => {
+    if (/——|—|--|……|…/.test(line)) lines.push(i + 1)
+  })
+  if (lines.length === 0) {
+    return { id, category: 'ban', label, verdict: 'pass', detail: '正文无破折号/省略号' }
+  }
+  return {
+    id,
+    category: 'ban',
+    label,
+    verdict: 'warn',
+    detail:
+      `${lines.length} 处（第 ${formatLines(lines)} 行）。守则第 9 条禁用；` +
+      '改成句号、逗号或动作断句。这是确定性替换，「去 AI 味」的标点兜底可直接改掉，不必调 LLM'
+  }
+}
+
+/**
+ * AI 痕迹自检：写完即查，纯算法零 token。
+ *
+ * **只查道具停止式**（「手里的算盘停了」「他的手一顿」）。这是 19 篇番茄真人稿
+ * vs 19 篇未润色自产 AI 稿实测下来，全系统唯一一条 AI 命中多于真人的规则：
+ * 7:0，命中 5/19 篇 AI 稿、0/19 篇真人稿。
+ *
+ * **刻意不查**禁用词密度（AUC 0.097，方向相反：真人用得比 AI 多 6.5 倍）、
+ * 三个结构均匀度 CV（0.285–0.486，无判别力）、「不是A而是B」（0.428，反向）。
+ * 把那些加进来只会天天报在自己的稿子上。理由见 tests/fixtures/deslop-corpus/FINDINGS.md。
+ *
+ * 也刻意不把它写进写作 prompt 的负向清单：一旦写进去生成端就会规避，这条指标随即失效
+ * （词表整层就是这么废掉的）。留它只在检测端存在，才能持续当指标用。
+ */
+function checkAiTells(content: string): SelfCheckItemResult {
+  const id = 'ai_tells'
+  const label = 'AI 痕迹（道具停止式）'
+  const handRe = TOXIC_PATTERNS.find((p) => p.id === 'hand_stops')?.re
+  const lines: number[] = []
+  if (handRe) {
+    content.split(/\r?\n/).forEach((line, i) => {
+      if (new RegExp(handRe.source).test(line)) lines.push(i + 1)
+    })
+  }
+  if (lines.length === 0) {
+    return { id, category: 'ban', label, verdict: 'pass', detail: '未见道具停止式' }
+  }
+  return {
+    id,
+    category: 'ban',
+    label,
+    verdict: 'warn',
+    detail: `${lines.length} 处（第 ${formatLines(lines)} 行）。改成具体的失误或速率变化（算珠拨过了头 / 算盘打得更快），或直接删掉`
+  }
+}
+
+/** 行号列表：最多列 6 个，多的折叠成「等 N 处」，避免长章刷屏 */
+function formatLines(lines: number[]): string {
+  if (lines.length <= 6) return lines.join('、')
+  return `${lines.slice(0, 6).join('、')} 等 ${lines.length} 处`
 }
 
 function checkKeywordPresence(opts: {
@@ -578,7 +691,7 @@ function checkKeywordPresence(opts: {
   // 至少命中 need 个；或长关键词整段命中 1 个也算过
   const longHit = kws.some((k) => k.length >= 4 && opts.haystack.includes(k))
   const ok = hits >= need || longHit
-  if (ok) {
+  if (ok && !hasUnresolvedUnfinishedMention(opts.source, opts.haystack)) {
     return {
       id: opts.id,
       category: opts.category,
@@ -698,11 +811,71 @@ function isCheckableClause(clause: string): boolean {
   return f.long.length > 0 || f.short.length > 0
 }
 
-/** 该子事件在正文里是否有落地痕迹 */
+/** 本项只能寻找文字痕迹；否定、愿望或计划不能算实际事件的证据。 */
 function isClauseCovered(clause: string, haystack: string): boolean {
-  const { long, short } = clauseFragments(clause)
-  if (long.some((k) => haystack.includes(k))) return true
-  return short.filter((k) => haystack.includes(k)).length >= 2
+  const mentions = matchingEventSentences(clause, haystack)
+  return mentions.some((m) => !m.unfinished) && !hasUnresolvedMentions(mentions)
+}
+
+const UNFINISHED_EVENT_RE = /没有|没能|未能|从未|尚未|还未|并未|未曾|未(?=取得|救出|完成|实现|找到|拿到)|没(?=取得|救出|完成|找到)|不曾|不可能|如果|假如|要是|但愿|希望能|计划|打算|准备(?:去|要|将)?|想要|想过|考虑|试图|正要|将要|明天|以后|日后|尚需|仍需/
+
+interface EventMention {
+  score: number
+  unfinished: boolean
+}
+
+function matchingEventSentences(clause: string, haystack: string): EventMention[] {
+  const normalize = (text: string): string => text.replace(/终于|已经|成功|最终|确实|后来|了/g, '')
+  const { long, short } = clauseFragments(normalize(clause))
+  const mentions: EventMention[] = []
+  // 逗号后的计划或否定常属于另一个动作，不能污染逗号前已经完成的事件。
+  for (const raw of haystack.split(/(?<=[。！？!?，,；;\r\n])/)) {
+    const sentence = normalize(raw)
+    // 比较覆盖度时忽略否定/计划词本身，否则「林舟没有取得」会比「林舟取得」少命中，
+    // 导致明确否定天然处于劣势。是否否定仍由原分句判定。
+    const comparison = sentence.replace(new RegExp(UNFINISHED_EVENT_RE.source, 'g'), '')
+    const longHits = long.filter((k) => comparison.includes(k))
+    const shortHits = short.filter((k) => comparison.includes(k))
+    if (longHits.length === 0 && shortHits.length < 2) continue
+    const hits = [...longHits, ...shortHits]
+    const rawHits = hits.filter((k) => sentence.includes(k))
+    const evidenceEnd = rawHits.length
+      ? Math.max(...rawHits.map((k) => sentence.lastIndexOf(k) + k.length)) : sentence.length
+    mentions.push({
+      score: longHits.length * 2 + shortHits.length,
+      // 相关动作之后的「没有停留」等不反过来否定动作本身。
+      // 保留疑问标点，询问是否取得不能覆盖前面明确的「没有取得」。
+      unfinished: /[？?]\s*$|是否|能否|有没有|会不会|是不是/.test(sentence) ||
+        hasUnfinishedEventEvidence(sentence.slice(0, evidenceEnd), [...long, ...short])
+    })
+  }
+  return mentions
+}
+
+function hasUnfinishedEventEvidence(sentence: string, fragments: string[]): boolean {
+  for (const marker of sentence.matchAll(new RegExp(UNFINISHED_EVENT_RE.source, 'g'))) {
+    if (!/^(?:没有|没能|未能|从未|尚未|还未|并未|未曾|未|没|不曾|不可能)$/.test(marker[0])) return true
+    const after = sentence.slice(marker.index! + marker[0].length)
+      .replace(/^(?:真正|直接|完全|随意|任意|轻易|继续|再次|再|去|能够|做到|拥有|学会|掌握|能力|办法|机会|的|会){0,4}/, '')
+    // 否定必须直接约束目标事件；「没有犹豫便取得」否定的是犹豫。
+    if (fragments.some((fragment) => after.startsWith(fragment))) return true
+  }
+  return false
+}
+
+function hasUnresolvedMentions(mentions: EventMention[]): boolean {
+  // 覆盖最完整的证据优先，同等覆盖度取最后一次表述。
+  // 重复物品名不能洗掉明确否定；后续关于物品的其他计划也不能冲掉已完成动作。
+  // 这仍只是文字证据，不是语义完成核验。
+  let strongest: EventMention | undefined
+  for (const mention of mentions) {
+    if (!strongest || mention.score >= strongest.score) strongest = mention
+  }
+  return strongest?.unfinished === true
+}
+
+function hasUnresolvedUnfinishedMention(clause: string, haystack: string): boolean {
+  return hasUnresolvedMentions(matchingEventSentences(clause, haystack))
 }
 
 /** 2 字片段池（人名/地名常在此），跨子事件轮流取 */

@@ -218,7 +218,7 @@ export default function CoverLearningLibraryPage(): React.ReactElement {
           <div className="placeholder" style={{ marginTop: 16, textAlign: 'left' }}>
             <strong>当前用途</strong>
             <p className="meta" style={{ marginBottom: 0 }}>
-              封面生成会读取题材推荐、构图、配色、标题字体、作者字体、文字位置、字效和 9:16 安全区规则。后续增加其他公共学习内容时，也统一从这个入口管理。
+              封面生成会读取题材推荐、构图、配色、标题字体、作者字体、文字位置、字效和 3:4 安全区规则。后续增加其他公共学习内容时，也统一从这个入口管理。
             </p>
           </div>
         </>

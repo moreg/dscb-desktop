@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
+import { createHash } from 'crypto'
 import {
   readText,
   parseDoc,
@@ -14,6 +15,8 @@ import {
 } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
 import { safeFileName, sanitizeForFileName } from './entity-helpers'
+import { parseForeshadowingMarkdown } from '../skill-format/foreshadowing-md-repo'
+import type { Foreshadowing } from '../../../shared/types'
 
 export interface MigrationOptions {
   dryRun?: boolean
@@ -207,14 +210,21 @@ async function collectTasks(projectDir: string): Promise<MigrationTask[]> {
   // 伏笔详情（从 记忆系统/伏笔追踪.md）
   const fDoc = await readText(join(projectDir, '记忆系统', '伏笔追踪.md'))
   if (fDoc) {
-    const fs2 = parseForeshadowingDoc(fDoc)
+    const trackingDoc = await readText(join(projectDir, '追踪', '伏笔.md'))
+    const byId = new Map(parseForeshadowingDoc(fDoc).map((f) => [f.id, f]))
+    // 派生详情也遵循追踪版优先，不能合并后的主表与详情各保留一个版本。
+    // 追踪中已改为计划记录的 ID，不保留旧版实际回收详情。
+    const trackingIds = foreshadowingIdsInDocument(trackingDoc ?? '')
+    for (const id of byId.keys()) if (trackingIds.has(id.toUpperCase())) byId.delete(id)
+    for (const f of parseForeshadowingDoc(trackingDoc ?? '')) byId.set(f.id, f)
+    const fs2 = [...byId.values()]
     for (const f of fs2) {
       tasks.push({
         label: `记忆系统/伏笔追踪.md → 记忆/伏笔/${f.id}.md`,
         run: async () => {
           const dir = join(projectDir, '记忆', '伏笔')
           await fs.mkdir(dir, { recursive: true })
-          const body = serializeEntityDoc(f.id, {}, f.content)
+          const body = serializeEntityDoc(f.id, foreshadowingFields(f), f.content)
           await writeTextAtomic(join(dir, `${f.id}.md`), body)
         }
       })
@@ -371,20 +381,8 @@ function parseCorePlotDoc(text: string): Array<ParsedEntity & { fileName: string
   return out
 }
 
-function parseForeshadowingDoc(text: string): Array<{ id: string; content: string }> {
-  const { headers, rows } = parseTable(text)
-  if (headers.length < 2) return []
-  const idxId = headers.findIndex((h) => h.includes('编号'))
-  const idxContent = headers.findIndex((h) => h.includes('内容'))
-  if (idxId < 0 || idxContent < 0) return []
-  const out: Array<{ id: string; content: string }> = []
-  for (const row of rows) {
-    const id = row[idxId]?.trim() ?? ''
-    const content = row[idxContent]?.trim() ?? ''
-    if (!id || !content) continue
-    out.push({ id, content })
-  }
-  return out
+function parseForeshadowingDoc(text: string): Foreshadowing[] {
+  return parseForeshadowingMarkdown(text)
 }
 
 // ========== 序列化器 ==========
@@ -448,29 +446,65 @@ async function mergeForeshadowing(projectDir: string): Promise<void> {
   const legacyText = await readText(join(projectDir, '记忆系统', '伏笔追踪.md'))
   const trackingText = await readText(join(projectDir, '追踪', '伏笔.md'))
 
-  const legacyRows = legacyText ? parseTable(legacyText).rows : []
-  const trackingRows = trackingText ? parseTable(trackingText).rows : []
+  if (legacyText) {
+    // 旧目录稍后会删除；解析器不采纳的计划、未知列与作者批注仍须原样留存。
+    const digest = createHash('sha256').update(legacyText).digest('hex')
+    await writeTextAtomic(join(projectDir, '记忆', '.migration-v3', `伏笔追踪-${digest}.md`), legacyText)
+  }
 
-  if (legacyRows.length === 0 && trackingRows.length === 0) return
+  const legacyItems = parseForeshadowingDoc(legacyText ?? '')
+  // 保留追踪文件的原表结构、未知列和作者附录，只追加它没有的旧版条目。
+  // 计划/编号映射表中的 ID 也保留追踪优先，不能用旧事实覆盖新的计划状态。
+  const existingIds = foreshadowingIdsInDocument(trackingText ?? '')
+  const additions = legacyItems.filter((f) => !existingIds.has(f.id.toUpperCase()))
+  if (additions.length === 0) return
 
-  // 合并：trackingRows 优先（同 ID 覆盖）
-  const byId = new Map<string, string[]>()
-  const header = legacyText
-    ? parseTable(legacyText).headers
-    : parseTable(trackingText).headers
-
-  for (const row of legacyRows) byId.set(row[0], row)
-  for (const row of trackingRows) byId.set(row[0], row)
-
-  const mergedRows = Array.from(byId.values()).sort((a, b) => a[0].localeCompare(b[0]))
-
-  const lines: string[] = ['# 伏笔追踪', '']
-  lines.push('| ' + header.join(' | ') + ' |')
-  lines.push('|' + header.map(() => '------').join('|') + '|')
-  for (const row of mergedRows) lines.push('| ' + row.join(' | ') + ' |')
-  lines.push('')
-  lines.push('<!-- merged from 记忆系统/伏笔追踪.md (legacy) + 追踪/伏笔.md (tracking); tracking version wins on conflict -->', '')
+  const headers = ['伏笔编号', '伏笔内容', '伏笔类型', '埋设章节', '预计回收章节', '实际回收章节', '状态', '强化章节', '部分回收章节']
+  const lines: string[] = [trackingText?.trimEnd() || '# 伏笔追踪', '', '## 旧版伏笔迁移补充', '']
+  lines.push('| ' + headers.join(' | ') + ' |', '|' + headers.map(() => '------').join('|') + '|')
+  for (const f of additions.sort((a, b) => a.id.localeCompare(b.id))) {
+    const cells = [f.id, f.content, f.note ?? '设定', chapterText(f.plantChapter, '未埋设'),
+      chapterText(f.expectedCollect, '未定'), chapterText(f.actualCollect, '未回收'),
+      FORESHADOWING_STATUS_TEXT[f.status], chaptersText(f.reinforcementChapters), chaptersText(f.partialCollectChapters)]
+    lines.push('| ' + cells.map(escapeCell).join(' | ') + ' |')
+  }
+  lines.push('', '<!-- merged from 记忆系统/伏笔追踪.md (legacy) + 追踪/伏笔.md (tracking); tracking version wins on conflict -->', '')
   await writeTextAtomic(join(projectDir, '追踪', '伏笔.md'), lines.join('\n'))
+}
+
+function foreshadowingIdsInDocument(text: string): Set<string> {
+  const ids = new Set(parseForeshadowingDoc(text).map((f) => f.id.toUpperCase()))
+  for (const match of text.matchAll(/\|\s*(FB-\d+)\s*(?=\|)/gi)) ids.add(match[1].toUpperCase())
+  return ids
+}
+
+const FORESHADOWING_STATUS_TEXT: Record<Foreshadowing['status'], string> = {
+  pending: '未回收', planted: '已埋设', reinforced: '已强化', partial: '部分回收',
+  deferred: '暂缓', collected: '已回收', missed: '已错过'
+}
+
+function chapterText(chapter: number | undefined, fallback: string): string {
+  return chapter == null ? fallback : `第 ${chapter} 章`
+}
+
+function chaptersText(chapters: number[] | undefined): string {
+  return chapters?.length ? chapters.map((n) => chapterText(n, '')).join('、') : '-'
+}
+
+function escapeCell(text: string): string {
+  return text.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
+}
+
+function foreshadowingFields(f: Foreshadowing): Record<string, string> {
+  return {
+    状态: FORESHADOWING_STATUS_TEXT[f.status],
+    ...(f.note ? { 类型备注: f.note } : {}),
+    ...(f.plantChapter == null ? {} : { 埋设章节: chapterText(f.plantChapter, '') }),
+    ...(f.expectedCollect == null ? {} : { 预计回收章节: chapterText(f.expectedCollect, '') }),
+    ...(f.actualCollect == null ? {} : { 实际回收章节: chapterText(f.actualCollect, '') }),
+    ...(f.reinforcementChapters?.length ? { 强化章节: chaptersText(f.reinforcementChapters) } : {}),
+    ...(f.partialCollectChapters?.length ? { 部分回收章节: chaptersText(f.partialCollectChapters) } : {})
+  }
 }
 
 // ========== 索引生成 ==========

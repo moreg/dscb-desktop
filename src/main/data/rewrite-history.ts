@@ -171,6 +171,13 @@ export const FORMAT_PROSE_KEY = 'format-prose'
 /** 「去 AI 味」应用到正文的整章替换在 rewriteHistory 中使用的 violationKey */
 export const DESLOP_APPLY_KEY = 'deslop-apply'
 
+/** 写后自检「一键替换标点」的整章替换在 rewriteHistory 中使用的 violationKey */
+export const PUNCT_FIX_KEY = 'punct-fix'
+
+export function isPunctFixKey(key: string | undefined): boolean {
+  return key === PUNCT_FIX_KEY || (key?.startsWith(`${PUNCT_FIX_KEY}:`) ?? false)
+}
+
 export function isAdjustRewriteKey(key: string | undefined): boolean {
   return key === ADJUST_REWRITE_KEY || (key?.startsWith(`${ADJUST_REWRITE_KEY}:`) ?? false)
 }
@@ -183,9 +190,9 @@ export function isDeslopApplyKey(key: string | undefined): boolean {
   return key === DESLOP_APPLY_KEY || (key?.startsWith(`${DESLOP_APPLY_KEY}:`) ?? false)
 }
 
-/** 是否整章级替换（格式化 / 按要求重写 / 去 AI 味）——撤销时优先全文还原，不走片段 indexOf */
+/** 是否整章级替换（格式化 / 按要求重写 / 去 AI 味 / 标点兜底）——撤销时优先全文还原，不走片段 indexOf */
 export function isWholeDocRewriteKey(key: string | undefined): boolean {
-  return isAdjustRewriteKey(key) || isFormatProseKey(key) || isDeslopApplyKey(key)
+  return isAdjustRewriteKey(key) || isFormatProseKey(key) || isDeslopApplyKey(key) || isPunctFixKey(key)
 }
 
 export function detectUndoRedoShortcut(e: ShortcutEvent): UndoRedoIntent {

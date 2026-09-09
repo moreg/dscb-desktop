@@ -133,6 +133,7 @@ export interface ChapterWordBudgetLike {
   chapterTargetWords: number
   writtenWords: number
   fromOutline: boolean
+  bound?: 'min' | 'about'
 }
 
 /** 低于目标这个比例才提示，避免差几十字也弹 */
@@ -148,7 +149,7 @@ export function describeWordShortfall(
   budget: ChapterWordBudgetLike | undefined,
   finalContent: string
 ): string | null {
-  if (!budget || budget.chapterTargetWords <= 0) return null
+  if (!budget || budget.chapterTargetWords <= 0 || budget.bound === 'about') return null
   const total = countProseWords(finalContent)
   const chapterGap = budget.chapterTargetWords - total
   const chapterShort = total < budget.chapterTargetWords * SHORTFALL_RATIO
@@ -160,15 +161,15 @@ export function describeWordShortfall(
     const roundShort = added < budget.targetWords * SHORTFALL_RATIO
     if (!roundShort && !chapterShort) return null
     const chapterPart = chapterShort
-      ? `全章 ${total}/${budget.chapterTargetWords} 字，还差 ${chapterGap} 字，可再点一次续写`
+      ? `全章 ${total}/${budget.chapterTargetWords} 字，比参考目标少 ${chapterGap} 字；请检查剩余剧情，已完整则无需补写`
       : `全章 ${total}/${budget.chapterTargetWords} 字，已达标`
     return roundShort
-      ? `本次只写了 ${added} 字（本次目标 ${budget.targetWords} 字）；${chapterPart}${suffix}`
+      ? `本次新增 ${added} 字（参考 ${budget.targetWords} 字）；${chapterPart}${suffix}`
       : `${chapterPart}${suffix}`
   }
 
   if (!chapterShort) return null
-  return `本章只写了 ${total} 字，比目标 ${budget.chapterTargetWords} 字少 ${chapterGap} 字，可点「续写」补足${suffix}`
+  return `本章 ${total} 字，比参考目标 ${budget.chapterTargetWords} 字少 ${chapterGap} 字；只在剧情尚未完成时续写，不必凑字数${suffix}`
 }
 
 /**
@@ -180,17 +181,17 @@ export function describeWordShortfall(
  */
 export function describeDeslopShortfall(
   afterWords: number,
-  target: Pick<WordTargetResolution, 'targetWords' | 'fromOutline'>,
+  target: Pick<WordTargetResolution, 'targetWords' | 'fromOutline'> & { bound?: 'min' | 'about' },
   beforeWords?: number
 ): string | null {
-  if (!target.targetWords || afterWords >= target.targetWords * SHORTFALL_RATIO) return null
+  if (!target.targetWords || target.bound === 'about' || afterWords >= target.targetWords * SHORTFALL_RATIO) return null
   const gap = target.targetWords - afterWords
   const change =
     beforeWords != null && beforeWords !== afterWords
       ? `${beforeWords} → ${afterWords} 字`
       : `${afterWords} 字`
   const source = target.fromOutline ? '细纲目标' : '默认目标'
-  return `去 AI 味后 ${change}，低于${source} ${target.targetWords} 字，还差 ${gap} 字——应用后可点「续写」补足。`
+  return `去 AI 味后 ${change}，比${source} ${target.targetWords} 字少 ${gap} 字；删去重复后变短是正常的，仅在情节缺失时补写。`
 }
 
 /**
@@ -202,12 +203,14 @@ export function resolveChapterTargetWords(raw: string | undefined): WordTargetRe
   if (parsed === undefined) {
     return { targetWords: DEFAULT_TARGET_WORDS, fromOutline: false, bound: 'min', raw }
   }
-  const targetWords = clampTargetWords(parsed)
+  const bound = UPPER_BOUND_RE.test(raw ?? '') ? 'about' : 'min'
+  // 作者给出的上限不能被默认最小篇幅向上抬高。
+  const targetWords = bound === 'about' ? Math.min(MAX_TARGET_WORDS, Math.max(1, parsed)) : clampTargetWords(parsed)
   return {
     targetWords,
     fromOutline: true,
     clampedFrom: targetWords === parsed ? undefined : parsed,
-    bound: UPPER_BOUND_RE.test(raw ?? '') ? 'about' : 'min',
+    bound,
     raw
   }
 }

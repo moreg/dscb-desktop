@@ -31,10 +31,13 @@ describe('formatChapterProse', () => {
     expect(formatChapterProse('无空白\n两行')).toBe('无空白\n两行')
   })
 
-  it('documents aggressive policy: Latin word spaces are also removed', () => {
-    // 产品选择：激进去空格；混排/英文词间空格不保留
-    expect(formatChapterProse('Hello World')).toBe('HelloWorld')
+  it('preserves Latin word boundaries while still removing Chinese spacing', () => {
+    expect(formatChapterProse('Hello World')).toBe('Hello World')
     expect(formatChapterProse('用 iPhone 拍照')).toBe('用iPhone拍照')
+    expect(formatChapterProse('他说 “Hello,   World!” 然后走了。')).toBe('他说“Hello, World!”然后走了。')
+    expect(formatChapterProse('Take\t40\u00a0kg to the café.')).toBe('Take 40 kg to the café.')
+    expect(formatChapterProse('“Hello, World!” he said.')).toBe('“Hello, World!” he said.')
+    expect(formatChapterProse('  Hello World  \n\n  下 一 行  ')).toBe('Hello World\n下一行')
   })
 
   it('needsChapterProseFormat detects residual issues', () => {
@@ -43,6 +46,7 @@ describe('formatChapterProse', () => {
     expect(needsChapterProseFormat('有\r\n回车')).toBe(true)
     expect(needsChapterProseFormat('尾部空行\n')).toBe(true)
     expect(needsChapterProseFormat('紧凑\n两行')).toBe(false)
+    expect(needsChapterProseFormat('Hello World')).toBe(false)
   })
 })
 
@@ -60,6 +64,12 @@ describe('joinContinuation', () => {
     expect(joinContinuation('他说这件事', '恐怕没那么简单。')).toBe(
       '他说这件事恐怕没那么简单。'
     )
+  })
+
+  it('英文词间已有的接缝空格保留，词内断点仍直接接续', () => {
+    expect(joinContinuation('He said ', 'hello.')).toBe('He said hello.')
+    expect(joinContinuation('He said', ' hello.')).toBe('He said hello.')
+    expect(joinContinuation('He whis', 'pered.')).toBe('He whispered.')
   })
 
   it('原文本就以换行结尾时，尊重作者已分好的段', () => {

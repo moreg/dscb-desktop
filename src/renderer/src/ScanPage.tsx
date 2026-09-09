@@ -82,7 +82,7 @@ export default function ScanPage(): React.ReactElement {
     analysisGenRef.current++
     const handle = analysisRef.current
     analysisRef.current = null
-    if (handle) void handle.abort().catch(() => undefined)
+    if (typeof handle?.abort === 'function') void handle.abort().catch(() => undefined)
     setAnalyzing(false)
     resetDecision()
   }, [resetDecision])
@@ -93,7 +93,9 @@ export default function ScanPage(): React.ReactElement {
   useEffect(
     () => () => {
       if (decisionTimerRef.current != null) window.clearTimeout(decisionTimerRef.current)
-      void analysisRef.current?.abort().catch(() => undefined)
+      if (typeof analysisRef.current?.abort === 'function') {
+        void analysisRef.current.abort().catch(() => undefined)
+      }
     },
     []
   )

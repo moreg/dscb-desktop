@@ -98,14 +98,12 @@ describe('TrackingMdRepo', () => {
     expect(result!.stateChanges[0].chapter).toBe(1)
     expect(result!.stateChanges[1].chapter).toBe(9)
 
-    // 时间线取「历史事件与小说事件对照表」节 body
-    expect(result!.timeline).toContain('1923 年深秋')
-    expect(result!.timeline).toContain('苏九重生归来')
+    // 跨到未来章的整段事件不能当作本章已发生状态。
+    expect(result!.timeline).not.toContain('苏九帮冯将军胜出')
 
-    // 进度摘要：fixture 共 3 条，全部返回
-    expect(result!.recentProgress).toHaveLength(3)
-    expect(result!.recentProgress[2].date).toBe('2026-07-05')
-    expect(result!.recentProgress[1].blocker).toBe('时间线冲突')
+    // 第 11–20 章尚未全部发生，不能把「完成」注入第 15 章。
+    expect(result!.recentProgress).toHaveLength(1)
+    expect(result!.recentProgress[0].date).toBe('2026-07-03')
 
     // 问题记录只取待处理/处理中
     expect(result!.openIssues).toHaveLength(2)
@@ -174,10 +172,10 @@ describe('TrackingMdRepo', () => {
 
   it('handles partial files (only some exist)', async () => {
     await writeFile(path.join(dir, '追踪', '上下文.md'), PROGRESS)
-    const result = await new TrackingMdRepo(dir).read(5)
+    const result = await new TrackingMdRepo(dir).read(15)
     expect(result).not.toBeNull()
     expect(result!.characterStates).toEqual([])
-    expect(result!.recentProgress).toHaveLength(3)
+    expect(result!.recentProgress).toHaveLength(1)
     expect(result!.timeline).toBe('')
     expect(result!.openIssues).toEqual([])
   })
@@ -257,5 +255,53 @@ describe('TrackingMdRepo', () => {
     expect(su).toBeDefined()
     expect(su!.power).toBe('暗劲')
     expect(su!.updateChapter).toBe(10)
+  })
+
+  it('补写旧章时逐人选择历史快照，并保留新表未包含的角色', async () => {
+    const snapshots = `# 角色状态
+
+## 当前状态（第10章）
+| 角色 | 当前实力 | 当前目标 | 更新章节 |
+|---|---|---|---|
+| 苏九 | 暗劲 | 藏好铜钱 | 第10章 |
+| 沈清秋 | 普通人 | 调查码头 | 第8章 |
+
+## 历史快照（第20章）
+| 角色 | 当前实力 | 当前目标 | 更新章节 |
+|---|---|---|---|
+| 苏九 | 化劲 | 找回铜钱 | 第20章 |
+
+## 最新状态摘要
+| 角色 | 最新武力 | 最新目标 | 重要状态章 |
+|---|---|---|---|
+| 苏九 | 天帝境 | 统一三界 | 第100章 |
+| 新反派 | 神境 | 攻城 | 第80章 |
+`
+    await writeFile(path.join(dir, '追踪', '角色状态.md'), snapshots)
+    const repo = new TrackingMdRepo(dir)
+    const at15 = await repo.read(15)
+    expect(at15!.characterStates.map((s) => s.name)).toEqual(['苏九', '沈清秋'])
+    expect(at15!.characterStates[0].power).toBe('暗劲')
+    expect((await repo.read(25))!.characterStates[0].power).toBe('化劲')
+    const display = await repo.readForDisplay()
+    expect(display!.characterStates.find((s) => s.name === '苏九')!.power).toBe('天帝境')
+    expect(display!.characterStates.map((s) => s.name)).toContain('沈清秋')
+    expect(display!.characterStates.map((s) => s.name)).toContain('新反派')
+  })
+
+  it('快照行缺更新章节时使用节标题章号，不能把未来表误作开书状态', async () => {
+    await writeFile(path.join(dir, '追踪', '角色状态.md'), `# 角色状态
+
+## 当前状态（第1卷第8章）
+| 角色 | 当前实力 | 当前目标 |
+|---|---|---|
+| 林远 | 炼气 | 求药 |
+
+## 历史快照（第50章）
+| 角色 | 当前实力 | 当前目标 |
+|---|---|---|
+| 林远 | 元婴 | 复仇 |
+`)
+    expect((await new TrackingMdRepo(dir).read(10))!.characterStates[0]).toMatchObject({ power: '炼气', updateChapter: 8 })
   })
 })

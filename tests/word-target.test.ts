@@ -119,9 +119,9 @@ describe('describeWordShortfall', () => {
       { targetWords: 1500, chapterTargetWords: 3000, writtenWords: 1500, fromOutline: true },
       '甲'.repeat(2000)
     )
-    expect(msg).toContain('本次只写了 500 字')
+    expect(msg).toContain('本次新增 500 字')
     expect(msg).toContain('全章 2000/3000 字')
-    expect(msg).toContain('还差 1000 字')
+    expect(msg).toContain('少 1000 字')
   })
 
   it('续写：本次达标但整章仍差时只报整章进度', () => {
@@ -156,6 +156,10 @@ describe('describeWordShortfall', () => {
   it('无 budget 时返回 null（旧版主进程回包没有这个字段）', () => {
     expect(describeWordShortfall(undefined, '甲'.repeat(10))).toBeNull()
   })
+  it('上限口径不提示续写补足，也不鼓励删水后重新灌水', () => {
+    expect(describeWordShortfall({ ...budget, bound: 'about' }, '甲'.repeat(1000))).toBeNull()
+    expect(describeDeslopShortfall(1000, { targetWords: 3000, fromOutline: true, bound: 'about' }, 2000)).toBeNull()
+  })
 })
 
 /**
@@ -170,7 +174,7 @@ describe('describeDeslopShortfall', () => {
     const msg = describeDeslopShortfall(2000, target, 3000)
     expect(msg).toContain('3000 → 2000 字')
     expect(msg).toContain('细纲目标 3000 字')
-    expect(msg).toContain('还差 1000 字')
+    expect(msg).toContain('少 1000 字')
   })
 
   it('仍达标时不打扰（含 5% 容差）', () => {
@@ -179,7 +183,7 @@ describe('describeDeslopShortfall', () => {
   })
 
   it('原文本就短于目标时也会提示（改写没让它变好）', () => {
-    expect(describeDeslopShortfall(2000, target, 2000)).toContain('还差 1000 字')
+    expect(describeDeslopShortfall(2000, target, 2000)).toContain('少 1000 字')
   })
 
   it('兜底目标要说明来源', () => {

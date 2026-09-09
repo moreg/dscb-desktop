@@ -74,6 +74,9 @@ const PING_ERROR_MAP: Record<string, string> = {
   CODEX_MODEL_ERROR: 'codex 模型配置有误',
   GROK_NOT_FOUND: '未检测到 grok CLI，请先安装 Grok（https://x.ai/cli）',
   GROK_SPAWN_FAILED: 'grok CLI 启动失败',
+  CLAUDE_AUTH_EXPIRED: 'Claude 登录态失效，请在终端运行 claude login',
+  CLAUDE_NOT_FOUND: '未检测到 claude CLI，请先安装 Claude Code',
+  CLAUDE_SPAWN_FAILED: 'claude CLI 启动失败',
   // codex 网络错误
   'tls handshake': 'TLS 握手失败，请检查网络代理设置',
   'stream disconnected': '连接中断，请检查网络稳定性',
@@ -96,6 +99,7 @@ function formatPingError(err: string): string {
   // 最后做 AGY_ERROR/CODEX_ERROR/GROK_ERROR 前缀匹配，截断到 80 字避免布局溢出
   if (err.startsWith('AGY_ERROR: ')) return `agy 出错：${err.slice(11).slice(0, 80)}`
   if (err.startsWith('CODEX_ERROR: ')) return `codex 出错：${err.slice(13).slice(0, 80)}`
+  if (err.startsWith('CLAUDE_ERROR: ')) return `claude 出错：${err.slice(14).slice(0, 80)}`
   if (err.startsWith('GROK_ERROR: ')) {
     const detail = err.slice(12)
     if (/Couldn't create session|unsatisfied requirements|agent building failed/i.test(detail)) {
@@ -2523,7 +2527,11 @@ function ProviderRow({
   const [tempDraft, setTempDraft] = useState<number | null>(
     typeof provider.temperature === 'number' ? provider.temperature : null
   )
-  const [reasoningDraft, setReasoningDraft] = useState(provider.reasoningEffort ?? 'medium')
+  // Claude 未显式配置时思考默认关闭（对齐 CLI 原生行为）；其余默认 medium
+  const reasoningFallback = provider.protocol === 'claude' ? 'none' : 'medium'
+  const [reasoningDraft, setReasoningDraft] = useState(
+    provider.reasoningEffort ?? reasoningFallback
+  )
   const [codexEffort, setCodexEffort] = useState<ProviderSummary['reasoningEffort']>('medium')
   const [codexEffortSaving, setCodexEffortSaving] = useState(false)
   const [agyModels, setAgyModels] = useState<string[]>([])
@@ -2539,8 +2547,8 @@ function ProviderRow({
     setTempDraft(typeof provider.temperature === 'number' ? provider.temperature : null)
   }, [provider.id, provider.temperature])
   useEffect(() => {
-    setReasoningDraft(provider.reasoningEffort ?? 'medium')
-  }, [provider.id, provider.reasoningEffort])
+    setReasoningDraft(provider.reasoningEffort ?? reasoningFallback)
+  }, [provider.id, provider.reasoningEffort, reasoningFallback])
   useEffect(() => {
     setAgySelectedModel(provider.model)
   }, [provider.id, provider.model])
@@ -2688,9 +2696,11 @@ function ProviderRow({
                 ? 'codex 默认'
                 : provider.protocol === 'grok'
                   ? 'grok 默认'
-                  : provider.protocol === 'antigravity'
-                    ? 'agy 默认'
-                    : 'default'
+                  : provider.protocol === 'claude'
+                    ? 'claude 默认'
+                    : provider.protocol === 'antigravity'
+                      ? 'agy 默认'
+                      : 'default'
           }`
         })
       } else {
@@ -2714,7 +2724,9 @@ function ProviderRow({
           ? 'Codex CLI'
           : provider.protocol === 'grok'
             ? 'Grok CLI'
-            : 'Chat completions /chat/completions'
+            : provider.protocol === 'claude'
+              ? 'Claude CLI'
+              : 'Chat completions /chat/completions'
   const protocolChipStyle: CSSProperties = {
     background:
       provider.protocol === 'openai-responses'
@@ -2727,7 +2739,9 @@ function ProviderRow({
             ? 'rgba(16,163,127,0.12)'
             : provider.protocol === 'grok'
               ? 'var(--surface-3)'
-              : 'var(--surface-2)',
+              : provider.protocol === 'claude'
+                ? 'var(--inkstone-soft)'
+                : 'var(--surface-2)',
     color:
       provider.protocol === 'openai-responses'
         ? '#10a37f'
@@ -2739,7 +2753,9 @@ function ProviderRow({
             ? '#10a37f'
             : provider.protocol === 'grok'
               ? 'var(--ink)'
-              : 'var(--ink-3)',
+              : provider.protocol === 'claude'
+                ? 'var(--inkstone)'
+                : 'var(--ink-3)',
     flexShrink: 0
   }
   const metaText =
@@ -2751,7 +2767,9 @@ function ProviderRow({
         ? `本机 codex CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'codex 默认模型'}`
         : provider.protocol === 'grok'
           ? `本机 grok CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'grok 默认模型'}`
-          : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`
+          : provider.protocol === 'claude'
+            ? `本机 claude CLI · ${provider.model && provider.model !== 'default' ? provider.model : 'claude 默认模型'}`
+            : `${provider.baseUrl || '(未填 baseUrl)'} · ${provider.model || '(未填 model)'}`
 
   return (
     <li
@@ -2880,10 +2898,26 @@ function ProviderRow({
           <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>正文建议 High；实际切换 agy 模型</span>
           {savedHint ? <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>✓ 已保存</span> : null}
         </div>
+      ) : provider.protocol === 'claude' ? (
+        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>思考强度</span>
+          <select
+            className="select"
+            value={reasoningDraft}
+            onChange={(e) => persistReasoning(e.target.value as ProviderSummary['reasoningEffort'])}
+            aria-label="思考强度（Claude 扩展思考预算）"
+            style={{ width: 130 }}
+          >
+            {['none', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => (
+              <option key={effort} value={effort}>{effort}</option>
+            ))}
+          </select>
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>映射到 claude 子进程 MAX_THINKING_TOKENS</span>
+          {savedHint ? <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>✓ 已保存</span> : null}
+        </div>
       ) : provider.protocol === 'grok' ? (
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--ink-3)' }}>
-          此 CLI provider 不接收温度或应用内“思考强度”。如需控制 GPT 推理预算，请新建并在“正文生成”路由中选择
-          <strong style={{ marginLeft: 4 }}>OpenAI Responses API（官方）</strong> provider。
+          此 CLI provider 不接收温度或应用内“思考强度”，跟随本机 CLI 登录态与默认配置。
         </div>
       ) : (
         <div
@@ -2981,12 +3015,15 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
   const [agyCustom, setAgyCustom] = useState(false)
   const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokModelsLoading, setGrokModelsLoading] = useState(false)
+  const [claudeModels, setClaudeModels] = useState<string[]>([])
+  const [claudeModelsLoading, setClaudeModelsLoading] = useState(false)
 
   const isAg = protocol === 'antigravity'
   const isCodex = protocol === 'codex'
   const isGrok = protocol === 'grok'
+  const isClaude = protocol === 'claude'
   const isResponses = protocol === 'openai-responses'
-  const isCli = isAg || isCodex || isGrok
+  const isCli = isAg || isCodex || isGrok || isClaude
 
   const defaultBaseUrlFor = (next: ProviderProtocol): string =>
     next === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'
@@ -3013,6 +3050,20 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
       'gpt-5.2': 'GPT-5.2'
     }
     return map[slug] ? `${map[slug]}（${slug}）` : slug
+  }
+
+  /** Claude 模型别名/全名 → 展示名（与 main CLAUDE_MODEL_LABELS 对齐） */
+  const claudeModelLabel = (slug: string): string => {
+    const map: Record<string, string> = {
+      sonnet: 'Sonnet（最新）',
+      opus: 'Opus（最新）',
+      haiku: 'Haiku（最新）',
+      'claude-opus-5': 'Claude Opus 5',
+      'claude-sonnet-5': 'Claude Sonnet 5',
+      'claude-fable-5': 'Claude Fable 5',
+      'claude-haiku-4-5-20251001': 'Claude Haiku 4.5'
+    }
+    return map[slug] ?? slug
   }
 
   // 切到 antigravity 时拉取 agy 可用模型列表
@@ -3076,12 +3127,32 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
   }, [isGrok, grokModels.length])
 
+  // 切到 claude 时拉取内置预设 + settings.json 默认模型
+  useEffect(() => {
+    if (!isClaude || claudeModels.length > 0) return
+    let cancelled = false
+    setClaudeModelsLoading(true)
+    window.api
+      .listClaudeModels()
+      .then((list) => {
+        if (!cancelled) setClaudeModels(list)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setClaudeModelsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isClaude, claudeModels.length])
+
   /** 按协议给出可读默认名称（名称可改；CLI 留空保存时也会用这个） */
   const defaultLabelFor = (p: ProviderProtocol, modelName?: string): string => {
     const m = (modelName || '').trim()
     if (p === 'codex') return m && m !== 'default' ? `Codex · ${m}` : 'Codex'
     if (p === 'antigravity') return m && m !== 'default' ? `Google · ${m}` : 'Google (agy)'
     if (p === 'grok') return m && m !== 'default' ? `Grok · ${m}` : 'Grok'
+    if (p === 'claude') return m && m !== 'default' ? `Claude · ${m}` : 'Claude'
     if (p === 'anthropic') return m ? `Anthropic · ${m}` : 'Anthropic'
     return p === 'openai-responses'
       ? m ? `OpenAI Responses · ${m}` : 'OpenAI Responses'
@@ -3117,7 +3188,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         model: isCli ? model.trim() || 'default' : model.trim(),
         apiKey: isCli ? '' : apiKey.trim(),
         protocol,
-        ...(isResponses ? { reasoningEffort } : {})
+        ...(isResponses || isClaude ? { reasoningEffort } : {})
       })
       setLabel('')
       setApiKey('')
@@ -3139,9 +3210,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         ? `（${codexModels.length} 个可选）`
         : isGrok && grokModels.length > 0
           ? `（${grokModels.length} 个可选）`
-          : isCli
-            ? '（可选）'
-            : ''
+          : isClaude && claudeModels.length > 0
+            ? `（${claudeModels.length} 个可选）`
+            : isCli
+              ? '（可选）'
+              : ''
 
   return (
     <div style={{ marginTop: 6 }}>
@@ -3163,7 +3236,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                   normalized === 'https://api.openai.com/v1' ||
                   normalized === 'https://api.anthropic.com' ||
                   normalized === 'https://api.anthropic.com/v1'
-                return isKnownDefault && next !== 'antigravity' && next !== 'codex' && next !== 'grok'
+                return isKnownDefault &&
+                  next !== 'antigravity' &&
+                  next !== 'codex' &&
+                  next !== 'grok' &&
+                  next !== 'claude'
                   ? defaultBaseUrlFor(next)
                   : current
               })
@@ -3171,18 +3248,22 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
               setModel('')
               setCodexCustom(false)
               setAgyCustom(false)
+              // Claude 思考默认关闭（对齐 claude CLI 原生行为，不静默开扩展思考）；
+              // Responses 的 reasoning 模型必然推理，默认 medium
+              setReasoningEffort(next === 'claude' ? 'none' : 'medium')
               setLabel((prev) => {
                 const prevDefaults = [
                   '',
                   'Codex',
                   'Google (agy)',
                   'Grok',
+                  'Claude',
                   'Anthropic',
                   'OpenAI Responses',
                   'OpenAI 兼容'
                 ]
                 // 仅在空或仍是「上一次协议的默认名」时自动改名，避免覆盖用户手填
-                if (!prev.trim() || prevDefaults.includes(prev.trim()) || /^Codex · |^Google · |^Grok · |^Anthropic · |^OpenAI(?: Responses)? · /.test(prev)) {
+                if (!prev.trim() || prevDefaults.includes(prev.trim()) || /^Codex · |^Google · |^Grok · |^Claude · |^Anthropic · |^OpenAI(?: Responses)? · /.test(prev)) {
                   return defaultLabelFor(next, '')
                 }
                 return prev
@@ -3198,6 +3279,7 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
               <option value="antigravity">Antigravity (agy CLI)</option>
               <option value="codex">Codex (codex CLI)</option>
               <option value="grok">Grok (grok CLI 登录)</option>
+              <option value="claude">Claude (claude CLI 登录)</option>
             </optgroup>
           </select>
         </div>
@@ -3215,7 +3297,9 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                   ? '例如 Google / 主力 Gemini'
                   : isGrok
                     ? '例如 Grok'
-                    : '主力 / 备用 / DeepSeek'
+                    : isClaude
+                      ? '例如 Claude'
+                      : '主力 / 备用 / DeepSeek'
             }
             autoComplete="off"
             spellCheck={false}
@@ -3305,6 +3389,30 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                   </option>
                 ))}
               </select>
+            ) : isClaude && claudeModels.length > 0 ? (
+              <select
+                id="np-model"
+                className="select"
+                value={model}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setModel(v)
+                  setLabel((prev) =>
+                    !prev.trim() || prev === 'Claude' || prev.startsWith('Claude · ')
+                      ? defaultLabelFor('claude', v)
+                      : prev
+                  )
+                }}
+              >
+                <option value="">claude 默认模型</option>
+                {claudeModels.map((m) => (
+                  <option key={m} value={m}>
+                    {claudeModelLabel(m)}
+                  </option>
+                ))}
+              </select>
+            ) : isClaude && claudeModelsLoading ? (
+              <input className="input" disabled placeholder="加载模型列表…" />
             ) : isCodex && codexModels.length > 0 && !codexCustom ? (
               <select
                 id="np-model"
@@ -3369,7 +3477,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder={
-                  isGrok ? '留空用 grok 默认，或填 grok-4.5' : '无法拉取列表，请手动填模型显示名'
+                  isGrok
+                    ? '留空用 grok 默认，或填 grok-4.5'
+                    : isClaude
+                      ? '留空用 claude 默认，或填 sonnet / opus'
+                      : '无法拉取列表，请手动填模型显示名'
                 }
                 autoComplete="off"
               />
@@ -3433,10 +3545,15 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                 使用本机 codex 登录态，无需 API Key / Base URL。首次使用请先在终端运行{' '}
                 <code>codex login</code> 完成登录。
               </>
-            ) : (
+            ) : isGrok ? (
               <>
                 使用本机 grok 登录态，无需 API Key / Base URL。首次使用请先在终端运行{' '}
                 <code>grok login</code> 完成登录。
+              </>
+            ) : (
+              <>
+                使用本机 Claude Code 登录态（或环境变量 <code>ANTHROPIC_API_KEY</code>），无需在此填
+                API Key / Base URL。首次使用请先在终端运行 <code>claude login</code> 完成登录。
               </>
             )}
           </div>
@@ -3456,13 +3573,17 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
         </div>
       )}
 
-      {isResponses ? (
+      {isResponses || isClaude ? (
         <div className="field" style={{ marginBottom: 10 }}>
           <label htmlFor="np-reasoning-effort">思考强度</label>
           <select id="np-reasoning-effort" className="select" value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ProviderSummary['reasoningEffort'])}>
             {['none', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => <option key={effort} value={effort}>{effort}</option>)}
           </select>
-          <div className="meta" style={{ marginTop: 4 }}>仅传给 OpenAI Responses API 的 GPT reasoning 模型；默认 medium，不使用温度。</div>
+          <div className="meta" style={{ marginTop: 4 }}>
+            {isClaude
+              ? '映射到 claude 子进程的 MAX_THINKING_TOKENS（none=关闭思考 / low=4k / medium=10k / high=24k / xhigh=32k / max=60k）；默认 none，跟随 claude CLI 原生行为。'
+              : '仅传给 OpenAI Responses API 的 GPT reasoning 模型；默认 medium，不使用温度。'}
+          </div>
         </div>
       ) : null}
 

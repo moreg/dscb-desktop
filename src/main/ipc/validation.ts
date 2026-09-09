@@ -12,6 +12,13 @@ export const projectNameSchema = z.string().min(1).max(255)
 // 章节相关
 export const chapterNumberSchema = z.number().int().positive()
 export const chapterContentSchema = z.string().max(500_000) // 合理上限
+export const versionNumberSchema = z.number().int().positive()
+export const chapterSourceSchema = z.enum(['ai', 'manual', 'reviewed'])
+export const createChapterVersionInputSchema = z.object({
+  source: chapterSourceSchema,
+  content: chapterContentSchema,
+  note: z.string().max(500).optional()
+})
 
 /**
  * 批量续写的整批进度。

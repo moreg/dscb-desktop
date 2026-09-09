@@ -55,7 +55,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
   }
 }
 
-/** 解析 LLM 输出的记忆提取 JSON，失败返回空提取 */
+/** 解析失败保留显式状态，不能将坏 JSON 当作“本章无变化”清理历史。 */
 export function parseMemoryExtractionJson(raw: string, chapterNumber: number): MemoryExtraction {
   const empty: MemoryExtraction = {
     chapterNumber,
@@ -71,8 +71,27 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
   }
   try {
     const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return empty
+    if (!m) return { ...empty, parseError: '记忆提取未返回有效 JSON，本次未提交' }
     const obj = JSON.parse(m[0])
+    const fields = ['newCharacters', 'newLocations', 'newItems', 'newForeshadowings', 'newPlotPoints', 'characterStateChanges', 'collectedForeshadowings', 'settingsPatches', 'settingsSuggestions']
+    if (!obj || typeof obj !== 'object' ||
+      ['newPlotPoints', 'characterStateChanges', 'collectedForeshadowings'].some((key) => !Array.isArray(obj[key])) ||
+      fields.some((key) => obj[key] !== undefined && (!Array.isArray(obj[key]) ||
+        obj[key].some((item: unknown) => !item || typeof item !== 'object' || Array.isArray(item))))) {
+      return { ...empty, parseError: '记忆提取结构不完整，本次未提交' }
+    }
+    const required: Record<string, string[]> = {
+      newCharacters: ['name'], newLocations: ['name'], newItems: ['name'],
+      newForeshadowings: ['content'], newPlotPoints: ['title', 'event'],
+      characterStateChanges: ['name', 'field', 'newValue'], collectedForeshadowings: ['content'],
+      settingsPatches: ['target', 'fileName', 'op', 'content']
+    }
+    if (Object.entries(required).some(([key, props]) => (obj[key] ?? []).some((item: Record<string, unknown>) =>
+      props.some((prop) => typeof item[prop] !== 'string') ||
+      (item.evidence !== undefined && typeof item.evidence !== 'string') ||
+      (item.foreshadowingId !== undefined && (typeof item.foreshadowingId !== 'string' || !item.foreshadowingId.trim()))))) {
+      return { ...empty, parseError: '记忆条目字段无效，本次未提交' }
+    }
     return {
       chapterNumber,
       newCharacters: Array.isArray(obj.newCharacters) ? obj.newCharacters : [],
@@ -92,7 +111,7 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
         : []
     }
   } catch {
-    return empty
+    return { ...empty, parseError: '记忆提取 JSON 解析失败，本次未提交' }
   }
 }
 
@@ -216,41 +235,25 @@ export interface ForeshadowReceipt {
 }
 
 /**
- * 在文本中定位"【本章伏笔回执】"标签后的 JSON。
- * 用栈式大括号平衡匹配，**不依赖**非贪婪正则，规避 LLM 在字符串值里出现 "}" 时的截断 bug。
- * 失败返回 null（不抛）。
+ * 只定位紧跟标签、位于全文末尾且字段有效的回执 JSON。
+ * 正文可能先提及同名标签；逐个尝试，不从该标签跨越正文去寻找后面的 JSON。
+ * 与正文守卫的末尾回执口径一致；无效结构原样保留，交给守卫/作者处理。
  */
 function findReceiptJson(raw: string): { jsonStr: string; start: number; end: number } | null {
   const tag = '【本章伏笔回执】'
-  const tagIdx = raw.indexOf(tag)
-  if (tagIdx < 0) return null
-  // 从标签后第一个 '{' 开始
-  const startSearch = raw.indexOf('{', tagIdx + tag.length)
-  if (startSearch < 0) return null
-  let depth = 0
-  let inString = false
-  let escape = false
-  for (let i = startSearch; i < raw.length; i++) {
-    const ch = raw[i]
-    if (inString) {
-      if (escape) {
-        escape = false
-      } else if (ch === '\\') {
-        escape = true
-      } else if (ch === '"') {
-        inString = false
-      }
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-    } else if (ch === '{') {
-      depth++
-    } else if (ch === '}') {
-      depth--
-      if (depth === 0) {
-        return { jsonStr: raw.slice(startSearch, i + 1), start: tagIdx, end: i + 1 }
-      }
+  for (let start = raw.indexOf(tag); start >= 0; start = raw.indexOf(tag, start + tag.length)) {
+    const jsonStr = raw.slice(start + tag.length).trim()
+    try {
+      const parsed: unknown = JSON.parse(jsonStr)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      const fields = Object.entries(parsed)
+      if (!fields.length || fields.some(([key, value]) =>
+        !['planted', 'collected'].includes(key) || !Array.isArray(value) ||
+        value.some((item: unknown) => typeof item !== 'string')
+      )) continue
+      return { jsonStr, start, end: raw.length }
+    } catch {
+      // 引文里的标签或正文中途的 JSON 不是末尾回执，继续找下一个标签。
     }
   }
   return null
@@ -258,9 +261,8 @@ function findReceiptJson(raw: string): { jsonStr: string; start: number; end: nu
 
 /**
  * 解析 LLM 在正文末尾写下的【本章伏笔回执】。
- * - 没找到标签 → 返回 { receipt: null, stripped: 原文本 }
- * - 找到但 JSON 解析失败 → 返回 { receipt: { planted: [], collected: [], raw }, stripped }
- * - 找到且解析成功 → 返回 { receipt, stripped: 剥离回执后的纯正文 }
+ * - 未找到合法末尾回执 → 返回 { receipt: null, stripped: 原文本 }，不删正文
+ * - 找到且字段有效 → 返回 { receipt, stripped: 剥离末尾回执后的纯正文 }
  */
 export function parseForeshadowReceipt(raw: string): {
   receipt: ForeshadowReceipt | null
@@ -270,20 +272,17 @@ export function parseForeshadowReceipt(raw: string): {
   const found = findReceiptJson(raw)
   if (!found) return empty
   const jsonStr = found.jsonStr.trim()
-  // 剥离：标签到 JSON 结束 + 收尾换行整理
-  const stripped = raw
-    .slice(0, found.start)
-    .replace(/\n{3,}/g, '\n\n')
-    .trimEnd()
+  // 只删除已验证的末尾回执，不顺带格式化正文。
+  const stripped = raw.slice(0, found.start).trimEnd()
 
   let parsed: unknown
   try {
     parsed = JSON.parse(jsonStr)
   } catch {
-    return { receipt: { planted: [], collected: [], raw: jsonStr }, stripped }
+    return empty
   }
   if (typeof parsed !== 'object' || parsed === null) {
-    return { receipt: { planted: [], collected: [], raw: jsonStr }, stripped }
+    return empty
   }
   const obj = parsed as Record<string, unknown>
   const sanitize = (v: unknown): string[] =>

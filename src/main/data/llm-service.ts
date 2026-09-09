@@ -4,6 +4,8 @@ import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
 import { runCodex, probeCodex } from './codex-runner'
 import { runGrok, probeGrok } from './grok-runner'
+import { runClaude, probeClaude } from './claude-runner'
+import { createHash } from 'crypto'
 
 export interface GenerateOptions {
   onToken?: (token: string) => void
@@ -50,7 +52,9 @@ export interface UsageInfo {
   totalTokens: number
 }
 
-function protocolOf(p: ProviderConfig): 'openai' | 'openai-responses' | 'anthropic' | 'antigravity' | 'codex' | 'grok' {
+function protocolOf(
+  p: ProviderConfig
+): 'openai' | 'openai-responses' | 'anthropic' | 'antigravity' | 'codex' | 'grok' | 'claude' {
   return p.protocol ?? 'openai'
 }
 
@@ -62,11 +66,18 @@ function protocolOf(p: ProviderConfig): 'openai' | 'openai-responses' | 'anthrop
 function usageModelLabel(p: ProviderConfig): string {
   const model = (p.model ?? '').trim() || 'default'
   const proto = protocolOf(p)
-  const isCli = proto === 'antigravity' || proto === 'codex' || proto === 'grok'
+  const isCli =
+    proto === 'antigravity' || proto === 'codex' || proto === 'grok' || proto === 'claude'
   if (!isCli) return model
 
   const cliName =
-    proto === 'antigravity' ? 'agy' : proto === 'codex' ? 'codex' : 'grok'
+    proto === 'antigravity'
+      ? 'agy'
+      : proto === 'codex'
+        ? 'codex'
+        : proto === 'grok'
+          ? 'grok'
+          : 'claude'
   if (model === 'default') {
     return `${p.label} · ${cliName} 默认`
   }
@@ -308,6 +319,24 @@ export class LlmService {
     return cfg.providers.find((x) => x.id === cfg.activeId) ?? null
   }
 
+  /** Opaque in-process cache identity; never exposes provider credentials or endpoint details. */
+  async getCacheIdentity(feature?: string): Promise<string | null> {
+    const provider = await this.resolveProvider(feature)
+    if (!provider) return null
+    const protocol = protocolOf(provider)
+    // CLI configuration/login/instructions live outside this settings store and can change
+    // independently. Likewise an implicit model cannot identify the model that actually ran.
+    if (!['openai', 'openai-responses', 'anthropic'].includes(protocol) ||
+      !provider.apiKey || !provider.baseUrl.trim() || !provider.model.trim() ||
+      /^(?:default|auto)$/i.test(provider.model.trim())) return null
+    return createHash('sha256').update(JSON.stringify({
+      id: provider.id, protocol, baseUrl: provider.baseUrl, model: provider.model,
+      temperature: provider.temperature, reasoningEffort: provider.reasoningEffort,
+      // Include credential changes in the opaque digest so changing account invalidates it.
+      credential: provider.apiKey
+    })).digest('hex')
+  }
+
   /**
    * 轻量连通测试：发送 1 token 的请求，成功即返回模型名。
    * @param providerId 可选；传入时精确测试该 provider（不影响 active），
@@ -379,6 +408,21 @@ export class LlmService {
         return { ok: false, error: (err as Error).message || 'GROK_ERROR' }
       }
     }
+    // claude 协议：走本机 Claude Code CLI，无需 apiKey（靠 claude login / ANTHROPIC_API_KEY）
+    if (proto === 'claude') {
+      const version = await probeClaude()
+      if (!version) return { ok: false, error: 'CLAUDE_NOT_FOUND' }
+      try {
+        await runClaude('回复一个字：好', {
+          model: p.model && p.model !== 'default' ? p.model : undefined,
+          timeoutSec: 90,
+          signal: AbortSignal.timeout(100_000)
+        })
+        return { ok: true, model: p.model, providerLabel: p.label }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message || 'CLAUDE_ERROR' }
+      }
+    }
     if (!p.apiKey) return { ok: false, error: 'NO_KEY' }
     try {
       const { url, init } = buildPingRequest(p)
@@ -411,6 +455,10 @@ export class LlmService {
     // grok 协议：走本机 grok CLI 子进程，不需 apiKey（靠 grok login）
     if (proto === 'grok') {
       return this.generateViaGrok(p, prompt, opts)
+    }
+    // claude 协议：走本机 Claude Code CLI 子进程，不需 apiKey（靠 claude login / ANTHROPIC_API_KEY）
+    if (proto === 'claude') {
+      return this.generateViaClaude(p, prompt, opts)
     }
     if (!p.apiKey) throw new Error('LLM_NOT_CONFIGURED')
 
@@ -616,6 +664,46 @@ export class LlmService {
         })
       } catch (err) {
         console.error('[llm-service] Failed to record grok usage:', err)
+      }
+    }
+    return full
+  }
+
+  /**
+   * claude 协议调用：委托 claude-runner 跑 `claude -p`（stream-json 真流式）。
+   * systemPrompt 与 user prompt 合并为单条（headless 单轮，不单独支持 system role）。
+   * 用量来自 result / assistant 事件的 usage（含 cache token）；每次独立进程，并发安全。
+   */
+  private async generateViaClaude(
+    p: ProviderConfig,
+    prompt: string,
+    opts: GenerateOptions
+  ): Promise<string> {
+    const body =
+      opts.systemPrompt && opts.systemPrompt.trim()
+        ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
+        : prompt
+    const merged = CLI_PROSE_ONLY_PREAMBLE + body
+
+    const timeoutMs = resolveStreamTimeoutMs(opts)
+    const { full, usage } = await runClaude(merged, {
+      model: p.model && p.model !== 'default' ? p.model : undefined,
+      thinkingEffort: p.reasoningEffort,
+      timeoutSec: Math.ceil(timeoutMs / 1000),
+      onToken: opts.onToken,
+      signal: opts.signal
+    })
+
+    if (this.usage && usage) {
+      try {
+        await this.usage.add({
+          ...usageRecordBase(p, opts),
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens
+        })
+      } catch (err) {
+        console.error('[llm-service] Failed to record claude usage:', err)
       }
     }
     return full

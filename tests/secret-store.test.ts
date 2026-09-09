@@ -111,4 +111,34 @@ describe('SecretStore', () => {
     await writeFile(path.join(dir, 'providers.enc'), enc)
     await expect(store.read()).rejects.toThrow(/SCHEMA_INVALID/)
   })
+
+  it('automatically sanitizes malformed antigravity model containing tab in providers and routing', async () => {
+    const { safeStorage } = await import('electron')
+    const malformed = {
+      activeId: 'p_agy',
+      providers: [
+        {
+          id: 'p_agy',
+          label: 'Google (agy)',
+          baseUrl: 'antigravity://local',
+          model: 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)',
+          apiKey: '',
+          protocol: 'antigravity'
+        }
+      ],
+      featureRouting: {
+        review: {
+          providerId: 'p_agy',
+          model: 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)'
+        }
+      }
+    }
+    const enc = safeStorage.encryptString(JSON.stringify(malformed))
+    const { writeFile } = await import('fs/promises')
+    await writeFile(path.join(dir, 'providers.enc'), enc)
+
+    const cfg = await store.read()
+    expect(cfg.providers[0].model).toBe('Gemini 3.8 Flash (High)')
+    expect(cfg.featureRouting?.review?.model).toBe('Gemini 3.8 Flash (High)')
+  })
 })

@@ -106,6 +106,50 @@ describe('check-ai-patterns: Gate A 句式与禁用词', () => {
     expect(findings.some((f) => f.type === 'eye_flash')).toBe(true)
   })
 
+  it('检测道具停止式"手里的X停了"（blocking）', () => {
+    const text = '他把话说完。手里的算盘停了。'
+    const findings = scanAiPatterns(text)
+    const hit = findings.filter((f) => f.type === 'hand_stops')
+    expect(hit).toHaveLength(1)
+    expect(hit[0].severity).toBe('blocking')
+    expect(hit[0].excerpt).toBe('手里的算盘停了')
+  })
+
+  it('道具停止式覆盖"X的手/动作"与"一顿/停在半空"变体', () => {
+    for (const text of ['擦刀的手停了下来。', '她拨算珠的手停住了。', '数钱的动作停了。', '他的手停在半空中。', '他的手一顿。']) {
+      expect(scanAiPatterns(text).some((f) => f.type === 'hand_stops')).toBe(true)
+    }
+  })
+
+  it('检测刻意反差套路"声音不大。xxx听见了。"', () => {
+    // 单行同句
+    expect(scanAiPatterns('声音不大。陆沉听见了。').some((f) => f.type === 'voice_heard')).toBe(true)
+    expect(scanAiPatterns('声音不大，但沈栀听见了。').some((f) => f.type === 'voice_heard')).toBe(true)
+    expect(scanAiPatterns('声音很轻。在场的人都听到了。').some((f) => f.type === 'voice_heard')).toBe(true)
+    expect(scanAiPatterns('动静不大，偏偏暗卫察觉到了。').some((f) => f.type === 'voice_heard')).toBe(true)
+
+    // 跨行变体（典型 AI 分段摆拍）
+    const multilineText = '声音不大。\n陆沉听见了。'
+    const findings = scanAiPatterns(multilineText)
+    const hits = findings.filter((f) => f.type === 'voice_heard')
+    expect(hits.length).toBeGreaterThanOrEqual(1)
+    expect(hits[0].severity).toBe('blocking')
+    expect(hits[0].gate).toBe('A')
+  })
+
+  it('检测发声器官解构与对白解说套路"声音从嗓子里挤出来 / 自己听着都陌生"', () => {
+    expect(scanAiPatterns('声音从嗓子里挤出来，他自己听着都陌生。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
+    expect(scanAiPatterns('话音从喉咙深处挤出来。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
+    expect(scanAiPatterns('连他自己听着都觉得陌生。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
+    expect(scanAiPatterns('字句从牙缝里崩出来。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
+  })
+
+  it('道具停止式不误报真实停止与具体动作', () => {
+    for (const text of ['雨停了。', '车在门口停了下来。', '他的手停在门把上。', '算珠停在七上，正是他刚报的那个数。', '他一颗珠子拨过了头。']) {
+      expect(scanAiPatterns(text).some((f) => f.type === 'hand_stops')).toBe(false)
+    }
+  })
+
   it('检测禁用词（一级）', () => {
     const text = '他缓缓走向前。'
     const findings = scanAiPatterns(text)
@@ -383,5 +427,100 @@ describe('scanAiPatterns 省略号检测', () => {
 
   it('没有省略号时不误报', () => {
     expect(scanAiPatterns('他站起来，走了出去。').some((f) => f.type === 'ellipsis')).toBe(false)
+  })
+})
+
+describe('scanAiPatterns & normalizePunctuation: 台词中间禁句号', () => {
+  const badDialogue = '“先生既然肯留下，委任今天就能签。名头先挂顾问，不领实职。军需那边管吃住，出门用车也方便。”'
+
+  it('scanAiPatterns 检测台词中间出现的句号（Gate E，报出2处）', () => {
+    const findings = scanAiPatterns(badDialogue)
+    const hits = findings.filter((f) => f.type === 'dialogue-internal-period')
+    expect(hits).toHaveLength(2)
+    expect(hits.every((h) => h.gate === 'E' && h.severity === 'advisory')).toBe(true)
+  })
+
+  it('台词末尾的句号不误报', () => {
+    const normal = '“先生既然肯留下，委任今天就能签，出门用车也方便。”'
+    const findings = scanAiPatterns(normal)
+    expect(findings.filter((f) => f.type === 'dialogue-internal-period')).toHaveLength(0)
+  })
+
+  it('normalizePunctuation 自动将台词中间的句号转为逗号，保留末尾句号', () => {
+    const r = normalizePunctuation(badDialogue)
+    expect(r.text).toBe('“先生既然肯留下，委任今天就能签，名头先挂顾问，不领实职，军需那边管吃住，出门用车也方便。”')
+    expect(r.changes.dialoguePeriod).toBe(2)
+  })
+
+  it('台词被打断以破折号收尾或闭合引号前有逗号时，规范化为句号，绝不留逗号', () => {
+    expect(normalizePunctuation('“你——”').text).toBe('“你。”')
+    expect(normalizePunctuation('“你—”').text).toBe('“你。”')
+    expect(normalizePunctuation('“你--”').text).toBe('“你。”')
+    expect(normalizePunctuation('“你……”').text).toBe('“你。”')
+    expect(normalizePunctuation('“你。”').text).toBe('“你。”')
+    expect(normalizePunctuation('“你，”').text).toBe('“你。”')
+    expect(normalizePunctuation('“面子能算吉凶？”\n“你——”\n“二帅慢走。”').text).toBe(
+      '“面子能算吉凶？”\n“你。”\n“二帅慢走。”'
+    )
+    expect(normalizePunctuation('他说——其实不是这样。').text).toBe('他说，其实不是这样。')
+    expect(normalizePunctuation('“先生既然肯留下——委任今天就能签。”').text).toBe(
+      '“先生既然肯留下，委任今天就能签。”'
+    )
+  })
+})
+
+describe('scanAiPatterns: 新增高毒/套路句式检测', () => {
+  it('检测"看似……实则……"二元哲学套路（blocking）', () => {
+    const findings = scanAiPatterns('他看似漫不经心，实则暗藏杀机。')
+    expect(findings.some((f) => f.type === 'seem_actually' && f.severity === 'blocking')).toBe(true)
+  })
+
+  it('检测"殊不知/岂料"评书式全知插话（blocking）', () => {
+    const findings = scanAiPatterns('他收起兵刃离去。殊不知，暗处有一双眼睛正盯着他。')
+    expect(findings.some((f) => f.type === 'commentator_knows' && f.severity === 'blocking')).toBe(true)
+  })
+
+  it('检测"震惊过后，取而代之的是……"情绪状态机（blocking）', () => {
+    const findings = scanAiPatterns('震惊之余，取而代之的是冰冷的杀意。')
+    expect(findings.some((f) => f.type === 'emotion_handoff' && f.severity === 'blocking')).toBe(true)
+  })
+
+  it('检测"视线落在了X身上"视线空转套路', () => {
+    const findings = scanAiPatterns('众人的目光齐刷刷落在了陆沉身上。')
+    expect(findings.some((f) => f.type === 'sight_lands')).toBe(true)
+  })
+
+  it('检测"想也不想/毫不犹豫"虚假决绝副词', () => {
+    const findings = scanAiPatterns('他想也不想，直接拔刀斩去。')
+    expect(findings.some((f) => f.type === 'fake_resolute')).toBe(true)
+  })
+
+  it('检测"颤了一下/身子僵了一下"触电式微痉挛（blocking）', () => {
+    const findings = scanAiPatterns('听到这个消息，他身子僵了一下。')
+    expect(findings.some((f) => f.type === 'fake_micro_spasm' && f.severity === 'blocking')).toBe(true)
+  })
+
+  it('检测"顿了一下/愣了一下"停顿占位词（blocking）', () => {
+    const findings = scanAiPatterns('他顿了一下，缓缓转过身来。')
+    expect(findings.some((f) => f.type === 'fake_pause_moment' && f.severity === 'blocking')).toBe(true)
+  })
+})
+
+describe('scanAiPatterns: 微动作/动量短语密度检测（X了X / X了一下 / X了两下）', () => {
+  it('少量正常物理动作（1~3次）不触发密度预警', () => {
+    const text = '他走上前去，在门上敲了两下。\n屋内的人推了一下桌子，又看了一下门外。'
+    const findings = scanAiPatterns(text)
+    const densityHits = findings.filter((f) => f.type === 'micro-action-density')
+    expect(densityHits).toHaveLength(0)
+  })
+
+  it('微动作累计 ≥4 次触发密度预警（advisory）', () => {
+    const text = '他走上前去，在门上敲了两下。\n屋内的人推了一下桌子，又看了一下门外。\n他想了想，终究没有开门。'
+    const findings = scanAiPatterns(text)
+    const densityHits = findings.filter((f) => f.type === 'micro-action-density')
+    expect(densityHits.length).toBeGreaterThanOrEqual(1)
+    expect(densityHits[0].severity).toBe('advisory')
+    expect(densityHits[0].gate).toBe('D')
+    expect(densityHits[0].word).toBe('想了想')
   })
 })

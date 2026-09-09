@@ -18,7 +18,9 @@ const providerConfigSchema = z.object({
   baseUrl: z.string().max(2048),
   model: z.string().max(255),
   apiKey: z.string().max(1000),
-  protocol: z.enum(['openai', 'openai-responses', 'anthropic', 'antigravity', 'codex', 'grok']).optional(),
+  protocol: z
+    .enum(['openai', 'openai-responses', 'anthropic', 'antigravity', 'codex', 'grok', 'claude'])
+    .optional(),
   homepage: z.string().max(2048).optional(),
   temperature: z.number().min(0).max(2).optional(),
   reasoningEffort: z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
@@ -119,6 +121,42 @@ function migrate(legacy: LegacyShape | unknown): ProvidersConfig {
   return { activeId, providers }
 }
 
+/** 净化已持久化的 provider 配置（例如早期版本误将制表符混入 model 名） */
+function sanitizeStoredProviders(config: ProvidersConfig): ProvidersConfig {
+  let changed = false
+  const providers = config.providers.map((p) => {
+    if (p.protocol === 'antigravity' && p.model && (p.model.includes('\t') || /\s{2,}/.test(p.model))) {
+      changed = true
+      const parts = p.model.split(/[\t]+|\s{2,}/).map((s) => s.trim()).filter(Boolean)
+      const clean = parts[1] || parts[0] || ''
+      return { ...p, model: clean }
+    }
+    return p
+  })
+
+  let featureRouting = config.featureRouting
+  if (featureRouting) {
+    let routingChanged = false
+    const updatedRouting = { ...featureRouting }
+    for (const key of Object.keys(updatedRouting) as Array<keyof typeof featureRouting>) {
+      const entry = updatedRouting[key]
+      if (entry?.model && (entry.model.includes('\t') || /\s{2,}/.test(entry.model))) {
+        const parts = entry.model.split(/[\t]+|\s{2,}/).map((s) => s.trim()).filter(Boolean)
+        const clean = parts[1] || parts[0] || ''
+        updatedRouting[key] = { ...entry, model: clean }
+        routingChanged = true
+      }
+    }
+    if (routingChanged) {
+      changed = true
+      featureRouting = updatedRouting
+    }
+  }
+
+  if (!changed) return config
+  return { ...config, providers, ...(featureRouting ? { featureRouting } : {}) }
+}
+
 export class SecretStore {
   private writePromise: Promise<void> | null = null
 
@@ -150,21 +188,23 @@ export class SecretStore {
       // 解密失败 / JSON 损坏 → 视为不兼容，提示用户重新配置
       throw new Error('SCHEMA_INVALID: providers.enc is corrupted or unreadable', { cause: err })
     }
-    if (isNewShape(parsed)) return parsed
+    if (isNewShape(parsed)) return sanitizeStoredProviders(parsed)
     // 旧 schema：尝试迁移
-    return migrate(parsed)
+    return sanitizeStoredProviders(migrate(parsed))
   }
 
   async write(config: ProvidersConfig): Promise<void> {
+    const sanitized = sanitizeStoredProviders(config)
     // 验证输入
-    const validated = validateInput(providersConfigSchema, config)
+    const validated = validateInput(providersConfigSchema, sanitized)
 
-    // 额外验证：API 密钥非空（antigravity/codex/grok 协议豁免，靠本机登录态）
+    // 额外验证：API 密钥非空（antigravity/codex/grok/claude 协议豁免，靠本机登录态）
     for (const provider of validated.providers) {
       const isCli =
         provider.protocol === 'antigravity' ||
         provider.protocol === 'codex' ||
-        provider.protocol === 'grok'
+        provider.protocol === 'grok' ||
+        provider.protocol === 'claude'
       if (!isCli) {
         if (!provider.apiKey || provider.apiKey.trim().length === 0) {
           throw new Error(`Provider ${provider.id} has empty API key`)

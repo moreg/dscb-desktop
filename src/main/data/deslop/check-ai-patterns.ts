@@ -79,6 +79,12 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
   // 8. Gate E 对话标签单一化
   findings.push(...scanDialogueTags(proseLines))
 
+  // 9. Gate E 台词中间禁句号（说话中间不落句号，改用逗号保持口语连贯）
+  findings.push(...scanDialogueInternalPeriods(proseLines))
+
+  // 10. Gate D 微动作/动量短语密度检测（X了X / X了一下 / X了两下）
+  findings.push(...scanMicroActionDensity(proseLines))
+
   findings.sort((a, b) => a.line - b.line || a.column - b.column)
   return findings
 }
@@ -87,12 +93,13 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
    正文行收集（跳过 front matter / 代码块 / 空行）
    ========================================================= */
 
-interface ProseLine {
+/** 一行正文（已跳过 front matter / 代码块）。check-uniformity 复用，避免两处各写一份跳过逻辑。 */
+export interface ProseLine {
   text: string
   lineNo: number
 }
 
-function collectProseLines(lines: string[]): ProseLine[] {
+export function collectProseLines(lines: string[]): ProseLine[] {
   const out: ProseLine[] = []
   let fence: { char: string; length: number } | null = null
   let inFrontMatter = hasYamlFrontMatter(lines)
@@ -385,7 +392,8 @@ function findPeriodStutter(proseLines: ProseLine[]): DeslopFinding[] {
 
 function scanToxicPatterns(proseLines: ProseLine[]): DeslopFinding[] {
   const findings: DeslopFinding[] = []
-  for (const { text, lineNo } of proseLines) {
+  for (let i = 0; i < proseLines.length; i++) {
+    const { text, lineNo } = proseLines[i]
     for (const pattern of TOXIC_PATTERNS) {
       const re = new RegExp(pattern.re.source, pattern.re.flags.includes('g') ? pattern.re.flags : pattern.re.flags + 'g')
       let m: RegExpExecArray | null
@@ -400,6 +408,41 @@ function scanToxicPatterns(proseLines: ProseLine[]): DeslopFinding[] {
           excerpt: compact(m[0]),
           word: m[0]
         })
+      }
+    }
+
+    // 跨相邻非空行检测（如第 i 行"声音不大。"与下文紧邻行"xxx听见了。"）
+    if (text.trim().length > 0) {
+      let nextLine: ProseLine | undefined
+      for (let j = i + 1; j < proseLines.length; j++) {
+        if (proseLines[j].text.trim().length > 0) {
+          if (proseLines[j].lineNo - lineNo <= 2) {
+            nextLine = proseLines[j]
+          }
+          break
+        }
+      }
+      if (nextLine) {
+        const pairText = text.trim() + '\n' + nextLine.text.trim()
+        for (const pattern of TOXIC_PATTERNS) {
+          if (!pattern.re.source.includes('\\n')) continue
+          const re = new RegExp(pattern.re.source, pattern.re.flags.includes('g') ? pattern.re.flags : pattern.re.flags + 'g')
+          let m: RegExpExecArray | null
+          while ((m = re.exec(pairText)) !== null) {
+            if (m[0].includes('\n')) {
+              findings.push({
+                line: lineNo,
+                column: text.indexOf(m[0].split('\n')[0]) + 1 || 1,
+                type: pattern.id,
+                severity: pattern.stars >= 4 ? 'blocking' : 'advisory',
+                gate: 'A',
+                message: `${pattern.name}（${'★'.repeat(pattern.stars)}）：${pattern.fix}`,
+                excerpt: compact(m[0].replace(/\n/g, ' ')),
+                word: m[0]
+              })
+            }
+          }
+        }
       }
     }
   }
@@ -581,6 +624,85 @@ function scanDialogueTags(proseLines: ProseLine[]): DeslopFinding[] {
     }
   }
   flush()
+  return findings
+}
+
+/**
+ * 扫描台词中间出现的句号：说话中间不要用句号断句，改用逗号连接，保持口语语流连贯。
+ */
+function scanDialogueInternalPeriods(proseLines: ProseLine[]): DeslopFinding[] {
+  const findings: DeslopFinding[] = []
+  for (const { text, lineNo } of proseLines) {
+    const quoteRegex = /([“"「])([^”"」\n]+?)([”"」])/g
+    let qm: RegExpExecArray | null
+    while ((qm = quoteRegex.exec(text)) !== null) {
+      const quoteStart = qm.index
+      const content = qm[2]
+      const periodRegex = /。(?!\s*$)/g
+      let pm: RegExpExecArray | null
+      while ((pm = periodRegex.exec(content)) !== null) {
+        const charIndex = quoteStart + 1 + pm.index
+        findings.push({
+          line: lineNo,
+          column: charIndex + 1,
+          type: 'dialogue-internal-period',
+          severity: 'advisory',
+          gate: 'E',
+          message: '台词中间出现句号：同一段话说话中间不要用句号断句，改用逗号连接，保持口语连贯；整段话仅在末尾保留一个句号。',
+          excerpt: compact(text.slice(Math.max(0, charIndex - 6), Math.min(text.length, charIndex + 8))),
+          word: '。'
+        })
+      }
+    }
+  }
+  return findings
+}
+
+/**
+ * 微动作/动量短语过密扫描：
+ * 检测 "X了X"、"X了一下"、"X了两下/几下"（如：看了看、笑了笑、敲了一下、眨了两下等）。
+ * 单段/单章允许 1~3 次自然物理动作，累计 ≥ 4 次时触发密度预警，引导精简无意义微动作或改用推进性事件动作。
+ */
+function scanMicroActionDensity(proseLines: ProseLine[]): DeslopFinding[] {
+  const findings: DeslopFinding[] = []
+  const matches: { lineNo: number; column: number; word: string; excerpt: string }[] = []
+
+  const pattern = /(?:([\u4e00-\u9fa5])了\1|([\u4e00-\u9fa5])了(?:一下|[两三几]下))/g
+
+  for (const { text, lineNo } of proseLines) {
+    const trimmed = text.trim()
+    if (!trimmed || isDivider(trimmed) || isStructural(trimmed)) continue
+    pattern.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = pattern.exec(text)) !== null) {
+      const word = m[0]
+      matches.push({
+        lineNo,
+        column: m.index + 1,
+        word,
+        excerpt: compact(text.slice(Math.max(0, m.index - 10), Math.min(text.length, m.index + word.length + 10)))
+      })
+    }
+  }
+
+  // 允许 1~3 次正常物理动作，从第 4 处开始触发密度告警
+  const DENSITY_THRESHOLD = 4
+  if (matches.length >= DENSITY_THRESHOLD) {
+    for (let i = DENSITY_THRESHOLD - 1; i < matches.length; i++) {
+      const item = matches[i]
+      findings.push({
+        line: item.lineNo,
+        column: item.column,
+        type: 'micro-action-density',
+        severity: 'advisory',
+        gate: 'D',
+        message: `微动作/动量短语过密（"${item.word}"，为全文第 ${i + 1} 处）：本章微动作（X了X / X了一下 / X了两下）已累计达 ${matches.length} 处，请避免角色频繁机械微动或触电停顿，建议精简并改用有推进力的事件动作。`,
+        excerpt: item.excerpt,
+        word: item.word
+      })
+    }
+  }
+
   return findings
 }
 

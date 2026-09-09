@@ -662,13 +662,15 @@ export class SettingsRepository {
     apiKey: string
     baseUrl: string
     model: string
+    channel: 'api' | 'codex' | 'grok'
   }> {
     const s = await this.get()
     const cfg = s.coverImage ?? {}
     return {
       apiKey: typeof cfg.apiKey === 'string' ? cfg.apiKey : '',
       baseUrl: cfg.baseUrl || 'https://api.openai.com/v1',
-      model: cfg.model || 'gpt-image-2'
+      model: cfg.model || 'gpt-image-2',
+      channel: cfg.channel === 'codex' || cfg.channel === 'grok' ? cfg.channel : 'api'
     }
   }
 
@@ -679,7 +681,8 @@ export class SettingsRepository {
       hasKey: cfg.apiKey.length > 0,
       keyMasked: cfg.apiKey ? maskKey(cfg.apiKey) : '',
       baseUrl: cfg.baseUrl,
-      model: cfg.model
+      model: cfg.model,
+      channel: cfg.channel
     }
   }
 
@@ -706,7 +709,8 @@ export class SettingsRepository {
       baseUrl,
       model: patch.model?.trim() || current.model,
       // apiKey 空串=保留旧值；非空才覆盖
-      apiKey: patch.apiKey && patch.apiKey.trim() ? patch.apiKey.trim() : current.apiKey
+      apiKey: patch.apiKey && patch.apiKey.trim() ? patch.apiKey.trim() : current.apiKey,
+      channel: patch.channel === 'codex' || patch.channel === 'grok' ? patch.channel : current.channel
     }
     await this.update({ coverImage: next })
     return this.getCoverImageConfigSummary()

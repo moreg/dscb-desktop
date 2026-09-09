@@ -152,6 +152,48 @@ describe('交叉一致性体检', () => {
     expect(warn!.hint).toContain('节奏对齐')
   })
 
+  it('空正式文件和隐藏草稿不算已有正文，修复也使用相同判断', async () => {
+    writeRhythm([entry(1, 5, 1, false), entry(2, 5, 1, true), entry(3, 5, 1, true)])
+    mkdirSync(join(tmp, '正文'), { recursive: true })
+    writeFileSync(join(tmp, '正文', '第001章 第1章.md'), '')
+    writeFileSync(join(tmp, '正文', '.draft-001.md'), '未采用的旧草稿')
+    writeFileSync(join(tmp, '正文', '第002章 第2章.md'), '\uFEFF \n\t')
+    writeProse(3)
+    const service = serviceFor(tmp)
+    const report = await service.report('x')
+    expect(report.find((d) => d.message.includes('仍是预测值'))).toBeUndefined()
+    expect(report.find((d) => d.message.includes('actualized=true'))?.message).toContain('2（1 章）')
+    expect((await service.applyFix('x', 'reset-actualized')).changed).toBe(1)
+    expect(readFileSync(join(tmp, '正文', '.draft-001.md'), 'utf-8')).toBe('未采用的旧草稿')
+    expect((await service.report('x')).find((d) => d.message.includes('actualized=true'))).toBeUndefined()
+  })
+
+  it.each([
+    '> 节奏对齐：读取节奏图谱第2章，情绪值 5、爽点类型 1（小打脸）；actualized保持false。',
+    '> 节奏对齐: 爽点类型：1；情绪值：5',
+    '> 全书同步校验：emotion=5，climax=1，actualized=false；与总纲一致。'
+  ])('识别带说明或同步格式的节奏元信息：%s', async (quote) => {
+    writeRhythm([entry(2, 5, 1, false)])
+    writeDetailed(2, 5, 1, false)
+    const file = join(tmp, '细纲', '细纲_第002章_第2章.md')
+    writeFileSync(file, detailed(2, 5, 1, false) + '\n' + quote)
+    const report = await serviceFor(tmp).report('x')
+    expect(report.find((d) => d.file === '细纲/')).toBeUndefined()
+  })
+
+  it('显式节奏优先于旧同步记录，剧情中的情绪数字不能充当元信息', async () => {
+    writeRhythm([entry(1, 5, 1, false), entry(2, 5, 1, false)])
+    writeDetailed(1, 5, 1)
+    writeDetailed(2, 5, 1, false)
+    const first = join(tmp, '细纲', '细纲_第001章_第1章.md')
+    writeFileSync(first, readFileSync(first, 'utf-8') + '\n> 全书同步校验：emotion=9，climax=3')
+    const second = join(tmp, '细纲', '细纲_第002章_第2章.md')
+    writeFileSync(second, readFileSync(second, 'utf-8') + '\n剧情里提到节奏对齐：情绪值 5、爽点类型 1。')
+    const report = await serviceFor(tmp).report('x')
+    expect(report.find((d) => d.message.includes('静默回退'))?.message).toContain('2（1 章）')
+    expect(report.find((d) => d.message.includes('与节奏图谱不一致'))).toBeUndefined()
+  })
+
   it('细纲与节奏图谱数值打架 -> 告警', async () => {
     writeRhythm([entry(1, 8, 3, false)])
     writeDetailed(1, 5, 1)

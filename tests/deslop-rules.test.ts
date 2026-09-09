@@ -23,6 +23,19 @@ describe('DESLOP_RULE_SECTIONS 注册表', () => {
     const gateB = DESLOP_RULE_SECTIONS.find((s) => s.key === 'gateB')!
     expect(gateB.text).toBe(GATE_METHODS.B)
   })
+
+  it('去 AI 默认规则约束事实守恒与有效去水，不示范靠编造细节扩写', () => {
+    const md = serializeDeslopRulesToMd({}, [])
+    expect(md).toContain('不得凭空添加原文没有的具体时间、道具、动机、事件或结论')
+    expect(md).toContain('禁止为了篇幅重复堆砌、机械扩写')
+    expect(md).toContain('不要为了显得自然故意打乱结构、截断因果')
+    expect(md).toContain('不要求每段都推进主线')
+    expect(md).toContain('相邻或相隔段落反复表达同一信息')
+    expect(md).toContain('不把有效呼应误删')
+    expect(GATE_METHODS.B).toContain('楚弈点进去才发现时标没了，退回列表一看，标题也改了。')
+    expect(md).not.toContain('今日下午')
+    expect(md).not.toContain('夏季健康提醒')
+  })
 })
 
 describe('serializeDeslopRulesToMd', () => {

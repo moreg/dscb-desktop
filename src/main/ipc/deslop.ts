@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { DeslopService } from '../data/deslop/deslop-service'
+import { normalizePunctuation } from '../data/deslop/normalize-punctuation'
 import { beginStream, endStream } from '../data/stream-abort-registry'
 import { ProjectService } from '../data/project-service'
 import { StyleProfileService } from '../data/style-profile-service'
@@ -109,6 +110,67 @@ export function registerDeslopIpc(
       }
     }
   )
+
+  /* 结构体检（流式；只出诊断清单，不改正文） */
+  ipcMain.handle(
+    'deslop:judge',
+    async (
+      e,
+      payload: {
+        projectId: string
+        text: string
+        requestId: string
+        outlineSummary?: string
+        chapterGoal?: string
+      }
+    ) => {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      try {
+        const validated = validateInput(
+          z.object({
+            projectId: projectIdSchema,
+            text: deslopTextSchema,
+            requestId: requestIdSchema,
+            outlineSummary: z.string().optional(),
+            chapterGoal: z.string().optional()
+          }),
+          payload
+        )
+        const send = (token: string): void => {
+          safeSend(win, 'deslopJudge:token', { requestId: validated.requestId, token, done: false })
+        }
+        const signal = beginStream(validated.requestId)
+        let result: Awaited<ReturnType<typeof deslopService.judgeStructure>>
+        try {
+          result = await deslopService.judgeStructure(validated.text, {
+            onToken: send,
+            meta: { projectId: validated.projectId },
+            signal,
+            context: {
+              outlineSummary: validated.outlineSummary,
+              chapterGoal: validated.chapterGoal
+            }
+          })
+        } finally {
+          endStream(validated.requestId)
+        }
+        safeSend(win, 'deslopJudge:token', { requestId: validated.requestId, token: '', done: true })
+        return result
+      } catch (err) {
+        const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
+        safeSend(win, 'deslopJudge:token', { requestId, token: '', done: true })
+        throw err
+      }
+    }
+  )
+
+  /* 标点兜底（确定性替换，零 LLM）——写后自检的「一键替换」用它 */
+  safeHandle('deslop:normalizePunctuation', async (_e, payload: { text: string }) => {
+    const validated = validateInput(z.object({ text: deslopTextSchema }), payload)
+    const result = normalizePunctuation(validated.text)
+    const changed = Object.values(result.changes).reduce((n, v) => n + v, 0)
+    return { text: result.text, changed }
+  })
 
   /* 读取项目级白名单 */
   safeHandle('deslop:getWhitelist', async (_e, projectId: string) => {

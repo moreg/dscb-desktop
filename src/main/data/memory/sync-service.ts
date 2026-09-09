@@ -11,6 +11,8 @@ import {
 import { writeTextAtomic } from '../atomic'
 import { listMdFilesDeep, safeFileName } from './entity-helpers'
 import { parseTimelineTable, indexTimelineColumns } from './timeline-repo'
+import { parseForeshadowingMarkdown } from '../skill-format/foreshadowing-md-repo'
+import type { Foreshadowing } from '../../../shared/types'
 
 export interface SyncReport {
   added: number
@@ -27,6 +29,8 @@ interface SyncIndexEntry {
   targetMtime: number
   /** 源文件相对项目根的路径（如 '设定/角色/苏铭.md'），用于检测源是否已被删除。 */
   sourceRel: string
+  /** 伏笔解析规则升级后，即使源 mtime 未变也重建一次旧派生视图。 */
+  foreshadowingParserVersion?: number
 }
 
 interface SyncIndex {
@@ -34,6 +38,11 @@ interface SyncIndex {
 }
 
 const SYNC_META_FILE = '记忆/.sync-index.json'
+const FORESHADOWING_PARSER_VERSION = 2
+const FORESHADOWING_STATUS_TEXT: Record<Foreshadowing['status'], string> = {
+  pending: '未回收', planted: '已埋设', reinforced: '已强化', partial: '部分回收',
+  deferred: '暂缓', collected: '已回收', missed: '已错过'
+}
 
 /**
  * 路径遍历防御：确保目标绝对路径落在 `记忆/` 子树内。
@@ -416,24 +425,9 @@ export class MemorySyncService {
     }
 
     const srcStat = await fs.stat(srcAbs)
-    const { headers, rows } = parseTable(text)
-    if (headers.length < 2) {
-      await this.pruneStale(report, index, tgtDir, '伏笔', seen)
-      return
-    }
-    const idxId = headers.findIndex((h) => h.includes('编号'))
-    const idxContent = headers.findIndex((h) => h.includes('内容'))
-    const idxStatus = headers.findIndex((h) => h.includes('状态'))
-    if (idxId < 0 || idxContent < 0) {
-      await this.pruneStale(report, index, tgtDir, '伏笔', seen)
-      return
-    }
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      const id = row[idxId]?.trim() ?? ''
-      const content = row[idxContent]?.trim() ?? ''
-      const status = idxStatus >= 0 ? row[idxStatus]?.trim() ?? '' : ''
+    const items = parseForeshadowingMarkdown(text)
+    for (const item of items) {
+      const { id, content } = item
       if (!id || !content) continue
       const fileName = `${id}.md`
       const tgtRel = `伏笔/${fileName}`
@@ -442,7 +436,8 @@ export class MemorySyncService {
       const prev = index[key]
 
       seen.add(key)
-      const needWrite = !prev || prev.sourceMtime !== srcStat.mtimeMs || !(await this.exists(tgtAbs))
+      const needWrite = !prev || prev.sourceMtime !== srcStat.mtimeMs ||
+        prev.foreshadowingParserVersion !== FORESHADOWING_PARSER_VERSION || !(await this.exists(tgtAbs))
       if (needWrite) {
         const lines = [
           `# ${id}`,
@@ -453,13 +448,20 @@ export class MemorySyncService {
           '',
           '## 字段',
           '',
-          `- **状态**：${status}`,
+          `- **状态**：${FORESHADOWING_STATUS_TEXT[item.status]}`,
+          ...(item.note ? [`- **类型备注**：${item.note}`] : []),
+          ...(item.plantChapter == null ? [] : [`- **埋设章节**：第 ${item.plantChapter} 章`]),
+          ...(item.expectedCollect == null ? [] : [`- **预计回收章节**：第 ${item.expectedCollect} 章`]),
+          ...(item.actualCollect == null ? [] : [`- **实际回收章节**：第 ${item.actualCollect} 章`]),
+          ...(item.reinforcementChapters?.length ? [`- **强化章节**：${item.reinforcementChapters.map((n) => `第 ${n} 章`).join('、')}`] : []),
+          ...(item.partialCollectChapters?.length ? [`- **部分回收章节**：${item.partialCollectChapters.map((n) => `第 ${n} 章`).join('、')}`] : []),
           '',
-          `<!-- synced from 追踪/伏笔.md row ${i + 1} -->`,
+          `<!-- synced from 追踪/伏笔.md ${id}; parser ${FORESHADOWING_PARSER_VERSION} -->`,
           ''
         ]
         await safeWrite(tgtAbs, lines.join('\n'), this.projectDir)
         this.recordSync(index, key, srcStat, srcRel)
+        index[key].foreshadowingParserVersion = FORESHADOWING_PARSER_VERSION
         if (prev) report.updated++
         else report.added++
       }

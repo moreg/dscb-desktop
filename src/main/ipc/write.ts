@@ -126,7 +126,7 @@ export function registerWriteIpc(service: WriteService): void {
           // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
           let continueMode: 'extend' | 'finish' | undefined
           let wordBudget:
-            | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean }
+            | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
             | undefined
           await service.generateChapterStream(
             validated.projectId,
@@ -142,7 +142,8 @@ export function registerWriteIpc(service: WriteService): void {
                   targetWords: meta.targetWords,
                   chapterTargetWords: meta.chapterTargetWords,
                   writtenWords: meta.writtenWords,
-                  fromOutline: meta.fromOutline
+                  fromOutline: meta.fromOutline,
+                  bound: meta.bound
                 }
               },
               onToken: (token) =>
@@ -534,6 +535,11 @@ export function registerWriteIpc(service: WriteService): void {
       )
     }
   )
+
+  safeHandle('write:invalidateChapterMemorySync', async (_e, payload: { projectId: string; chapterNumber: number }) => {
+    const validated = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema }), payload)
+    service.invalidateChapterMemorySync(validated.projectId, validated.chapterNumber)
+  })
 
   /** 写后自检清单对照（纯算法，不写记忆） */
   safeHandle(

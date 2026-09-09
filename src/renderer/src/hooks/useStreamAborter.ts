@@ -12,11 +12,15 @@ import type { StreamHandleOf } from '../../../shared/types'
  *       const result = await track(window.api.xxxStream(...))
  */
 export function useStreamAborter(): <T>(handle: StreamHandleOf<T>) => Promise<T> {
-  const active = useRef<Set<{ abort: () => Promise<unknown> }>>(new Set())
+  const active = useRef<Set<{ abort?: () => Promise<unknown> }>>(new Set())
 
   useEffect(
     () => () => {
-      for (const h of active.current) void h.abort().catch(() => undefined)
+      for (const h of active.current) {
+        if (typeof h?.abort === 'function') {
+          void h.abort().catch(() => undefined)
+        }
+      }
       active.current.clear()
     },
     []

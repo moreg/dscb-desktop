@@ -208,7 +208,7 @@ export function parseChapterNumber(text: string): number | null {
  * 这种标题会被误当成第 121 章的章节块，凭空多出一个没有任何字段的幽灵章。
  */
 export function parseChapterHeadingNumber(title: string): number | null {
-  const m = title.match(/^\s*[#【\[]*\s*第\s*(\d+)\s*章/)
+  const m = title.match(/^\s*[#【[]*\s*第\s*(\d+)\s*章/)
   return m ? parseInt(m[1], 10) : null
 }
 
