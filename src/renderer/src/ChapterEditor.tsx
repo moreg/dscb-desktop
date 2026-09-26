@@ -39,6 +39,7 @@ import {
   FORMAT_PROSE_KEY,
   DESLOP_APPLY_KEY,
   PUNCT_FIX_KEY,
+  CHAR_POSITION_FIX_KEY,
   isWholeDocRewriteKey,
   type RewriteEntry
 } from '../../main/data/rewrite-history'
@@ -74,11 +75,7 @@ import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { FullOutlineDialog } from './FullOutlineDialog'
 import { parseForeshadowReceipt } from '../../shared/parsers'
-import {
-  describeDeslopShortfall,
-  describeWordShortfall,
-  resolveChapterTargetWords
-} from '../../shared/word-target'
+import { resolveChapterTargetWords } from '../../shared/word-target'
 import {
   parseAdjustPlanItems,
   buildConfirmedPlanFromSelection,
@@ -347,6 +344,7 @@ export default function ChapterEditor({
     // Capture the chapter being left; the render-time ref may already point at the next chapter.
     selfCheckTrackerRef.current.invalidate()
     ++fixPunctuationRef.current
+    ++fixCharPositionRef.current
     void window.api.invalidateChapterMemorySync(projectId, chapterNumber).catch(console.error)
   }, [projectId, chapterNumber])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1246,6 +1244,8 @@ export default function ChapterEditor({
     setSelfCheckLoading(false)
     ++fixPunctuationRef.current
     setFixPunctuationLoading(false)
+    ++fixCharPositionRef.current
+    setFixCharPositionLoading(false)
     setLastContinueMode(null)
     setSkipMemoryOnAutoSyncAll(false)
     setFlowSyncTrigger(0)
@@ -2035,9 +2035,6 @@ export default function ChapterEditor({
           recordHistory: true
         })
         setDirty(true)
-        // 字数达标提示：模型算不准中文字数，写不够是常态；不当场报出来就没人发现
-        const shortfall = describeWordShortfall(result.wordBudget, formatted)
-        if (shortfall) setUndoToast({ message: shortfall, type: 'warning' })
         // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
         // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
         setFlowPanelOpen(true)
@@ -2581,7 +2578,7 @@ export default function ChapterEditor({
       })
       savePendingSyncQueue(storage, next)
       // 异步补全书名，设置页列表更易读
-      void window.api.listProjects().then((list) => {
+      void window.api.listProjects({ includeArchived: true }).then((list) => {
         const name = list?.find((p) => p.id === projectId)?.name
         if (!name) return
         try {
@@ -3313,6 +3310,8 @@ export default function ChapterEditor({
    */
   const [fixPunctuationLoading, setFixPunctuationLoading] = useState(false)
   const fixPunctuationRef = useRef(0)
+  const [fixCharPositionLoading, setFixCharPositionLoading] = useState(false)
+  const fixCharPositionRef = useRef(0)
   const fixPunctuation = async (): Promise<void> => {
     const previousSelfCheck = getSelfCheckForAction()
     if (!previousSelfCheck || fixPunctuationLoading) return
@@ -3344,6 +3343,44 @@ export default function ChapterEditor({
     }
   }
 
+  /**
+   * 写后自检「人物位置对应线索」的一键修补：主进程只让模型改人物首次出场的段落，
+   * 回来的是整章正文（未改段落原样），同样走 pushRewrite，Ctrl+Z 整章还原。
+   */
+  const fixCharPosition = async (): Promise<void> => {
+    const previousSelfCheck = getSelfCheckForAction()
+    if (!previousSelfCheck || fixCharPositionLoading) return
+    const source = selfCheckTrackerRef.current.capture()
+    const before = source.content
+    if (!before.trim()) return
+    const requestId = ++fixCharPositionRef.current
+    const myGen = genRef.current
+    const stale = (): boolean => requestId !== fixCharPositionRef.current ||
+      genRef.current !== myGen || !selfCheckTrackerRef.current.matches(source)
+    setFixCharPositionLoading(true)
+    try {
+      const r = await window.api.fixCharacterPositions(projectId, chapterNumber, before)
+      if (stale()) return
+      if (r.changed === 0 || r.content === before) {
+        setUndoToast({ message: r.message, type: 'warning' })
+        return
+      }
+      setDraft(r.content, { preserveCaret: false })
+      setDirty(true)
+      pushRewrite(before, r.content, CHAR_POSITION_FIX_KEY)
+      setUndoToast({
+        message: `${r.message}（Ctrl+Z 可撤销）`,
+        type: r.remaining.length ? 'warning' : 'success'
+      })
+      await rerunSelfCheck(r.content, previousSelfCheck)
+    } catch (err) {
+      if (stale()) return
+      setAlertInfo({ message: `补位置衔接失败：${friendlyLlmError((err as Error).message)}` })
+    } finally {
+      if (requestId === fixCharPositionRef.current) setFixCharPositionLoading(false)
+    }
+  }
+
   /** 应用去 AI 味结果到正文 */
   const applyDeslopResult = (): void => {
     if (!deslopResult) return
@@ -3352,8 +3389,6 @@ export default function ChapterEditor({
     // 必须置 dirty 并压改写栈：否则保存按钮仍显示「已存」无法保存，Ctrl+Z 也撤不掉
     setDirty(true)
     pushRewrite(before, deslopResult.rewritten, DESLOP_APPLY_KEY)
-    // 改写把正文删短到细纲目标以下时留一条提示：面板马上要关掉，不说就没人知道
-    if (deslopShortfall) setUndoToast({ message: deslopShortfall, type: 'warning' })
     setDeslopResult(null)
     setDeslopScanReport(null)
     setDeslopLog('')
@@ -3612,23 +3647,6 @@ export default function ChapterEditor({
     [chapterOutline?.wordEstimate]
   )
   const chapterGoal = chapterGoalOverride ?? outlineWordTarget.targetWords
-
-  /**
-   * 去 AI 味结果是否把正文改到了细纲目标以下。
-   * 删除比例上限 35% 是相对原文算的，跟细纲目标无关——3000 字改完剩 2000 字会照常通过，
-   * 应用前不提示就没人发现成品短了。
-   */
-  const deslopShortfall = useMemo(
-    () =>
-      deslopResult
-        ? describeDeslopShortfall(
-            deslopResult.afterWords,
-            outlineWordTarget,
-            deslopResult.beforeWords
-          )
-        : null,
-    [deslopResult, outlineWordTarget]
-  )
 
   // 会话字数：当前字数 - 进入时字数
   const sessionWords = useMemo(
@@ -4970,6 +4988,8 @@ export default function ChapterEditor({
           onApplySelfCheckToRewrite={applySelfCheckToRewrite}
           onFixPunctuation={fixPunctuation}
           fixPunctuationLoading={fixPunctuationLoading}
+          onFixCharPosition={fixCharPosition}
+          fixCharPositionLoading={fixCharPositionLoading}
           onApplySelfCheckToContinue={applySelfCheckToContinue}
           onRetryAutoSync={retryPostWriteSync}
           onUndoAutoSync={
@@ -5942,12 +5962,6 @@ export default function ChapterEditor({
                     {deslopDiffFull ? '只看差异' : '看全文'}
                   </button>
                 </div>
-
-                {deslopShortfall ? (
-                  <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--warning)' }}>
-                    ⚠ {deslopShortfall}
-                  </p>
-                ) : null}
 
                 {deslopDiffView?.identical ? (
                   <p className="diag-msg" style={{ marginBottom: 8, color: 'var(--ink-2)' }}>

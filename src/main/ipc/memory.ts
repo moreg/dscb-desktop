@@ -4,6 +4,7 @@ import { shell } from 'electron'
 import { MemoryService } from '../data/memory-service'
 import { MemoryEntityService } from '../data/memory-entity-service'
 import { MemorySyncService } from '../data/memory/sync-service'
+import { listMemoryCandidates } from '../data/memory/candidate-repository'
 import { migrateProjectV3ToV4 } from '../data/memory/migration-v3-to-v4'
 import { safeHandle } from './safe-handle'
 import { registerCollectionIpc } from './register-collection'
@@ -31,6 +32,12 @@ export function registerMemoryIpc(
     create: (pid, input) => service.createCharacter(pid, input),
     update: (pid, id, patch) => service.updateCharacter(pid, id, patch),
     delete: (pid, id) => service.deleteCharacter(pid, id)
+  })
+
+  /** 写后同步留下的记忆候选：哪些章有条目没入库 */
+  safeHandle('memory:listCandidates', async (_e, payload: { projectId: string }) => {
+    const dir = await projectService.resolveDir(payload.projectId)
+    return listMemoryCandidates(dir)
   })
 
   registerCollectionIpc<CreateRelationshipInput, UpdateRelationshipInput>('memory:relationship', {

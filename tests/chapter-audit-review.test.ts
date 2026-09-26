@@ -71,6 +71,43 @@ describe('chapter-audit (meta_break 打破第四面墙)', () => {
     ).toBeUndefined()
   })
 
+  /**
+   * 元叙事词表是全局的，可「作者」「主角」「反派」在不少书里就是页内身份。
+   * 回归：一本以「作者魂印／作者格」为金手指的书，10 章里 19 条 error 全是这一个词。
+   */
+  describe('项目设定里立过的词按世界观术语处理', () => {
+    const content = () => makeValidContent() + '\n\n他的作者格空着，作者魂印仍亮。\n\n弹幕飘过一片叫好声。'
+
+    it('设定文件名含该词时降为 info，并说明出处', () => {
+      const report = auditChapter(content(), {
+        reviewRules: reviewRulesOn(),
+        worldTerms: ['作者魂印', '原作者阵营', '金手指']
+      })
+      const hits = report.violations.filter((v) => v.ruleId === 'meta_break' && v.word === '作者')
+      expect(hits.length).toBeGreaterThan(0)
+      expect(hits.every((v) => v.severity === 'info')).toBe(true)
+      expect(hits[0].message).toContain('作者魂印')
+      expect(report.counts.error).toBe(
+        report.violations.filter((v) => v.severity === 'error').length
+      )
+    })
+
+    it('设定里没有的元叙事词照旧 error', () => {
+      const report = auditChapter(content(), {
+        reviewRules: reviewRulesOn(),
+        worldTerms: ['作者魂印']
+      })
+      const danmu = report.violations.find((v) => v.ruleId === 'meta_break' && v.word === '弹幕')
+      expect(danmu?.severity).toBe('error')
+    })
+
+    it('不传 worldTerms 时行为不变', () => {
+      const report = auditChapter(content(), { reviewRules: reviewRulesOn() })
+      const hit = report.violations.find((v) => v.ruleId === 'meta_break' && v.word === '作者')
+      expect(hit?.severity).toBe('error')
+    })
+  })
+
   it('非穿书/系统题材保持 error（当前 genre 表无穿书 key，全题材默认 error）', () => {
     const content = makeValidContent() + '\n\n弹幕飘过一片叫好声。'
     const report = auditChapter(content, {
@@ -107,6 +144,69 @@ describe('chapter-audit (quote_count 引文字数一致性)', () => {
     const rules = reviewRulesOn({ checks: { quote_count: false } })
     const report = auditChapter(content, { reviewRules: rules })
     expect(report.violations.find((v) => v.ruleId === 'quote_count')).toBeUndefined()
+  })
+
+  /**
+   * 「这X个字」多半指引文里的一个词，而不是整句。
+   * 旧实现只拿最近一条整句引文比对：「白裙，未开。」被说成「那两个字」就报 error，
+   * 实测这是 quote_count 误报的全部来源。
+   */
+  it('标点切出的片段字数对得上时不报', () => {
+    // 引文「白裙，未开。」两段各 2 字，说「那两个字」指的是其中一段
+    const content = makeValidContent('"白裙，未开。"潘可确认那两个字没有改动。')
+    const report = auditChapter(content, { reviewRules: reviewRulesOn() })
+    expect(report.violations.find((v) => v.ruleId === 'quote_count')).toBeUndefined()
+  })
+
+  it('引文里反复出现的固定说法对得上时不报', () => {
+    // 「主稿」是本章反复出现的术语，"这两个字"说的是它，而不是整句 5 字
+    const content =
+      makeValidContent('"主稿仍在列。"文真盯着这两个字。').replace(
+        '他盯着门外，脚步声渐近。',
+        '入库表上的主稿一栏空着，主稿的编号还没落下。'
+      )
+    const report = auditChapter(content, { reviewRules: reviewRulesOn() })
+    expect(report.violations.find((v) => v.ruleId === 'quote_count')).toBeUndefined()
+  })
+
+  it('等长片段只在这一句里出现过，不算对得上', () => {
+    // 「主稿」全章只出现在引文里，说不通就该报
+    const content = makeValidContent('"主稿仍在列。"文真盯着这两个字。')
+    const hit = auditChapter(content, { reviewRules: reviewRulesOn() }).violations.find(
+      (v) => v.ruleId === 'quote_count'
+    )
+    expect(hit?.severity).toBe('error')
+  })
+
+  it('整句和片段都对不上才报', () => {
+    // 引文片段为 2 字和 2 字，整句 4 字，说成"三个字"对不上任何一段
+    const content = makeValidContent('"白裙，未开。"潘可确认这三个字没有改动。')
+    const hit = auditChapter(content, { reviewRules: reviewRulesOn() }).violations.find(
+      (v) => v.ruleId === 'quote_count'
+    )
+    expect(hit?.severity).toBe('error')
+  })
+
+  it('被数的字就写在同一句里（没加引号）时不报', () => {
+    // 「共同避险，只到这四个字。」——"共同避险"正是 4 字
+    const content = makeValidContent('"没答应。"\n\n"共同避险，只到这四个字。"')
+    expect(
+      auditChapter(content, { reviewRules: reviewRulesOn() }).violations.find(
+        (v) => v.ruleId === 'quote_count'
+      )
+    ).toBeUndefined()
+  })
+
+  it('描述的是前几句里的引文时也算对得上', () => {
+    // 「这两个字」说的是更早那句「作者？」，不是紧邻的那条引文
+    const content = makeValidContent(
+      '"作者？"他问。\n\n严阙没答话，只把笔按在纸面上，一直按到墨透。\n\n这两个字落进页口。'
+    )
+    expect(
+      auditChapter(content, { reviewRules: reviewRulesOn() }).violations.find(
+        (v) => v.ruleId === 'quote_count'
+      )
+    ).toBeUndefined()
   })
 })
 

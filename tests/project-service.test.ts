@@ -145,6 +145,21 @@ describe('ProjectService', () => {
     })
   })
 
+  it('keeps title candidates without changing the current name, deduped and removable', async () => {
+    const meta = await service.create({ name: '原书名', description: '原简介' })
+    await service.addTitleCandidate(meta.id, { name: '候选一', description: '简介一', seed: '强悬念' })
+    await service.addTitleCandidate(meta.id, { name: '候选二', description: '简介二' })
+    const list = await service.addTitleCandidate(meta.id, { name: '候选一', description: '简介一' })
+    expect(list.map((item) => item.name)).toEqual(['候选二', '候选一'])
+
+    const data = await service.getProjectData(meta.id)
+    expect(data).toMatchObject({ name: '原书名', description: '原简介' })
+    expect(data.titleCandidates).toHaveLength(2)
+
+    const remaining = await service.removeTitleCandidate(meta.id, list[0].id)
+    expect(remaining.map((item) => item.name)).toEqual(['候选一'])
+  })
+
   it('resolveDir caches directory across calls', async () => {
     const meta = await service.create({ name: 'X' })
     ;(service as unknown as { dirCache: Map<string, string> }).dirCache.delete(meta.id)
@@ -152,5 +167,36 @@ describe('ProjectService', () => {
     await service.resolveDir(meta.id)
     await service.resolveDir(meta.id)
     expect(listSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides archived projects from the default list and still resolves them', async () => {
+    const kept = await service.create({ name: '在写' })
+    const archived = await service.create({ name: '归档书' })
+    await service.setArchived(archived.id, true)
+    const listed = await service.listProjects()
+    expect(listed.map((p) => p.id)).toEqual([kept.id])
+    const all = await service.listProjects({ includeArchived: true })
+    expect(all.map((p) => p.id).sort()).toEqual([kept.id, archived.id].sort())
+    expect(all.find((p) => p.id === archived.id)?.archivedAt).toBeTruthy()
+    expect(await service.resolveDir(archived.id)).toBe(archived.path)
+  })
+
+  it('scan does not resurrect an archived project as a new shelf entry', async () => {
+    const archived = await service.create({ name: '归档后扫描' })
+    await service.setArchived(archived.id, true)
+    await service.scanProjects()
+    expect(await service.listProjects()).toEqual([])
+    const all = await service.listProjects({ includeArchived: true })
+    expect(all).toHaveLength(1)
+    expect(all[0].id).toBe(archived.id)
+    expect(all[0].archivedAt).toBeTruthy()
+  })
+
+  it('unarchive puts the project back on the default list', async () => {
+    const meta = await service.create({ name: '移回' })
+    await service.setArchived(meta.id, true)
+    await service.setArchived(meta.id, false)
+    expect((await service.listProjects()).map((p) => p.id)).toEqual([meta.id])
+    expect((await service.listProjects())[0].archivedAt).toBeUndefined()
   })
 })

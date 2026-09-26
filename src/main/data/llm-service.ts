@@ -1,5 +1,5 @@
 import type { SecretStore } from './secret-store'
-import type { ProviderConfig, FeatureCategory, PingResult } from '../../shared/types'
+import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
 import { runCodex, probeCodex } from './codex-runner'
@@ -44,6 +44,22 @@ export interface GenerateOptions {
    * 因此**调用方的提示词必须始终自带 JSON 格式要求**，schema 只是叠加的保险。
    */
   jsonSchema?: object
+
+  /**
+   * 单次调用的强度覆盖（温度/思考强度），只影响这一次请求，不写回 provider 配置。
+   *
+   * 编辑器里「采用建议」按钮走的是另一条路——直接 upsertProvider 改写保存的默认值，
+   * 图的是「以后写这类章节都按这个来」。批量续写按章切换强度不能用那条路：
+   * 跑完 10 章后 provider 会永久停在最后一章的建议值上，下次手动续写、或另一个
+   * 窗口同时在编辑别的章节，用的都是被批量流程顺手改掉的值。这个字段只在
+   * resolveProvider() 返回后临时合并进当次请求，用完即弃。
+   *
+   * 只对 openai/anthropic（温度）与 openai-responses/claude（思考强度）协议生效。
+   * codex 的思考强度是 CLI 全局配置，没有单次调用覆盖的接口；antigravity 的档位
+   * 对应的是切换到另一个具体模型名，贸然按档位猜测容易打到账号里没有的型号，
+   * 这两个协议下 strengthOverride 会被忽略，仍按 provider 当前配置生成。
+   */
+  strengthOverride?: { temperature?: number; reasoningEffort?: ReasoningEffort }
 }
 
 export interface UsageInfo {
@@ -441,8 +457,25 @@ export class LlmService {
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
     // 调用前已取消：立刻退出，避免再开一轮 CLI/HTTP
     if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
-    const p = await this.resolveProvider(opts.meta?.feature)
-    if (!p) throw new Error('LLM_NOT_CONFIGURED')
+    const resolved = await this.resolveProvider(opts.meta?.feature)
+    if (!resolved) throw new Error('LLM_NOT_CONFIGURED')
+    /**
+     * strengthOverride 只在这次调用里生效，合并出一份临时对象，不写回 resolveProvider
+     * 读到的配置、也不持久化。codex/antigravity/grok 的生成函数根本不读 p.temperature/
+     * p.reasoningEffort（只用 p.model），所以这里不需要按协议分支，覆盖字段对它们
+     * 天然是死数据，只有 openai/anthropic/openai-responses/claude 分支会真的用到。
+     */
+    const p: ProviderConfig = opts.strengthOverride
+      ? {
+          ...resolved,
+          ...(opts.strengthOverride.temperature !== undefined
+            ? { temperature: opts.strengthOverride.temperature }
+            : {}),
+          ...(opts.strengthOverride.reasoningEffort !== undefined
+            ? { reasoningEffort: opts.strengthOverride.reasoningEffort }
+            : {})
+        }
+      : resolved
     const proto = protocolOf(p)
     // antigravity 协议：走本机 agy CLI 子进程，不需 apiKey（靠本机 OAuth 登录）
     if (proto === 'antigravity') {

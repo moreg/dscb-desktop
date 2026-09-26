@@ -56,6 +56,53 @@ describe('记忆候选提交与过期任务', () => {
     expect(saved.status).not.toBe('pending')
   })
 
+  it('自动补找缺失引文后重新校验，并保存修复证据', async () => {
+    const prose = '林远推开木门走进院子，放下行囊。'
+    const extraction = memory('林远走进院子')
+    extraction.newPlotPoints[0].evidence = '林远进入了院子'
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+    const repaired = memory('林远走进院子')
+    repaired.newPlotPoints[0].evidence = '林远推开木门走进院子'
+    const repair = vi.spyOn(flow, 'repairMemoryEvidence').mockResolvedValue(repaired)
+    const result = await service.syncChapterAfterWrite(id, 1, prose)
+    expect(repair).toHaveBeenCalledTimes(1)
+    expect(result?.memory.applied.plotPoints).toBe(1)
+    expect(result?.memory.heldBack).toBeUndefined()
+    const saved = JSON.parse(await readFile(join(dir, '.cache', 'memory-candidates', 'chapter-1.json'), 'utf8'))
+    expect(saved.extraction.newPlotPoints[0].evidence).toBe('林远推开木门走进院子')
+  })
+
+  it('正文自检失败时不花费调用补证', async () => {
+    const extraction = memory('不存在的院门动作')
+    const repair = vi.spyOn(flow, 'repairMemoryEvidence')
+    const result = await service.syncChapterAfterWrite(id, 1, '林远坐在窗边。', { extraction, selfCheck: null })
+    expect(repair).not.toHaveBeenCalled()
+    expect(result?.memory.reviewRequired).toBeDefined()
+  })
+
+  it('一条证据不过关时其余记忆照常入库，候选文件标 partial', async () => {
+    // 回归：旧实现一条不过就整章连坐。实测连写 10 章，每章十几条证据里总有失手的，
+    // 结果 10 章的记忆一条也没进库，其中大半是压根不要求证据的新角色/新地点。
+    const prose = '林远推开木门走进院子，放下行囊。'
+    const extraction = memory('林远推开木门走进院子')
+    extraction.newCharacters = [{ name: '林远', role: '主角', identity: '游侠', personality: '寡言' }]
+    extraction.newPlotPoints.push({ title: '虚构', event: '林远拔刀', evidence: '林远拔刀砍翻了三个人' })
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+
+    const result = await service.syncChapterAfterWrite(id, 1, prose)
+
+    expect(result?.memory.reviewRequired).toBeUndefined()
+    expect(result?.memory.heldBack).toHaveLength(1)
+    expect(result?.memory.heldBack?.[0]).toContain('虚构')
+    expect(result?.memory.applied.plotPoints).toBe(1)
+    const saved = JSON.parse(await readFile(join(dir, '.cache', 'memory-candidates', 'chapter-1.json'), 'utf8'))
+    expect(saved.status).toBe('partial')
+    expect(saved.itemIssues).toHaveLength(1)
+    expect(saved.chapterIssues).toEqual([])
+    // 被挡下的条目原样留在候选文件里，供后续复核
+    expect(saved.extraction.newPlotPoints).toHaveLength(2)
+  })
+
   it('单独应用记忆也要核对已保存正文，细纲式回收不能绕过候选核验', async () => {
     const prose = '林远收起古铜钥匙，推开门走出院子。'
     await new ProseRepo(dir).write(1, prose)
@@ -66,7 +113,8 @@ describe('记忆候选提交与过期任务', () => {
     candidate.collectedForeshadowings = [{ foreshadowingId: item.id, content: item.content, chapter: 1,
       evidence: '第20章计划揭晓钥匙主人是掌柜。' }]
     const result = await service.applyMemory(id, candidate)
-    expect(result.reviewRequired?.join('')).toContain('正文原文依据')
+    // 分级后这条属于条目级：只挡它自己，不再连坐整章其余记忆
+    expect(result.heldBack?.join('')).toContain('正文原文依据')
     expect(result.applied.collected).toBe(0)
     const actual = (await repo.list()).find((f) => f.id === item.id)
     expect(actual?.status).toBe('planted')
@@ -77,7 +125,7 @@ describe('记忆候选提交与过期任务', () => {
     const candidate = memory('林远推开木门走进院子。')
     await new ProseRepo(dir).write(1, '林远锁上木门离开院子。')
     const result = await service.applyMemory(id, candidate)
-    expect(result.reviewRequired?.length).toBeGreaterThan(0)
+    expect(result.heldBack?.length).toBeGreaterThan(0)
     expect(result.applied.plotPoints).toBe(0)
   })
 
@@ -92,9 +140,110 @@ describe('记忆候选提交与过期任务', () => {
     const candidate = memory(prose)
     candidate.collectedForeshadowings = [{ foreshadowingId: mirror.id, content: master.content, chapter: 1, evidence: prose }]
     const result = await service.applyMemory(id, candidate)
-    expect(result.reviewRequired?.join('')).toContain('编号与原问题不一致')
+    expect(result.heldBack?.join('')).toContain('编号与原问题不一致')
     expect(result.applied.collected).toBe(0)
     expect((await repo.list()).every((f) => f.status === 'planted')).toBe(true)
+  })
+
+  it('逐条复核：强制写入只落选中的条目，并记进 forced 不再重复报', async () => {
+    const prose = '林远推开木门走进院子，放下行囊。'
+    const extraction = memory('林远推开木门走进院子')
+    // 两条都定位不到：一条作者确认属实强制写入，另一条留着
+    extraction.newPlotPoints = [
+      { title: '甲', event: '林远拔刀', evidence: '林远拔刀砍翻了三个人' },
+      { title: '乙', event: '林远上马', evidence: '林远翻身上马疾驰而去' }
+    ]
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+    await service.syncChapterAfterWrite(id, 1, prose)
+    await new ProseRepo(dir).write(1, prose)
+
+    const before = await service.inspectMemoryCandidate(id, 1)
+    expect(before?.items.filter((i) => i.issues.length)).toHaveLength(2)
+    expect(before?.items.every((i) => !i.forced)).toBe(true)
+
+    const res = await service.forceApplyMemoryCandidateItems(id, 1, [
+      { kind: 'plotPoint', index: 0 }
+    ])
+    expect(res.forcedCount).toBe(1)
+    expect(res.applied.applied.plotPoints).toBe(1)
+
+    const after = await service.inspectMemoryCandidate(id, 1)
+    // 强制写入的那条标成 forced，不再算待核对；没选的那条原样留着
+    expect(after?.items.find((i) => i.index === 0)?.forced).toBe(true)
+    expect(after?.items.filter((i) => i.issues.length && !i.forced)).toHaveLength(1)
+    const saved = JSON.parse(await readFile(join(dir, '.cache', 'memory-candidates', 'chapter-1.json'), 'utf8'))
+    expect(saved.forced).toEqual([{ kind: 'plotPoint', key: 'plot:甲' }])
+    expect(saved.itemIssues).toHaveLength(1)
+    expect(saved.status).toBe('partial')
+  })
+
+  it('正文在候选之后改过时拒绝强制写入', async () => {
+    // 回归：强制写入一度完全不看 sourceHash，旧稿提取的结论会被写进改过的新稿记忆
+    const prose = '林远推开木门走进院子，放下行囊。'
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(
+      JSON.stringify(memory('凭空捏造的一句话在这里'))
+    )
+    await service.syncChapterAfterWrite(id, 1, prose)
+    await new ProseRepo(dir).write(1, '林远锁上木门离开了院子，什么也没带。')
+
+    const detail = await service.inspectMemoryCandidate(id, 1)
+    expect(detail?.stale).toBe(true)
+    await expect(
+      service.forceApplyMemoryCandidateItems(id, 1, [{ kind: 'plotPoint', index: 0 }])
+    ).rejects.toThrow('先「重跑本章记忆同步」')
+  })
+
+  it('同一份正文重跑保留已确认条目，且换了提取顺序也能按 key 认出来', async () => {
+    const prose = '林远推开木门走进院子，放下行囊。'
+    await new ProseRepo(dir).write(1, prose)
+    const first = memory('林远推开木门走进院子')
+    first.newPlotPoints = [
+      { title: '甲', event: '林远拔刀', evidence: '林远拔刀砍翻了三个人' },
+      { title: '乙', event: '林远上马', evidence: '林远翻身上马疾驰而去' }
+    ]
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(first))
+    await service.syncChapterAfterWrite(id, 1, prose)
+    await service.forceApplyMemoryCandidateItems(id, 1, [{ kind: 'plotPoint', index: 0 }])
+
+    // 重跑：同一份正文，但模型这次把两条的顺序调了个个儿
+    const second = memory('林远推开木门走进院子')
+    second.newPlotPoints = [
+      { title: '乙', event: '林远上马', evidence: '林远翻身上马疾驰而去' },
+      { title: '甲', event: '林远拔刀', evidence: '林远拔刀砍翻了三个人' }
+    ]
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(second))
+    await service.syncChapterAfterWrite(id, 1, prose)
+
+    const after = await service.inspectMemoryCandidate(id, 1)
+    // 「甲」这次排在下标 1，靠 key 仍认得出是已确认过的那条
+    expect(after?.items.find((i) => i.label.includes('甲'))?.forced).toBe(true)
+    expect(after?.items.find((i) => i.label.includes('乙'))?.forced).toBe(false)
+    expect(after?.items.filter((i) => i.issues.length && !i.forced)).toHaveLength(1)
+  })
+
+  it('正文改过后重跑会丢弃旧的确认记录', async () => {
+    const prose = '林远推开木门走进院子，放下行囊。'
+    await new ProseRepo(dir).write(1, prose)
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(
+      JSON.stringify(memory('凭空捏造的一句话在这里'))
+    )
+    await service.syncChapterAfterWrite(id, 1, prose)
+    await service.forceApplyMemoryCandidateItems(id, 1, [{ kind: 'plotPoint', index: 0 }])
+    expect((await service.inspectMemoryCandidate(id, 1))?.items[0].forced).toBe(true)
+
+    // 改写正文后重跑：那些确认是针对旧稿做的，必须重新判断
+    const rewritten = '林远锁上木门离开了院子，什么也没带。'
+    await new ProseRepo(dir).write(1, rewritten)
+    await service.syncChapterAfterWrite(id, 1, rewritten)
+
+    expect((await service.inspectMemoryCandidate(id, 1))?.items[0].forced).toBe(false)
+  })
+
+  it('一条都不选时拒绝强制写入', async () => {
+    const prose = '林远推开木门走进院子，放下行囊。'
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(memory('凭空捏造的一句话在这里')))
+    await service.syncChapterAfterWrite(id, 1, prose)
+    await expect(service.forceApplyMemoryCandidateItems(id, 1, [])).rejects.toThrow('没有选中任何条目')
   })
 
   it('较慢的旧提取晚返回时不能覆盖已经提交的新记忆', async () => {

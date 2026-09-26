@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   buildTempRequirementsFromSelfCheck,
   formatSelfCheckDelta,
-  isDeferredSelfCheckItem,
   selfCheckHasActionableIssues
 } from '../src/shared/self-check-to-requirements'
 import { evaluateChapterSelfCheck } from '../src/main/data/chapter-self-check'
@@ -242,30 +241,6 @@ describe('buildTempRequirementsFromSelfCheck', () => {
 })
 
 describe('自检到修订要求的方向一致性', () => {
-  it.each(['rewrite', 'continue'] as const)('超过上限时 %s 要求压缩且未完章也不降为后续补写', (mode) => {
-    const r = evaluateChapterSelfCheck({
-      chapterNumber: 1, content: '甲'.repeat(3600), targetWords: 3000, targetBound: 'about'
-    })
-    const word = r.items.find((item) => item.id === 'word_count')!
-    expect(word.verdict).toBe('warn')
-    expect(word.detail).toContain('超出')
-    expect(isDeferredSelfCheckItem(word)).toBe(false)
-    const text = buildTempRequirementsFromSelfCheck(r, { mode, partialChapter: true })
-    expect(text).toContain('压缩重复叙述')
-    expect(text).toContain('建议·结构')
-    expect(text).not.toContain('把细纲里尚未充分展开的剧情点写满')
-  })
-
-  it('篇幅不足先核对情节，剧情完整时保留原有长度', () => {
-    const r = evaluateChapterSelfCheck({
-      chapterNumber: 1, content: '甲'.repeat(1800), targetWords: 3000, targetBound: 'min'
-    })
-    const text = buildTempRequirementsFromSelfCheck(r)
-    expect(text).toContain('完整则保留现有长度')
-    expect(text).toContain('不为凑字扩写')
-    expect(text).not.toContain('剧情点写满')
-  })
-
   it.each(['rewrite', 'continue'] as const)('到期伏笔可延期，%s 不把提及等同完整回收', (mode) => {
     const r = evaluateChapterSelfCheck({
       chapterNumber: 5, content: '林舟关上房门，吹灭了灯。',

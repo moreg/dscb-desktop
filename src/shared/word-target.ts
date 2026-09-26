@@ -127,76 +127,9 @@ export function countProseWords(text: string): number {
   return text.replace(/\s/g, '').length
 }
 
-/** 一次正文生成实际使用的字数口径（主进程按细纲算出） */
-export interface ChapterWordBudgetLike {
-  targetWords: number
-  chapterTargetWords: number
-  writtenWords: number
-  fromOutline: boolean
-  bound?: 'min' | 'about'
-}
-
-/** 低于目标这个比例才提示，避免差几十字也弹 */
-const SHORTFALL_RATIO = 0.95
-
-/**
- * 生成「写够没有」的提示文案；达标返回 null。
- *
- * 模型算不准中文字数，写不够是常态。此前全链路没有任何地方核对实际字数，
- * 写少了既没提示也没人补，用户只能自己盯着进度条猜。
- */
-export function describeWordShortfall(
-  budget: ChapterWordBudgetLike | undefined,
-  finalContent: string
-): string | null {
-  if (!budget || budget.chapterTargetWords <= 0 || budget.bound === 'about') return null
-  const total = countProseWords(finalContent)
-  const chapterGap = budget.chapterTargetWords - total
-  const chapterShort = total < budget.chapterTargetWords * SHORTFALL_RATIO
-  const suffix = budget.fromOutline ? '' : '（细纲未填字数预估，用的是默认目标）'
-
-  // 续写：本次增量和整章进度分别报
-  if (budget.writtenWords > 0) {
-    const added = Math.max(0, total - budget.writtenWords)
-    const roundShort = added < budget.targetWords * SHORTFALL_RATIO
-    if (!roundShort && !chapterShort) return null
-    const chapterPart = chapterShort
-      ? `全章 ${total}/${budget.chapterTargetWords} 字，比参考目标少 ${chapterGap} 字；请检查剩余剧情，已完整则无需补写`
-      : `全章 ${total}/${budget.chapterTargetWords} 字，已达标`
-    return roundShort
-      ? `本次新增 ${added} 字（参考 ${budget.targetWords} 字）；${chapterPart}${suffix}`
-      : `${chapterPart}${suffix}`
-  }
-
-  if (!chapterShort) return null
-  return `本章 ${total} 字，比参考目标 ${budget.chapterTargetWords} 字少 ${chapterGap} 字；只在剧情尚未完成时续写，不必凑字数${suffix}`
-}
-
-/**
- * 去 AI 味之后的篇幅提示；仍达标返回 null。
- *
- * 改写允许合法删掉最多 35%（deslop 的 deleteLimitPct），3000 字改完剩 2000 字属于"通过"，
- * 但成品就此低于细纲目标，而改写链路上没有任何地方拿细纲字数对过账。
- * 这里只做提示——删多少由 deslop 的护栏决定，补不补由作者决定。
- */
-export function describeDeslopShortfall(
-  afterWords: number,
-  target: Pick<WordTargetResolution, 'targetWords' | 'fromOutline'> & { bound?: 'min' | 'about' },
-  beforeWords?: number
-): string | null {
-  if (!target.targetWords || target.bound === 'about' || afterWords >= target.targetWords * SHORTFALL_RATIO) return null
-  const gap = target.targetWords - afterWords
-  const change =
-    beforeWords != null && beforeWords !== afterWords
-      ? `${beforeWords} → ${afterWords} 字`
-      : `${afterWords} 字`
-  const source = target.fromOutline ? '细纲目标' : '默认目标'
-  return `去 AI 味后 ${change}，比${source} ${target.targetWords} 字少 ${gap} 字；删去重复后变短是正常的，仅在情节缺失时补写。`
-}
-
 /**
  * 解析细纲字数并给出完整口径信息（是否兜底、是否被夹取、是下限还是上限）。
- * 写正文、写后自检、编辑器目标条都走这一个入口。
+ * 写正文、编辑器目标条都走这一个入口。
  */
 export function resolveChapterTargetWords(raw: string | undefined): WordTargetResolution {
   const parsed = parseWordEstimate(raw)

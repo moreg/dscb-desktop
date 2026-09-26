@@ -33,6 +33,8 @@ const genreSchema = z.enum([
 const compositionSchema = z.enum(['closeup', 'fullbody', 'scene', 'duo'])
 const stylePresetSchema = z.enum([
   'auto',
+  'photorealistic',
+  'anime_illustration',
   'fanqie_impact',
   'ancient_romance',
   'ink_minimal',

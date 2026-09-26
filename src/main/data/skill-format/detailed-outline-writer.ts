@@ -165,7 +165,12 @@ export class DetailedOutlineWriter {
       this.setField(newFields, newOrder, '章末钩子', patch.hook)
     }
     if (patch.wordEstimate !== undefined) {
-      this.setField(newFields, newOrder, '字数预估', patch.wordEstimate)
+      // 技能标准细纲使用「字数目标」，旧格式使用「字数预估」。优先更新现有
+      // 字段，避免自动回写后同一章同时出现两套互相冲突的字数口径。
+      const key = newFields.has('字数目标')
+        ? '字数目标'
+        : (newFields.has('字数预估') ? '字数预估' : '字数目标')
+      this.setField(newFields, newOrder, key, patch.wordEstimate)
     }
     if (patch.goldenLine !== undefined) {
       this.setField(newFields, newOrder, '金句', patch.goldenLine)

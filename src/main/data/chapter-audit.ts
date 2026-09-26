@@ -55,6 +55,15 @@ export interface AuditOptions {
    * 毒点/引文/成文质量/段落/对话标签/敏感词。enabled=false 或缺省时跳过这些检查（向后兼容）。
    */
   reviewRules?: ReviewRulesConfig
+  /**
+   * 本项目自己定义的世界观术语（取自 设定/ 下的文件名，见 readWorldTerms）。
+   *
+   * 元叙事词表是全局的，可「作者」「主角」「反派」这类词在不少设定里就是页内身份。
+   * 实测一本以「作者魂印／作者格／作者栏」为金手指的书，10 章里 19 条 error 全是
+   * 这一个词——规则每章都把世界观名词判成打破第四面墙，红字于是失去意义。
+   * 项目设定里已经立过的词，按世界观词处理（降为 info，不阻断）。
+   */
+  worldTerms?: readonly string[]
 }
 
 const DEFAULT_PER_WORD_CAP = 3
@@ -257,7 +266,7 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
 
   // 「正文审核」技能新增的算法检查（M2）。每项读 checks[id] !== false 决定是否跳过。
   if (rules) {
-    pushMetaBreakViolations(content, voice, rules, violations)
+    pushMetaBreakViolations(content, voice, rules, opts.worldTerms ?? [], violations)
     pushPovMixViolations(content, rules, violations)
     pushRepetitionViolations(content, thresholds, rules, violations)
     pushQuoteCountViolations(content, rules, violations)
@@ -356,6 +365,33 @@ function truncate(s: string, n: number): string {
 // 禁用词扫描（字面）
 // ----------------------------------------------------------------------
 
+/**
+ * 有些禁用词同时也是正常词组的一部分，不能只做裸子串匹配。
+ *
+ * 「十分」作为程度副词时应提示（如「十分震惊」），但在「十九点二十分」
+ * 「十分钟」「十分之一」里分别表示时间、时长和分数，语义完全不同。
+ */
+function isForbiddenWordUsage(content: string, word: string, offset: number): boolean {
+  if (word !== '十分') return true
+
+  const previous = content[offset - 1] ?? ''
+  const following = content.slice(offset + word.length)
+
+  // 「二十分 / 90十分」等复合数字；也覆盖截图中的「十九点二十分」。
+  if (/[0-9０-９〇零一二两三四五六七八九十百千万亿点點时時]/.test(previous)) return false
+
+  // 「十分钟 / 十分之一 / 十分制 / 十分钱」等计量用法。
+  if (/^(?:(?:钟|鐘)(?:头|頭)?|之[0-9０-９〇零一二两三四五六七八九十百千万亿]|钱|錢)/.test(following)) {
+    return false
+  }
+  // 「十分制」需看完整搭配，不能把「十分制约」里的程度副词一并豁免。
+  if (/^制(?:$|[\s，。！？；：、,.!?]|评分|计分|考核|考试)/.test(following)) {
+    return false
+  }
+
+  return true
+}
+
 function pushForbiddenWordViolations(
   content: string,
   perWordCap: number,
@@ -380,6 +416,9 @@ function pushForbiddenWordViolations(
     while (hits < perWordCap) {
       const idx = content.indexOf(word, from)
       if (idx < 0) break
+      // 先推进游标，避免上下文豁免后重复命中同一位置。
+      from = idx + word.length
+      if (!isForbiddenWordUsage(content, word, idx)) continue
       out.push({
         category: 'forbidden_word',
         severity: isGenreAllowed ? 'info' : 'warn',
@@ -395,7 +434,6 @@ function pushForbiddenWordViolations(
           : genreReplacementSuggestion(word, voice)
       })
       hits++
-      from = idx + word.length
     }
   }
 }
@@ -582,6 +620,7 @@ function pushMetaBreakViolations(
   content: string,
   voice: GenreVoice,
   rules: ReviewRulesConfig,
+  worldTerms: readonly string[],
   out: AuditViolation[]
 ): void {
   if (!isCheckOn(rules, 'meta_break')) return
@@ -592,6 +631,13 @@ function pushMetaBreakViolations(
   // 先扫字面词表
   for (const word of words) {
     if (reported >= 5) break
+    /**
+     * 项目设定里立过的词按世界观词处理。判据是设定文件名而不是出现次数——
+     * 「作者魂印」「原作者阵营」这种是作者自己开的设定，和角色偶然说漏嘴
+     * 提到「读者」完全是两回事，后者仍然是 error。
+     */
+    const term = worldTerms.find((t) => t.includes(word))
+    const downgraded = isAllowed || term !== undefined
     let from = 0
     let hits = 0
     while (hits < 3 && reported < 5) {
@@ -599,17 +645,21 @@ function pushMetaBreakViolations(
       if (idx < 0) break
       out.push({
         category: 'toxic',
-        severity: isAllowed ? 'info' : 'error',
-        message: isAllowed
-          ? `打破第四面墙提醒（${voice.label}题材可能支持）：「${word}」`
-          : `🚨 打破第四面墙：角色提及元叙事词「${word}」，建议删除`,
+        severity: downgraded ? 'info' : 'error',
+        message: term
+          ? `世界观术语提醒：「${word}」是本项目设定术语（${term}），未按元叙事处理`
+          : isAllowed
+            ? `打破第四面墙提醒（${voice.label}题材可能支持）：「${word}」`
+            : `🚨 打破第四面墙：角色提及元叙事词「${word}」，建议删除`,
         snippet: extractContext(content, idx, word.length),
         offset: idx,
         ruleId: 'meta_break',
         word,
-        suggestion: isAllowed
-          ? '确认本作世界观是否支持角色知晓自身处境，不支持则删除'
-          : '删除元叙事内容，除非世界观明确支持（穿书/系统文）'
+        suggestion: term
+          ? `设定里已有「${term}」；若此处确属打破第四面墙，改写这一句或在设置里调整元叙事词表`
+          : isAllowed
+            ? '确认本作世界观是否支持角色知晓自身处境，不支持则删除'
+            : '删除元叙事内容，除非世界观明确支持（穿书/系统文）'
       })
       reported++
       hits++
@@ -775,6 +825,37 @@ function pushRepetitionViolations(
   }
 }
 
+/** 「这X个字」往回看几条引文；再远就不是在说同一句话了 */
+const QUOTE_LOOKBACK = 3
+
+/** 只留汉字，用于按「字」为单位比对（标点、空白、字母都不算字） */
+function hanOnly(s: string): string {
+  return (s.match(/[一-龥]/g) || []).join('')
+}
+
+/**
+ * 引文里是否存在一个「claimed 个字」的说法能对上。
+ *
+ * 「这X个字」指的往往不是整条引文，而是其中一个词：
+ * 「白裙，未开。」→「那两个字」说的是"未开"；「主稿仍在列。」→"主稿"。
+ * 所以三种都算对得上：整句字数相符、标点切出的片段相符、
+ * 或某个等长片段是本章反复出现的固定说法（术语、代号、名字）。
+ * 三种都不成立才算描述错——「你做得不错。」被说成"这三个字"照样拦得住。
+ */
+function quoteCountFits(quote: string, claimed: number, chapterHan: string): boolean {
+  if (countHanChars(quote) === claimed) return true
+  if (quote.split(/[，,。！？!?、；;：:…—\s]+/).some((seg) => countHanChars(seg) === claimed)) {
+    return true
+  }
+  const han = hanOnly(quote)
+  for (let i = 0; i + claimed <= han.length; i++) {
+    const term = han.slice(i, i + claimed)
+    // 出现两次以上 = 不只是这句里的偶然切片，而是本章在反复用的说法
+    if (chapterHan.indexOf(term, chapterHan.indexOf(term) + 1) >= 0) return true
+  }
+  return false
+}
+
 /**
  * 🚨 引文字数一致性：文中"X个字"描述与最近引文实际汉字数不符。出自技能 3.2。
  * 示例："你做得不错。"她说这三个字的时候… → 引文 5 字，描述 3 字 → error。
@@ -789,21 +870,38 @@ function pushQuoteCountViolations(
   const descRe = /([这那])([些]?)([一二三四五六七八九十百零\d两]+)个字(的时候)?/g
   let m: RegExpExecArray | null
   let reported = 0
+  // 整章的汉字投影，只在真的出现「X个字」描述时才算一次
+  let chapterHan: string | undefined
   while ((m = descRe.exec(content)) !== null && reported < 3) {
     const claimed = parseCnNumber(m[3])
     if (claimed == null) continue
     const descIdx = m.index
-    // 回溯找最近的引文
+    // 回溯找最近的几条引文
     const before = content.slice(0, descIdx)
     const quoteRe = /["“”'‘「『]+([^"””'’」』\n]{1,200})["””'’」』]+/g
-    let lastQuote: { text: string; idx: number } | null = null
+    const quotes: { text: string; idx: number }[] = []
     let qm: RegExpExecArray | null
     while ((qm = quoteRe.exec(before)) !== null) {
-      lastQuote = { text: qm[1], idx: qm.index }
+      quotes.push({ text: qm[1], idx: qm.index })
+      if (quotes.length > QUOTE_LOOKBACK) quotes.shift()
     }
+    const lastQuote = quotes[quotes.length - 1]
     if (!lastQuote) continue
     const actual = countHanChars(lastQuote.text)
-    if (actual !== claimed) {
+    const han = (chapterHan ??= hanOnly(content))
+    /**
+     * 被数的那几个字也可能就写在同一句里，没加引号：
+     * 「共同避险，只到这四个字。」——"共同避险"正是 4 字。
+     * 取描述之前、同一句内的片段比对即可，不必扩大到上下文。
+     */
+    const sentStart = Math.max(
+      ...['。', '！', '？', '\n'].map((mark) => before.lastIndexOf(mark))
+    ) + 1
+    const namedHere = content
+      .slice(sentStart, descIdx)
+      .split(/[，,。！？!?、；;：:…—"“”'‘’「」『』\s]+/)
+      .some((seg) => countHanChars(seg) === claimed)
+    if (!namedHere && !quotes.some((q) => quoteCountFits(q.text, claimed, han))) {
       out.push({
         category: 'quote',
         severity: 'error',

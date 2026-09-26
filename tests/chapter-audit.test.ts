@@ -67,6 +67,37 @@ describe('chapter-audit (PR2 baseline)', () => {
     expect(hit?.offset).toBeGreaterThanOrEqual(0)
   })
 
+  it('does not treat the time in "十九点二十分" as the adverb "十分"', () => {
+    const content = makeValidContent() + '\n\n餐窗口，十七点到十九点二十分。他看了几秒，抬手拍下。'
+    const report = auditChapter(content)
+    const hit = report.violations.find(
+      (v) => v.category === 'forbidden_word' && v.word === '十分'
+    )
+    expect(hit).toBeUndefined()
+  })
+
+  it.each(['九点十分关门。', '十分钟后他回来了。', '只完成了十分之一。', '这张卷子采用十分制。'])(
+    'does not treat measurement usage as the adverb "十分": %s',
+    (sentence) => {
+      const report = auditChapter(makeValidContent() + `\n\n${sentence}`)
+      const hit = report.violations.find(
+        (v) => v.category === 'forbidden_word' && v.word === '十分'
+      )
+      expect(hit).toBeUndefined()
+    }
+  )
+
+  it.each(['他对此十分震惊。', '双方立场十分分裂。', '这项规定十分制约发展。'])(
+    'still flags "十分" when it is used as a degree adverb: %s',
+    (sentence) => {
+      const report = auditChapter(makeValidContent() + `\n\n${sentence}`)
+      const hit = report.violations.find(
+        (v) => v.category === 'forbidden_word' && v.word === '十分'
+      )
+      expect(hit).toBeDefined()
+    }
+  )
+
   it('does not flag word_count (字数区间提醒已关闭)', () => {
     const report = auditChapter('太短了。')
     const wc = report.violations.find((v) => v.category === 'word_count')

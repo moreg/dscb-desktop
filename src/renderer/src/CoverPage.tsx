@@ -59,6 +59,18 @@ const STYLE_PRESET_OPTIONS: Array<{
     swatch: 'linear-gradient(135deg, #24364b, #d7a24a, #f2e7d2)'
   },
   {
+    value: 'photorealistic',
+    label: '真人写实封面',
+    description: '真人摄影质感、自然肤质与电影光影，适合古装和现代人物',
+    swatch: 'linear-gradient(135deg, #17293d, #d99b55 55%, #f2e7d2)'
+  },
+  {
+    value: 'anime_illustration',
+    label: '二次元动漫封面',
+    description: '二维动漫人物、清晰线稿与赛璐璐上色，适合国漫和日漫风格',
+    swatch: 'linear-gradient(135deg, #49c8ff, #f3eee3 52%, #f05038)'
+  },
+  {
     value: 'fanqie_impact',
     label: '高饱和爽文海报',
     description: '强对比、主体醒目、超大标题，适合脑洞与逆袭',

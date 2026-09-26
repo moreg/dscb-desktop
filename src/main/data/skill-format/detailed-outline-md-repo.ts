@@ -251,6 +251,7 @@ export class DetailedOutlineMdRepo {
       if (!d.title && titleFromFile) d.title = titleFromFile
       // 从引用块提取卷号和节奏对齐信息
       applyReferenceBlock(doc, d)
+      applyPreambleFields(doc.body, d)
       return chapterNumber === undefined || d.chapterNumber === chapterNumber ? [d] : []
     }
 
@@ -589,6 +590,36 @@ function extractSectionBody(body: string, sectionName: string): string | undefin
   if (!foundH2) return undefined
   const text = para.join(' ').trim()
   return text || undefined
+}
+
+/**
+ * 「情节点序列」各点自带的字数之和（技能格式写成「【冲突·密，约 200 字】」）。
+ * 少于 2 个点带字数时视为没有逐点预算，返回 undefined。
+ */
+export function sumPlotPointWords(sections: OutlineProseSection[] | undefined): number | undefined {
+  const points = sections?.find((s) => s.title.startsWith('情节点序列'))
+  const counts = [...(points?.text.matchAll(/约\s*(\d{2,5})\s*字/g) ?? [])].map((m) => Number(m[1]))
+  return counts.length >= 2 ? counts.reduce((a, b) => a + b, 0) : undefined
+}
+
+/**
+ * 文件头（H1 与首个 H2 之间）里对写正文有用的字段。
+ * 技能把「视角」写在版本/修改记录旁边，不在任何 H2 节内，collectAllSections 收不到，
+ * 以前这条人称/限知约束从来没进过 prompt。章节块里已有同名字段时不覆盖。
+ */
+const PREAMBLE_WRITING_FIELDS = ['视角']
+
+function applyPreambleFields(body: string, detail: ChapterDetail): void {
+  const firstH2 = body.search(/^##\s/m)
+  const preamble = firstH2 >= 0 ? body.slice(0, firstH2) : ''
+  if (!preamble.trim()) return
+  const { fields } = parseBoldFields(preamble)
+  for (const key of PREAMBLE_WRITING_FIELDS) {
+    const value = toStr(fields.get(key))
+    if (!value) continue
+    detail.rawFields = detail.rawFields ?? {}
+    if (detail.rawFields[key] === undefined) detail.rawFields[key] = value
+  }
 }
 
 /** 从引用块/参考信息中提取卷号并应用 */

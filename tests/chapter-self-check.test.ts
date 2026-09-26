@@ -310,35 +310,12 @@ describe('evaluateChapterSelfCheck', () => {
     })
   })
 
-  /**
-   * 细纲写「不超过 3000 字」时，写正文的 prompt 按上限口径下发，
-   * 自检以前只认下限，把听话写少的章判死。
-   */
-  describe('字数上限口径（bound=about）', () => {
-    const wordItem = (content: string, bound: 'min' | 'about') =>
-      evaluateChapterSelfCheck({
-        chapterNumber: 1,
-        content,
-        targetWords: 3000,
-        targetFromOutline: true,
-        targetBound: bound
-      }).items.find((i) => i.id === 'word_count')
-
-    it('上限口径下写不满不判问题', () => {
-      expect(wordItem('甲'.repeat(2000), 'about')?.verdict).toBe('pass')
-    })
-
-    it('篇幅参考不足只提醒，不强迫用水文补到目标', () => {
-      const item = wordItem('甲'.repeat(2000), 'min')
-      expect(item?.verdict).toBe('warn')
-      expect(item?.detail).toContain('以剧情完整为先')
-      expect(item?.detail).toContain('不要为凑字机械扩写')
-      expect(item?.repairKind).toBe('short_length')
-    })
-
-    it('上限口径下超出较多 → warn', () => {
-      expect(wordItem('甲'.repeat(3600), 'about')?.verdict).toBe('warn')
-      expect(wordItem('甲'.repeat(3600), 'about')?.repairKind).toBe('over_length')
+  describe('篇幅不进自检', () => {
+    it('字数多少都不出 word_count 项', () => {
+      for (const n of [500, 3000, 9000]) {
+        const report = evaluateChapterSelfCheck({ chapterNumber: 1, content: '甲'.repeat(n) })
+        expect(report.items.find((i) => i.id === 'word_count')).toBeUndefined()
+      }
     })
   })
 
@@ -368,14 +345,31 @@ describe('evaluateChapterSelfCheck', () => {
       expect(due?.repairKind).toBe('verify_foreshadow')
     })
 
-    it('回执自称回收且正文有痕迹也不能仅凭关键词判通过', () => {
+    // 此前恒为 warn：正文怎么改都消不掉，「按自检改正文」只会反复空转
+    it('回执自称回收且每个要点都有明确叙述 → 通过（仍提示通读）', () => {
       const r = evaluateChapterSelfCheck({
         chapterNumber: 5,
         content:
           '"山本一夫要找的从来不是宝物。"苏九把纸摊开，"他要找的是能改变国运的人。"',
         foreshadowings: [fb({ status: 'collected', actualCollect: 5, expectedCollect: 5 })]
       })
-      expect(r.items.find((i) => i.id.startsWith('due_fb'))?.verdict).toBe('warn')
+      const due = r.items.find((i) => i.id.startsWith('due_fb'))
+      expect(due?.verdict).toBe('pass')
+      expect(due?.detail).toContain('通读')
+    })
+
+    it('回执自称回收但只落实了部分要点 → 仍 warn 并列出缺的要点', () => {
+      const r = evaluateChapterSelfCheck({
+        chapterNumber: 5,
+        content: '苏九撬开玉佩，玉佩之中藏着藏宝地图。',
+        foreshadowings: [{
+          content: '玉佩之中藏着藏宝地图；皇陵入口在北山断崖下',
+          status: 'collected', actualCollect: 5, expectedCollect: 5
+        }]
+      })
+      const due = r.items.find((i) => i.id.startsWith('due_fb'))
+      expect(due?.verdict).toBe('warn')
+      expect(due?.missing?.length).toBe(1)
     })
 
     it('正文只是顺带提了个人名，不算回收', () => {
@@ -423,14 +417,40 @@ describe('evaluateChapterSelfCheck', () => {
         { name: '苏月', location: '城门', action: '站着' }
       ], characterStates: [], timePoint: '夜里', unfinished: [], suspense: '', props: []
     }
-    for (const content of ['林舟站在城门，苏月坐在书房。两人都没有离开过原地。', '书房与城门都静悄悄的。', '林舟并不在书房，苏月也不在城门。']) {
+    for (const content of ['林舟站在城门，苏月坐在书房。两人都没有离开过原地。', '林舟并不在书房，苏月也不在城门。']) {
       const item = evaluateChapterSelfCheck({ chapterNumber: 2, content, prevEndingState })
         .items.find((i) => i.id === 'char_position')
       expect(item?.verdict).toBe('warn')
       expect(item?.detail).toContain('无法确认')
+      expect(item?.repairKind).toBe('char_position')
     }
+    // 全员未出场：不假通过，也不当成问题逼着补镜头
+    const absent = evaluateChapterSelfCheck({ chapterNumber: 2, content: '书房与城门都静悄悄的。', prevEndingState })
+      .items.find((i) => i.id === 'char_position')
+    expect(absent?.verdict).toBe('skip')
+    expect(absent?.detail).toContain('均未出场')
     expect(evaluateChapterSelfCheck({ chapterNumber: 2, content: '林舟站在书房，苏月守在城门。', prevEndingState })
       .items.find((i) => i.id === 'char_position')?.verdict).toBe('pass')
+  })
+
+  it('上章同处一地的人物写进同一句，不因「同句有他人」全员判无法确认', () => {
+    const prevEndingState = {
+      chapterNumber: 19, characterPositions: [
+        { name: '邵宁', location: '学校资助办公室', action: '核对' },
+        { name: '贺川', location: '学校资助办公室', action: '核对' }
+      ], characterStates: [], timePoint: '夜里', unfinished: [], suspense: '', props: []
+    }
+    const same = evaluateChapterSelfCheck({ chapterNumber: 20, prevEndingState,
+      content: '邵宁和贺川还在资助办公室，把封存编号又核了一遍。' })
+      .items.find((i) => i.id === 'char_position')
+    expect(same?.verdict).toBe('pass')
+
+    // 地点不同时仍不能互借
+    const diff = evaluateChapterSelfCheck({ chapterNumber: 20, content: '邵宁和贺川还在资助办公室。',
+      prevEndingState: { ...prevEndingState, characterPositions: [
+        prevEndingState.characterPositions[0], { name: '贺川', location: '礼堂后场', action: '等' }
+      ] } }).items.find((i) => i.id === 'char_position')
+    expect(diff?.verdict).toBe('warn')
   })
 
   /**
@@ -454,6 +474,35 @@ describe('evaluateChapterSelfCheck', () => {
   it('第 1 章不记 skip（本来就没有上一章）', () => {
     const r = evaluateChapterSelfCheck({ chapterNumber: 1, content: '开篇第一句。' })
     expect(r.items.find((i) => i.id === 'prev_state_missing')).toBeUndefined()
+  })
+
+  /**
+   * 回归：prevEndingStateExtractionFailed 之前不存在，「这次提取真失败了」和
+   * 「本来就没跑过」共用同一句「本次会话没写过本章正文」——提取明明失败过，
+   * 提示却说得像没写过，容易让人误判该重写上一章而不是重跑一次自检。
+   */
+  it('提取真的失败过时，措辞与「没跑过」区分开', () => {
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 3,
+      content: '他推开门走了进去。',
+      prevTail: '上一章的结尾正文。',
+      prevEndingStateExtractionFailed: true
+    })
+    const skipped = r.items.find((i) => i.id === 'prev_state_missing')
+    expect(skipped?.verdict).toBe('skip')
+    expect(skipped?.detail).toContain('提取失败')
+    expect(skipped?.detail).not.toContain('没写过本章正文')
+  })
+
+  it('没有真的尝试过提取时，仍是原来「没跑过」的措辞', () => {
+    const r = evaluateChapterSelfCheck({
+      chapterNumber: 3,
+      content: '他推开门走了进去。',
+      prevTail: '上一章的结尾正文。',
+      prevEndingStateExtractionFailed: false
+    })
+    const skipped = r.items.find((i) => i.id === 'prev_state_missing')
+    expect(skipped?.detail).toContain('没写过本章正文')
   })
 
   it('能力越权套话 → warn', () => {

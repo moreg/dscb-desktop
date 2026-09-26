@@ -4,7 +4,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { CoverLearningLibraryService } from '../src/main/data/cover-learning-library'
 import { SettingsRepository } from '../src/main/data/settings-repository'
-import { buildCoverPrompt } from '../src/main/data/skill-prompts/cover/cover-styles'
+import { buildCoverPrompt, COVER_STYLE_PRESETS } from '../src/main/data/skill-prompts/cover/cover-styles'
 
 const cleanup: string[] = []
 
@@ -33,7 +33,7 @@ describe('CoverLearningLibraryService', () => {
     expect(summary.status).toBe('ready')
     expect(summary.sampleCount).toBe(138)
     expect(summary.categoryCount).toBe(23)
-    expect(summary.styleCount).toBe(19)
+    expect(summary.styleCount).toBe(21)
     expect(JSON.parse(await fs.readFile(summary.filePath, 'utf-8')).name).toBe('番茄小说封面学习库')
   })
 
@@ -71,6 +71,46 @@ describe('CoverLearningLibraryService', () => {
     expect(service.resolveStyle(library, 'game_neon', 'scifi').key).toBe('game_neon')
   })
 
+  it('旧版学习库自动补全真人和二次元风格，并保留用户修改', async () => {
+    const { service } = await fixture()
+    const initialized = await service.initialize()
+    const raw = JSON.parse(await fs.readFile(initialized.filePath, 'utf-8'))
+    delete raw.styles.photorealistic
+    delete raw.styles.anime_illustration
+    raw.styles.folk_horror.prompt = 'CUSTOM_LEGACY_STYLE: hand-cut red paper silhouettes.'
+    raw.globalRules = ['CUSTOM_LEGACY_RULE: keep a quiet band behind the title.']
+    raw.genreRecommendations.urban = 'minimal_typographic'
+    const stored = JSON.stringify(raw, null, 2)
+    await fs.writeFile(initialized.filePath, stored, 'utf-8')
+
+    const loaded = await service.load()
+
+    expect(loaded.summary.status).toBe('ready')
+    expect(loaded.summary.styleCount).toBe(21)
+    expect(loaded.summary.sampleCount).toBe(138)
+    expect(loaded.library.styles.folk_horror.prompt).toBe(raw.styles.folk_horror.prompt)
+    expect(loaded.library.globalRules).toEqual(raw.globalRules)
+    expect(service.resolveStyle(loaded.library, 'auto', 'urban').key).toBe('minimal_typographic')
+    for (const key of ['photorealistic', 'anime_illustration'] as const) {
+      const learned = service.resolveStyle(loaded.library, key, 'urban')
+      expect(learned.key).toBe(key)
+      expect(learned.definition).toEqual(COVER_STYLE_PRESETS[key])
+      const prompt = buildCoverPrompt({
+        bookName: '盛夏重逢',
+        authorName: '某某',
+        platform: 'fanqie',
+        genre: 'urban',
+        composition: 'closeup',
+        stylePreset: learned.key,
+        learningPreset: learned.definition,
+        learningRules: loaded.library.globalRules
+      })
+      expect(prompt).toContain(COVER_STYLE_PRESETS[key].prompt)
+      expect(prompt).toContain('CUSTOM_LEGACY_RULE')
+    }
+    expect(await fs.readFile(initialized.filePath, 'utf-8')).toBe(stored)
+  })
+
   it('损坏的用户文件不被覆盖，并安全回退到内置库', async () => {
     const { service } = await fixture()
     const initialized = await service.initialize()
@@ -78,7 +118,13 @@ describe('CoverLearningLibraryService', () => {
 
     const loaded = await service.load()
     expect(loaded.summary.status).toBe('fallback')
-    expect(loaded.summary.styleCount).toBe(19)
+    expect(loaded.summary.styleCount).toBe(21)
+    for (const key of ['photorealistic', 'anime_illustration'] as const) {
+      expect(service.resolveStyle(loaded.library, key, 'urban')).toEqual({
+        key,
+        definition: COVER_STYLE_PRESETS[key]
+      })
+    }
     expect(await fs.readFile(initialized.filePath, 'utf-8')).toBe('{ broken json')
   })
 

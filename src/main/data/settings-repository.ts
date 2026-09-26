@@ -710,7 +710,10 @@ export class SettingsRepository {
       model: patch.model?.trim() || current.model,
       // apiKey 空串=保留旧值；非空才覆盖
       apiKey: patch.apiKey && patch.apiKey.trim() ? patch.apiKey.trim() : current.apiKey,
-      channel: patch.channel === 'codex' || patch.channel === 'grok' ? patch.channel : current.channel
+      channel:
+        patch.channel === 'api' || patch.channel === 'codex' || patch.channel === 'grok'
+          ? patch.channel
+          : current.channel
     }
     await this.update({ coverImage: next })
     return this.getCoverImageConfigSummary()

@@ -46,19 +46,10 @@ export interface ChapterSelfCheckInput {
   /** 卷内禁止提前的提示句（可选） */
   doNotAdvanceHints?: string[]
   /**
-   * 整章目标字数（细纲「字数预估」口径）。给了才跑字数项。
-   * 仅提供篇幅参考；写不满时提醒核实情节，不因字数少强制扩写。
+   * prevEndingState 为空时，区分「这次真的尝试提取但失败了」和「本来就没有可用状态」。
+   * 只影响下面 skip 提示的措辞，不影响任何判定——提取失败时该项照样是 skip，不会因此判死。
    */
-  targetWords?: number
-  /** 目标字数是否真的来自细纲；false 表示是兜底值，字数项只提示不判死 */
-  targetFromOutline?: boolean
-  /**
-   * 细纲字数的语义（口径与 shared/word-target.ts 同源）：
-   * - 'min'：目标/下限，写不够才是问题（默认）
-   * - 'about'：上限口径（「不超过 3000 字」「3000 字以内」），写不够**不是**问题，写超了才提示
-   * 不传按 'min'。丢掉这个字段会把「上限」当「下限」判死。
-   */
-  targetBound?: 'min' | 'about'
+  prevEndingStateExtractionFailed?: boolean
 }
 
 /** 兼容旧 import 路径 */
@@ -108,9 +99,13 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
       category: 'continuity',
       label: '上章衔接三项（悬念/未完成/人物位置）',
       verdict: 'skip',
-      detail: input.prevTail?.trim()
-        ? '未缓存上章结尾状态（本次会话没写过本章正文），这三项未执行——不等于通过'
-        : '没有上一章正文，无法做衔接检查'
+      // 三种缺失原因不能共用一句话：提取失败是这次真出了错，跟「本来就没数据」
+      // 或「没在这次会话生成过」不是一回事——文案含糊会让人误判该做什么。
+      detail: input.prevEndingStateExtractionFailed
+        ? '上章结尾状态提取失败（LLM 调用出错），这三项本次未执行，不等于通过；可重跑写后自检再试一次'
+        : input.prevTail?.trim()
+          ? '未缓存上章结尾状态（本次会话没写过本章正文），这三项未执行——不等于通过'
+          : '没有上一章正文，无法做衔接检查'
     })
   }
 
@@ -151,33 +146,23 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
   // 5) 人物位置（弱信号）
   const positions = input.prevEndingState?.characterPositions ?? []
   if (positions.length > 0) {
-    const head = content.slice(0, 800)
-    const clauses = head.split(/[。！？!?，,；;\r\n]+/).map((s) => s.trim()).filter(Boolean)
-    const checkable = positions.filter((p) => p.name?.trim() && p.location?.length >= 2)
-    const uncertain = checkable.filter((p) => {
-      const first = clauses.findIndex((s) => s.includes(p.name))
-      if (first < 0) return true
-      const own = clauses[first]
-      if (/不在|没在|并非|尚未|想起|听说|望向|看向|打算|计划/.test(own)) return true
-      // 不能借用同句另一个角色的地点；只认本人的明确位置描述。
-      const hasOther = checkable.some((other) => other.name !== p.name && own.includes(other.name))
-      if (!hasOther && isLocationMentioned(p.location, own) &&
-          /(?:站在|坐在|身处|位于|守在|留在|待在|蹲在|靠在|就在|仍在|在)/.test(own)) return false
-      // 场景先行句可提供地点，前提是没有其他人物/移动动作介入。
-      const scene = clauses[first - 1]
-      return !scene || hasOther || checkable.some((other) => scene.includes(other.name)) ||
-        /走向|赶往|离开|回到|前往|远处|想起|听说|望向/.test(scene) ||
-        !isLocationMentioned(p.location, scene)
-    })
+    const a = assessCharacterPositions(content, positions)
+    const absentNote = a.absent.length ? `；本章未出场：${a.absent.join('、')}（不核验）` : ''
     items.push({
       id: 'char_position',
       category: 'continuity',
       label: '人物位置对应线索',
-      verdict: !checkable.length ? 'skip' : uncertain.length ? 'warn' : 'pass',
-      detail: !checkable.length ? '缺少可对应的人物或地点，未核验位置连续性'
-        : uncertain.length
-          ? `无法确认人物与上章地点的对应：${uncertain.map((p) => `${p.name}—${p.location}`).join('、')}；核对转场或交给深度审稿，不能只凭地点出现判通过`
-          : '开头有人物与原地点对应的文字线索；本项不核验转场时间与全过程'
+      verdict: !a.checkable.length || (!a.uncertain.length && !a.anchored.length)
+        ? 'skip' : a.uncertain.length ? 'warn' : 'pass',
+      detail: !a.checkable.length ? '缺少可对应的人物或地点，未核验位置连续性'
+        : a.uncertain.length
+          ? `无法确认人物与上章地点的对应：${a.uncertain.map((p) => `${p.name}—${p.location}`).join('、')}；核对转场或交给深度审稿，不能只凭地点出现判通过${absentNote}`
+          : !a.anchored.length
+            ? `上章人物本章均未出场（${a.absent.join('、')}），未核验位置连续性`
+            : `人物首次出场处有与原地点对应或转场交代的文字线索；本项不核验转场时间与全过程${absentNote}`,
+      ...(a.uncertain.length
+        ? { repairKind: 'char_position' as const, missing: a.uncertain.map((p) => `${p.name}（上章在${p.location}）`) }
+        : {})
     })
   }
 
@@ -260,18 +245,6 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
   // 写完即查的 AI 痕迹。只放语料实测有正向判别力的两条，见 tests/fixtures/deslop-corpus/FINDINGS.md
   items.push(checkPunctuationRule(content))
   items.push(checkAiTells(content))
-
-  // 12) 篇幅达标（对照细纲「字数预估」）
-  if (input.targetWords && input.targetWords > 0) {
-    items.push(
-      checkWordCount(
-        content,
-        input.targetWords,
-        input.targetFromOutline !== false,
-        input.targetBound ?? 'min'
-      )
-    )
-  }
 
   return finalize(ch, items)
 }
@@ -364,6 +337,15 @@ function checkForeshadowRecovery(
     return { ...base, verdict: 'skip', detail: '伏笔内容无可判定的关键词' }
   }
   const missing = clauses.filter((c) => !isClauseCovered(c, content))
+  // 回执称已回收、且每个要点都有非否定/非疑问/非计划的明确叙述：与核心事件同一标准判通过。
+  // 此前这里恒为 warn，正文怎么改都消不掉，「按自检改正文」只会反复空转。
+  if (claimed && missing.length === 0) {
+    return {
+      ...base,
+      verdict: 'pass',
+      detail: `回执称本章回收，各要点均有明确叙述；文字证据不等于语义核验，建议通读确认疑问已解开：${clip(f.content, 40)}`
+    }
+  }
   if (missing.length < clauses.length) {
     return {
       ...base,
@@ -384,6 +366,73 @@ function checkForeshadowRecovery(
   }
 }
 
+type CharacterPosition = PrevEndingState['characterPositions'][number]
+
+export interface CharacterPositionAssessment {
+  /** 有名字且地点可匹配的上章人物 */
+  checkable: CharacterPosition[]
+  /** 首次出场处能对上原地点或有转场交代 */
+  anchored: string[]
+  /** 出场了但对不上：firstLine 是首次出场所在行（content.split('\n') 下标），供定点修补 */
+  uncertain: (CharacterPosition & { firstLine: number })[]
+  /** 整章未出场：位置连续性无从谈起，不强求补镜头 */
+  absent: string[]
+}
+
+const POSITION_REMOTE_RE = /不在|没在|并非|尚未|想起|听说|望向|看向|打算|计划/
+const POSITION_STAY_RE = /(?:站在|坐在|身处|位于|守在|留在|待在|蹲在|靠在|就在|仍在|还在|在)/
+/** 本人带移动动作的句子本身就是转场交代 */
+const POSITION_MOVE_RE = /走进|走入|走出|来到|赶到|赶回|回到|返回|踏进|踏入|冲进|冲出|推门|抵达|赶来|离开/
+const SCENE_BREAK_RE = /走向|赶往|离开|回到|前往|远处|想起|听说|望向/
+
+/**
+ * 人物位置连续性（启发式）：看每个上章人物**首次出场**的那一行及其前一行（场景句），
+ * 本人句子里写明原地点、写了转场动作，或紧邻的场景句给出原地点，才算对上。
+ * 同句另有他人时不借用其地点；否定/回忆/远望不算在场。
+ */
+export function assessCharacterPositions(
+  content: string,
+  positions: readonly CharacterPosition[]
+): CharacterPositionAssessment {
+  const lines = content.split('\n')
+  const checkable = positions.filter((p) => p.name?.trim() && p.location?.trim().length >= 2)
+  const out: CharacterPositionAssessment = { checkable, anchored: [], uncertain: [], absent: [] }
+  // 同句的他人若上章就在同一地点，这句地点对两人都成立，不存在「借用别人地点」的问题。
+  // 此前一律排除，导致同处一室的几个人写进同一句时全员判「无法确认」。
+  const sameSpot = (a: CharacterPosition, b: CharacterPosition): boolean =>
+    a.location.trim() === b.location.trim()
+  const splitClauses = (text: string): string[] =>
+    text.split(/[。！？!?，,；;]+/).map((c) => c.trim()).filter(Boolean)
+
+  for (const p of checkable) {
+    const firstLine = lines.findIndex((l) => l.includes(p.name))
+    if (firstLine < 0) {
+      out.absent.push(p.name)
+      continue
+    }
+    let prevLine = firstLine - 1
+    while (prevLine >= 0 && !lines[prevLine].trim()) prevLine--
+    const clauses = [
+      ...(prevLine >= 0 ? splitClauses(lines[prevLine]) : []),
+      ...splitClauses(lines[firstLine])
+    ]
+    const elsewhere = checkable.filter((o) => o.name !== p.name && !sameSpot(o, p))
+    const ok = clauses.some((own, i) => {
+      if (!own.includes(p.name) || POSITION_REMOTE_RE.test(own)) return false
+      const hasOther = elsewhere.some((o) => own.includes(o.name))
+      if (hasOther) return false
+      if (POSITION_MOVE_RE.test(own)) return true
+      if (isLocationMentioned(p.location, own) && POSITION_STAY_RE.test(own)) return true
+      const scene = clauses[i - 1]
+      return !!scene && !scene.includes(p.name) && !elsewhere.some((o) => scene.includes(o.name)) &&
+        !SCENE_BREAK_RE.test(scene) && isLocationMentioned(p.location, scene)
+    })
+    if (ok) out.anchored.push(p.name)
+    else out.uncertain.push({ ...p, firstLine })
+  }
+  return out
+}
+
 /** 「附近」「旁边」这类到处都是的词，不能拿来当地点命中的证据 */
 const GENERIC_PLACE_RE = /^(附近|旁边|里面|外面|上面|下面|中间|周围|一带|地方|这里|那里)$/
 
@@ -397,62 +446,6 @@ function isLocationMentioned(loc: string, haystack: string): boolean {
   const { long, short } = clauseFragments(loc)
   if (long.some((k) => haystack.includes(k))) return true
   return short.some((k) => !GENERIC_PLACE_RE.test(k) && haystack.includes(k))
-}
-
-/** 篇幅参考线：低于目标 5% 内不提醒，不以字数判失败 */
-const WORD_COUNT_PASS_RATIO = 0.95
-/** 上限口径下超出多少才提示 */
-const WORD_COUNT_OVER_RATIO = 1.15
-
-/**
- * 篇幅参考检查，剧情与收束完整优先，字数不足不判失败。
- *
- * bound='about' 是上限口径（细纲写「不超过 3000 字」「3000 字以内」）：写不够不是问题，
- * 写超了才提示。写正文的 prompt 一直认这个口径，自检以前不认，于是听话写少的章被判死。
- */
-function checkWordCount(
-  content: string,
-  targetWords: number,
-  fromOutline: boolean,
-  bound: 'min' | 'about' = 'min'
-): SelfCheckItemResult {
-  const actual = content.replace(/\s/g, '').length
-  const ratio = actual / targetWords
-  const gap = targetWords - actual
-  const source = fromOutline ? '细纲' : '默认'
-  if (bound === 'about') {
-    const over = actual - targetWords
-    return {
-      id: 'word_count',
-      category: 'structure',
-      repairKind: 'over_length',
-      label: '篇幅符合细纲上限',
-      verdict: ratio > WORD_COUNT_OVER_RATIO ? 'warn' : 'pass',
-      detail:
-        ratio > WORD_COUNT_OVER_RATIO
-          ? `实际 ${actual} 字，超出${source}上限 ${targetWords} 字 ${over} 字（${Math.round(ratio * 100)}%）`
-          : `实际 ${actual} 字 / ${source}上限 ${targetWords} 字（上限口径，写不满不算问题）`
-    }
-  }
-  if (ratio >= WORD_COUNT_PASS_RATIO) {
-    return {
-      id: 'word_count',
-      category: 'structure',
-      repairKind: 'short_length',
-      label: '篇幅参考',
-      verdict: 'pass',
-      detail: `实际 ${actual} 字 / ${source}参考 ${targetWords} 字；字数不代表剧情完整或质量合格`
-    }
-  }
-  // 篇幅是参考，不能用硬性失败驱动模型机械补字；剧情完整优先。
-  return {
-    id: 'word_count',
-    category: 'structure',
-    repairKind: 'short_length',
-    label: '篇幅参考',
-    verdict: 'warn',
-    detail: `实际 ${actual} 字，比${source}参考 ${targetWords} 字少 ${gap} 字（${Math.round(ratio * 100)}%）；以剧情完整为先，事件与收束已完成可提前结束，不要为凑字机械扩写`
-  }
 }
 
 function finalize(chapterNumber: number, items: SelfCheckItemResult[]): ChapterSelfCheckReport {

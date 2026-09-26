@@ -41,6 +41,8 @@ export interface PostWriteSyncSummary {
 export interface PostWriteSyncInput {
   memory: {
     reviewRequired?: string[]
+    /** 部分条目被挡下（其余已写入），与 reviewRequired 不同，不算整章未生效 */
+    heldBack?: string[]
     superseded?: boolean
     applied: {
       stateChanges: number
@@ -194,6 +196,11 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
     } else {
       message = '已同步（本章无新增状态/设定）'
     }
+  }
+
+  // 部分条目被挡下：其余已写入，所以不降 phase，只在文案里说清有几条没进去
+  if (!input.memory.reviewRequired?.length && input.memory.heldBack?.length) {
+    message = `${message}；${input.memory.heldBack.length} 项证据不足未写入`
   }
 
   // 附加写后自检摘要：不抬升同步 phase（避免「自检未过」被当成「同步失败」）

@@ -1,6 +1,8 @@
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
+import { repairMissingMemoryEvidence } from './memory-evidence-repair'
+import type { MemoryExtraction } from '../../shared/types'
 
 // 纯解析函数从 shared/parsers re-export，供 main 测试与 renderer 共享
 export {
@@ -17,6 +19,12 @@ export {
  */
 export class WriteFlowService {
   constructor(private readonly llm: LlmService) {}
+
+  async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
+    return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt, {
+      ...opts, maxTokens: 4096, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
+    }))
+  }
 
   /**
    * 从上一章正文末尾提取结构化结尾状态。
@@ -159,6 +167,8 @@ export class WriteFlowService {
       `- settingsSuggestions: [{ topic, reason, suggestedPath }]（仅建议手改底稿，如题材定位；可空）`,
       `evidence 必须逐字引用本章连续原文（至少6字符），保留主体、动作、结果及否定词。不能只引用名字或道具名；不能截掉“没有”“打算”等词来制造既成事实。`,
       `evidence 字段值不要额外套中文引号或补标点：直接复制正文片段；只有正文原本存在的引号才能保留。`,
+      `先找到支持该条事实的连续原句，再填写记忆内容；不得先概括事实再凭印象编写引文。每条只记证据能直接支持的一件事，优先引用包含主体和动作结果的最短完整小句，不拼接多处原文，不带入无关的后续猜测。`,
+      `否定事实也是事实：正文写“拒绝交出账册”，应记“拒绝交出账册”，不能记为“交出账册”。准备动作与计划结果必须分开，不能把“准备出城”记成“已经出城”。`,
       `只提取已经实际发生的变化；传闻、台词里的猜测、谎言、计划、梦境和假设不能直接更新客观状态。无法确认时留空或写入 settingsSuggestions，不补造。`,
       `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。字段值尽量简短，避免冗长复述正文。`,
       ``,

@@ -178,6 +178,13 @@ export function isPunctFixKey(key: string | undefined): boolean {
   return key === PUNCT_FIX_KEY || (key?.startsWith(`${PUNCT_FIX_KEY}:`) ?? false)
 }
 
+/** 写后自检「一键补位置衔接」的整章替换在 rewriteHistory 中使用的 violationKey */
+export const CHAR_POSITION_FIX_KEY = 'char-position-fix'
+
+export function isCharPositionFixKey(key: string | undefined): boolean {
+  return key === CHAR_POSITION_FIX_KEY || (key?.startsWith(`${CHAR_POSITION_FIX_KEY}:`) ?? false)
+}
+
 export function isAdjustRewriteKey(key: string | undefined): boolean {
   return key === ADJUST_REWRITE_KEY || (key?.startsWith(`${ADJUST_REWRITE_KEY}:`) ?? false)
 }
@@ -190,9 +197,10 @@ export function isDeslopApplyKey(key: string | undefined): boolean {
   return key === DESLOP_APPLY_KEY || (key?.startsWith(`${DESLOP_APPLY_KEY}:`) ?? false)
 }
 
-/** 是否整章级替换（格式化 / 按要求重写 / 去 AI 味 / 标点兜底）——撤销时优先全文还原，不走片段 indexOf */
+/** 是否整章级替换（格式化 / 按要求重写 / 去 AI 味 / 标点兜底 / 位置衔接）——撤销时优先全文还原，不走片段 indexOf */
 export function isWholeDocRewriteKey(key: string | undefined): boolean {
-  return isAdjustRewriteKey(key) || isFormatProseKey(key) || isDeslopApplyKey(key) || isPunctFixKey(key)
+  return isAdjustRewriteKey(key) || isFormatProseKey(key) || isDeslopApplyKey(key) || isPunctFixKey(key) ||
+    isCharPositionFixKey(key)
 }
 
 export function detectUndoRedoShortcut(e: ShortcutEvent): UndoRedoIntent {

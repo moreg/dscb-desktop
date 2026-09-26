@@ -154,7 +154,7 @@ export class StyleProfileService {
    * 单个项目读写失败不阻断其余清理——文风本身已经删除成功。
    */
   private async clearDanglingDefaults(styleProfileId: string): Promise<void> {
-    const projects = await this.projectService.listProjects().catch(() => [])
+    const projects = await this.projectService.listProjects({ includeArchived: true }).catch(() => [])
     const affected = await Promise.all(
       projects.map(async ({ id, path }) => {
         const persisted = await new ProjectRepository(path).read().catch(() => null)

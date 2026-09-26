@@ -10,6 +10,7 @@ import { SettingsRepository } from './data/settings-repository'
 import { UsageRepository } from './data/usage-repository'
 import { LlmService } from './data/llm-service'
 import { OutlineService } from './data/outline-service'
+import { ExportService } from './data/export-service'
 import { WriteService } from './data/write-service'
 import { DiagnosticsService } from './data/diagnostics-service'
 import { FigureService } from './data/figure-service'
@@ -29,6 +30,7 @@ import { registerMemoryIpc } from './ipc/memory'
 import { registerTrackingIpc } from './ipc/tracking'
 import { registerLlmIpc } from './ipc/llm'
 import { registerOutlineIpc } from './ipc/outline'
+import { registerExportIpc } from './ipc/export'
 import { registerWriteIpc } from './ipc/write'
 import { registerSettingsIpc } from './ipc/settings'
 import { registerUsageIpc } from './ipc/usage'
@@ -154,6 +156,9 @@ if (!hasSingleInstanceLock) {
 
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
+
+  const exportService = new ExportService(chapterService, outlineService)
+  registerExportIpc(exportService, projectService)
 
   // 拆文库（长/短篇拆文）—— 全局目录，跨项目共享的方法论资产。
   // 提前到 writeService 之前，以便 benchmarkResolver 注入写作召回。

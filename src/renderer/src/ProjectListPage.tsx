@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
+import { isProjectArchived } from '../../shared/types'
 
 interface Props {
   onOpenProject: (projectId: string) => void
   onOpenProjectWindow: (projectId: string) => void
 }
+
+type Shelf = 'active' | 'archived'
 
 export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
@@ -14,10 +17,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
   const [scanning, setScanning] = useState(false)
   const [showNew, setShowNew] = useState(false)
   const [keyword, setKeyword] = useState('')
+  const [shelf, setShelf] = useState<Shelf>('active')
+  const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
+  const [archiveBusy, setArchiveBusy] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
 
-  const refresh = () => {
-    setLoading(true)
-    void window.api.listProjects().then(async (list) => {
+  const loadProjects = async (withSpinner: boolean) => {
+    if (withSpinner) setLoading(true)
+    try {
+      const list = await window.api.listProjects({ includeArchived: true })
       setProjects(list)
       const cc: Record<string, number> = {}
       const wc: Record<string, number> = {}
@@ -30,8 +38,9 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
       )
       setChapterCounts(cc)
       setWordCounts(wc)
+    } finally {
       setLoading(false)
-    })
+    }
   }
 
   /** 扫描 projectsRoot，自动发现含 大纲/大纲.md 的 v3.2 项目 */
@@ -39,29 +48,62 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
     setScanning(true)
     try {
       await window.api.scanProjects()
-      refresh()
+      await loadProjects(true)
     } finally {
       setScanning(false)
     }
   }
 
-  useEffect(refresh, [])
+  useEffect(() => {
+    void loadProjects(true)
+  }, [])
+
+  const activeProjects = useMemo(
+    () => projects.filter((p) => !isProjectArchived(p)),
+    [projects]
+  )
+  const archivedProjects = useMemo(
+    () => projects.filter((p) => isProjectArchived(p)),
+    [projects]
+  )
+  const shelfProjects = shelf === 'archived' ? archivedProjects : activeProjects
 
   const filtered = useMemo(() => {
-    if (!keyword) return projects
+    if (!keyword) return shelfProjects
     const k = keyword.toLowerCase()
-    return projects.filter(
+    return shelfProjects.filter(
       (p) =>
         p.name.toLowerCase().includes(k) ||
         (p.genre ?? '').toLowerCase().includes(k) ||
         (p.description ?? '').toLowerCase().includes(k)
     )
-  }, [projects, keyword])
+  }, [shelfProjects, keyword])
 
   const totalWords = useMemo(
-    () => Object.values(wordCounts).reduce((s, n) => s + n, 0),
-    [wordCounts]
+    () => shelfProjects.reduce((s, p) => s + (wordCounts[p.id] ?? 0), 0),
+    [shelfProjects, wordCounts]
   )
+
+  const applyArchived = async (project: ProjectMeta, archived: boolean) => {
+    const setArchived = (
+      window.api as { setProjectArchived?: (projectId: string, archived: boolean) => Promise<ProjectMeta> }
+    ).setProjectArchived
+    if (typeof setArchived !== 'function') {
+      setArchiveError('当前窗口还是旧版主进程，请重启应用后再归档。项目文件不会被删除。')
+      return
+    }
+    setArchiveBusy(true)
+    setArchiveError('')
+    try {
+      await setArchived(project.id, archived)
+      setPendingArchive(null)
+      await loadProjects(false)
+    } catch (err) {
+      setArchiveError((err as Error).message || (archived ? '归档失败' : '移回失败'))
+    } finally {
+      setArchiveBusy(false)
+    }
+  }
 
   const formatRelative = (iso: string) => {
     if (!iso) return '—'
@@ -81,7 +123,11 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
         <div className="page-head-row">
           <div>
             <h1>我的书案</h1>
-            <p className="desc">静待落笔处，万卷由此生</p>
+            <p className="desc">
+              {shelf === 'archived'
+                ? '归档的书不在书案展示，文件仍保留，可随时移回'
+                : '静待落笔处，万卷由此生'}
+            </p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button
@@ -101,8 +147,25 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
 
       <div className="toolbar">
         <div className="filters">
-          <span className="filter-chip">项目 {projects.length}</span>
-          <span className="filter-chip">总字数 {(totalWords / 10000).toFixed(1)} 万</span>
+          <button
+            type="button"
+            className={`filter-chip ${shelf === 'active' ? 'active' : ''}`}
+            aria-pressed={shelf === 'active'}
+            onClick={() => setShelf('active')}
+          >
+            在写 {activeProjects.length}
+          </button>
+          <button
+            type="button"
+            className={`filter-chip ${shelf === 'archived' ? 'active' : ''}`}
+            aria-pressed={shelf === 'archived'}
+            onClick={() => setShelf('archived')}
+          >
+            归档 {archivedProjects.length}
+          </button>
+          <span className="filter-chip filter-chip-static">
+            总字数 {(totalWords / 10000).toFixed(1)} 万
+          </span>
         </div>
         <input
           className="input"
@@ -112,6 +175,12 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
           onChange={(e) => setKeyword(e.target.value)}
         />
       </div>
+
+      {archiveError && !pendingArchive ? (
+        <p className="meta" style={{ color: 'var(--danger)', margin: '0 0 12px' }}>
+          {archiveError}
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="empty">展卷中…</p>
@@ -123,7 +192,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
           </button>
         </div>
       ) : filtered.length === 0 ? (
-        <p className="empty">没有匹配的项目。</p>
+        <p className="empty">
+          {keyword
+            ? '没有匹配的项目。'
+            : shelf === 'archived'
+              ? '还没有归档的书。'
+              : archivedProjects.length > 0
+                ? '书案上没有在写的书。已归档的可在上方「归档」里找回。'
+                : '没有匹配的项目。'}
+        </p>
       ) : (
         <div className="project-grid">
           {filtered.map((p) => {
@@ -157,6 +234,34 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
                 <div className="pc-foot">
                   <span>翻开 {formatRelative(p.lastOpenedAt)}</span>
                   <div className="pc-actions">
+                    {isProjectArchived(p) ? (
+                      <button
+                        type="button"
+                        className="archive-action restore"
+                        title="移回书案"
+                        disabled={archiveBusy}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void applyArchived(p, false)
+                        }}
+                      >
+                        移回书案
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="archive-action"
+                        title="归档后不在书案展示，文件仍保留"
+                        disabled={archiveBusy}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setArchiveError('')
+                          setPendingArchive(p)
+                        }}
+                      >
+                        归档
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="open project-entry"
@@ -185,12 +290,26 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
           })}
         </div>
       )}
+      {pendingArchive ? (
+        <ArchiveConfirmDialog
+          project={pendingArchive}
+          busy={archiveBusy}
+          error={archiveError}
+          onClose={() => {
+            if (archiveBusy) return
+            setPendingArchive(null)
+            setArchiveError('')
+          }}
+          onConfirm={() => void applyArchived(pendingArchive, true)}
+        />
+      ) : null}
       {showNew ? (
         <NewProjectDialog
           onClose={() => setShowNew(false)}
           onCreated={() => {
             setShowNew(false)
-            refresh()
+            setShelf('active')
+            void loadProjects(false)
           }}
         />
       ) : null}
@@ -312,6 +431,49 @@ function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreat
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={saving || !name.trim()}>
             {saving ? '创建中…' : '创建'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ArchiveConfirmDialog({
+  project,
+  busy,
+  error,
+  onClose,
+  onConfirm
+}: {
+  project: ProjectMeta
+  busy: boolean
+  error: string
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div
+      className="dialog-overlay"
+      onClick={() => {
+        if (!busy) onClose()
+      }}
+    >
+      <div className="dialog" style={{ width: 420 }} onClick={(e) => e.stopPropagation()}>
+        <h3>归档《{project.name}》？</h3>
+        <p style={{ margin: '0 0 18px', fontSize: 14, lineHeight: 1.7, color: 'var(--ink-2)' }}>
+          归档后不在「我的书案」展示，项目文件仍保留在原处。之后可从上方「归档」里移回。
+        </p>
+        {error ? (
+          <p className="meta" style={{ margin: '0 0 12px', color: 'var(--danger)' }}>
+            {error}
+          </p>
+        ) : null}
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button className="btn btn-primary" onClick={onConfirm} disabled={busy}>
+            {busy ? '归档中…' : '归档'}
           </button>
         </div>
       </div>

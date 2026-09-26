@@ -146,6 +146,8 @@ describe('COVER_STYLE_PRESETS 番茄封面风格库', () => {
     'ink_minimal',
     'dark_suspense',
     'urban_cinematic',
+    'photorealistic',
+    'anime_illustration',
     'anime_light',
     'retro_period',
     'epic_fantasy',
@@ -162,7 +164,8 @@ describe('COVER_STYLE_PRESETS 番茄封面风格库', () => {
     'minimal_typographic'
   ]
 
-  it('19 种风格字段完整', () => {
+  it('全部风格字段完整', () => {
+    expect(presets).toHaveLength(Object.keys(COVER_STYLE_PRESETS).length)
     for (const key of presets) {
       const style = COVER_STYLE_PRESETS[key]
       expect(style.label).toBeTruthy()
@@ -255,6 +258,79 @@ describe('COVER_STYLE_PRESETS 番茄封面风格库', () => {
     })
     expect(prompt).toContain('no human figure as main subject')
     expect(prompt).not.toContain('a detective in a black coat')
+  })
+
+  it.each(['photorealistic', 'anime_illustration'] as const)('%s 不混入轻小说的萌系标签与 Q 版默认人物', (stylePreset) => {
+    const prompt = buildCoverPrompt({
+      bookName: '转生之旅', authorName: '作者', platform: 'ciweimao', genre: 'light_novel',
+      composition: 'closeup', stylePreset
+    })
+    expect(prompt).toContain(COVER_STYLE_PRESETS[stylePreset].prompt)
+    expect(prompt).not.toContain(PLATFORM_STYLES.ciweimao.prompt)
+    expect(prompt).not.toContain(GENRE_STYLES.light_novel.tag)
+    expect(prompt).not.toContain(GENRE_STYLES.light_novel.characterDesc)
+    expect(prompt).toContain('story-appropriate age, appearance and clothing')
+    expect(prompt).not.toContain('high detail digital painting style')
+  })
+
+  it.each(['qidian', 'ciweimao', 'other'] as const)('真人封面不被 %s 平台的插画默认覆盖', (platform) => {
+    const prompt = buildCoverPrompt({
+      bookName: '宫墙旧事', authorName: '作者', platform, genre: 'ancient_romance',
+      composition: 'closeup', stylePreset: 'photorealistic'
+    })
+    expect(prompt).toContain('Photographic medium lock')
+    expect(prompt).toContain('no illustration, digital painting, anime, cartoon')
+    expect(prompt).not.toContain(PLATFORM_STYLES[platform].prompt)
+    expect(prompt).toContain(GENRE_STYLES.ancient_romance.characterDesc)
+    expect(prompt).toContain('portrait 3:4 ratio')
+  })
+
+  it.each(['photorealistic', 'anime_illustration'] as const)('%s 保留提炼的人物年龄服饰、场景与自选文字排版', (stylePreset) => {
+    const prompt = buildCoverPrompt({
+      bookName: '转生之旅', authorName: '作者', platform: 'fanqie', genre: 'light_novel',
+      composition: 'fullbody', stylePreset,
+      scene: {
+        characterDesc: 'a sixty-year-old woman in weathered bronze armor',
+        backgroundDesc: 'a ruined mountain fortress'
+      },
+      typography: { titleFont: 'brush', authorPosition: 'bottom_right' }
+    })
+    expect(prompt).toContain('a sixty-year-old woman in weathered bronze armor')
+    expect(prompt).toContain('a ruined mountain fortress')
+    expect(prompt).toContain('expressive hand-brushed Chinese calligraphy')
+    expect(prompt).toContain('at the lower right inside the safe area')
+  })
+
+  it.each(['photorealistic', 'anime_illustration'] as const)('%s 的纯场景构图仍省略主体人物', (stylePreset) => {
+    const prompt = buildCoverPrompt({
+      bookName: '无人的城', authorName: '作者', platform: 'fanqie', genre: 'urban',
+      composition: 'scene', stylePreset, scene: { characterDesc: 'a detective in a black coat' }
+    })
+    expect(prompt).toContain('no human figure as main subject')
+    expect(prompt).not.toContain('a detective in a black coat')
+    expect(prompt).not.toContain(GENRE_STYLES.urban.characterDesc)
+  })
+
+  it('学习库定义仍受显式真人媒介约束', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '转生之旅', authorName: '作者', platform: 'ciweimao', genre: 'light_novel',
+      composition: 'closeup', stylePreset: 'photorealistic',
+      learningPreset: { ...COVER_STYLE_PRESETS.photorealistic, prompt: 'a premium narrative poster with a quiet background' }
+    })
+    expect(prompt).toContain('a premium narrative poster with a quiet background')
+    expect(prompt).toContain('Photographic medium lock')
+    expect(prompt).not.toContain(GENRE_STYLES.light_novel.tag)
+    expect(prompt).not.toContain(GENRE_STYLES.light_novel.characterDesc)
+  })
+
+  it('原有二次元轻小说风格保留既有题材默认', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '萌猫日记', authorName: '作者', platform: 'ciweimao', genre: 'light_novel',
+      composition: 'closeup', stylePreset: 'anime_light'
+    })
+    expect(prompt).toContain(COVER_STYLE_PRESETS.anime_light.prompt)
+    expect(prompt).toContain(GENRE_STYLES.light_novel.tag)
+    expect(prompt).toContain(GENRE_STYLES.light_novel.characterDesc)
   })
 })
 
@@ -397,6 +473,11 @@ describe('CoverService.resolvePrompt 手改优先', () => {
   it('给了 promptOverride 就原样返回，一个字不加', () => {
     const mine = 'my own prompt, nothing else'
     expect(service.resolvePrompt({ ...base, promptOverride: mine })).toBe(mine)
+  })
+
+  it.each(['photorealistic', 'anime_illustration'] as const)('%s 也保留手改提示词的最高优先级', (stylePreset) => {
+    const mine = 'my own visual direction'
+    expect(service.resolvePrompt({ ...base, stylePreset, promptOverride: mine })).toBe(mine)
   })
 
   it('手改内容删掉了模板约束也照发（用户说了算）', () => {

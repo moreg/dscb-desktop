@@ -34,10 +34,10 @@ describe('自检按章加载与完整卷纲禁抢写提示', () => {
     const evaluate = vi.spyOn(selfCheck, 'evaluateChapterSelfCheck')
     await service.selfCheckChapter('project', 1, '邱北点燃了湿柴。')
     expect(listAll).not.toHaveBeenCalled()
-    expect(evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ plotSummary: '邱北点燃湿柴', hook: '天边升起黑烟', targetWords: 3000, targetBound: 'about' }))
+    expect(evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ plotSummary: '邱北点燃湿柴', hook: '天边升起黑烟' }))
     await new OutlineRepository(projectDir).upsertDetailed({ chapterNumber: 2, plotSummary: '旧数据核心事件', wordEstimate: '2500 字' })
     await service.selfCheckChapter('project', 2, '正文')
-    expect(evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ plotSummary: '旧数据核心事件', targetWords: 2500 }))
+    expect(evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ plotSummary: '旧数据核心事件' }))
     expect(listAll).not.toHaveBeenCalled()
   })
 

@@ -233,7 +233,7 @@ export function renderGenreVoiceMarkdown(voice: GenreVoice): string {
     lines.push(`- 该题材允许保留的虚词：${voice.allowedHedges.join('、')}`)
   }
   if (voice.suggestedParticles?.length) {
-    lines.push(`- 建议主动使用的题材语气词（替换现代通腔）：${voice.suggestedParticles.join('、')}`)
+    lines.push(`- 按情境选用的题材语气词（符合时代与人物身份时使用）：${voice.suggestedParticles.join('、')}`)
   }
   lines.push('')
   lines.push('**语感替换示例**（左 AI 味 → 右本题材自然写法）：')

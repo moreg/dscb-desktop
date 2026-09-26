@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -150,6 +150,43 @@ describe('WriteService', () => {
     expect(user).toContain('金手指边界')
     expect(user).toMatch(/只能|无法|不能|消耗/)
     expect(user).toContain('输出前必须对照')
+  })
+
+  /**
+   * 回归：结尾状态提取失败时，之前 selfCheckChapter 的 skip 提示说的是
+   * 「本次会话没写过本章正文」——但明明刚在这次会话里为这一章生成过 prompt，
+   * 只是那次辅助 LLM 调用炸了。现在要能分清「提取失败」和「没跑过」。
+   */
+  it('extractEndingState 失败时，selfCheckChapter 的提示要说清是「提取失败」而不是「没跑过」', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new ProseRepo(dir).write(1, '赵乾惨叫一声跪倒在地。林远收剑，望向山门阴影：「谁？」')
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    ;(service as unknown as { flow: unknown }).flow = {
+      extractEndingState: async () => {
+        throw new Error('LLM 超时')
+      }
+    }
+
+    // 触发一次真实的生成流程：会尝试提取上章结尾状态，且会失败
+    await service.buildChapterPrompt(projectId, 2)
+
+    const report = await service.selfCheckChapter(projectId, 2, '第二章正文，随便写点内容。')
+    const skipped = report.items.find((i) => i.id === 'prev_state_missing')
+    expect(skipped?.verdict).toBe('skip')
+    expect(skipped?.detail).toContain('提取失败')
+    expect(skipped?.detail).not.toContain('没写过本章正文')
+  })
+
+  it('从没生成过时，selfCheckChapter 的提示仍是原来「没跑过」的措辞', async () => {
+    const dir = await ps.resolveDir(projectId)
+    await new ProseRepo(dir).write(1, '第一章的正文。')
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    // 不调用 buildChapterPrompt：从未真正尝试过提取上章结尾状态
+    const report = await service.selfCheckChapter(projectId, 2, '第二章正文，随便写点内容。')
+    const skipped = report.items.find((i) => i.id === 'prev_state_missing')
+    expect(skipped?.detail).toContain('没写过本章正文')
   })
 
   it('buildChapterPrompt injects volume anchors and blocks future spoilers', async () => {
@@ -525,6 +562,570 @@ describe('WriteService', () => {
       spy.mockRestore()
     })
 
+    it('autoContinue writes the whole range without pausing', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      const completed: number[] = []
+      const progress = await service.generateChaptersBatch(
+        projectId,
+        1,
+        10,
+        (chapter) => completed.push(chapter),
+        null,
+        {},
+        undefined,
+        { autoContinue: true }
+      )
+
+      expect(progress.status).toBe('completed')
+      expect(progress.currentChapter).toBe(10)
+      expect(progress.total).toBe(10)
+      expect(progress.completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+      expect(completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+      expect(spy).toHaveBeenCalledTimes(10)
+      spy.mockRestore()
+    })
+
+    it.each(['P0', 'omission', 'core', 'structure'])('autoContinue rewrites the outline from prose on outline issue %s and keeps writing', async (issue) => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile, readFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      for (const ch of [1, 2, 3, 4]) {
+        await writeFile(
+          path.join(dir, '细纲', `细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md`),
+          `# 细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md\n\n## 第 ${ch} 章：测试章${ch}\n\n> 所属卷：第 1 卷\n\n- **核心事件**：原细纲事件${ch}\n`,
+          'utf-8'
+        )
+      }
+      const llm = mockLlm('')
+      vi.mocked(llm.generateStream).mockImplementation(async (prompt: string) =>
+        prompt.includes('细纲联动校准器')
+          ? JSON.stringify([2, 3, 4].map((ch) => ({ chapterNumber: ch, patch: { plotSummary: `承接正文${ch}` } })))
+          : JSON.stringify({ patch: { plotSummary: '按正文重写的事件', title: '擅自改名' } }))
+      const service = new WriteService(ps, llm)
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        if (ch === 1) {
+          result.outlineDiff.diffs = [{ type: issue === 'core' ? 4 : issue === 'structure' ? 5 : 1,
+            typeLabel: '漏写', priority: issue === 'P0' ? 'P0' : 'P1', suggestion: '补写关键交接结果' }]
+        }
+        return result
+      })
+      const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+      expect(progress.status).toBe('completed')
+      expect(progress.completed).toEqual([1, 2])
+      const first = await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')
+      expect(first).toContain('按正文重写的事件')
+      expect(first).toContain('## 第 1 章：测试章1')
+      expect(first).not.toContain('擅自改名')
+      expect(await readFile(path.join(dir, '细纲', '细纲_第003章_测试章3.md'), 'utf-8')).toContain('承接正文3')
+    })
+
+    it('autoContinue pauses with the outline intact when the prose rewrite fails', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile, readFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      await writeFile(
+        path.join(dir, '细纲', '细纲_第001章_测试章1.md'),
+        '# 细纲_第001章_测试章1.md\n\n## 第 1 章：测试章1\n\n- **核心事件**：原细纲事件\n',
+        'utf-8'
+      )
+      const service = new WriteService(ps, mockLlm('不是 JSON'))
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        result.outlineDiff.diffs = [{ type: 1, typeLabel: '漏写', priority: 'P1', suggestion: '补写关键交接结果' }]
+        return result
+      })
+      const progress = await service.generateChaptersBatch(projectId, 1, 3, () => {}, null, {}, undefined, { autoContinue: true })
+      expect(progress.status).toBe('paused')
+      expect(progress.pendingPostProcessChapter).toBe(1)
+      expect(progress.pauseReason).toContain('以正文回写细纲未完成')
+      expect(await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')).toContain('原细纲事件')
+    })
+
+    it.each(['missing', 'unchecked'])('autoContinue saves and pauses on outline issue %s', async (issue) => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        result.outlineDiff.hasOutline = issue !== 'missing'
+        result.outlineDiff.checked = issue !== 'unchecked'
+        if (!['missing', 'unchecked'].includes(issue)) {
+          result.outlineDiff.diffs = [{ type: issue === 'core' ? 4 : issue === 'structure' ? 5 : 1,
+            typeLabel: '漏写', priority: issue === 'P0' ? 'P0' : 'P1', suggestion: '补写关键交接结果' }]
+        }
+        return result
+      })
+      const progress = await service.generateChaptersBatch(projectId, 1, 3, () => {}, null, {}, undefined, { autoContinue: true })
+      expect(progress.status).toBe('paused')
+      expect(progress.completed).toEqual([1])
+      expect(progress.pauseReason).toMatch(/第 1 章(?:正文)?已保存/)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain('第1章正文')
+    })
+
+    it('ordinary outline adjustments and held memory items do not interrupt continuous writing', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        result.outlineDiff.diffs = [{ type: 3, typeLabel: '细节调整', priority: 'P1', suggestion: '道具颜色不同' }]
+        result.memoryApply = { applied: { characters: 0, locations: 0, items: 0, foreshadowings: 0, plotPoints: 0, stateChanges: 0, collected: 0 }, errors: [], heldBack: ['单条证据待复核'] }
+        return result
+      })
+      const progress = await service.generateChaptersBatch(projectId, 1, 3, () => {}, null, {}, undefined, { autoContinue: true })
+      expect(progress.status).toBe('completed')
+      expect(progress.completed).toEqual([1, 2, 3])
+    })
+
+    it('autoContinue writes accepted正文 differences back to the detailed outline before continuing', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile, readFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      for (const ch of [1, 2]) {
+        await writeFile(
+          path.join(dir, '细纲', `细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md`),
+          `# 细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md\n\n## 第 ${ch} 章：测试章${ch}\n\n- **核心事件**：原细纲事件\n- **字数目标**：3000-3300 字\n`,
+          'utf-8'
+        )
+      }
+
+      const service = new WriteService(ps, mockLlm(''))
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章扩写正文`)
+        result.outlineDiff = {
+          chapterNumber: ch,
+          hasOutline: true,
+          checked: true,
+          passed: false,
+          diffs: [{
+            type: 5,
+            typeLabel: '结构性偏离',
+            priority: 'P1',
+            resolution: 'review',
+            suggestion: '接受扩写版并回写细纲',
+            actual: '正文约 5400 字',
+            outlinePatch: { wordEstimate: '5200-5600 字' }
+          }]
+        }
+        return result
+      })
+
+      const completed: ChapterFlowResult[] = []
+      const progress = await service.generateChaptersBatch(
+        projectId,
+        1,
+        2,
+        (_chapter, result) => completed.push(result),
+        null,
+        {},
+        undefined,
+        { autoContinue: true }
+      )
+
+      expect(progress.status).toBe('completed')
+      expect(completed).toHaveLength(2)
+      expect(completed.every((result) => result.outlineDiff.diffs.length === 0)).toBe(true)
+      const updated = await readFile(
+        path.join(dir, '细纲', '细纲_第001章_测试章1.md'),
+        'utf-8'
+      )
+      expect(updated).toContain('- **字数目标**：5200-5600 字')
+    })
+
+    it('autoContinue adjusts the next three outlines after an accepted core-event change', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile, readFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      for (const ch of [1, 2, 3, 4]) {
+        await writeFile(
+          path.join(dir, '细纲', `细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md`),
+          `# 细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md\n\n## 第 ${ch} 章：测试章${ch}\n\n> 所属卷：第 1 卷\n\n- **核心事件**：原细纲事件${ch}\n- **字数目标**：3000-3300 字\n`,
+          'utf-8'
+        )
+      }
+      const llm = mockLlm(JSON.stringify([2, 3, 4].map((ch) => ({
+        chapterNumber: ch,
+        reason: '承接上一章新结果',
+        patch: { plotSummary: `承接改写后的核心事件${ch}` }
+      }))))
+      const service = new WriteService(ps, llm)
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        if (ch === 1) {
+          result.outlineDiff = {
+            chapterNumber: ch,
+            hasOutline: true,
+            checked: true,
+            passed: false,
+            diffs: [{
+              type: 4,
+              typeLabel: '核心事件改',
+              priority: 'P1',
+              resolution: 'review',
+              suggestion: '接受正文新结果并联动后续细纲',
+              actual: '主角提前拿到账册，但整体方向不变',
+              outlinePatch: { plotSummary: '主角提前拿到账册' }
+            }]
+          }
+        }
+        return result
+      })
+
+      const progress = await service.generateChaptersBatch(
+        projectId, 1, 4, () => {}, null, {}, undefined, { autoContinue: true }
+      )
+
+      expect(progress.status).toBe('completed')
+      for (const ch of [2, 3, 4]) {
+        const updated = await readFile(
+          path.join(dir, '细纲', `细纲_第${String(ch).padStart(3, '0')}章_测试章${ch}.md`),
+          'utf-8'
+        )
+        expect(updated).toContain(`- **核心事件**：承接改写后的核心事件${ch}`)
+        expect(updated).toContain(`## 第 ${ch} 章：测试章${ch}`)
+      }
+    })
+
+    it('autoContinue writes a volume-level mainline change back from prose', async () => {
+      const dir = await ps.resolveDir(projectId)
+      const { mkdir, writeFile, readFile } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      await writeFile(
+        path.join(dir, '细纲', '细纲_第001章_测试章1.md'),
+        '# 细纲_第001章_测试章1.md\n\n## 第 1 章：测试章1\n\n- **核心事件**：原细纲事件\n',
+        'utf-8'
+      )
+      const service = new WriteService(ps, mockLlm(''))
+      vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+        const result = makeFlowResult(ch, `第${ch}章正文`)
+        result.outlineDiff = {
+          chapterNumber: ch,
+          hasOutline: true,
+          checked: true,
+          passed: false,
+          diffs: [{
+            type: 4,
+            typeLabel: '核心事件改',
+            priority: 'P1',
+            resolution: 'review',
+            suggestion: '本卷主线改为提前决战，需要作者确认',
+            actual: '卷终决战提前',
+            outlinePatch: { plotSummary: '提前完成整卷决战' }
+          }]
+        }
+        return result
+      })
+
+      const progress = await service.generateChaptersBatch(
+        projectId, 1, 3, () => {}, null, {}, undefined, { autoContinue: true }
+      )
+      expect(progress.status).toBe('completed')
+      expect(progress.completed).toEqual([1, 2, 3])
+      expect(await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')).toContain('提前完成整卷决战')
+    })
+
+    it('autoContinue stops at a chapter boundary once aborted, as paused', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const controller = new AbortController()
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => {
+          // 第 2 章写完时用户点了「⏹ 停止」
+          if (ch === 2) controller.abort()
+          return makeFlowResult(ch, `第${ch}章正文`)
+        })
+
+      const completed: number[] = []
+      const progress = await service.generateChaptersBatch(
+        projectId,
+        1,
+        10,
+        (chapter) => completed.push(chapter),
+        null,
+        { signal: controller.signal },
+        undefined,
+        { autoContinue: true }
+      )
+
+      // 停在章与章之间：已完成的章都保留，状态是 paused 而不是 failed，
+      // 这样「继续下一章」从第 3 章接着跑，不会重写已经写好的第 2 章。
+      expect(progress.status).toBe('paused')
+      expect(progress.currentChapter).toBe(2)
+      expect(progress.completed).toEqual([1, 2])
+      expect(completed).toEqual([1, 2])
+      expect(spy).toHaveBeenCalledTimes(2)
+      spy.mockRestore()
+    })
+
+    it('autoContinue still stops at the failing chapter', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => {
+          if (ch === 3) throw new Error('LLM 超时')
+          return makeFlowResult(ch, `第${ch}章正文`)
+        })
+
+      const progress = await service.generateChaptersBatch(
+        projectId,
+        1,
+        5,
+        () => {},
+        null,
+        {},
+        undefined,
+        { autoContinue: true }
+      )
+
+      expect(progress.status).toBe('failed')
+      expect(progress.currentChapter).toBe(3)
+      expect(progress.completed).toEqual([1, 2])
+      expect(progress.error).toContain('LLM 超时')
+      spy.mockRestore()
+    })
+
+    it('resumeChaptersBatch carries autoContinue to the rest of the range', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      const completed: number[] = []
+      const progress = await service.resumeChaptersBatch(
+        projectId,
+        2,
+        5,
+        (chapter) => completed.push(chapter),
+        null,
+        {},
+        { fromChapter: 1, total: 5, completed: [1, 2] },
+        { autoContinue: true }
+      )
+
+      expect(progress.status).toBe('completed')
+      expect(progress.total).toBe(5)
+      expect(progress.completed).toEqual([1, 2, 3, 4, 5])
+      expect(completed).toEqual([3, 4, 5])
+      spy.mockRestore()
+    })
+
+    it('autoStrength: 按每章节奏算出不同的 strengthOverride 传给 runFullFlowForChapter', async () => {
+      // 回归：批量续写不能像编辑器「采用建议」那样直接改写 provider 配置——
+      // 那样跑完一批后 provider 会永久停在最后一章的建议值上。这里验证的是
+      // strengthOverride 确实按每章的节奏数据分别算出、分别传下去，而不是
+      // 全批用同一个值，也不是完全没生效。
+      const dir = await ps.resolveDir(projectId)
+      const { writeFile, mkdir } = await import('fs/promises')
+      await mkdir(path.join(dir, '图解'), { recursive: true })
+      await writeFile(
+        path.join(dir, '图解', '节奏图谱.html'),
+        [
+          '<script>',
+          'const rhythmData = [',
+          "  { chapter: 1, title: '大高潮', emotion: 5, climax: 3, volume: 1, actualized: false },",
+          "  { chapter: 2, title: '过渡章', emotion: 2, climax: 0, volume: 1, actualized: false },",
+          "  { chapter: 3, title: '常规章', emotion: 5, climax: 1, volume: 1, actualized: false }",
+          '];',
+          '</script>'
+        ].join('\n'),
+        'utf-8'
+      )
+
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      await service.generateChaptersBatch(
+        projectId,
+        1,
+        3,
+        () => {},
+        null,
+        {},
+        undefined,
+        { autoContinue: true, autoStrength: true }
+      )
+
+      expect(spy).toHaveBeenCalledTimes(3)
+      // 第 1 章：爽点 3 级大高潮 -> 拉满
+      expect(spy.mock.calls[0][3]).toMatchObject({
+        strengthOverride: { temperature: 1.0, reasoningEffort: 'high' }
+      })
+      // 第 2 章：情绪 2、无爽点的过渡章 -> 求稳
+      expect(spy.mock.calls[1][3]).toMatchObject({
+        strengthOverride: { temperature: 0.6, reasoningEffort: 'low' }
+      })
+      // 第 3 章：情绪 5、爽点 1，不满足前两条 -> 默认档
+      expect(spy.mock.calls[2][3]).toMatchObject({
+        strengthOverride: { temperature: 0.8, reasoningEffort: 'medium' }
+      })
+      spy.mockRestore()
+    })
+
+    it('autoStrength 关闭（默认）时不传 strengthOverride，行为与之前一致', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      await service.generateChaptersBatch(projectId, 1, 1, () => {})
+
+      expect(spy.mock.calls[0][3]).toMatchObject({ strengthOverride: undefined })
+      spy.mockRestore()
+    })
+
+    it('autoStrength 打开但这章没有节奏数据时，用默认档而不是报错中断整批', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+
+      const progress = await service.generateChaptersBatch(
+        projectId,
+        1,
+        1,
+        () => {},
+        null,
+        {},
+        undefined,
+        { autoStrength: true }
+      )
+
+      expect(progress.status).toBe('completed')
+      expect(spy.mock.calls[0][3]).toMatchObject({
+        strengthOverride: { temperature: 0.8, reasoningEffort: 'medium' }
+      })
+      spy.mockRestore()
+    })
+
+    describe('429 限流退避重试', () => {
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      it('限流后按 30s/60s/120s 退避重试，重试成功则整批继续', async () => {
+        // 回归：连续模式背靠背打请求最容易撞限流，之前是零重试，整批直接停在这一章，
+        // 逼用户手动点「重试」。这里验证撞限流后会自己扛，不用人管。
+        vi.useFakeTimers()
+        const service = new WriteService(ps, mockLlm(''))
+        let calls = 0
+        const spy = vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
+          calls++
+          if (calls <= 2) throw new Error('LLM_RATE_LIMIT')
+          return makeFlowResult(ch, `第${ch}章正文`)
+        })
+        const waits: [number, number, number, number][] = []
+        let started!: () => void
+        const firstRetry = new Promise<void>((resolve) => { started = resolve })
+        const onRetryWait = (chapter: number, attempt: number, maxAttempts: number, waitMs: number): void => {
+          waits.push([chapter, attempt, maxAttempts, waitMs])
+          started()
+        }
+
+        const promise = service.generateChaptersBatch(
+          projectId,
+          9,
+          9,
+          () => {},
+          null,
+          {},
+          undefined,
+          { autoContinue: true },
+          onRetryWait
+        )
+        await firstRetry
+        await vi.advanceTimersByTimeAsync(30_000) // 第 1 次重试的等待
+        await vi.advanceTimersByTimeAsync(60_000) // 第 2 次重试的等待
+        const progress = await promise
+
+        expect(progress.status).toBe('completed')
+        expect(progress.completed).toEqual([9])
+        expect(calls).toBe(3)
+        expect(waits).toEqual([
+          [9, 1, 3, 30_000],
+          [9, 2, 3, 60_000]
+        ])
+        spy.mockRestore()
+      })
+
+      it('重试次数用完仍限流则整批照常落 failed，行为跟之前一致，只是多等了几轮', async () => {
+        vi.useFakeTimers()
+        const service = new WriteService(ps, mockLlm(''))
+        const spy = vi
+          .spyOn(service, 'runFullFlowForChapter')
+          .mockRejectedValue(new Error('LLM_RATE_LIMIT'))
+
+        let started!: () => void
+        const firstRetry = new Promise<void>((resolve) => { started = resolve })
+        const promise = service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, undefined, started)
+        await firstRetry
+        await vi.advanceTimersByTimeAsync(30_000)
+        await vi.advanceTimersByTimeAsync(60_000)
+        await vi.advanceTimersByTimeAsync(120_000)
+        const progress = await promise
+
+        expect(progress.status).toBe('failed')
+        expect(progress.error).toContain('LLM_RATE_LIMIT')
+        // 初次 + 3 次重试 = 4 次调用
+        expect(spy).toHaveBeenCalledTimes(4)
+        spy.mockRestore()
+      })
+
+      it('非限流错误不重试，立刻失败', async () => {
+        const service = new WriteService(ps, mockLlm(''))
+        const spy = vi.spyOn(service, 'runFullFlowForChapter').mockRejectedValue(new Error('LLM 超时'))
+
+        const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {})
+
+        expect(progress.status).toBe('failed')
+        expect(progress.error).toContain('LLM 超时')
+        expect(spy).toHaveBeenCalledTimes(1)
+        spy.mockRestore()
+      })
+
+      it('等待限流重试期间点「停止」能立刻打断，不用等满 30 秒', async () => {
+        vi.useFakeTimers()
+        const controller = new AbortController()
+        const service = new WriteService(ps, mockLlm(''))
+        let calls = 0
+        const spy = vi
+          .spyOn(service, 'runFullFlowForChapter')
+          .mockImplementation(async (_pid, ch, _onProgress, opts) => {
+            calls++
+            if ((opts as { signal?: AbortSignal })?.signal?.aborted) throw new Error('LLM_ABORTED')
+            if (calls === 1) throw new Error('LLM_RATE_LIMIT')
+            return makeFlowResult(ch, `第${ch}章正文`)
+          })
+
+        let started!: () => void
+        const firstRetry = new Promise<void>((resolve) => { started = resolve })
+        const promise = service.generateChaptersBatch(
+          projectId,
+          1,
+          1,
+          () => {},
+          null,
+          { signal: controller.signal },
+          undefined,
+          undefined,
+          started
+        )
+        // 让第一次调用先跑完、进入 30s 等待，再点停止——不推进任何真实/虚拟时间
+        await firstRetry
+        controller.abort()
+        const progress = await promise
+
+        expect(progress.status).toBe('failed')
+        expect(progress.error).toContain('LLM_ABORTED')
+        // 中止后由批量循环直接停止，不再进入一次无意义的生成调用。
+        expect(calls).toBe(1)
+        spy.mockRestore()
+      })
+    })
+
     it('returns completed when fromChapter === toChapter (single chapter)', async () => {
       const service = new WriteService(ps, mockLlm(''))
       const spy = vi
@@ -644,7 +1245,7 @@ describe('WriteService', () => {
       spy.mockRestore()
     })
 
-    it('批量续写不会被同章已有的技能格式正文遮蔽（回归：旧格式写入被 read 忽略）', async () => {
+    it('批量续写拒绝覆盖同章已有的技能格式正文', async () => {
       const dir = await ps.resolveDir(projectId)
       const { mkdir, writeFile } = await import('fs/promises')
       await mkdir(path.join(dir, '正文'), { recursive: true })
@@ -656,13 +1257,16 @@ describe('WriteService', () => {
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章的新正文`))
 
-      await service.generateChaptersBatch(projectId, 1, 1, () => {})
+      const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {})
 
-      expect(await new ProseRepo(dir).read(1)).toBe('第1章的新正文')
+      expect(await new ProseRepo(dir).read(1)).toBe('旧的正文')
+      expect(progress.status).toBe('failed')
+      expect(progress.error).toContain('已有正文')
+      expect(spy).not.toHaveBeenCalled()
       spy.mockRestore()
     })
 
-    it('落盘失败时仍把正文回传给 UI，不让一整章 LLM 产出随异常消失', async () => {
+    it('落盘失败时保存独立恢复稿，不误发章节完成事件', async () => {
       const service = new WriteService(ps, mockLlm(''))
       const flowSpy = vi
         .spyOn(service, 'runFullFlowForChapter')
@@ -680,13 +1284,17 @@ describe('WriteService', () => {
         delivered.push({ chapter, content: result.content })
       )
 
-      // 关键：正文必须已经送到 UI 手上
-      expect(delivered).toEqual([{ chapter: 1, content: '第1章的正文内容' }])
+      expect(delivered).toEqual([])
       expect(progress.status).toBe('failed')
       expect(progress.error).toContain('保存失败')
       expect(progress.error).toContain('EBUSY')
       // 没存成就不算完成
       expect(progress.completed).toEqual([])
+      const { readdir, readFile } = await import('fs/promises')
+      const recoveryDir = path.join(await ps.resolveDir(projectId), '.cache', 'batch-drafts')
+      const [recovery] = await readdir(recoveryDir)
+      expect(await readFile(path.join(recoveryDir, recovery), 'utf-8')).toBe('第1章的正文内容')
+      expect(progress.error).toContain(recovery)
       flowSpy.mockRestore()
       saveSpy.mockRestore()
     })
@@ -733,7 +1341,7 @@ describe('WriteService', () => {
       await mkdir(path.join(dir, '细纲'), { recursive: true })
       await writeFile(
         path.join(dir, '细纲', '第01卷.md'),
-        '# 第01卷\n\n## 第1章：测试章节\n\n**核心事件：** 测试事件\n**爽点：** 测试爽点\n**章末钩子：** 测试钩子\n',
+        '# 第01卷\n\n## 第1章：测试章节\n\n**核心事件：** 测试事件\n**爽点：** 测试爽点\n**章末钩子：** 测试钩子\n**本章写作要求：** 必须当面交接账册\n\n### 情节安排\n先验印章，再交账册，不得倒序。\n',
         'utf-8'
       )
 
@@ -754,11 +1362,12 @@ describe('WriteService', () => {
 
       // 验证所有 flow 方法都收到了步骤 1 生成的 content
       expect(outlineSpy).toHaveBeenCalledWith(
-        expect.any(String), // outlineText
+        expect.stringContaining('必须当面交接账册'), // 完整细纲，不能只传核心事件
         knownContent,        // ← 关键：content 必须是步骤 1 生成的
         1,
         expect.any(Object)
       )
+      expect(outlineSpy.mock.calls[0][0]).toContain('先验印章，再交账册，不得倒序。')
       expect(memSpy).toHaveBeenCalledWith(
         knownContent,        // ← 关键
         1,
@@ -780,6 +1389,9 @@ describe('WriteService', () => {
 
       // 验证返回的 content 也是步骤 1 生成的
       expect(result.content).toBe(knownContent)
+      // 有细纲且对照跑成：两个状态位都要立起来
+      expect(result.outlineDiff.hasOutline).toBe(true)
+      expect(result.outlineDiff.checked).toBe(true)
 
       genSpy.mockRestore()
       outlineSpy.mockRestore()
@@ -788,10 +1400,52 @@ describe('WriteService', () => {
       figSpy.mockRestore()
     })
 
+    it('marks hasOutline=false when the chapter has no outline at all', async () => {
+      // 没写任何细纲文件：diffs 同样是空的，但含义是"没得对照"而不是"对照通过"，
+      // 批量面板的逐章小结靠这个标志区分，否则会给自由发挥的章发绿灯。
+      const service = new WriteService(ps, mockLlm(''))
+      const genSpy = vi.spyOn(service, 'generateChapterStream').mockResolvedValue('正文内容')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const flow = (service as unknown as { flow: any }).flow
+      const outlineSpy = vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
+      vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue('{}')
+      vi.spyOn(flow, 'evaluateRhythmStream').mockResolvedValue('{}')
+      vi.spyOn(flow, 'generateFigureStream').mockResolvedValue('{}')
+
+      const result = await service.runFullFlowForChapter(projectId, 1, () => {})
+
+      expect(result.outlineDiff.hasOutline).toBe(false)
+      expect(result.outlineDiff.checked).toBe(false)
+      expect(result.outlineDiff.diffs).toEqual([])
+      // 没细纲就不该白烧一次对照调用
+      expect(outlineSpy).not.toHaveBeenCalled()
+      genSpy.mockRestore()
+      vi.restoreAllMocks()
+    })
+
     it('isolates errors: one flow step failure does not abort others', async () => {
       const llm = mockLlm('')
       const service = new WriteService(ps, llm)
       const knownContent = '正文内容'
+
+      // 必须真有细纲，否则对照步骤根本不会被调用，"抛错也不影响其他步骤"就成了空跑
+      const dir = await ps.resolveDir(projectId)
+      const { writeFile, mkdir } = await import('fs/promises')
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      await writeFile(
+        path.join(dir, '细纲', '第01卷.md'),
+        [
+          '# 第01卷',
+          '',
+          '## 第1章：测试章节',
+          '',
+          '**核心事件：** 测试事件',
+          '**爽点：** 测试爽点',
+          '**章末钩子：** 测试钩子',
+          ''
+        ].join('\n'),
+        'utf-8'
+      )
 
       const genSpy = vi
         .spyOn(service, 'generateChapterStream')
@@ -811,6 +1465,9 @@ describe('WriteService', () => {
       // 细纲对照失败 → 用空报告兜底
       expect(result.outlineDiff.diffs).toEqual([])
       expect(result.outlineDiff.passed).toBe(true)
+      // 但不能让调用方把"没跑成"读成"对照通过"：本章有细纲，只是没检查成
+      expect(result.outlineDiff.hasOutline).toBe(true)
+      expect(result.outlineDiff.checked).toBe(false)
       // 其他步骤仍被调用
       expect(memSpy).toHaveBeenCalled()
       expect(rhythmSpy).toHaveBeenCalled()

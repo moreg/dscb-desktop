@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DiagnosticFixKind,
+  ListProjectsQuery,
   CreateProjectDataInput,
   CreateChapterInput,
   UpdateChapterMetaInput,
@@ -69,7 +70,9 @@ function makeStreamHandle<T>(
 }
 
 const api = {
-  listProjects: () => ipcRenderer.invoke('library:list'),
+  listProjects: (query?: ListProjectsQuery) => ipcRenderer.invoke('library:list', query ?? {}),
+  setProjectArchived: (projectId: string, archived: boolean) =>
+    ipcRenderer.invoke('library:setArchived', { projectId, archived }),
   getMobileServerStatus: () =>
     ipcRenderer.invoke('mobile:status') as Promise<MobileServerStatus>,
   startMobileServer: () =>
@@ -95,6 +98,10 @@ const api = {
     ipcRenderer.invoke('projects:updateInfo', { projectId, ...info }),
   setBenchmarkBooks: (projectId: string, books: string[]) =>
     ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
+  addTitleCandidate: (projectId: string, candidate: { name: string; description: string; seed?: string }) =>
+    ipcRenderer.invoke('projects:addTitleCandidate', { projectId, ...candidate }),
+  removeTitleCandidate: (projectId: string, candidateId: string) =>
+    ipcRenderer.invoke('projects:removeTitleCandidate', { projectId, candidateId }),
   watchProject: (projectId: string) => ipcRenderer.invoke('projects:watch', projectId) as Promise<boolean>,
   stopWatchProject: () => ipcRenderer.invoke('projects:stopWatch') as Promise<boolean>,
   listStyleProfiles: () => ipcRenderer.invoke('styles:list'),
@@ -265,6 +272,8 @@ const api = {
     ipcRenderer.invoke('outline:generateDetailedRange', id, fromChapter, count) as Promise<DetailedOutlineItem[]>,
   getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
   getVolumes: (id: string) => ipcRenderer.invoke('outline:getVolumes', id),
+  exportChapters: (projectId: string, volumeNumber?: number) =>
+    ipcRenderer.invoke('export:chapters', { projectId, volumeNumber }),
   getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
   getVolumeOutlines: (id: string) => ipcRenderer.invoke('outline:getVolumeOutlines', id),
   getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),
@@ -547,6 +556,12 @@ const api = {
       chapterNumber,
       content
     }),
+  fixCharacterPositions: (projectId: string, chapterNumber: number, content: string) =>
+    ipcRenderer.invoke('write:fixCharacterPositions', {
+      projectId,
+      chapterNumber,
+      content
+    }),
   checkAdjustPlanCompliance: (
     projectId: string,
     chapterNumber: number,
@@ -676,7 +691,13 @@ const api = {
     // 调用方可自带 requestId，配合 abortStream(requestId) 实现「停止批量续写」
     externalRequestId?: string,
     /** 整批进度：失败后「重试当前章」回传，避免进度从头计数 */
-    batchState?: { fromChapter: number; total: number; completed: number[] }
+    batchState?: { fromChapter: number; total: number; completed: number[]; pendingPostProcessChapter?: number },
+    /** 连续模式：每章写完不暂停，一口气写到 toChapter（「一键写 N 章」） */
+    autoContinue?: boolean,
+    /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
+    autoStrength?: boolean,
+    /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -695,8 +716,17 @@ const api = {
         onToken(payload.token, payload.done)
       }
     }
+    const retryWaitHandler = (
+      _e: unknown,
+      payload: { requestId: string; chapter: number; attempt: number; maxAttempts: number; waitMs: number }
+    ) => {
+      if (payload.requestId === requestId && onRetryWait) {
+        onRetryWait(payload.chapter, payload.attempt, payload.maxAttempts, payload.waitMs)
+      }
+    }
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
+    if (onRetryWait) ipcRenderer.on('write:batchRetryWait', retryWaitHandler as never)
     return ipcRenderer
       .invoke('write:generateBatch', {
         projectId,
@@ -704,11 +734,14 @@ const api = {
         toChapter,
         styleProfileId,
         requestId,
-        batchState
+        batchState,
+        autoContinue,
+        autoStrength
       })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
+        if (onRetryWait) ipcRenderer.removeListener('write:batchRetryWait', retryWaitHandler as never)
       })
   },
   resumeBatch: (
@@ -720,7 +753,13 @@ const api = {
     onToken?: (token: string, done: boolean) => void,
     externalRequestId?: string,
     /** 上一次 BatchProgress 的整批进度，用于续跑时延续计数而不是从头计 */
-    batchState?: { fromChapter: number; total: number; completed: number[] }
+    batchState?: { fromChapter: number; total: number; completed: number[]; pendingPostProcessChapter?: number },
+    /** 连续模式：每章写完不暂停，一口气写到 toChapter */
+    autoContinue?: boolean,
+    /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
+    autoStrength?: boolean,
+    /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -739,8 +778,17 @@ const api = {
         onToken(payload.token, payload.done)
       }
     }
+    const retryWaitHandler = (
+      _e: unknown,
+      payload: { requestId: string; chapter: number; attempt: number; maxAttempts: number; waitMs: number }
+    ) => {
+      if (payload.requestId === requestId && onRetryWait) {
+        onRetryWait(payload.chapter, payload.attempt, payload.maxAttempts, payload.waitMs)
+      }
+    }
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
+    if (onRetryWait) ipcRenderer.on('write:batchRetryWait', retryWaitHandler as never)
     return ipcRenderer
       .invoke('write:resumeBatch', {
         projectId,
@@ -748,13 +796,26 @@ const api = {
         toChapter,
         styleProfileId,
         requestId,
-        batchState
+        batchState,
+        autoContinue,
+        autoStrength
       })
       .finally(() => {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
+        if (onRetryWait) ipcRenderer.removeListener('write:batchRetryWait', retryWaitHandler as never)
       })
   },
+  listMemoryCandidates: (projectId: string) =>
+    ipcRenderer.invoke('memory:listCandidates', { projectId }),
+  inspectMemoryCandidate: (projectId: string, chapterNumber: number) =>
+    ipcRenderer.invoke('write:inspectMemoryCandidate', { projectId, chapterNumber }),
+  forceApplyMemoryCandidateItems: (
+    projectId: string,
+    chapterNumber: number,
+    picks: { kind: string; index: number }[]
+  ) =>
+    ipcRenderer.invoke('write:forceApplyMemoryCandidateItems', { projectId, chapterNumber, picks }),
   getUsageSummary: () => ipcRenderer.invoke('usage:summary'),
   getUsageDayDetail: (date: string) => ipcRenderer.invoke('usage:dayDetail', date),
   getUsageByProject: () => ipcRenderer.invoke('usage:byProject'),

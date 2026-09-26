@@ -161,6 +161,9 @@ interface Props {
   /** 一键标点兜底（确定性替换，零 LLM），挂在自检的 punctuation_rule 项上 */
   onFixPunctuation?: () => void | Promise<void>
   fixPunctuationLoading?: boolean
+  /** 一键补位置衔接（LLM 只改人物首次出场段落），挂在自检的 char_position 项上 */
+  onFixCharPosition?: () => void | Promise<void>
+  fixCharPositionLoading?: boolean
   /** 自检失败项 → 续写临时要求 */
   onApplySelfCheckToContinue?: () => void
   /** 失败 / 部分失败 / 手动补跑：重新跑记忆与设定同步 */
@@ -215,6 +218,8 @@ export default function ChapterFlowPanel(props: Props) {
     onApplySelfCheckToRewrite,
     onFixPunctuation,
     fixPunctuationLoading,
+    onFixCharPosition,
+    fixCharPositionLoading,
     onApplySelfCheckToContinue,
     onRetryAutoSync,
     onUndoAutoSync,
@@ -729,6 +734,9 @@ export default function ChapterFlowPanel(props: Props) {
     const stale = () => epoch !== flowEpochRef.current
     let buffer = ''
     try {
+      const rhythm = await window.api.getRhythm(projectId)
+      if (stale()) return
+      const expectedEmotion = rhythm.find((entry) => entry.chapter === chapterNumber)?.emotion ?? 5
       const r = await trackStream(
         window.api.evaluateRhythmStream(projectId, chapterNumber, (token, done) => {
           if (token) buffer += token
@@ -741,8 +749,7 @@ export default function ChapterFlowPanel(props: Props) {
         setRhythmEvaluating(false)
         return
       }
-      // parseRhythmEvaluationJson 优先用 LLM 输出的 expectedEmotion（透传字段）
-      const evaluation = parseRhythmEvaluationJson(buffer, chapterNumber, 5)
+      const evaluation = parseRhythmEvaluationJson(buffer, chapterNumber, expectedEmotion)
       setRhythmEvaluation(evaluation)
       onCompleteRhythm?.()
       // 自动应用（diff ≤ 1）
@@ -1076,6 +1083,8 @@ export default function ChapterFlowPanel(props: Props) {
           onApplyToRewrite={onApplySelfCheckToRewrite}
           onFixPunctuation={onFixPunctuation}
           fixPunctuationLoading={fixPunctuationLoading}
+          onFixCharPosition={onFixCharPosition}
+          fixCharPositionLoading={fixCharPositionLoading}
           onApplyToContinue={onApplySelfCheckToContinue}
           onRerun={
             onRerunSelfCheck

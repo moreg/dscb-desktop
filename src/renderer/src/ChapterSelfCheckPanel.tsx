@@ -74,6 +74,12 @@ interface Props {
    */
   onFixPunctuation?: () => void | Promise<void>
   fixPunctuationLoading?: boolean
+  /**
+   * 一键补位置衔接：只让模型改人物首次出场的那一两段，补「仍在原地」或转场交代，
+   * 其余正文不动。挂在 char_position 项上。
+   */
+  onFixCharPosition?: () => void | Promise<void>
+  fixCharPositionLoading?: boolean
 }
 
 /**
@@ -92,12 +98,14 @@ export default function ChapterSelfCheckPanel(props: Props) {
     onApplyToRewrite,
     onApplyToContinue,
     onFixPunctuation,
-    fixPunctuationLoading
+    fixPunctuationLoading,
+    onFixCharPosition,
+    fixCharPositionLoading
   } = props
   const [expanded, setExpanded] = useState(defaultExpanded ?? true)
   const [filter, setFilter] = useState<'all' | 'issues'>('issues')
   const hasIssues = selfCheckHasActionableIssues(report)
-  const actionsDisabled = stale || !!error || rerunLoading || fixPunctuationLoading
+  const actionsDisabled = stale || !!error || rerunLoading || fixPunctuationLoading || fixCharPositionLoading
 
   const sorted = useMemo(() => {
     if (!report?.items?.length) return [] as SelfCheckItemResult[]
@@ -284,6 +292,18 @@ export default function ChapterSelfCheckPanel(props: Props) {
                         title="确定性替换：—— / — / -- 改逗号或句号，…… / … 改句号。不调 LLM，可撤销"
                       >
                         {fixPunctuationLoading ? '替换中…' : '⚡ 一键替换标点'}
+                      </button>
+                    ) : null}
+                    {item.id === 'char_position' && item.verdict === 'warn' && onFixCharPosition ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ marginTop: 6 }}
+                        disabled={actionsDisabled}
+                        onClick={() => void onFixCharPosition()}
+                        title="只改这些人物首次出场的段落：补一句仍在原地或转场交代，其余正文不动。调用 LLM，可 Ctrl+Z 撤销"
+                      >
+                        {fixCharPositionLoading ? '修补中…' : '⚡ 一键补位置衔接'}
                       </button>
                     ) : null}
                     {item.missing?.length ? (

@@ -24,6 +24,13 @@ const updateProjectInfoSchema = z.object({
   description: z.string().max(5000).optional()
 })
 
+const addTitleCandidateSchema = z.object({
+  projectId: projectIdSchema,
+  name: projectNameSchema,
+  description: z.string().max(5000),
+  seed: z.string().max(200).optional()
+})
+
 export function registerProjectsIpc(service: ProjectService): () => void {
   // A watcher belongs to one renderer window. A single global watcher would
   // cause window B to replace window A's subscription when two books are open.
@@ -61,6 +68,27 @@ export function registerProjectsIpc(service: ProjectService): () => void {
         name: validated.name.trim(),
         description: validated.description?.trim() || undefined
       })
+    }
+  )
+  safeHandle(
+    'projects:addTitleCandidate',
+    async (_e, payload: { projectId: string; name: string; description: string; seed?: string }) => {
+      const validated = validateInput(addTitleCandidateSchema, payload)
+      return service.addTitleCandidate(validated.projectId, {
+        name: validated.name.trim(),
+        description: validated.description.trim(),
+        seed: validated.seed?.trim() || undefined
+      })
+    }
+  )
+  safeHandle(
+    'projects:removeTitleCandidate',
+    async (_e, payload: { projectId: string; candidateId: string }) => {
+      const validated = validateInput(
+        z.object({ projectId: projectIdSchema, candidateId: z.string().min(1).max(100) }),
+        payload
+      )
+      return service.removeTitleCandidate(validated.projectId, validated.candidateId)
     }
   )
   safeHandle(

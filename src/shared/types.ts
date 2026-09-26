@@ -8,6 +8,19 @@ export interface ProjectMeta {
   genre?: string
   createdAt: string
   lastOpenedAt: string
+  /** 归档时间。有值则不在书案展示，项目文件仍保留。 */
+  archivedAt?: string
+}
+
+export interface ListProjectsQuery {
+  /** 默认只返回未归档项目；为 true 时连归档一并返回。 */
+  includeArchived?: boolean
+}
+
+export function isProjectArchived(
+  project: { archivedAt?: string | null }
+): project is { archivedAt: string } {
+  return typeof project.archivedAt === 'string' && project.archivedAt.trim() !== ''
 }
 
 export interface Library {
@@ -150,6 +163,17 @@ export interface ProjectData {
    * 对齐 oh-story-claudecode 的对标/拆文库分离设计。
    */
   benchmarkBooks?: string[]
+  /** 灵感抽签里“加入候选”的书名与简介，供作品信息页挑选；不影响当前书名。 */
+  titleCandidates?: ProjectTitleCandidate[]
+}
+
+export interface ProjectTitleCandidate {
+  id: string
+  name: string
+  description: string
+  /** 抽签时的包装角度，如“强悬念 × 轻松爽快 × 突出主角困境” */
+  seed?: string
+  createdAt: string
 }
 
 export interface ChapterMeta {
@@ -468,7 +492,9 @@ export interface MobileServerStatus {
 }
 
 export interface RendererApi {
-  listProjects: () => Promise<ProjectMeta[]>
+  listProjects: (query?: ListProjectsQuery) => Promise<ProjectMeta[]>
+  /** 归档/移回书案。归档不删文件，只从书案列表隐藏。 */
+  setProjectArchived: (projectId: string, archived: boolean) => Promise<ProjectMeta>
   getMobileServerStatus: () => Promise<MobileServerStatus>
   startMobileServer: () => Promise<MobileServerStatus>
   stopMobileServer: () => Promise<MobileServerStatus>
@@ -494,6 +520,12 @@ export interface RendererApi {
   ) => Promise<ProjectData>
   /** 设置项目的对标书列表（拆文库中的书名，写作时召回方法论） */
   setBenchmarkBooks: (projectId: string, books: string[]) => Promise<string[]>
+  /** 把一条灵感抽签结果加入作品信息的候选列表（同名同简介去重） */
+  addTitleCandidate: (
+    projectId: string,
+    candidate: { name: string; description: string; seed?: string }
+  ) => Promise<ProjectTitleCandidate[]>
+  removeTitleCandidate: (projectId: string, candidateId: string) => Promise<ProjectTitleCandidate[]>
   /** 进入项目视图时启动文件监听（主进程 fs.watch 项目目录） */
   watchProject: (projectId: string) => Promise<boolean>
   /** 离开项目视图时停止文件监听 */
@@ -691,6 +723,11 @@ export interface RendererApi {
   ) => Promise<DetailedOutlineItem[]>
   getRhythm: (projectId: string) => Promise<RhythmEntry[]>
   getVolumes: (projectId: string) => Promise<Volume[]>
+  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；用户取消保存对话框时 canceled=true */
+  exportChapters: (
+    projectId: string,
+    volumeNumber?: number
+  ) => Promise<{ canceled: boolean; path?: string }>
   getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
   getVolumeOutlines: (projectId: string) => Promise<VolumeOutline[]>
   getDiagnostics: (projectId: string) => Promise<Diagnostic[]>
@@ -795,6 +832,12 @@ export interface RendererApi {
     chapterNumber: number,
     content: string
   ) => Promise<ChapterSelfCheckReport>
+  /** 写后自检「人物位置对应线索」一键修补（LLM 只改人物首次出场段落） */
+  fixCharacterPositions: (
+    projectId: string,
+    chapterNumber: number,
+    content: string
+  ) => Promise<CharacterPositionFixResult>
   /** 落笔要点达成度核验（LLM 逐条判定勾选的落笔要点是否在正文中有可见落地） */
   checkAdjustPlanCompliance: (
     projectId: string,
@@ -880,7 +923,8 @@ export interface RendererApi {
     fileName: string,
     html: string
   ) => Promise<string>
-  /** 批量续写：从 fromChapter 到 toChapter 逐章生成，每章完成后暂停等用户确认。
+  /** 批量续写：从 fromChapter 到 toChapter 逐章生成，默认每章完成后暂停等用户确认
+   *  （autoContinue=true 则一口气写完整段）。
    *  可传 requestId，配合 abortStream(requestId) 中断当前章的生成。 */
   generateBatch: (
     projectId: string,
@@ -891,7 +935,17 @@ export interface RendererApi {
     onToken?: (token: string, done: boolean) => void,
     requestId?: string,
     /** 整批进度：失败后「重试当前章」回传，避免进度从头计数 */
-    batchState?: { fromChapter: number; total: number; completed: number[] }
+    batchState?: { fromChapter: number; total: number; completed: number[]; pendingPostProcessChapter?: number },
+    /** 连续模式：每章写完不暂停，一口气写到 toChapter（「一键写 N 章」） */
+    autoContinue?: boolean,
+    /**
+     * 按本章节奏（细纲情绪/爽点）自动调整生成强度（温度/思考强度）。
+     * 单次调用覆盖，不会像编辑器「采用建议」那样永久改写 provider 配置；
+     * 只对 openai/anthropic/openai-responses/claude 协议生效。
+     */
+    autoStrength?: boolean,
+    /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
@@ -903,8 +957,27 @@ export interface RendererApi {
     onToken?: (token: string, done: boolean) => void,
     requestId?: string,
     /** 上一次 BatchProgress 的整批进度，用于续跑时延续计数而不是从剩余段重新计 */
-    batchState?: { fromChapter: number; total: number; completed: number[] }
+    batchState?: { fromChapter: number; total: number; completed: number[]; pendingPostProcessChapter?: number },
+    /** 连续模式：每章写完不暂停，一口气写到 toChapter */
+    autoContinue?: boolean,
+    /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
+    autoStrength?: boolean,
+    /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
+  /** 列出还没完全落地的记忆候选（整章待核对 / 个别条目被挡下） */
+  listMemoryCandidates: (projectId: string) => Promise<MemoryCandidateSummary[]>
+  /** 逐条列出一章的候选记忆与校验结论（按当前正文重算） */
+  inspectMemoryCandidate: (
+    projectId: string,
+    chapterNumber: number
+  ) => Promise<MemoryCandidateDetail | null>
+  /** 作者确认属实后强制写入选中条目——绕开证据校验，调用前必须二次确认 */
+  forceApplyMemoryCandidateItems: (
+    projectId: string,
+    chapterNumber: number,
+    picks: { kind: MemoryCandidateItem['kind']; index: number }[]
+  ) => Promise<{ applied: MemoryApplyResult; forcedCount: number }>
   getUsageSummary: () => Promise<UsageSummary>
   /** P16-C：按日期获取 LLM 调用详情（点击趋势图某天柱状图） */
   getUsageDayDetail: (date: string) => Promise<UsageRecord[]>
@@ -1611,12 +1684,25 @@ export interface SelfCheckItemResult {
   verdict: SelfCheckVerdict
   detail: string
   /** 修订方向与展示文案分离；旧报告缺省时只给保守的核对要求。 */
-  repairKind?: 'short_length' | 'over_length' | 'verify_plot' | 'verify_foreshadow' | 'execution_error'
+  repairKind?: 'short_length' | 'over_length' | 'verify_plot' | 'verify_foreshadow' | 'execution_error' | 'char_position'
   /**
    * 未通过时：约束句里「正文中找不到落地痕迹」的子事件原文。
    * 「按自检改正文」会把它逐条列给模型，否则模型只知道哪项没过、不知道缺哪一段。
    */
   missing?: string[]
+}
+
+/** 「人物位置对应线索」一键修补的结果 */
+export interface CharacterPositionFixResult {
+  /** 修补后的整章正文（未改动时与传入一致） */
+  content: string
+  /** 被替换的段落数 */
+  changed: number
+  /** 修补后能对上的人物 */
+  fixed: string[]
+  /** 修补后仍对不上、需人工核对的人物 */
+  remaining: string[]
+  message: string
 }
 
 export interface ChapterSelfCheckReport {
@@ -1974,6 +2060,21 @@ export interface OutlineDiffReport {
   diffs: OutlineDiffItem[]
   /** 总体通过判定（无 P0/P1 即通过） */
   passed: boolean
+  /**
+   * 本章有没有细纲可对照。false 表示压根没细纲，diffs 为空并不代表"对照通过"。
+   * 旧调用方不填时为 undefined（未知），展示端按"未知"处理，不要当成 false。
+   */
+  hasOutline?: boolean
+  /**
+   * 对照步骤是否真的跑完。有细纲但 LLM 调用失败时为 false，
+   * 此时 diffs 同样是空的，不能读作"无差异"。
+   */
+  checked?: boolean
+  /**
+   * 连续写作「以正文为准」回写细纲后填：已按正文回写的差异条数（0 表示本章无需回写）。
+   * undefined 表示没跑过正文优先回写。回写成功后 diffs 只保留仍未处理的项。
+   */
+  proseSynced?: number
 }
 
 /** 以正文回写细纲的应用结果 */
@@ -2139,8 +2240,13 @@ export interface MemoryApplyPreview {
 
 /** 记忆应用结果 */
 export interface MemoryApplyResult {
-  /** 候选已提取但尚未生效；不按网络故障自动重试。 */
+  /** 整章候选都未生效（正文本身待核对）；不按网络故障自动重试。 */
   reviewRequired?: string[]
+  /**
+   * 本章其余条目已写入，这几条因证据不过关被单独挡下。
+   * 与 reviewRequired 互斥：前者是整章没入库，这个是部分入库。
+   */
+  heldBack?: string[]
   /** 正文或任务版本已变化，本次未写入。 */
   superseded?: boolean
   applied: {
@@ -2236,7 +2342,7 @@ export interface FigureDraft {
 export interface BatchProgress {
   /** 总章数 */
   total: number
-  /** 当前是第几章（1-based） */
+  /** 本批已保存的正文章数（可能仍有待补检查的章节） */
   current: number
   /** 当前章号 */
   currentChapter: number
@@ -2248,10 +2354,56 @@ export interface BatchProgress {
   status: 'pending' | 'generating' | 'flow' | 'paused' | 'completed' | 'failed'
   /** 暂停原因（差异/失败等） */
   pauseReason?: string
-  /** 已完成章节 */
+  /** 正文已保存，继续时先复用该章正文补跑后处理。 */
+  pendingPostProcessChapter?: number
+  /** 正文已保存的章节；pendingPostProcessChapter 表示其中仍待检查的一章。 */
   completed: number[]
   /** 错误信息 */
   error?: string
+}
+
+/**
+ * 一章的记忆候选状态（读自 .cache/memory-candidates/chapter-N.json）。
+ * pending = 整章都没入库；partial = 其余已入库，这几条被挡下。
+ */
+export interface MemoryCandidateSummary {
+  chapterNumber: number
+  status: 'pending' | 'partial'
+  /** 整章未生效的原因（正文本身待核对） */
+  chapterIssues: string[]
+  /** 被单独挡下的条目原因 */
+  itemIssues: string[]
+  /** 分级之前落盘的旧记录：级别未知，重跑一次才准 */
+  legacy: boolean
+  updatedAt: string
+}
+
+/** 记忆候选里的单个条目（复核界面逐条勾选用） */
+export interface MemoryCandidateItem {
+  kind: 'plotPoint' | 'stateChange' | 'foreshadowCollect' | 'settingsPatch'
+  /** 在 extraction 对应数组里的下标，与 kind 一起定位条目（仅本次提取内有效） */
+  index: number
+  /** 内容派生的稳定标识，跨重跑仍指向同一条 */
+  key: string
+  label: string
+  /** 模型给的引文 */
+  evidence?: string
+  /** 未通过校验的原因；空数组 = 通过 */
+  issues: string[]
+  /** 作者已确认属实并强制写入过 */
+  forced: boolean
+}
+
+/** 一章候选记忆的逐条明细 */
+export interface MemoryCandidateDetail {
+  chapterNumber: number
+  /** 整章未入库的原因（非空时逐条强制写入也救不了，要先处理正文） */
+  chapterIssues: string[]
+  /** 正文在这份候选之后改过：强制写入会把旧稿结论写进新稿，界面须禁用 */
+  stale: boolean
+  /** 分级之前落盘的旧记录 */
+  legacy: boolean
+  items: MemoryCandidateItem[]
 }
 
 /** 单章完整流程结果（生成→质检→细纲对照→记忆→节奏→图解） */
@@ -2267,6 +2419,8 @@ export interface ChapterFlowResult {
   memory: MemoryExtraction
   /** 自动提交结果；有待核对问题时提取候选仍返回，但不生效。 */
   memoryApply?: MemoryApplyResult
+  /** 设定同步结果，供批量流程识别未完成的关键后处理。 */
+  settingsApply?: SettingsApplyResult
   /** 节奏评估（可能为 null，LLM 失败时） */
   rhythm: RhythmEvaluation | null
   /** 图解草稿 */
@@ -2606,6 +2760,8 @@ export type CoverComposition = 'closeup' | 'fullbody' | 'scene' | 'duo'
  */
 export type CoverStylePreset =
   | 'auto'
+  | 'photorealistic'
+  | 'anime_illustration'
   | 'fanqie_impact'
   | 'ancient_romance'
   | 'ink_minimal'

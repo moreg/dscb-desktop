@@ -1,6 +1,7 @@
 import { CharacterRepository } from './character-repository'
 import {
   buildCoverPrompt,
+  COVER_STYLE_MEDIUM_REQUIREMENTS,
   COVER_STYLE_PRESETS,
   inferGenre,
   type CoverStyleDefinition
@@ -332,6 +333,10 @@ export class CoverPromptService {
     const styleLine = selectedStyle
       ? `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 色彩、光线和画面组织必须符合该风格，不要另选画风。`
       : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
+    const mediumRequirement = input.stylePreset ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset] : undefined
+    const mediumLine = mediumRequirement
+      ? `\n   媒介要求：${mediumRequirement}。所有画面字段与 styleHintZh 都必须遵守该媒介，不得因题材或平台改成另一种画风。人物年龄、身份、体型和服饰遵循小说资料；更换画风不等于更换角色，不要擅自改成少年、学生、Q版人物或现代装。`
+      : ''
 
     return `你是中文网文封面美术指导。请阅读下面这本小说的资料，提炼出**这本书专属**的封面画面要素。
 
@@ -344,7 +349,7 @@ ${input.extraHint?.trim() ? `【作者额外要求】\n${input.extraHint.trim()}
 
 【约束】
 1. ${genreLine}
-2. ${styleLine}
+2. ${styleLine}${mediumLine}
 3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。${selectedStyle?.noPeople ? '当前风格要求无人物，composition 必须返回 scene，characterDesc 必须留空。' : ''}
 4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段用**英文**书写（它们会直接送进图像模型），每项一句话，具体到可画出来的程度。
    - characterDesc：年龄、性别、发型、服饰材质与颜色、神态、手持物。

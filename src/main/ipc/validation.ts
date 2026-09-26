@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 
 /**
  * IPC 输入验证模式。
@@ -28,10 +29,25 @@ export const createChapterVersionInputSchema = z.object({
 export const batchStateSchema = z
   .object({
     fromChapter: chapterNumberSchema,
-    total: z.number().int().min(1),
-    completed: z.array(chapterNumberSchema).max(10_000)
+    total: z.number().int().min(1).max(MAX_BATCH_CHAPTERS),
+    completed: z.array(chapterNumberSchema).max(MAX_BATCH_CHAPTERS),
+    pendingPostProcessChapter: chapterNumberSchema.optional()
   })
   .optional()
+
+export const batchWriteInputSchema = z.object({
+  projectId: projectIdSchema,
+  fromChapter: chapterNumberSchema,
+  toChapter: chapterNumberSchema,
+  styleProfileId: z.string().min(1).max(255).nullable().optional(),
+  requestId: z.string().min(1).max(255),
+  batchState: batchStateSchema,
+  autoContinue: z.boolean().optional(),
+  autoStrength: z.boolean().optional()
+}).superRefine((input, ctx) => {
+  const error = getBatchRangeError(input.fromChapter, input.toChapter, input.batchState)
+  if (error) ctx.addIssue({ code: 'custom', message: error })
+})
 
 // 草稿操作
 export const saveDraftInputSchema = z.object({

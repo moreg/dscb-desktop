@@ -103,6 +103,22 @@ export class ChapterService {
   }
 
   async listChapters(projectId: string): Promise<ChapterMeta[]> {
+    return (await this.listChaptersInternal(projectId)).metas
+  }
+
+  /**
+   * 同 listChapters，但顺带把已读出的正文一并返回（章号 -> 正文），
+   * 供需要正文全文的调用方（如导出）复用，避免正文文件被读两遍。
+   */
+  async listChaptersWithContent(
+    projectId: string
+  ): Promise<{ metas: ChapterMeta[]; content: Map<number, string> }> {
+    return this.listChaptersInternal(projectId)
+  }
+
+  private async listChaptersInternal(
+    projectId: string
+  ): Promise<{ metas: ChapterMeta[]; content: Map<number, string> }> {
     const dir = await this.projectService.resolveDir(projectId)
     const rhythm = await this.readRhythm(dir)
     const prose = new ProseRepo(dir)
@@ -110,12 +126,14 @@ export class ChapterService {
     const nameToId = await this.readCharacterNameToIdMap(dir)
     const now = new Date().toISOString()
     const metas: ChapterMeta[] = []
+    const content = new Map<number, string>()
     for (const e of rhythm) {
       const has = await prose.exists(e.chapter)
       const det = detailedMap.get(e.chapter)
       // wordCount：正文实时统计（v4 删除了 记忆系统/章节进度.md，不再有外部字数表）
-      const content = has ? await prose.read(e.chapter) : ''
-      const wordCount = content ? countWords(content) : 0
+      const chapterContent = has ? await prose.read(e.chapter) : ''
+      const wordCount = chapterContent ? countWords(chapterContent) : 0
+      content.set(e.chapter, chapterContent)
       metas.push({
         schemaVersion: 1,
         updatedAt: now,
@@ -133,7 +151,7 @@ export class ChapterService {
         appearingCharacters: this.mapCharactersToIds(det?.charactersAppearing, nameToId)
       })
     }
-    return metas
+    return { metas, content }
   }
 
   async getChapter(projectId: string, n: number): Promise<ChapterContent> {

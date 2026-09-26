@@ -384,7 +384,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
     try {
       const list = loadPendingSyncQueue(getLocalStorage())
       setPendingSyncList(list)
-      void window.api.listProjects().then((projects: ProjectMeta[]) => {
+      void window.api.listProjects({ includeArchived: true }).then((projects: ProjectMeta[]) => {
         const map: Record<string, string> = {}
         for (const p of projects) map[p.id] = p.name
         for (const it of list) {

@@ -3,6 +3,7 @@ import {
   buildSystemPrompt,
   resolveGenreVoice,
   flattenForbiddenWords,
+  CHAPTER_RULE_SECTIONS,
   FORBIDDEN_WORD_CATEGORIES,
   GENRE_VOICES
 } from '../src/main/data/skill-prompts'
@@ -62,11 +63,11 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('边界铁律')
   })
 
-  it('embeds 7 de-AI techniques', () => {
+  it('embeds default narration rules from the editable section registry', () => {
     const prompt = buildSystemPrompt()
-    expect(prompt).toContain('展示反应，而非解释情绪')
-    expect(prompt).toContain('直给原则')
-    expect(prompt).toContain('打破对仗感')
+    const narration = CHAPTER_RULE_SECTIONS.find((section) => section.key === 'deai')!
+    expect(prompt).toContain(narration.text)
+    expect(narration.text).toContain('【自然准确的叙述】')
   })
 
   it('embeds dialogue rules', () => {
@@ -83,23 +84,41 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('事件-反应-结果')
   })
 
-  it('applies chapter rule overrides; unlisted sections keep defaults', () => {
-    const prompt = buildSystemPrompt('玄幻', null, {
-      dialogue: '【自定义对话规则】只许说真话。'
-    })
-    expect(prompt).toContain('【自定义对话规则】只许说真话。')
-    // 未覆盖的小节仍用内置默认
-    expect(prompt).toContain('章末结尾硬性原则')
-    // 对话小节被整体覆盖，其默认标记不再出现
-    expect(prompt).not.toContain('真人对话特征')
-  })
+  it.each([undefined, 'extend', 'finish'] as const)(
+    'applies custom narration and dialogue in %s mode; unlisted sections keep defaults',
+    (mode) => {
+      const narration = CHAPTER_RULE_SECTIONS.find((section) => section.key === 'deai')!
+      const prompt = buildSystemPrompt(
+        '玄幻',
+        null,
+        {
+          dialogue: '【自定义对话规则】只许说真话。',
+          deai: '【自定义叙述规则】采用作者指定的抒情文风。'
+        },
+        null,
+        mode
+      )
+      expect(prompt).toContain('【自定义对话规则】只许说真话。')
+      expect(prompt).toContain('【自定义叙述规则】采用作者指定的抒情文风。')
+      // 未覆盖的小节仍用内置默认，续写覆盖声明也不能重新插入默认叙述要求。
+      expect(prompt).toContain('章末结尾硬性原则')
+      expect(prompt).not.toContain(narration.text)
+      expect(prompt).not.toContain('【自然准确的叙述】')
+      expect(prompt).not.toContain('真人对话特征')
+    }
+  )
 
-  it('skips a section whose override is an empty string (= 停用)', () => {
-    const prompt = buildSystemPrompt('玄幻', null, { ending: '' })
-    expect(prompt).not.toContain('章末结尾硬性原则')
-    // 其他小节不受影响
-    expect(prompt).toContain('真人对话特征')
-  })
+  it.each([undefined, 'extend', 'finish'] as const)(
+    'skips disabled narration and ending sections in %s mode',
+    (mode) => {
+      const prompt = buildSystemPrompt('玄幻', null, { ending: '', deai: '' }, null, mode)
+      expect(prompt).not.toContain('章末结尾硬性原则')
+      expect(prompt).not.toContain('【自然准确的叙述】')
+      // 其他小节与续写行为不受影响。
+      expect(prompt).toContain('真人对话特征')
+      expect(prompt.includes('续写模式覆盖声明')).toBe(mode !== undefined)
+    }
+  )
 
   it('embeds continuity rules', () => {
     const prompt = buildSystemPrompt()
@@ -197,7 +216,7 @@ describe('flattenForbiddenWords', () => {
 })
 
 describe('genre-voice suggestedParticles（题材语气词）', () => {
-  it('古风/仙侠有建议主动使用的语气词清单', () => {
+  it('古风/仙侠有可按情境选用的语气词清单', () => {
     const voice = resolveGenreVoice('古风')
     expect(voice.suggestedParticles?.length).toBeGreaterThan(5)
     expect(voice.suggestedParticles).toContain('约莫')
@@ -207,7 +226,7 @@ describe('genre-voice suggestedParticles（题材语气词）', () => {
 
   it('古风语气词渲染进 system prompt', () => {
     const prompt = buildSystemPrompt('古风')
-    expect(prompt).toContain('建议主动使用的题材语气词')
+    expect(prompt).toContain('按情境选用的题材语气词')
     expect(prompt).toContain('约莫')
     expect(prompt).toContain('殊不知')
   })
@@ -216,6 +235,6 @@ describe('genre-voice suggestedParticles（题材语气词）', () => {
     const voice = resolveGenreVoice('现代都市')
     expect(voice.suggestedParticles).toBeUndefined()
     const prompt = buildSystemPrompt('现代都市')
-    expect(prompt).not.toContain('建议主动使用的题材语气词')
+    expect(prompt).not.toContain('按情境选用的题材语气词')
   })
 })

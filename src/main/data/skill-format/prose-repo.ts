@@ -190,7 +190,7 @@ export class ProseRepo {
 }
 
 /** 清理标题中的非法文件名字符，保留可读性 */
-function sanitizeTitle(title: string): string {
+export function sanitizeTitle(title: string): string {
   if (!title) return '未命名'
   // 替换路径分隔符和其他危险字符为空格，再合并连续空白
   return title.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim() || '未命名'

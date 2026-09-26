@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
-import { beginStream, endStream } from '../data/stream-abort-registry'
+import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import { safeHandle, safeSend } from './safe-handle'
 import type {
   MemoryApplyResult,
@@ -13,7 +13,7 @@ import {
   projectIdSchema,
   chapterNumberSchema,
   chapterContentSchema,
-  batchStateSchema
+  batchWriteInputSchema
 } from './validation'
 import { z } from 'zod'
 
@@ -564,6 +564,29 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  /** 写后自检「人物位置对应线索」一键修补（LLM 只改人物首次出场段落） */
+  safeHandle(
+    'write:fixCharacterPositions',
+    async (
+      _e,
+      payload: { projectId: string; chapterNumber: number; content: string }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          content: chapterContentSchema
+        }),
+        payload
+      )
+      return service.fixCharacterPositions(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.content
+      )
+    }
+  )
+
   /** 落笔要点达成度核验（LLM 逐条判定） */
   safeHandle(
     'write:checkAdjustPlanCompliance',
@@ -614,6 +637,56 @@ export function registerWriteIpc(service: WriteService): void {
         memory: validated.memory as MemoryApplyResult,
         settings: validated.settings as SettingsApplyResult
       })
+    }
+  )
+
+  /** 复核面板：逐条列出一章的候选记忆与校验结论 */
+  safeHandle(
+    'write:inspectMemoryCandidate',
+    async (_e, payload: { projectId: string; chapterNumber: number }) => {
+      const validated = validateInput(
+        z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema }),
+        payload
+      )
+      return service.inspectMemoryCandidate(validated.projectId, validated.chapterNumber)
+    }
+  )
+
+  /**
+   * 作者确认属实后强制写入选中的候选条目——这是唯一绕开证据校验的入口，
+   * 界面必须先做二次确认再调它。
+   */
+  safeHandle(
+    'write:forceApplyMemoryCandidateItems',
+    async (
+      _e,
+      payload: {
+        projectId: string
+        chapterNumber: number
+        picks: { kind: string; index: number }[]
+      }
+    ) => {
+      const validated = validateInput(
+        z.object({
+          projectId: projectIdSchema,
+          chapterNumber: chapterNumberSchema,
+          picks: z
+            .array(
+              z.object({
+                kind: z.enum(['plotPoint', 'stateChange', 'foreshadowCollect', 'settingsPatch']),
+                index: z.number().int().min(0).max(500)
+              })
+            )
+            .min(1)
+            .max(100)
+        }),
+        payload
+      )
+      return service.forceApplyMemoryCandidateItems(
+        validated.projectId,
+        validated.chapterNumber,
+        validated.picks
+      )
     }
   )
 
@@ -798,131 +871,80 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
-  ipcMain.handle(
-    'write:generateBatch',
-    async (
-      e,
-      payload: {
-        projectId: string
-        fromChapter: number
-        toChapter: number
-        styleProfileId?: string | null
-        requestId: string
-        batchState?: { fromChapter: number; total: number; completed: number[] }
-      }
-    ) => {
+  // 同一项目只允许一个批量任务；暂停、失败和取消均在 finally 中释放。
+  const activeBatchProjects = new Set<string>()
+  const activeBatchRequests = new Set<string>()
+  for (const channel of ['write:generateBatch', 'write:resumeBatch'] as const) {
+    ipcMain.handle(channel, async (e, payload: unknown) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
-        const validated = validateInput(
-          z.object({
-            projectId: projectIdSchema,
-            fromChapter: chapterNumberSchema,
-            toChapter: chapterNumberSchema,
-            styleProfileId: styleProfileIdSchema,
-            requestId: z.string().min(1),
-            // 整批进度：失败后「重试当前章」带上它，避免进度从头计数
-            batchState: batchStateSchema
-          }),
-          payload
-        )
-        // 批量流也登记进 abort 注册表：渲染端「停止」按钮 invoke llm:abort(requestId)
-        // 即可中断当前章的 LLM 生成（后续步骤自然不再执行，progress 返回 failed）。
-        const signal = beginStream(validated.requestId)
+        const validated = validateInput(batchWriteInputSchema, payload)
+        if (activeBatchProjects.has(validated.projectId)) {
+          throw new Error('BATCH_ALREADY_RUNNING: 该项目正在批量写作，请等待当前任务结束')
+        }
+        if (activeBatchRequests.has(validated.requestId)) {
+          throw new Error('BATCH_REQUEST_ALREADY_RUNNING: 请勿重复提交同一个批量任务')
+        }
+        // 在任何异步操作前登记，防止多窗口或连续点击同时通过检查。
+        activeBatchProjects.add(validated.projectId)
+        activeBatchRequests.add(validated.requestId)
         try {
-          const progress = await service.generateChaptersBatch(
-            validated.projectId,
-            validated.fromChapter,
-            validated.toChapter,
-            (chapter, result) => {
-              safeSend(win, 'write:batchChapterComplete', {
-                requestId: validated.requestId,
-                chapter,
-                result
-              })
-            },
-            validated.styleProfileId,
-            {
-              signal,
-              onToken: (token) =>
-                safeSend(win, 'llm:token', {
+          const signal = beginStream(validated.requestId)
+          const abortBatch = () => { abortStream(validated.requestId) }
+          e.sender.once('destroyed', abortBatch)
+          try {
+            if (e.sender.isDestroyed()) abortBatch()
+            const runBatch = channel === 'write:resumeBatch'
+              ? service.resumeChaptersBatch.bind(service)
+              : service.generateChaptersBatch.bind(service)
+            const progress = await runBatch(
+              validated.projectId,
+              validated.fromChapter,
+              validated.toChapter,
+              (chapter, result) => {
+                safeSend(win, 'write:batchChapterComplete', {
                   requestId: validated.requestId,
-                  token,
-                  done: false
+                  chapter,
+                  result
                 })
-            },
-            validated.batchState
-          )
-          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, progress }
+              },
+              validated.styleProfileId,
+              {
+                signal,
+                onToken: (token) =>
+                  safeSend(win, 'llm:token', {
+                    requestId: validated.requestId,
+                    token,
+                    done: false
+                  })
+              },
+              validated.batchState,
+              {
+                autoContinue: validated.autoContinue === true,
+                autoStrength: validated.autoStrength === true
+              },
+              (chapter, attempt, maxAttempts, waitMs) =>
+                safeSend(win, 'write:batchRetryWait', {
+                  requestId: validated.requestId,
+                  chapter,
+                  attempt,
+                  maxAttempts,
+                  waitMs
+                })
+            )
+            return { ok: true, progress }
+          } finally {
+            e.sender.removeListener('destroyed', abortBatch)
+            safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+            endStream(validated.requestId)
+          }
         } finally {
-          endStream(validated.requestId)
+          activeBatchProjects.delete(validated.projectId)
+          activeBatchRequests.delete(validated.requestId)
         }
       } catch (err) {
-        return { ok: false, error: (err as Error).message }
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
-    }
-  )
-
-  ipcMain.handle(
-    'write:resumeBatch',
-    async (
-      e,
-      payload: {
-        projectId: string
-        fromChapter: number
-        toChapter: number
-        styleProfileId?: string | null
-        requestId: string
-        batchState?: { fromChapter: number; total: number; completed: number[] }
-      }
-    ) => {
-      const win = BrowserWindow.fromWebContents(e.sender)
-      try {
-        const validated = validateInput(
-          z.object({
-            projectId: projectIdSchema,
-            fromChapter: chapterNumberSchema,
-            toChapter: chapterNumberSchema,
-            styleProfileId: styleProfileIdSchema,
-            requestId: z.string().min(1),
-            // 整批进度（续跑时由 UI 回传上一次的 BatchProgress）
-            batchState: batchStateSchema
-          }),
-          payload
-        )
-        const signal = beginStream(validated.requestId)
-        try {
-          const progress = await service.resumeChaptersBatch(
-            validated.projectId,
-            validated.fromChapter,
-            validated.toChapter,
-            (chapter, result) => {
-              safeSend(win, 'write:batchChapterComplete', {
-                requestId: validated.requestId,
-                chapter,
-                result
-              })
-            },
-            validated.styleProfileId,
-            {
-              signal,
-              onToken: (token) =>
-                safeSend(win, 'llm:token', {
-                  requestId: validated.requestId,
-                  token,
-                  done: false
-                })
-            },
-            validated.batchState
-          )
-          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, progress }
-        } finally {
-          endStream(validated.requestId)
-        }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
-      }
-    }
-  )
+    })
+  }
 }

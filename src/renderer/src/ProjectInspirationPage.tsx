@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { DetailedOutlineItem, MainOutline, ProjectData, ProjectMeta } from '../../shared/types'
+import type { DetailedOutlineItem, MainOutline, ProjectData } from '../../shared/types'
 import { buildProjectInspirationPrompt, parseProjectInspiration } from './project-inspiration'
 
 interface DrawResult {
@@ -26,6 +26,11 @@ function nextSeed(previous?: string): string {
   return seed
 }
 
+function candidateKey(item: { name: string; description: string }): string {
+  return `${item.name.trim()}
+${item.description.trim()}`
+}
+
 function detailedPlotContext(items: DetailedOutlineItem[]): string {
   return items
     .filter((item) => item.plotSummary?.trim())
@@ -35,9 +40,12 @@ function detailedPlotContext(items: DetailedOutlineItem[]): string {
     .slice(0, 5000)
 }
 
-export default function ProjectInspirationPage() {
-  const [projects, setProjects] = useState<ProjectMeta[]>([])
-  const [projectId, setProjectId] = useState('')
+interface Props {
+  projectId: string
+  onProjectUpdated?: (name: string) => void
+}
+
+export default function ProjectInspirationPage({ projectId, onProjectUpdated }: Props) {
   const [project, setProject] = useState<ProjectData | null>(null)
   const [outline, setOutline] = useState<MainOutline | null>(null)
   const [plots, setPlots] = useState('')
@@ -50,18 +58,10 @@ export default function ProjectInspirationPage() {
   const [copyId, setCopyId] = useState<number | null>(null)
   const [savingResultId, setSavingResultId] = useState<number | null>(null)
   const [savedResultId, setSavedResultId] = useState<number | null>(null)
+  const [candidateKeys, setCandidateKeys] = useState<Set<string>>(new Set())
+  const [addingCandidateId, setAddingCandidateId] = useState<number | null>(null)
   const generationRef = useRef(0)
   const handleRef = useRef<{ abort: () => Promise<unknown> } | null>(null)
-
-  useEffect(() => {
-    void window.api
-      .listProjects()
-      .then((list) => {
-        setProjects(list)
-        setProjectId((current) => current || list[0]?.id || '')
-      })
-      .finally(() => setLoadingProject(false))
-  }, [])
 
   useEffect(() => {
     if (!projectId) {
@@ -92,6 +92,7 @@ export default function ProjectInspirationPage() {
         )
         if (cancelled) return
         setProject(nextProject)
+        setCandidateKeys(new Set((nextProject.titleCandidates ?? []).map(candidateKey)))
         setOutline(nextOutline)
         setPlots(detailedPlotContext(details))
         setProseExcerpt(
@@ -139,7 +140,7 @@ export default function ProjectInspirationPage() {
       return
     }
     if (!project) {
-      setError('请先选择一本书')
+      setError('项目信息尚未读取完成')
       return
     }
 
@@ -215,19 +216,45 @@ export default function ProjectInspirationPage() {
         description: result.description
       })
       setProject(updated)
-      setProjects((current) =>
-        current.map((item) =>
-          item.id === projectId
-            ? { ...item, name: updated.name, description: updated.description }
-            : item
-        )
-      )
+      onProjectUpdated?.(updated.name)
       setSavedResultId(result.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSavingResultId(null)
     }
+  }
+
+  const addCandidate = async (result: DrawResult) => {
+    if (!projectId) return
+    setAddingCandidateId(result.id)
+    setError('')
+    try {
+      const candidates = await window.api.addTitleCandidate(projectId, {
+        name: result.name,
+        description: result.description,
+        seed: result.seed
+      })
+      setCandidateKeys(new Set(candidates.map(candidateKey)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAddingCandidateId(null)
+    }
+  }
+
+  const renderCandidateButton = (result: DrawResult) => {
+    const added = candidateKeys.has(candidateKey(result))
+    return (
+      <button
+        className="btn btn-ghost btn-sm"
+        onClick={() => void addCandidate(result)}
+        disabled={added || addingCandidateId !== null}
+        title="加入候选后，可在“作品信息”页查看并随时选用"
+      >
+        {addingCandidateId === result.id ? '加入中…' : added ? '✓ 已在候选' : '☆ 加入候选'}
+      </button>
+    )
   }
 
   const latest = results[0]
@@ -241,22 +268,14 @@ export default function ProjectInspirationPage() {
     <div className="inspiration-page">
       <div className="page-head">
         <h1>灵感抽签</h1>
-        <p className="desc">从书里的真实内容出发，每次抽一个不同的书名与简介包装方案。</p>
+        <p className="desc">从本书的真实内容出发，每次抽一个不同的书名与简介包装方案。</p>
       </div>
 
       <div className="inspiration-layout">
         <section className="inspiration-controls">
-          <div className="field">
-            <label>选择书籍</label>
-            <select
-              className="select"
-              value={projectId}
-              onChange={(event) => setProjectId(event.target.value)}
-              disabled={loadingProject || drawing}
-            >
-              {projects.length === 0 ? <option value="">暂无项目</option> : null}
-              {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
+          <div className="inspiration-source-note">
+            <span>当前书名</span>
+            <strong>{loadingProject ? '正在读取…' : project ? `《${project.name}》` : '—'}</strong>
           </div>
           <div className="inspiration-source-note">
             <span>取材范围</span>
@@ -298,6 +317,7 @@ export default function ProjectInspirationPage() {
                 <button className="btn btn-ghost btn-sm" onClick={() => void copyResult(latest)}>
                   {copyId === latest.id ? '✓ 已复制' : '复制书名与简介'}
                 </button>
+                {renderCandidateButton(latest)}
                 <button
                   className="btn btn-primary btn-sm"
                   onClick={() => void saveResultToProject(latest)}
@@ -315,7 +335,7 @@ export default function ProjectInspirationPage() {
             <div className="inspiration-empty">
               <div className="inspiration-lottery" aria-hidden>签</div>
               <h2>{drawing ? '正在摇签…' : '签筒还空着'}</h2>
-              <p>{drawing ? 'AI 正在从大纲中寻找新的包装角度' : '选好书后，抽取第一组书名与简介'}</p>
+              <p>{drawing ? 'AI 正在从大纲中寻找新的包装角度' : '点击左侧按钮，抽取第一组书名与简介'}</p>
             </div>
           )}
         </section>
@@ -334,6 +354,7 @@ export default function ProjectInspirationPage() {
                   <button className="btn btn-ghost btn-sm" onClick={() => void copyResult(item)}>
                     {copyId === item.id ? '✓ 已复制' : '复制'}
                   </button>
+                  {renderCandidateButton(item)}
                   <button
                     className="btn btn-primary btn-sm"
                     onClick={() => void saveResultToProject(item)}

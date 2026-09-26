@@ -97,18 +97,24 @@ describe('WriteFlowService.checkOutlineStream', () => {
     expect(report.passed).toBe(true)
   })
 
-  it('falls back to empty diffs on parse failure', () => {
+  it('marks parse failure as unchecked instead of passing', () => {
     const report = parseOutlineDiffJson('not json', 9)
     expect(report.diffs).toEqual([])
-    expect(report.passed).toBe(true)
+    expect(report.passed).toBe(false)
+    expect(report.checked).toBe(false)
   })
 
-  it('normalizes invalid priority to P2', () => {
+  it('does not downgrade invalid priority to a harmless P2', () => {
     const raw = JSON.stringify([
       { type: 4, typeLabel: '核心事件改', suggestion: '重写', priority: 'P9' }
     ])
     const report = parseOutlineDiffJson(raw, 4)
-    expect(report.diffs[0].priority).toBe('P2')
+    expect(report.passed).toBe(false)
+    expect(report.checked).toBe(false)
+  })
+
+  it.each(['[{}]', '[null]', '[{"type":99,"priority":"P0"}]', '[{"type":1', '{}'])('rejects malformed outline reports: %s', (raw) => {
+    expect(parseOutlineDiffJson(raw, 1)).toMatchObject({ passed: false, checked: false })
   })
 
   it('parses outlinePatch for update-outline path', () => {
@@ -178,6 +184,18 @@ describe('WriteFlowService.evaluateRhythmStream', () => {
     expect(eval_!.expectedEmotion).toBe(5)
     expect(eval_!.diff).toBe(1)
     expect(eval_!.autoApply).toBe(true)
+  })
+
+  it('keeps the planned emotion as the baseline when the model changes its echoed value', () => {
+    const evaluation = parseRhythmEvaluationJson(
+      JSON.stringify({ expectedEmotion: 3, actualEmotion: 3 }), 8, 9
+    )
+    expect(evaluation).toMatchObject({ expectedEmotion: 9, actualEmotion: 3, diff: 6, autoApply: false })
+  })
+
+  it('rejects numeric overflow instead of turning it into an automatic rhythm update', () => {
+    expect(parseRhythmEvaluationJson('{"actualEmotion":1e309}', 1, 9)).toBeNull()
+    expect(parseRhythmEvaluationJson('{"actualEmotion":5}', 1, Number.NaN)).toBeNull()
   })
 
   it('returns null on parse failure', () => {

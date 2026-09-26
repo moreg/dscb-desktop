@@ -620,3 +620,42 @@ describe('一键修复 applyFix', () => {
     ).rejects.toThrow('未知的修复类型')
   })
 })
+
+describe('细纲内部字数一致性', () => {
+  let tmp: string
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'diag-budget-'))
+    mkdirSync(join(tmp, '细纲'), { recursive: true })
+  })
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  function writeOutline(target: string, points: number[]): void {
+    writeFileSync(
+      join(tmp, '细纲', '细纲_第001章_测试.md'),
+      [
+        '# 细纲_第001章_测试.md',
+        '',
+        '## 第 1 章：测试',
+        '',
+        '- **核心事件**：测试',
+        `- **字数目标**：${target}`,
+        '',
+        '## 情节细化',
+        '',
+        '### 情节点序列',
+        '',
+        ...points.map((n, i) => `${i + 1}. 情节${i + 1}。【冲突·密，约 ${n} 字】`),
+        ''
+      ].join('\n'),
+      'utf-8'
+    )
+  }
+
+  it('字数目标与情节点合计不一致不告警：篇幅差异不算体检问题', async () => {
+    writeOutline('正文约4300字', [1200, 1300])
+    const report = await serviceFor(tmp).report('x')
+    expect(report.find((d) => d.message.includes('情节点字数合计'))).toBeUndefined()
+  })
+})

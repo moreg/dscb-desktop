@@ -25,9 +25,12 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
   const resolutions = new Set(['updateOutline', 'updateContent', 'either', 'review'])
   try {
     const m = raw.match(/\[[\s\S]*\]/)
-    if (!m) return { chapterNumber, diffs: [], passed: true }
+    if (!m) return { chapterNumber, diffs: [], passed: false, checked: false }
     const arr = JSON.parse(m[0])
-    if (!Array.isArray(arr)) return { chapterNumber, diffs: [], passed: true }
+    if (!Array.isArray(arr) || arr.some((x) => !x || typeof x !== 'object' ||
+      ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority))) {
+      return { chapterNumber, diffs: [], passed: false, checked: false }
+    }
     const diffs: OutlineDiffItem[] = arr
       .filter((x) => x && typeof x === 'object' && typeof x.type === 'number')
       .map((x) => {
@@ -51,7 +54,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
     const passed = !diffs.some((d) => d.priority === 'P0' || d.priority === 'P1')
     return { chapterNumber, diffs, passed }
   } catch {
-    return { chapterNumber, diffs: [], passed: true }
+    return { chapterNumber, diffs: [], passed: false, checked: false }
   }
 }
 
@@ -117,26 +120,24 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
 
 /**
  * 解析 LLM 输出的节奏评估 JSON。
- * 优先用 LLM 输出的 expectedEmotion（透传字段），否则用参数 fallback。
+ * 使用调用方从节奏图谱读取的预期值，模型仅评估实际情绪，不能修改比较基准。
  * 自动计算 diff 与 autoApply（diff ≤ 1 自动回写）。
  * 失败返回 null（调用方应跳过回填）。
  */
 export function parseRhythmEvaluationJson(
   raw: string,
   chapterNumber: number,
-  expectedFallback: number
+  expectedEmotion: number
 ): RhythmEvaluation | null {
   try {
     const m = raw.match(/\{[\s\S]*\}/)
     if (!m) return null
     const obj = JSON.parse(m[0])
-    if (typeof obj.actualEmotion !== 'number') return null
+    if (typeof obj.actualEmotion !== 'number' || !Number.isFinite(obj.actualEmotion) ||
+      !Number.isFinite(expectedEmotion)) return null
     // 钳制到 0-10
     const actual = Math.max(0, Math.min(10, obj.actualEmotion))
-    const expected =
-      typeof obj.expectedEmotion === 'number'
-        ? Math.max(0, Math.min(10, obj.expectedEmotion))
-        : expectedFallback
+    const expected = Math.max(0, Math.min(10, expectedEmotion))
     const diff = Math.abs(actual - expected)
     return {
       chapterNumber,

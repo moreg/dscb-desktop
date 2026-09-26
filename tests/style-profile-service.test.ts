@@ -89,6 +89,18 @@ describe('StyleProfileService', () => {
     expect((await projectService.getProjectData(other.id)).defaultStyleProfileId).toBeUndefined()
   })
 
+  it('deleting a style also clears defaults on archived projects', async () => {
+    const service = new StyleProfileService(projectService, mockLlm('{}'))
+    const created = await service.create(makeStyleInput('归档书的文风'))
+    const archived = await projectService.create({ name: '已归档', genre: '玄幻' })
+    await projectService.updateProjectData(archived.id, { defaultStyleProfileId: created.id })
+    await projectService.setArchived(archived.id, true)
+
+    await service.delete(created.id)
+
+    expect((await projectService.getProjectData(archived.id)).defaultStyleProfileId).toBeUndefined()
+  })
+
   it('deleting a style leaves unrelated project defaults untouched', async () => {
     const service = new StyleProfileService(projectService, mockLlm('{}'))
     const keep = await service.create(makeStyleInput('保留'))

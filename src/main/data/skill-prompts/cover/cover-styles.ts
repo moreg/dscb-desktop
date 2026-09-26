@@ -253,6 +253,28 @@ export interface CoverStyleDefinition {
   noPeople?: boolean
 }
 
+/** 显式媒介选择优先于题材模板与学习库的画风建议。 */
+export const COVER_STYLE_MEDIUM_REQUIREMENTS: Partial<Record<CoverStylePreset, string>> = {
+  photorealistic:
+    'Photographic medium lock: render the chosen composition as a live-action film poster or professional photograph; when people are present, portray original fictional novel characters with believable human anatomy, natural skin texture and realistic fabric. Use no illustration, digital painting, anime, cartoon or 3D-rendered plastic skin. Preserve the story characters ages, identities and period-appropriate clothing',
+  anime_illustration:
+    '2D anime medium lock: render the chosen composition as hand-drawn 2D anime illustration with clean expressive linework and layered cel shading; no live-action photography, photorealistic skin or 3D rendering. When people are present, preserve the story characters ages, identities and period-appropriate clothing; do not automatically turn them into chibi figures, children, school students or cute mascots'
+}
+
+/** 选择明确媒介时，题材只补充故事内容，不再携带另一种媒介或人物画法。 */
+const GENRE_SUBJECTS: Record<CoverGenre, string> = {
+  xianxia: 'Chinese cultivation fantasy, spiritual adventure and an ethereal atmosphere',
+  urban: 'modern urban life, contemporary ambition and city drama',
+  ancient_romance: 'ancient Chinese romance, palace drama and emotional relationships',
+  modern_romance: 'modern romance, emotional intimacy and a warm atmosphere',
+  mystery: 'mystery thriller, suspense and a noir atmosphere',
+  scifi: 'science fiction, futuristic technology and speculative worlds',
+  western_fantasy: 'western high fantasy, epic adventure and a medieval setting',
+  historical: 'historical Chinese drama, conflict and period atmosphere',
+  supernatural: 'Chinese supernatural horror, eerie mysteries and a ghostly atmosphere',
+  light_novel: 'light-novel storytelling, imaginative adventures and expressive character relationships'
+}
+
 export const COVER_STYLE_PRESETS: Record<Exclude<CoverStylePreset, 'auto'>, CoverStyleDefinition> = {
   fanqie_impact: {
     label: '高饱和爽文海报',
@@ -318,6 +340,32 @@ export const COVER_STYLE_PRESETS: Record<Exclude<CoverStylePreset, 'auto'>, Cove
     titlePosition: 'across the lower third below the characters eye line',
     titleEffect: 'clean white or warm gold with a subtle outline and cinematic shadow',
     authorPosition: 'small at the bottom center aligned to a thin divider line'
+  },
+  photorealistic: {
+    label: '真人写实封面',
+    description: '原创小说角色的真人摄影质感、真实肤质与电影光影，适合现代、古装、悬疑和幻想题材。',
+    prompt:
+      'photorealistic live-action novel cover, cinematic photographic composition, authentic camera depth and premium film-poster finish; when people are present, portray original fictional characters with believable anatomy, natural skin texture and detailed realistic costume materials',
+    colorPalette: 'natural skin tones, deep charcoal, muted blue and warm amber, adapted to the story setting',
+    lighting: 'physically believable cinematic key light, soft shadow transitions, controlled rim light and photographic depth of field',
+    titleFont: 'large refined Chinese display lettering with strong clean shapes and restrained white or warm gold contrast',
+    authorFont: 'small clean Chinese serif or sans-serif text with generous spacing',
+    titlePosition: 'across the lower third within a quiet text area, leaving faces and defining costume details unobstructed',
+    titleEffect: 'subtle photographic-poster shadow and a fine high-contrast outline, without excessive extrusion',
+    authorPosition: 'small and centered along the bottom safe area with a clear gap below the title'
+  },
+  anime_illustration: {
+    label: '二次元动漫封面',
+    description: '精致二维动漫人物、清晰线稿与赛璐璐层次，适合古风、都市、玄幻、冒险和言情题材。',
+    prompt:
+      'high-quality 2D anime novel cover, clean confident linework, layered cel shading and atmospheric illustrated environments, polished narrative anime key visual; when people are present, portray original fictional characters with expressive faces, story-appropriate proportions and richly designed costumes',
+    colorPalette: 'harmonious anime colors with a clear dominant hue, selective vivid accents and deep controlled shadows',
+    lighting: 'illustrated cinematic key light, layered cel-shaded shadows, restrained luminous rim accents and atmospheric depth',
+    titleFont: 'large expressive Chinese display lettering with clean readable strokes, shaped to the story tone',
+    authorFont: 'small crisp Chinese text with a subtle contrasting outline',
+    titlePosition: 'across the lower third in reserved negative space, preserving faces, silhouettes and key character details',
+    titleEffect: 'a controlled outline and layered shadow matched to the illustration palette',
+    authorPosition: 'small near the bottom center inside the safe area, clearly separated from the title'
   },
   anime_light: {
     label: '二次元轻小说',
@@ -612,6 +660,7 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
       ? COVER_STYLE_PRESETS[args.stylePreset]
       : undefined
   )
+  const mediumRequirement = args.stylePreset ? COVER_STYLE_MEDIUM_REQUIREMENTS[args.stylePreset] : undefined
   const effectiveComposition = preset?.noPeople ? 'scene' : args.composition
   const composition = COMPOSITION_DESC[effectiveComposition]
   const scene = args.scene
@@ -642,6 +691,7 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   } else {
     lines.push(`Chinese web novel cover design, ${platform.prompt}.`)
   }
+  if (mediumRequirement) lines.push(sentence(mediumRequirement))
   // 文字层
   lines.push(`Title text '${args.bookName}' ${titlePosition}, in ${titleFont}, with ${titleEffect}.`)
   lines.push(
@@ -657,11 +707,14 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     lines.push(`Learned cover rules: ${args.learningRules.join(' ')}`)
   }
   // 题材 + 构图 + 画面层
-  lines.push(`${style.tag}.`)
+  lines.push(`${mediumRequirement ? GENRE_SUBJECTS[args.genre] : style.tag}.`)
   lines.push(`${composition}.`)
   // 纯场景构图不描述主体人物，否则与「no human figure as main subject」自相矛盾
   if (effectiveComposition !== 'scene') {
-    lines.push(sentence(pick(scene?.characterDesc, style.characterDesc)))
+    const defaultCharacter = mediumRequirement && args.genre === 'light_novel'
+      ? 'an original fictional protagonist with story-appropriate age, appearance and clothing, natural character proportions and an expressive face'
+      : style.characterDesc
+    lines.push(sentence(pick(scene?.characterDesc, defaultCharacter)))
   }
   lines.push('Background: ' + sentence(pick(scene?.backgroundDesc, style.backgroundDesc)))
   if (scene?.keyProps?.trim()) {

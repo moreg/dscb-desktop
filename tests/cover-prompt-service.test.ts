@@ -330,6 +330,33 @@ describe('CoverPromptService.extract', () => {
     expect(draft.prompt).toContain('at the lower right inside the safe area')
   })
 
+  it.each([
+    ['photorealistic', '真人写实封面', 'Photographic medium lock'],
+    ['anime_illustration', '二次元动漫封面', '2D anime medium lock']
+  ] as const)('%s 的提炼与最终提示词锁定媒介，保留故事中的年龄和服饰', async (stylePreset, label, medium) => {
+    const { service, generateStream } = makeService({
+      synopsis: '主角是一位六十岁的女将军，穿旧铜甲，守卫山中残破的堡垒。',
+      llmResponse: JSON.stringify({
+        genre: 'light_novel', composition: 'fullbody',
+        characterDesc: 'a sixty-year-old female general in weathered bronze armor',
+        backgroundDesc: 'a ruined mountain fortress',
+        styleHintZh: '女将军，旧铜甲，残破堡垒'
+      })
+    })
+    const draft = await service.extract({ ...input, platform: 'ciweimao', stylePreset })
+    const extractionPrompt = generateStream.mock.calls[0][0] as string
+    expect(extractionPrompt).toContain(`视觉风格已锁定为“${label}”`)
+    expect(extractionPrompt).toContain(medium)
+    expect(extractionPrompt).toContain('所有画面字段与 styleHintZh 都必须遵守该媒介')
+    expect(extractionPrompt).toContain('人物年龄、身份、体型和服饰遵循小说资料')
+    expect(extractionPrompt).toContain('六十岁的女将军')
+    expect(draft.prompt).toContain(medium)
+    expect(draft.prompt).toContain('a sixty-year-old female general in weathered bronze armor')
+    expect(draft.prompt).toContain('a ruined mountain fortress')
+    expect(draft.prompt).not.toContain(GENRE_STYLES.light_novel.tag)
+    expect(draft.prompt).not.toContain(GENRE_STYLES.light_novel.characterDesc)
+  })
+
   it('无人物概念风格即使模型返回人物构图也强制改为 scene', async () => {
     const { service } = makeService({
       llmResponse: '{"genre":"mystery","composition":"closeup","characterDesc":"a detective"}'

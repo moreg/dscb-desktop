@@ -43,7 +43,7 @@ type View =
   | { kind: 'projects' }
   | { kind: 'teardown' }
   | { kind: 'scan' }
-  | { kind: 'inspiration' }
+  | { kind: 'inspiration'; projectId: string }
   | { kind: 'projectInfo'; projectId: string }
   | { kind: 'chapters'; projectId: string }
   | { kind: 'editor'; projectId: string; chapterNumber: number }
@@ -107,12 +107,12 @@ function replaceProjectInUrl(projectId: string | null): void {
 function isNavActive(view: View, kind: string, projectId: string | null): boolean {
   if (kind === 'projects') return view.kind === 'projects'
   if (kind === 'teardown') return view.kind === 'teardown'
-  if (kind === 'inspiration') return view.kind === 'inspiration'
   if (kind === 'styles') return view.kind === 'styles'
   if (kind === 'coverLearningLibrary') return view.kind === 'coverLearningLibrary'
   if (!projectId) return false
   if (kind === 'chapters') return view.kind === 'chapters' || view.kind === 'editor'
   if (kind === 'projectInfo') return view.kind === 'projectInfo'
+  if (kind === 'inspiration') return view.kind === 'inspiration'
   if (kind === 'outline') return view.kind === 'outline'
   if (kind === 'rhythm') return view.kind === 'rhythm'
   if (kind === 'figures') return view.kind === 'figures'
@@ -241,7 +241,7 @@ export default function App() {
         if (cancelled || !watching) return
 
         void window.api
-          .listProjects()
+          .listProjects({ includeArchived: true })
           .then((list: ProjectMeta[]) => {
             if (cancelled) return
             const project = list.find((item) => item.id === currentProjectId)
@@ -362,13 +362,6 @@ export default function App() {
             拆文库
           </button>
           <button
-            className={`nav-item ${view.kind === 'inspiration' ? 'active' : ''}`}
-            onClick={() => setView({ kind: 'inspiration' })}
-          >
-            <span className="icon">🎲</span>
-            灵感抽签
-          </button>
-          <button
             className={`nav-item ${view.kind === 'scan' ? 'active' : ''}`}
             onClick={() => setView({ kind: 'scan' })}
           >
@@ -399,6 +392,13 @@ export default function App() {
               >
                 <span className="icon">📖</span>
                 作品信息
+              </button>
+              <button
+                className={`nav-item ${isNavActive(view, 'inspiration', currentProjectId) ? 'active' : ''}`}
+                onClick={() => setView({ kind: 'inspiration', projectId: currentProjectId })}
+              >
+                <span className="icon">🎲</span>
+                灵感抽签
               </button>
               <button
                 className={`nav-item ${isNavActive(view, 'chapters', currentProjectId) ? 'active' : ''}`}
@@ -634,7 +634,13 @@ export default function App() {
             </ErrorBoundary>
           ) : view.kind === 'inspiration' ? (
             <ErrorBoundary>
-              <ProjectInspirationPage />
+              <ProjectInspirationPage
+                projectId={view.projectId}
+                onProjectUpdated={(name) => {
+                  setProjectName(name)
+                  document.title = `${name} — 大神持笔`
+                }}
+              />
             </ErrorBoundary>
           ) : view.kind === 'projectInfo' ? (
             <ErrorBoundary>

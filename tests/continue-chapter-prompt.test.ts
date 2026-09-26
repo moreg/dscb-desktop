@@ -254,7 +254,7 @@ describe('续写 prompt', () => {
       // 接缝起手硬性铁律与去 AI 报表句断言
       expect(prompt.system).toContain('接缝起手硬性铁律')
       expect(prompt.system).toContain('严禁首句复述前文末尾台词')
-      expect(prompt.system).toContain('禁止机械双联报表句')
+      expect(prompt.system).toContain('机械双联报表句')
       expect(prompt.user).toContain('未完句或未闭合台词优先自然接完')
     })
 
@@ -487,51 +487,13 @@ describe('续写 prompt', () => {
     expect(prompt.user).not.toContain('正文目标约 3000 字')
   })
 
-  /**
-   * 写后自检的篇幅项：此前审稿的 word_count 提醒已废弃、自检也没有这一项，
-   * 模型写少了全链路没人发现。
-   */
-  describe('写后自检的篇幅达标项', () => {
-    it('写不够时只提醒篇幅参考，不鼓励机械补足', async () => {
-      await writeOutline('3000')
+  it('写后自检不再检查篇幅（上限/参考都不报）', async () => {
+    for (const [estimate, len] of [['3000', 1500], ['3000 字以内', 3600], ['适中', 100]] as const) {
+      await writeOutline(estimate)
       const service = new WriteService(ps, mockLlm(''))
-      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(1500))
-
-      const item = report.items.find((i) => i.id === 'word_count')
-      expect(item?.verdict).toBe('warn')
-      expect(item?.detail).toContain('1500')
-      expect(item?.detail).toContain('3000')
-    })
-
-    it('写够时判 pass', async () => {
-      await writeOutline('3000')
-      const service = new WriteService(ps, mockLlm(''))
-      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(3000))
-
-      expect(report.items.find((i) => i.id === 'word_count')?.verdict).toBe('pass')
-    })
-
-    /**
-     * 细纲写「3000 字以内」时 prompt 按上限口径下发，自检若只认下限，
-     * 就会把听话写少的章判死——bound 必须一路透传到自检。
-     */
-    it('上限口径（3000 字以内）写不满不判死', async () => {
-      await writeOutline('3000 字以内')
-      const service = new WriteService(ps, mockLlm(''))
-      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(2000))
-
-      const item = report.items.find((i) => i.id === 'word_count')
-      expect(item?.verdict).toBe('pass')
-      expect(item?.detail).toContain('上限')
-    })
-
-    it('细纲没写字数时只 warn 不判死（目标不是作者定的）', async () => {
-      await writeOutline('适中')
-      const service = new WriteService(ps, mockLlm(''))
-      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(100))
-
-      expect(report.items.find((i) => i.id === 'word_count')?.verdict).toBe('warn')
-    })
+      const report = await service.selfCheckChapter(projectId, 1, '甲'.repeat(len))
+      expect(report.items.find((i) => i.id === 'word_count')).toBeUndefined()
+    }
   })
 
   it('续写时自检清单改为对接已写前部，不再要求「开头」对齐上一章', async () => {
@@ -543,5 +505,103 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('接续点连续')
     expect(prompt.user).toContain('不重复前部')
     expect(prompt.user).not.toContain('上章结尾对接')
+  })
+  /**
+   * 技能生成的细纲带大量流程节（质量复核/钩子类型标注/字数预算表/对标 N/A），
+   * 原先整份灌进 prompt：预算表的「预算合计 2500」与字数目标 4300 打架，
+   * 「质量复核：通过」让模型以为不必自查。只留对写正文有用的内容。
+   */
+  describe('细纲注入只保留写作相关内容', () => {
+    async function writeSkillOutline(): Promise<void> {
+      const dir = await ps.resolveDir(projectId)
+      await mkdir(path.join(dir, '细纲'), { recursive: true })
+      await writeFile(
+        path.join(dir, '细纲', '细纲_第001章_先结账.md'),
+        [
+          '# 细纲_第001章_先结账.md',
+          '',
+          '- **版本**：v1.0',
+          '- **修改记录**：2026-09-19，首批细纲',
+          '- **对标状态**：跳过',
+          '- **视角**：第三人称，许棠限知',
+          '',
+          '## 第 1 章：先结账',
+          '',
+          '> 所属卷：第 1 卷',
+          '',
+          '- **核心事件**：周竞举杯拦路，许棠借监控挡回索赔',
+          '- **字数目标**：约 3000 字',
+          '- **所属卷**：第 1 卷',
+          '- **章首钩子**：红酒杯已经举到许棠面前',
+          '- **对标引用**：N/A（项目无对标目录）',
+          '',
+          '## 情节细化',
+          '',
+          '### 情节点序列',
+          '',
+          '1. 酒杯举到面前。【冲突·密，约 200 字】',
+          '2. 补换座起因。【前因·疏，约 150 字】',
+          '',
+          '## 结尾设定和钩子',
+          '',
+          '- **章尾钩子**：许棠指向摄像头',
+          '',
+          '## 写作禁区',
+          '',
+          '1. 不能动刀伤人。',
+          '',
+          '## 章首/章尾钩子类型标注',
+          '',
+          '- **章首**：冲突开局，酒杯举到面前',
+          '- **章尾**：证据疑问，指向摄像头',
+          '',
+          '## 字数预算契约（情节点序列与字数对应）',
+          '',
+          '| 情节点 | 字数 |',
+          '|---|---|',
+          '| 1 | 200 |',
+          '',
+          '**预算合计**：2500字',
+          '',
+          '## 追踪关联',
+          '',
+          '- **新埋伏笔**：无',
+          '',
+          '## 质量复核',
+          '',
+          '- **7 Gate**：A—G 逐项复核通过',
+          '- **审阅依据**：动作承担冲突',
+          ''
+        ].join('\n'),
+        'utf-8'
+      )
+    }
+
+    it('剔除流程元数据、重复钩子与重复字数表，保留骨架与禁区', async () => {
+      await writeSkillOutline()
+      const service = new WriteService(ps, mockLlm(''))
+      const prompt = await service.buildChapterPrompt(projectId, 1)
+      const u = prompt.user
+
+      // 保留
+      expect(u).toContain('酒杯举到面前。【冲突·密，约 200 字】')
+      expect(u).toContain('不能动刀伤人')
+      expect(u).toContain('章首钩子：红酒杯已经举到许棠面前')
+      expect(u).toContain('章末钩子：许棠指向摄像头')
+      // 文件头的视角以前不在任何 H2 节内，从没进过 prompt
+      expect(u).toContain('视角：第三人称，许棠限知')
+
+      // 剔除
+      expect(u).not.toContain('A—G 逐项复核通过')
+      expect(u).not.toContain('动作承担冲突')
+      expect(u).not.toContain('对标引用')
+      expect(u).not.toContain('冲突开局，酒杯举到面前')
+      expect(u).not.toContain('预算合计')
+      expect(u).not.toContain('| 1 | 200 |')
+      expect(u).not.toContain('新埋伏笔')
+      expect(u).not.toContain('修改记录')
+      // 章尾钩子已作为「章末钩子」输出，别名不再重复
+      expect(u).not.toContain('- 章尾钩子：')
+    })
   })
 })

@@ -763,3 +763,76 @@ describe('LlmService feature routing', () => {
     fetchSpy.mockRestore()
   })
 })
+
+describe('LlmService strengthOverride：单次调用覆盖，不落盘', () => {
+  it('openai/anthropic 协议：温度覆盖写进请求体，但不改保存的 provider 配置', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-strength-'))
+    const store = new SecretStore(path.join(dir, 'providers.enc'))
+    // provider 本身没配温度：默认走「模型默认」，不带 temperature 字段
+    await store.write({ activeId: sampleProvider.id, providers: [sampleProvider] })
+    const svc = new LlmService(store)
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: {"choices":[{"delta":{"content":"字"}}]}\n\n', 'data: [DONE]\n\n'])
+    } as never)
+
+    await svc.generateStream('hi', { strengthOverride: { temperature: 1.0 } })
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string).temperature).toBe(1.0)
+
+    // 覆盖只影响这次请求：保存的 provider 配置里仍然没有 temperature 字段
+    const saved = await store.read()
+    expect(saved.providers[0].temperature).toBeUndefined()
+
+    fetchSpy.mockRestore()
+  })
+
+  it('openai-responses 协议：思考强度覆盖写进请求体，不改保存配置', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-strength-'))
+    const store = new SecretStore(path.join(dir, 'providers.enc'))
+    const provider = { ...sampleProvider, protocol: 'openai-responses' as const, reasoningEffort: 'medium' as const }
+    await store.write({ activeId: provider.id, providers: [provider] })
+    const svc = new LlmService(store)
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody([
+        'data: {"type":"response.output_text.delta","delta":"字"}\n\n',
+        'data: {"type":"response.completed"}\n\n'
+      ])
+    } as never)
+
+    await svc.generateStream('hi', { strengthOverride: { reasoningEffort: 'high' } })
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string).reasoning.effort).toBe('high')
+
+    // 覆盖前保存的是 medium，调用后仍是 medium——没有被这次的 high 顺手写回去
+    const saved = await store.read()
+    expect(saved.providers[0].reasoningEffort).toBe('medium')
+
+    fetchSpy.mockRestore()
+  })
+
+  it('不传 strengthOverride 时，行为与之前完全一致（用 provider 自带值）', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-strength-'))
+    const store = new SecretStore(path.join(dir, 'providers.enc'))
+    const provider = { ...sampleProvider, temperature: 0.6 }
+    await store.write({ activeId: provider.id, providers: [provider] })
+    const svc = new LlmService(store)
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: {"choices":[{"delta":{"content":"字"}}]}\n\n', 'data: [DONE]\n\n'])
+    } as never)
+
+    await svc.generateStream('hi')
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string).temperature).toBe(0.6)
+
+    fetchSpy.mockRestore()
+  })
+})

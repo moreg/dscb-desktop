@@ -7,7 +7,16 @@ import { SettingsRepository } from './settings-repository'
 import { writeTextAtomic } from './atomic'
 import { scanProjectsRoot } from './skill-format/library-scanner'
 import { ProjectSkillRepo } from './skill-format/project-skill-repo'
-import type { CreateProjectDataInput, ProjectData, ProjectMeta } from '../../shared/types'
+import type {
+  CreateProjectDataInput,
+  ListProjectsQuery,
+  ProjectData,
+  ProjectMeta,
+  ProjectTitleCandidate
+} from '../../shared/types'
+import { isProjectArchived } from '../../shared/types'
+
+const MAX_TITLE_CANDIDATES = 50
 
 export class ProjectService {
   constructor(
@@ -194,10 +203,37 @@ export class ProjectService {
     return next
   }
 
-  async listProjects(): Promise<ProjectMeta[]> {
+  /** 追加灵感抽签候选；同名同简介视为重复，最新的排在最前。 */
+  async addTitleCandidate(
+    projectId: string,
+    candidate: { name: string; description: string; seed?: string }
+  ): Promise<ProjectTitleCandidate[]> {
+    const current = (await this.getProjectData(projectId)).titleCandidates ?? []
+    const duplicate = current.some(
+      (item) => item.name === candidate.name && item.description === candidate.description
+    )
+    if (duplicate) return current
+    const next: ProjectTitleCandidate[] = [
+      { id: randomUUID(), ...candidate, createdAt: new Date().toISOString() },
+      ...current
+    ].slice(0, MAX_TITLE_CANDIDATES)
+    const updated = await this.updateProjectData(projectId, { titleCandidates: next })
+    return updated.titleCandidates ?? []
+  }
+
+  async removeTitleCandidate(projectId: string, candidateId: string): Promise<ProjectTitleCandidate[]> {
+    const current = (await this.getProjectData(projectId)).titleCandidates ?? []
+    const next = current.filter((item) => item.id !== candidateId)
+    if (next.length === current.length) return current
+    const updated = await this.updateProjectData(projectId, { titleCandidates: next })
+    return updated.titleCandidates ?? []
+  }
+
+  async listProjects(query: ListProjectsQuery = {}): Promise<ProjectMeta[]> {
     const all = await this.library.list()
     const filtered: ProjectMeta[] = []
     for (const project of all) {
+      if (!query.includeArchived && isProjectArchived(project)) continue
       if (!(await hasV3Outline(project.path))) continue
       // project.json 是小说名称/简介的主数据；兼容旧 library.json 没有 description
       // 或名称尚未同步的项目。读取失败时仍保留索引条目。
@@ -209,6 +245,10 @@ export class ProjectService {
       })
     }
     return filtered
+  }
+
+  async setArchived(projectId: string, archived: boolean): Promise<ProjectMeta> {
+    return this.library.setArchived(projectId, archived)
   }
 
   async scanProjects(): Promise<ProjectMeta[]> {
