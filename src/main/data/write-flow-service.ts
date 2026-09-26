@@ -1,6 +1,7 @@
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
+import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
 import type { MemoryExtraction } from '../../shared/types'
 
@@ -272,9 +273,8 @@ export function parseEndingStateJson(
     rawTail: prevTail
   }
   try {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return fallback
-    const obj = JSON.parse(m[0])
+    const obj = findJsonObject(raw)
+    if (!obj) return fallback
     return {
       chapterNumber,
       characterPositions: Array.isArray(obj.characterPositions) ? obj.characterPositions : [],

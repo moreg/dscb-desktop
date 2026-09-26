@@ -1,4 +1,5 @@
 import type { MemoryExtraction } from '../../shared/types'
+import { findJsonArray } from '../../shared/json-extract'
 import { inspectMemoryCandidateItems, locateMemoryEvidence, normalizeMemoryEvidence } from './memory-evidence-validator'
 
 /** Only repair missing quotations. Never change claims, remove candidates, or relax validation. */
@@ -33,7 +34,7 @@ export async function repairMissingMemoryEvidence(
   let patches: unknown
   try {
     const raw = await generate(prompt)
-    patches = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] ?? '')
+    patches = findJsonArray(raw)
   } catch { return extraction }
   if (!Array.isArray(patches)) return extraction
   const updated: MemoryExtraction = {

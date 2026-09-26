@@ -60,6 +60,7 @@ import { writeJsonAtomic } from './atomic'
 import { extractPowerBoundaryBullets } from './power-boundary'
 import { readText, parseDoc } from './skill-format/md-parser'
 import { parseForeshadowReceipt } from '../../shared/parsers'
+import { findJsonArray, findJsonObject } from '../../shared/json-extract'
 import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
@@ -78,7 +79,6 @@ import type {
   Character,
   ChapterDetail,
   OutlineProseSection,
-  FigureDraft,
   Foreshadowing,
   MemoryExtraction,
   MemoryApplyPreview,
@@ -106,10 +106,8 @@ import type {
   DetailedOutlineItem
 } from '../../shared/types'
 import {
-  parseFigureDraftJson,
   parseMemoryExtractionJson,
-  parseOutlineDiffJson,
-  parseRhythmEvaluationJson
+  parseOutlineDiffJson
 } from '../../shared/parsers'
 import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 import {
@@ -305,6 +303,8 @@ function tokensForWords(words: number): number {
 
 export class WriteService {
   private readonly memoryCoordinator = new ChapterMemoryCoordinator()
+  /** 批量写后步骤的成功结果，暂停后重试同一稿件时复用，见 PostProcessCacheEntry。 */
+  private readonly postProcessCache = new Map<string, PostProcessCacheEntry>()
 
   /** Draft edits/undo invalidate in-flight extraction before it can commit. */
   invalidateChapterMemorySync(projectId: string, chapterNumber: number): void {
@@ -2043,11 +2043,12 @@ export class WriteService {
   }
 
   /**
-   * 单章完整流程：生成 → 质检 → 细纲对照 → 记忆提取 → 节奏评估 → 图解生成。
-   * 可通过 onContentGenerated 先保存正文；记忆按项目设置自动同步，节奏/图解由 UI 决定。
+   * 批量写章的单章流程：生成 → 质检 → 细纲对照 / 记忆提取 / 深度审稿（并行）→ 正文回写细纲 → 记忆同步。
+   * 可通过 onContentGenerated 先保存正文；记忆按项目设置自动同步。节奏评估与图解不在此流程里跑
+   * （批量不回写也不落盘），由单章流程面板按需触发。
    * onProgress 用于推送当前步骤，UI 可显示进度。
    *
-   * 重要：步骤 3-6 直接调用 this.flow.* 并显式传入内存中的 content，
+   * 重要：写后各步直接调用 this.flow.* 并显式传入内存中的 content，
    * 绕过 WriteService 包装方法的磁盘重载逻辑，始终核对本次生成或恢复的正文。
    */
   async runFullFlowForChapter(
@@ -2091,19 +2092,9 @@ export class WriteService {
       console.warn('[runFullFlowForChapter] selfCheck failed:', err)
     }
 
-    // 预加载步骤 3-6 所需的支撑数据（只读磁盘一次）
-    let outlineText = ''
+    // 预加载对照/提取所需的支撑数据（只读磁盘一次）
+    const outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
     let knownCharacters: string[] = []
-    let expectedEmotion = 5
-    try {
-      const all = await new DetailedOutlineMdRepo(dir).listAll()
-      const d = all.find((x) => x.chapterNumber === chapterNumber)
-      if (d) {
-        outlineText = renderChapterDetail(d, '本章细纲')
-      }
-    } catch {
-      // skip：无细纲
-    }
     try {
       const list = await new CharacterRepo(dir).list()
       if (list.length > 0) knownCharacters = list.map((c) => c.name)
@@ -2112,154 +2103,72 @@ export class WriteService {
       console.warn('[runFullFlowForChapter] Failed to load characters:', err)
       // skip
     }
-    try {
-      const rhythm = await new RhythmHtmlRepo(dir).read()
-      const entry = rhythm?.find((r) => r.chapter === chapterNumber)
-      if (entry) expectedEmotion = entry.emotion
-    } catch (err) {
-      console.warn('[runFullFlowForChapter] Failed to read rhythm data, using default:', err)
-      // skip：用默认值 5
-    }
 
-    // 3. 细纲对照（直接传 content，不经过磁盘重载）
-    onProgress('outlineCheck')
-    /**
-     * hasOutline / checked 必须如实回传：没细纲和对照失败都会留下空 diffs，
-     * 调用方（批量面板的逐章小结）若只看 diffs.length 会把这两种情况
-     * 一律显示成「无 P0」，等于给没对照过的章发绿灯。
-     */
-    let outlineDiff: OutlineDiffReport = {
-      chapterNumber,
-      diffs: [],
-      passed: true,
-      hasOutline: Boolean(outlineText),
-      checked: false
-    }
-    if (outlineText && !memoryTicket.controller.signal.aborted) {
-      try {
-        const outlineRaw = await this.flow.checkOutlineStream(
-          outlineText,
-          content,
-          chapterNumber,
-          flowOpts('batchOutline')
-        )
-        const parsed = parseOutlineDiffJson(outlineRaw, chapterNumber)
-        outlineDiff = {
-          ...parsed,
-          hasOutline: true,
-          checked: parsed.checked !== false
-        }
-      } catch (err) {
-        console.warn('[runFullFlowForChapter] Failed to check outline:', err)
-        // skip：用空报告，但保留 checked=false，别让调用方误读成"对照通过"
+    // 暂停后重试时复用本稿已成功的步骤（按正文与细纲指纹命中），只补跑失败的那步。
+    const cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
+    const cached = this.postProcessCache.get(cacheKey) ?? {}
+    const cachePut = (patch: PostProcessCacheEntry): void => {
+      const entry = { ...this.postProcessCache.get(cacheKey), ...patch }
+      this.postProcessCache.delete(cacheKey)
+      this.postProcessCache.set(cacheKey, entry)
+      while (this.postProcessCache.size > POST_PROCESS_CACHE_LIMIT) {
+        this.postProcessCache.delete(this.postProcessCache.keys().next().value as string)
       }
     }
 
-    // 4. 记忆提取（直接传 content）
-    onProgress('memoryExtract')
-    let memory: MemoryExtraction = {
-      chapterNumber,
-      newCharacters: [],
-      newLocations: [],
-      newItems: [],
-      newForeshadowings: [],
-      newPlotPoints: [],
-      characterStateChanges: [],
-      collectedForeshadowings: [],
-      settingsPatches: [],
-      settingsSuggestions: []
-    }
-    if (!memoryTicket.controller.signal.aborted) try {
-      const memRaw = await this.flow.extractMemoryStream(
-        content,
-        chapterNumber,
-        knownCharacters,
-        flowOpts('batchMemory'),
-        await new ForeshadowingMdRepo(dir).list()
-      )
-      memory = parseMemoryExtractionJson(memRaw, chapterNumber)
-    } catch (err) {
-      console.warn('[runFullFlowForChapter] Failed to extract memory:', err)
-      memory.parseError = `记忆提取失败：${(err as Error).message}`
-    }
-
-    // 记忆在深审完成后统一核对提交，提取阶段不改变全书状态。
-
-    // 5. 节奏评估（直接传 content）
-    onProgress('rhythmEval')
-    let rhythm: RhythmEvaluation | null = null
-    if (!memoryTicket.controller.signal.aborted) try {
-      const rhythmRaw = await this.flow.evaluateRhythmStream(
-        content,
-        chapterNumber,
-        expectedEmotion,
-        flowOpts('batchRhythm')
-      )
-      rhythm = parseRhythmEvaluationJson(rhythmRaw, chapterNumber, expectedEmotion)
-    } catch (err) {
-      console.warn('[runFullFlowForChapter] Failed to evaluate rhythm:', err)
-      // skip：rhythm 保持 null
-    }
-
-    // 6. 图解生成（直接传 content）
-    onProgress('figureGen')
-    let figure: FigureDraft = {
-      chapterNumber,
-      shouldGenerate: false,
-      type: '',
-      topic: '',
-      fileName: '',
-      html: '',
-      reason: '未执行'
-    }
-    if (!memoryTicket.controller.signal.aborted) try {
-      const figRaw = await this.flow.generateFigureStream(
-        content,
-        chapterNumber,
-        flowOpts('batchFigure')
-      )
-      figure = parseFigureDraftJson(figRaw, chapterNumber)
-    } catch (err) {
-      console.warn('[runFullFlowForChapter] Failed to generate figure:', err)
-      // skip
-    }
-
-    // 7. LLM 深度审稿（仅当 settings.autoDeepReview=true 时自动跑，省 token）
-    // 默认关：用户在面板手动点「AI 深度审稿」按钮触发（见 runDeepReview IPC）。
-    let deepReview: AuditViolation[] = []
-    if (this.settings && !memoryTicket.controller.signal.aborted) {
-      try {
-        const rules = await this.settings.getReviewRules()
-        if (rules.enabled && rules.autoDeepReview) {
-          onProgress('deepReview')
-          deepReview = await this.runDeepReview(
-            projectId,
-            content,
-            chapterNumber,
-            flowOpts('batchDeepReview')
-          )
-        }
-      } catch (err) {
-        console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
-        deepReview = [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:batch',
-          message: '深度审稿未完成，记忆暂不自动生效' }]
-      }
-    }
+    // 3-4. 细纲对照、记忆提取、深度审稿都只依赖正文，并行跑；记忆在深审完成后统一核对提交，
+    // 提取阶段不改变全书状态。
+    onProgress('postChecks')
+    const [checkedOutline, memory, deepReview] = await Promise.all([
+      cached.outline && cached.outline.outlineHash === hashProse(outlineText)
+        ? structuredClone(cached.outline.report)
+        : this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+          .then((report) => {
+            if (report.checked) cachePut({ outline: { outlineHash: hashProse(outlineText), report: structuredClone(report) } })
+            return report
+          }),
+      cached.memory
+        ? structuredClone(cached.memory)
+        : this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters, flowOpts('batchMemory'), memoryTicket.controller.signal)
+          .then((extraction) => {
+            if (!extraction.parseError) cachePut({ memory: structuredClone(extraction) })
+            return extraction
+          }),
+      cached.deepReview
+        ? structuredClone(cached.deepReview)
+        : this.runAutoDeepReview(projectId, chapterNumber, content, flowOpts('batchDeepReview'), memoryTicket.controller.signal)
+          .then((review) => {
+            if (!review.some((item) => item.ruleId?.startsWith('review_incomplete:'))) cachePut({ deepReview: structuredClone(review) })
+            return review
+          })
+    ])
+    let outlineDiff = checkedOutline
 
     // 以正文为准：先回写细纲，再用新细纲重跑自检，最后才同步记忆。顺序不能反——
     // 旧细纲下的自检失败会把记忆整章拦下，下一章又对着旧细纲/旧记忆写，问题逐章滚大。
-    if (proseFirst && !memoryTicket.controller.signal.aborted) {
+    // 上次已回写成功（缓存里的报告带 proseSynced）时不再重复回写。
+    if (proseFirst && outlineDiff.proseSynced === undefined && !memoryTicket.controller.signal.aborted) {
       onProgress('outlineSync')
-      outlineDiff = await this.syncOutlineFromProse(
-        projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal
-      )
-      if (outlineDiff.proseSynced) {
-        try {
-          selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
-        } catch (err) {
-          console.warn('[runFullFlowForChapter] selfCheck after outline sync failed:', err)
-          selfCheck = null
-        }
+      // 回写失败时本章细纲保持原样（见 syncOutlineFromProse），可以安全地原样重跑。
+      const checkedDiff = outlineDiff
+      for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS && !memoryTicket.controller.signal.aborted; attempt++) {
+        outlineDiff = await this.syncOutlineFromProse(
+          projectId, chapterNumber, content, checkedDiff, memoryTicket.controller.signal
+        )
+        if (outlineDiff.checked !== false || checkedDiff.checked === false) break
+      }
+      if (outlineDiff.checked !== false && outlineDiff.proseSynced !== undefined) {
+        // 细纲已按正文改写，指纹换成改写后的细纲，重试时直接命中「已回写」。
+        const syncedOutline = await this.loadChapterOutlineText(dir, chapterNumber)
+        cachePut({ outline: { outlineHash: hashProse(syncedOutline), report: structuredClone(outlineDiff) } })
+      }
+    }
+    if (proseFirst && outlineDiff.proseSynced) {
+      try {
+        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+      } catch (err) {
+        console.warn('[runFullFlowForChapter] selfCheck after outline sync failed:', err)
+        selfCheck = null
       }
     }
 
@@ -2276,14 +2185,116 @@ export class WriteService {
       memory: sync?.extraction ?? memory,
       memoryApply: sync?.memory,
       settingsApply: sync?.settings,
-      rhythm,
-      figure,
+      // 节奏评估、图解在批量里既不回写图谱也不落盘，不再逐章花调用；需要时在单章流程面板单独跑。
+      rhythm: null,
+      figure: { chapterNumber, shouldGenerate: false, type: '', topic: '', fileName: '', html: '', reason: BATCH_SKIPPED_REASON },
       deepReview,
       selfCheck
     }
     } finally {
       opts.signal?.removeEventListener('abort', cancelMemory)
       this.memoryCoordinator.finish(memoryTicket)
+    }
+  }
+
+  private async loadChapterOutlineText(dir: string, chapterNumber: number): Promise<string> {
+    try {
+      const d = (await new DetailedOutlineMdRepo(dir).listAll()).find((x) => x.chapterNumber === chapterNumber)
+      return d ? renderChapterDetail(d, '本章细纲') : ''
+    } catch {
+      return '' // 无细纲
+    }
+  }
+
+  /**
+   * 细纲对照。hasOutline / checked 必须如实回传：没细纲和对照失败都会留下空 diffs，
+   * 调用方（批量面板的逐章小结）若只看 diffs.length 会把这两种情况
+   * 一律显示成「无 P0」，等于给没对照过的章发绿灯。
+   * 对照失败（网络抖动、输出不是合法 JSON）多为偶发，就地重试几次，
+   * 免得一键多章因为一次坏输出整批暂停；仍失败则保留 checked=false 和原因。
+   */
+  private async checkOutlineWithRetry(
+    chapterNumber: number,
+    outlineText: string,
+    content: string,
+    opts: GenerateOptions,
+    signal: AbortSignal
+  ): Promise<OutlineDiffReport> {
+    let report: OutlineDiffReport = { chapterNumber, diffs: [], passed: true, hasOutline: Boolean(outlineText), checked: false }
+    for (let attempt = 0; outlineText && attempt < POST_PROCESS_ATTEMPTS && !signal.aborted; attempt++) {
+      try {
+        const parsed = parseOutlineDiffJson(await this.flow.checkOutlineStream(outlineText, content, chapterNumber, opts), chapterNumber)
+        report = { ...parsed, hasOutline: true, checked: parsed.checked !== false }
+        if (report.checked) break
+        console.warn(`[runFullFlowForChapter] Outline check unparseable (attempt ${attempt + 1}):`, parsed.error)
+      } catch (err) {
+        console.warn(`[runFullFlowForChapter] Failed to check outline (attempt ${attempt + 1}):`, err)
+        // 用空报告，但保留 checked=false，别让调用方误读成"对照通过"
+        report = { ...report, diffs: [], passed: true, checked: false, error: (err as Error).message }
+        if (attempt + 1 < POST_PROCESS_ATTEMPTS) await waitBeforePostProcessRetry(err, attempt, signal)
+      }
+    }
+    return report
+  }
+
+  /** 记忆提取：失败或输出不合格时就地重试，连续写作下记忆没提交会暂停整批。 */
+  private async extractMemoryWithRetry(
+    dir: string,
+    chapterNumber: number,
+    content: string,
+    knownCharacters: string[],
+    opts: GenerateOptions,
+    signal: AbortSignal
+  ): Promise<MemoryExtraction> {
+    let memory: MemoryExtraction = {
+      chapterNumber,
+      newCharacters: [],
+      newLocations: [],
+      newItems: [],
+      newForeshadowings: [],
+      newPlotPoints: [],
+      characterStateChanges: [],
+      collectedForeshadowings: [],
+      settingsPatches: [],
+      settingsSuggestions: []
+    }
+    for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS && !signal.aborted; attempt++) {
+      try {
+        const memRaw = await this.flow.extractMemoryStream(
+          content, chapterNumber, knownCharacters, opts, await new ForeshadowingMdRepo(dir).list()
+        )
+        memory = parseMemoryExtractionJson(memRaw, chapterNumber)
+        if (!memory.parseError) break
+        console.warn(`[runFullFlowForChapter] Memory extraction unparseable (attempt ${attempt + 1}):`, memory.parseError)
+      } catch (err) {
+        console.warn(`[runFullFlowForChapter] Failed to extract memory (attempt ${attempt + 1}):`, err)
+        memory = { ...memory, parseError: `记忆提取失败：${(err as Error).message}` }
+        if (attempt + 1 < POST_PROCESS_ATTEMPTS) await waitBeforePostProcessRetry(err, attempt, signal)
+      }
+    }
+    return memory
+  }
+
+  /**
+   * LLM 深度审稿（仅当 settings.autoDeepReview=true 时自动跑，省 token）。
+   * 默认关：用户在面板手动点「AI 深度审稿」按钮触发（见 runDeepReview IPC）。
+   */
+  private async runAutoDeepReview(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    opts: GenerateOptions,
+    signal: AbortSignal
+  ): Promise<AuditViolation[]> {
+    if (!this.settings || signal.aborted) return []
+    try {
+      const rules = await this.settings.getReviewRules()
+      if (!rules.enabled || !rules.autoDeepReview) return []
+      return await this.runDeepReview(projectId, content, chapterNumber, opts)
+    } catch (err) {
+      console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
+      return [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:batch',
+        message: '深度审稿未完成，记忆暂不自动生效' }]
     }
   }
 
@@ -2392,6 +2403,7 @@ export class WriteService {
         else if (result.outlineDiff.hasOutline === false) pendingReason = '缺少本章细纲，请补齐细纲后重试检查'
         else if (result.outlineDiff.checked === false) {
           pendingReason = result.outlineDiff.proseSynced !== undefined ? '以正文回写细纲未完成' : '细纲对照未完成'
+          if (result.outlineDiff.error) pendingReason += `（${result.outlineDiff.error}）`
         }
         else if (result.selfCheck === null || result.selfCheck?.items.some((item) =>
           item.repairKind === 'execution_error' || item.id === 'self_check_error')) pendingReason = '写后自检未完成'
@@ -2405,6 +2417,8 @@ export class WriteService {
         else if (result.settingsApply?.errors.length) pendingReason = `设定同步失败：${result.settingsApply.errors.join('；')}`
         else if (result.deepReview?.some((item) => item.ruleId?.startsWith('review_incomplete:'))) pendingReason = '深度审稿未完成'
 
+        // 本章写后处理全部完成，缓存用不上了。
+        if (!pendingReason) this.postProcessCache.delete(postProcessCacheKey(projectId, ch, result.content))
         onChapterComplete(ch, result)
         if (pendingReason && (runOptions?.autoContinue || resumingPostProcess || opts.signal?.aborted)) {
           return {
@@ -2500,7 +2514,7 @@ export class WriteService {
       return { ...report, diffs: [], passed: true, proseSynced: report.diffs.length }
     } catch (err) {
       console.warn(`[generateChaptersBatch] Failed to sync outline from prose for ch ${chapterNumber}:`, err)
-      return { ...report, checked: false, passed: false, proseSynced: 0 }
+      return { ...report, checked: false, passed: false, proseSynced: 0, error: (err as Error).message }
     }
   }
 
@@ -2548,11 +2562,8 @@ export class WriteService {
       signal,
       meta: { feature: 'proseOutlineRewrite', projectId, chapterNumber }
     })
-    const match = raw.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('模型未返回有效的细纲补丁')
-    const parsed: unknown = JSON.parse(match[0])
-    if (!parsed || typeof parsed !== 'object') throw new Error('细纲补丁格式错误')
-    const obj = parsed as Record<string, unknown>
+    const obj = findJsonObject(raw)
+    if (!obj) throw new Error('模型未返回有效的细纲补丁')
     const clean = sanitizeOutlinePatch('patch' in obj ? obj.patch : obj) ?? {}
     delete clean.title
     delete clean.wordEstimate
@@ -2627,10 +2638,8 @@ export class WriteService {
       signal,
       meta: { feature: 'downstreamOutlineSync', projectId, chapterNumber }
     })
-    const match = raw.match(/\[[\s\S]*\]/)
-    if (!match) throw new Error('模型未返回有效的后续细纲补丁')
-    const parsed: unknown = JSON.parse(match[0])
-    if (!Array.isArray(parsed)) throw new Error('后续细纲补丁格式错误')
+    const parsed = findJsonArray(raw)
+    if (!parsed) throw new Error('模型未返回有效的后续细纲补丁')
 
     const allowed = new Set(candidates.map((item) => item.chapterNumber))
     const patches = new Map<number, OutlineDiffPatch>()
@@ -3551,6 +3560,30 @@ interface AskQuestionRenderInput {
  * 该报错还是立刻报错，不该让用户对着编辑器多等两分钟。
  */
 const RATE_LIMIT_RETRY_DELAYS_MS = [30_000, 60_000, 120_000]
+/** 批量写后各步（细纲对照、记忆提取、正文回写细纲）的总尝试次数（含首次）。 */
+const POST_PROCESS_ATTEMPTS = 3
+/** 批量模式不跑图解时写进 figure.reason。 */
+const BATCH_SKIPPED_REASON = '批量模式不生成'
+/** 写后步骤缓存最多保留的章数（每章一条，按最近使用淘汰）。 */
+const POST_PROCESS_CACHE_LIMIT = 20
+
+/** 同一稿件已成功的写后步骤结果；正文或细纲一变，指纹对不上就不会命中。 */
+interface PostProcessCacheEntry {
+  outline?: { outlineHash: string; report: OutlineDiffReport }
+  memory?: MemoryExtraction
+  deepReview?: AuditViolation[]
+}
+
+function postProcessCacheKey(projectId: string, chapterNumber: number, content: string): string {
+  return `${projectId}:${chapterNumber}:${hashProse(content)}`
+}
+
+/** 写后步骤重试前的等待：限流按退避表等，其余错误稍等 1 秒；被停止时立即返回。 */
+async function waitBeforePostProcessRetry(err: unknown, attempt: number, signal: AbortSignal): Promise<void> {
+  const rateLimited = (err as Error)?.message?.includes('LLM_RATE_LIMIT')
+  const ms = rateLimited ? RATE_LIMIT_RETRY_DELAYS_MS[attempt] ?? 30_000 : 1_000
+  await abortableDelay(ms, signal).catch(() => {})
+}
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('LLM_ABORTED')

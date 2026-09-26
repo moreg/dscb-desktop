@@ -1912,12 +1912,7 @@ function BatchWriteDialog({
                   同步失败：{[...lastSummary.memory.errors, ...lastSummary.settingsErrors].join('；')}
                 </li>
               ) : null}
-              <li>
-                节奏：{lastResult.rhythm ? `实际情绪 ${lastResult.rhythm.actualEmotion}` : '未评估'}
-              </li>
-              <li>
-                图解：{lastResult.figure.shouldGenerate ? `生成 ${lastResult.figure.fileName}` : '本章无关键转折'}
-              </li>
+              <li>节奏 / 图解：批量模式不评估，需要时在单章流程面板中单独运行</li>
             </ul>
           </div>
         ) : null}

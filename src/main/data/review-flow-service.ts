@@ -1,5 +1,6 @@
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { AuditSeverity, AuditViolation, CustomReviewCheck, ReviewCheckId } from '../../shared/types'
+import { findJsonObject } from '../../shared/json-extract'
 import { createHash } from 'crypto'
 
 /**
@@ -347,9 +348,8 @@ function toViolation(f: RawFinding, offset?: number): AuditViolation {
  */
 export function parseFindingsJson(raw: string, fallbackCheckId: ReviewCheckId): RawFinding[] {
   try {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return [incompleteFinding(fallbackCheckId, '模型未返回可解析的 JSON')]
-    const obj = JSON.parse(m[0])
+    const obj = findJsonObject(raw)
+    if (!obj) return [incompleteFinding(fallbackCheckId, '模型未返回可解析的 JSON')]
     if (!Array.isArray(obj.findings)) return [incompleteFinding(fallbackCheckId, '模型结果缺少 findings 数组')]
     const out: RawFinding[] = []
     let dropped = 0

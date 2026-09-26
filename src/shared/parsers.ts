@@ -7,6 +7,7 @@ import type {
   RhythmEvaluation
 } from './types'
 import { defaultResolutionForType, sanitizeOutlinePatch } from './outline-diff-apply'
+import { findJsonArray, findJsonObject } from './json-extract'
 
 /**
  * 纯解析函数集合（main 与 renderer 共享）。
@@ -23,13 +24,25 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
     5: '结构性偏离'
   }
   const resolutions = new Set(['updateOutline', 'updateContent', 'either', 'review'])
+  const fail = (error: string): OutlineDiffReport => ({ chapterNumber, diffs: [], passed: false, checked: false, error })
   try {
-    const m = raw.match(/\[[\s\S]*\]/)
-    if (!m) return { chapterNumber, diffs: [], passed: false, checked: false }
-    const arr = JSON.parse(m[0])
-    if (!Array.isArray(arr) || arr.some((x) => !x || typeof x !== 'object' ||
+    // 也接受 {"diffs": [...]} 包装。
+    const found = findJsonArray(raw) ?? (() => {
+      const obj = findJsonObject(raw)
+      return Array.isArray(obj?.diffs) ? obj.diffs : undefined
+    })()
+    if (!found) return fail('细纲对照未返回可解析的 JSON 数组')
+    // 模型常把 type 写成 "1"、priority 写成 "p0"；只做无歧义的规整，越界值仍判失败。
+    const arr = found.map((x) => x && typeof x === 'object' && !Array.isArray(x)
+      ? {
+          ...x,
+          type: typeof x.type === 'string' && /^\s*[1-5]\s*$/.test(x.type) ? Number(x.type) : x.type,
+          priority: typeof x.priority === 'string' ? x.priority.trim().toUpperCase() : x.priority
+        }
+      : x)
+    if (arr.some((x) => !x || typeof x !== 'object' ||
       ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority))) {
-      return { chapterNumber, diffs: [], passed: false, checked: false }
+      return fail('细纲对照输出的差异项缺少有效的 type/priority')
     }
     const diffs: OutlineDiffItem[] = arr
       .filter((x) => x && typeof x === 'object' && typeof x.type === 'number')
@@ -54,7 +67,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
     const passed = !diffs.some((d) => d.priority === 'P0' || d.priority === 'P1')
     return { chapterNumber, diffs, passed }
   } catch {
-    return { chapterNumber, diffs: [], passed: false, checked: false }
+    return fail('细纲对照输出的 JSON 格式错误')
   }
 }
 
@@ -73,9 +86,8 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
     settingsSuggestions: []
   }
   try {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return { ...empty, parseError: '记忆提取未返回有效 JSON，本次未提交' }
-    const obj = JSON.parse(m[0])
+    const obj = findJsonObject(raw)
+    if (!obj) return { ...empty, parseError: '记忆提取未返回有效 JSON，本次未提交' }
     const fields = ['newCharacters', 'newLocations', 'newItems', 'newForeshadowings', 'newPlotPoints', 'characterStateChanges', 'collectedForeshadowings', 'settingsPatches', 'settingsSuggestions']
     if (!obj || typeof obj !== 'object' ||
       ['newPlotPoints', 'characterStateChanges', 'collectedForeshadowings'].some((key) => !Array.isArray(obj[key])) ||
@@ -130,9 +142,8 @@ export function parseRhythmEvaluationJson(
   expectedEmotion: number
 ): RhythmEvaluation | null {
   try {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return null
-    const obj = JSON.parse(m[0])
+    const obj = findJsonObject(raw)
+    if (!obj) return null
     if (typeof obj.actualEmotion !== 'number' || !Number.isFinite(obj.actualEmotion) ||
       !Number.isFinite(expectedEmotion)) return null
     // 钳制到 0-10
@@ -168,9 +179,8 @@ export function parseFigureDraftJson(raw: string, chapterNumber: number): Figure
     reason: '解析失败'
   }
   try {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return empty
-    const obj = JSON.parse(m[0])
+    const obj = findJsonObject(raw)
+    if (!obj) return empty
     const shouldGenerate = !!obj.shouldGenerate
     const type = typeof obj.type === 'string' ? obj.type : ''
     const topic = typeof obj.topic === 'string' ? obj.topic : ''

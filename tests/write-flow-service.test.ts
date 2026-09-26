@@ -117,6 +117,26 @@ describe('WriteFlowService.checkOutlineStream', () => {
     expect(parseOutlineDiffJson(raw, 1)).toMatchObject({ passed: false, checked: false })
   })
 
+  it('tolerates think blocks, code fences, stray brackets and loose field formats', () => {
+    const raw = [
+      '<think>先看 [P0] 级问题……</think>',
+      '说明：以下为差异 [共 1 条]',
+      '```json',
+      '[{"type":"2","typeLabel":"超纲增量","suggestion":"回写","priority":"p1"}]',
+      '```'
+    ].join('\n')
+    const report = parseOutlineDiffJson(raw, 6)
+    expect(report.checked).toBeUndefined()
+    expect(report.diffs).toHaveLength(1)
+    expect(report.diffs[0]).toMatchObject({ type: 2, priority: 'P1' })
+    expect(report.passed).toBe(false)
+  })
+
+  it('accepts a {"diffs": [...]} wrapper and reports why parsing failed', () => {
+    expect(parseOutlineDiffJson('{"diffs": []}', 2)).toMatchObject({ passed: true, diffs: [] })
+    expect(parseOutlineDiffJson('not json', 2).error).toBeTruthy()
+  })
+
   it('parses outlinePatch for update-outline path', () => {
     const raw = JSON.stringify([
       {

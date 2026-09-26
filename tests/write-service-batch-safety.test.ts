@@ -103,19 +103,82 @@ describe('batch safety and recovery', () => {
   it('recovers the final saved chapter by rerunning checks without generating or double-counting', async () => {
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
-    vi.mocked(flow.checkOutlineStream).mockRejectedValueOnce(new Error('暂时断网'))
+    // 对照会就地重试 3 次，三次都断网才暂停。
+    vi.mocked(flow.checkOutlineStream)
+      .mockRejectedValueOnce(new Error('暂时断网'))
+      .mockRejectedValueOnce(new Error('暂时断网'))
+      .mockRejectedValueOnce(new Error('暂时断网'))
     const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
     expect(first.status).toBe('paused')
     expect(first.pendingPostProcessChapter).toBe(1)
     expect(first.completed).toEqual([1])
+    expect(first.pauseReason).toContain('暂时断网')
     const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
     expect(resumed.status).toBe('completed')
     expect(resumed.pendingPostProcessChapter).toBeUndefined()
     expect(resumed.completed).toEqual([1])
     expect(resumed.current).toBe(1)
     expect(generate).toHaveBeenCalledOnce()
-    expect(flow.checkOutlineStream).toHaveBeenCalledTimes(2)
+    expect(flow.checkOutlineStream).toHaveBeenCalledTimes(4)
     expect(await new ProseRepo(dir).read(1)).toBe(content)
+  })
+
+  it('retries a flaky memory extraction before handing it to memory sync', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.extractMemoryStream).mockResolvedValueOnce('<think>先列 {人物}</think>好的，结果如下：')
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(flow.extractMemoryStream).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][3]?.extraction?.parseError).toBeUndefined()
+  })
+
+  it('runs outline check and memory extraction concurrently', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    let releaseOutline: () => void = () => {}
+    // 对照要等记忆提取开始才返回：若两步仍串行，这里会一直卡住直到超时。
+    vi.mocked(flow.checkOutlineStream).mockImplementation(() => new Promise((resolve) => {
+      releaseOutline = () => resolve('[]')
+    }))
+    vi.mocked(flow.extractMemoryStream).mockImplementation(async () => {
+      releaseOutline()
+      return JSON.stringify(resultFor(1).memory)
+    })
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(flow.evaluateRhythmStream).not.toHaveBeenCalled()
+    expect(flow.generateFigureStream).not.toHaveBeenCalled()
+  })
+
+  it('reuses successful steps when retrying a paused chapter', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    // 对照和回写细纲都成功，记忆提取连续三次失败 → 暂停
+    vi.mocked(flow.extractMemoryStream)
+      .mockRejectedValueOnce(new Error('模型断流'))
+      .mockRejectedValueOnce(new Error('模型断流'))
+      .mockRejectedValueOnce(new Error('模型断流'))
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    expect(first.pauseReason).toContain('模型断流')
+    const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    expect(resumed.status).toBe('completed')
+    expect(generate).toHaveBeenCalledOnce()
+    // 细纲对照不重跑，只补跑失败的记忆提取
+    expect(flow.checkOutlineStream).toHaveBeenCalledOnce()
+    expect(flow.extractMemoryStream).toHaveBeenCalledTimes(4)
+  })
+
+  it('retries a flaky outline check in place instead of pausing the batch', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream)
+      .mockRejectedValueOnce(new Error('暂时断网'))
+      .mockResolvedValueOnce('对不起，我无法输出 JSON')
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(flow.checkOutlineStream).toHaveBeenCalledTimes(3)
   })
 
   it('preserves pending checks when recovery is cancelled before the first call', async () => {

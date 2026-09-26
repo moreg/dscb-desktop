@@ -2070,6 +2070,8 @@ export interface OutlineDiffReport {
    * 此时 diffs 同样是空的，不能读作"无差异"。
    */
   checked?: boolean
+  /** checked=false 时的失败原因（调用报错或输出无法解析），供暂停提示展示。 */
+  error?: string
   /**
    * 连续写作「以正文为准」回写细纲后填：已按正文回写的差异条数（0 表示本章无需回写）。
    * undefined 表示没跑过正文优先回写。回写成功后 diffs 只保留仍未处理的项。

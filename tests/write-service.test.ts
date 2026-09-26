@@ -1375,17 +1375,11 @@ describe('WriteService', () => {
         expect.any(Object),
       expect.any(Array)
       )
-      expect(rhythmSpy).toHaveBeenCalledWith(
-        knownContent,        // ← 关键
-        1,
-        expect.any(Number),  // expectedEmotion
-        expect.any(Object)
-      )
-      expect(figSpy).toHaveBeenCalledWith(
-        knownContent,        // ← 关键
-        1,
-        expect.any(Object)
-      )
+      // 批量流程不跑节奏评估/图解（结果既不回写也不落盘）
+      expect(rhythmSpy).not.toHaveBeenCalled()
+      expect(figSpy).not.toHaveBeenCalled()
+      expect(result.rhythm).toBeNull()
+      expect(result.figure.shouldGenerate).toBe(false)
 
       // 验证返回的 content 也是步骤 1 生成的
       expect(result.content).toBe(knownContent)
@@ -1470,8 +1464,6 @@ describe('WriteService', () => {
       expect(result.outlineDiff.checked).toBe(false)
       // 其他步骤仍被调用
       expect(memSpy).toHaveBeenCalled()
-      expect(rhythmSpy).toHaveBeenCalled()
-      expect(figSpy).toHaveBeenCalled()
 
       genSpy.mockRestore()
       outlineSpy.mockRestore()
@@ -1480,7 +1472,7 @@ describe('WriteService', () => {
       figSpy.mockRestore()
     })
 
-    it('calls onProgress with all 7 step names in order', async () => {
+    it('calls onProgress with the batch step names in order', async () => {
       const llm = mockLlm('')
       const service = new WriteService(ps, llm)
 
@@ -1498,14 +1490,11 @@ describe('WriteService', () => {
       const steps: string[] = []
       await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
 
-      // 自动提交移动到审稿之后，提取时不改全书状态。
+      // 对照/提取/深审并行成一步；自动提交在审稿之后，提取时不改全书状态。
       expect(steps).toEqual([
         'generating',
         'audit',
-        'outlineCheck',
-        'memoryExtract',
-        'rhythmEval',
-        'figureGen',
+        'postChecks',
         'memoryApply',
         'done'
       ])
@@ -1584,7 +1573,7 @@ describe('WriteService', () => {
 
       expect(applyMemSpy).not.toHaveBeenCalled()
       expect(steps).not.toContain('memoryApply')
-      expect(steps).toContain('memoryExtract')
+      expect(steps).toContain('postChecks')
 
       genSpy.mockRestore()
       applyMemSpy.mockRestore()
