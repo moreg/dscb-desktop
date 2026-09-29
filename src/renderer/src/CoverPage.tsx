@@ -432,8 +432,12 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
     setGenerating(true)
     setError('')
     try {
-      // 框里是什么就发什么
-      await window.api.generateCover(buildInput({ promptOverride: prompt }))
+      // 编辑框原样发送。提炼方向不写进框里，只在出图时附加，压过框里冲突的人物和画风。
+      const direction = extraHint.trim()
+      await window.api.generateCover(buildInput({
+        promptOverride: prompt,
+        ...(direction ? { visualDirection: direction } : {})
+      }))
       await refresh()
     } catch (err) {
       setError(describeError(err))
@@ -704,7 +708,6 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             </div>
           </div>
         </div>
-        {/* 唯一的提示词事实来源：框里是什么，就原样送给图像模型 */}
         <div className="field" style={{ marginBottom: 4 }}>
           <label
             htmlFor="cover-prompt"
@@ -713,7 +716,11 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             <span>
               封面提示词
               <span className="meta" style={{ marginLeft: 6 }}>
-                {promptDirty ? '已手改，出图按此原文' : '按平台/题材自动拼装，可直接编辑'}
+                {extraHint.trim()
+                  ? '提炼方向优先级最高，压过这段提示词里冲突的人物和画风'
+                  : promptDirty
+                    ? '已手改，出图按此原文'
+                    : '按平台/题材自动拼装，可直接编辑'}
               </span>
             </span>
             <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -792,14 +799,14 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
 
         <div className="field">
           <label htmlFor="cover-extra-hint" style={{ fontSize: 12 }}>
-            提炼方向（可选，只影响「从小说内容提炼」）
+            提炼方向（优先级最高，压过小说主角、视觉风格和提示词）
           </label>
           <input
             id="cover-extra-hint"
             className="input"
             value={extraHint}
             onChange={(e) => setExtraHint(e.target.value)}
-            placeholder="如：主角画女性视角 / 不要人物只要场景 / 突出第三卷的决战"
+            placeholder="如：主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格"
           />
         </div>
 

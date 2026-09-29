@@ -157,6 +157,14 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     hint: '前后矛盾、时间线混乱、因果不衔接'
   },
   {
+    checkId: 'spoiler',
+    kind: 'llm',
+    group: 'llm_review',
+    label: '提前剧透',
+    defaultSeverity: 'error',
+    hint: '旁白、人物心理或章末钩子提前说破尚未揭晓的答案'
+  },
+  {
     checkId: 'low_iq_plot',
     kind: 'llm',
     group: 'llm_review',

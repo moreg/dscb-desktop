@@ -173,12 +173,15 @@ export class CoverPromptService {
       ? this.learningLibrary.resolveStyle(loadedLibrary.library, input.stylePreset, genre)
       : undefined
     const selectedPreset = learned?.definition ?? explicitStyle
-    const composition = selectedPreset?.noPeople
-      ? 'scene'
-      : input.compositionOverride ??
-        (COMPOSITIONS.includes(parsed.composition as CoverComposition)
-          ? (parsed.composition as CoverComposition)
-          : 'closeup')
+    const direction = input.extraHint?.trim() ?? ''
+    const modelComposition = COMPOSITIONS.includes(parsed.composition as CoverComposition)
+      ? (parsed.composition as CoverComposition)
+      : undefined
+    const composition = direction
+      ? modelComposition ?? 'closeup'
+      : selectedPreset?.noPeople
+        ? 'scene'
+        : input.compositionOverride ?? modelComposition ?? 'closeup'
 
     const prompt = buildCoverPrompt({
       bookName: input.bookName,
@@ -191,6 +194,7 @@ export class CoverPromptService {
       learningRules: loadedLibrary?.library.globalRules,
       typography: input.typography,
       styleHint: cleanField(parsed.styleHintZh),
+      ...(direction ? { directionWins: true } : {}),
       scene: {
         characterDesc: cleanField(parsed.characterDesc),
         backgroundDesc: cleanField(parsed.backgroundDesc),
@@ -330,27 +334,44 @@ export class CoverPromptService {
     const selectedStyle = learnedStyle ?? (input.stylePreset && input.stylePreset !== 'auto'
       ? COVER_STYLE_PRESETS[input.stylePreset]
       : undefined)
+    const direction = input.extraHint?.trim() ?? ''
     const styleLine = selectedStyle
-      ? `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 色彩、光线和画面组织必须符合该风格，不要另选画风。`
+      ? direction
+        ? `界面当前视觉风格是“${selectedStyle.label}”（${selectedStyle.description}），只给方向没写到的细节做参考，优先级低于作者画面方向。`
+        : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 色彩、光线和画面组织必须符合该风格，不要另选画风。`
       : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
-    const mediumRequirement = input.stylePreset ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset] : undefined
+    const mediumRequirement = !direction && input.stylePreset
+      ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset]
+      : undefined
     const mediumLine = mediumRequirement
       ? `\n   媒介要求：${mediumRequirement}。所有画面字段与 styleHintZh 都必须遵守该媒介，不得因题材或平台改成另一种画风。人物年龄、身份、体型和服饰遵循小说资料；更换画风不等于更换角色，不要擅自改成少年、学生、Q版人物或现代装。`
       : ''
+    const noPeopleLine = !direction && selectedStyle?.noPeople
+      ? '当前风格要求无人物，composition 必须返回 scene，characterDesc 必须留空。'
+      : ''
+    const directionBlock = direction
+      ? `【作者画面方向，优先级最高】
+${direction}
+这是封面画面的最高优先级，高于小说资料、界面上选中的视觉风格、媒介锁和学习库规则。characterDesc、composition、styleHintZh、summaryZh 必须服从这段方向。它压过小说资料里的主角：性别、族裔、身份、姿态、服饰、画风凡是和方向冲突的，按方向改，丢掉冲突的那一部分。不要改回小说主角。方向没有写到的场景、道具、色调和情节，仍从小说资料里补。
+
+`
+      : ''
+    const taskBody = direction
+      ? '封面要在一眼之内传达这本书的题材与卖点。作者画面方向已经指定的人物和画风必须照方向画，不要改回小说主角。方向没写的场景、道具和背景，再从资料里补。'
+      : `封面要在一眼之内传达这本书的题材与卖点。请判断：主角长什么样、穿什么、拿什么，站在什么场景里，整体什么色调和光线。
+必须基于上面的资料，不要套用泛泛的题材模板——如果资料写了主角是断臂的中年刀客，就不要写成白衣少年剑仙。`
 
     return `你是中文网文封面美术指导。请阅读下面这本小说的资料，提炼出**这本书专属**的封面画面要素。
 
-${material}
+${directionBlock}${material}
 
-${input.extraHint?.trim() ? `【作者额外要求】\n${input.extraHint.trim()}\n` : ''}
 【任务】
-封面要在一眼之内传达这本书的题材与卖点。请判断：主角长什么样、穿什么、拿什么，站在什么场景里，整体什么色调和光线。
-必须基于上面的资料，不要套用泛泛的题材模板——如果资料写了主角是断臂的中年刀客，就不要写成白衣少年剑仙。
+${taskBody}
 
 【约束】
 1. ${genreLine}
 2. ${styleLine}${mediumLine}
-3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。${selectedStyle?.noPeople ? '当前风格要求无人物，composition 必须返回 scene，characterDesc 必须留空。' : ''}
+3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。${noPeopleLine}
 4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段用**英文**书写（它们会直接送进图像模型），每项一句话，具体到可画出来的程度。
    - characterDesc：年龄、性别、发型、服饰材质与颜色、神态、手持物。
    - backgroundDesc：具体地点与环境细节，不要只写 "fantasy world"。

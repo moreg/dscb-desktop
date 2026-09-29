@@ -1141,6 +1141,21 @@ export interface RendererApi {
   chooseCoverLearningLibraryDirectory: () => Promise<CoverLearningLibrarySummary | null>
   /** 选择封面文件夹并学习；取消选择时返回 null */
   chooseAndLearnCoverFolder: () => Promise<CoverLearningRunResult | null>
+  /* ---- 番茄书测（多书名实验）---- */
+  /** 读取本书的测试书名和封面记录；没有记录时返回空列表 */
+  getBookTest: (projectId: string) => Promise<BookTestState>
+  /** 保存笔名、封面风格和这轮想测的方向 */
+  patchBookTest: (input: PatchBookTestInput) => Promise<BookTestState>
+  /** 按大纲和简介再生成若干套测试书名，追加到列表前面 */
+  generateBookTestTitles: (input: GenerateBookTestTitlesInput) => Promise<BookTestState>
+  /** 给已经在列表里的一套换一个书名，已有封面保留 */
+  replaceBookTestTitle: (projectId: string, candidateId: string) => Promise<BookTestState>
+  /** 改某一套的书名、卖点、封面说明，或勾选留下 */
+  updateBookTestCandidate: (input: UpdateBookTestCandidateInput) => Promise<BookTestState>
+  /** 从列表拿掉一套。封面文件还在封面页 */
+  deleteBookTestCandidate: (projectId: string, candidateId: string) => Promise<BookTestState>
+  /** 按这套书名和笔名出一张番茄封面 */
+  generateBookTestCover: (projectId: string, candidateId: string, authorName?: string) => Promise<BookTestState>
   /* ---- 扫榜（story-long-scan / story-short-scan）---- */
   /** 采集某平台榜单（确定性，不调 LLM），返回榜单 markdown + 结构化条目 */
   scanRank: (input: ScanRankInput) => Promise<ScanResult>
@@ -1843,6 +1858,7 @@ export type ReviewCheckId =
   // LLM 类（review-flow-service.ts 流式判定）
   | 'character_breakdown' // 角色崩坏人设
   | 'logic_hole' // 逻辑漏洞/逻辑断层
+  | 'spoiler' // 提前揭晓反转、身份、伏笔答案或结局
   | 'low_iq_plot' // 剧情降智
   | 'emotion_cliff' // 情绪断崖
   | 'hook_grade' // 钩子强度分级
@@ -2903,9 +2919,14 @@ export interface GenerateCoverInput {
   /** 风格偏好补充（可选，追加到 prompt） */
   styleHint?: string
   /**
+   * 封面页「提炼方向」，优先级最高。出图时包在提示词外面，压过小说主角、视觉风格和提示词里冲突的人物、姿态、服饰、画风。
+   * 不写进提示词编辑框。
+   */
+  visualDirection?: string
+  /**
    * 用户在界面上手改过的完整提示词。给了就**原样**送进图像模型，
    * 不再按平台/题材模板拼装 —— 界面上那个可编辑提示词框即是唯一事实来源。
-   * 空白时回退模板拼装。
+   * 空白时回退模板拼装。visualDirection 的优先级仍高于这段提示词。
    */
   promptOverride?: string
   /** 参考图本地路径（设置后走图生图） */
@@ -2943,7 +2964,10 @@ export interface ExtractCoverPromptInput {
   stylePreset?: CoverStylePreset
   /** 书名与作者名的字体、位置和文字特效 */
   typography?: CoverTypographyOptions
-  /** 用户额外诉求（中文自由文本，如「主角要女性」「不要人物只要场景」） */
+  /**
+   * 封面页「提炼方向」，优先级最高。提炼提示词和生成封面时都压过小说主角、视觉风格和提示词里冲突的人物、姿态、服饰、画风。
+   * 生成封面时以 visualDirection 包在出图提示词外面，不写进编辑框。
+   */
   extraHint?: string
 }
 
@@ -3005,6 +3029,61 @@ export interface CoverLearningLibrarySummary {
   learningRunCount: number
   lastLearnedAt?: string
   error?: string
+}
+
+/**
+ * 番茄多书名实验的一套方案。
+ * 书名和封面只存在这里，不回写作品当前书名。
+ */
+export interface BookTestCandidate {
+  id: string
+  title: string
+  /** 这套在测的卖点，给作者挑选时看 */
+  hook: string
+  /** 这套封面该画什么 */
+  coverHint: string
+  /** 作者勾选、准备拿去提交的 */
+  kept: boolean
+  /** 封面页里的文件名，如 封面_v3.png */
+  coverFileName?: string
+  /** 出这张封面时用的书名。和 title 不一致时，封面上还是旧书名 */
+  coverTitle?: string
+  createdAt: string
+}
+
+export interface BookTestState {
+  schemaVersion: 1
+  /** 写在封面上的笔名 */
+  authorName: string
+  stylePreset: CoverStylePreset
+  /** 这一轮额外指定的测试方向 */
+  direction: string
+  candidates: BookTestCandidate[]
+  updatedAt: string
+}
+
+export interface PatchBookTestInput {
+  projectId: string
+  authorName?: string
+  stylePreset?: CoverStylePreset
+  direction?: string
+}
+
+export interface GenerateBookTestTitlesInput {
+  projectId: string
+  count: number
+  direction?: string
+  authorName?: string
+  stylePreset?: CoverStylePreset
+}
+
+export interface UpdateBookTestCandidateInput {
+  projectId: string
+  id: string
+  title?: string
+  hook?: string
+  coverHint?: string
+  kept?: boolean
 }
 
 /** 一次本地封面文件夹学习的结果。 */

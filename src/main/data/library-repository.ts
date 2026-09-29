@@ -42,7 +42,7 @@ export class LibraryRepository {
 
   async update(
     projectId: string,
-    patch: Partial<Pick<ProjectMeta, 'name' | 'description' | 'genre'>>
+    patch: Partial<Pick<ProjectMeta, 'name' | 'description' | 'genre' | 'path'>>
   ): Promise<ProjectMeta> {
     return withFileLock(this.libraryFile, async () => {
       const lib = await readJson<Library>(this.libraryFile, EMPTY)

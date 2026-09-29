@@ -110,10 +110,29 @@ describe('ReviewFlowService.runDeepReview', () => {
     )
     const svc = new ReviewFlowService(llm)
     const out = await svc.runDeepReview('正文…', { chapterNumber: 1 })
-    // 8 个 LLM 检查各调一次
-    expect((llm.generateStream as ReturnType<typeof vi.fn>).mock.calls.length).toBe(8)
-    expect(out.length).toBe(8)
+    // 9 个 LLM 检查各调一次
+    expect((llm.generateStream as ReturnType<typeof vi.fn>).mock.calls.length).toBe(9)
+    expect(out.length).toBe(9)
     expect(out.every((v) => v.category === 'llm_review')).toBe(true)
+  })
+
+  it('checks premature reveals against the outline and prior reader knowledge', async () => {
+    const llm = mockLlmByCheck({
+      spoiler: JSON.stringify({ findings: [{
+        checkId: 'spoiler', severity: 'error', message: '身份在揭晓节点前被说破', snippet: '他其实是魔王'
+      }] })
+    })
+    const content = '他其实是魔王。门外有人敲门。'
+    const out = await new ReviewFlowService(llm).runDeepReview(content, {
+      chapterNumber: 2,
+      enabledChecks: ['spoiler'],
+      outline: '第 2 章末才揭晓身份。',
+      continuityContext: '前章读者尚不知道他的真实身份。'
+    })
+    const prompt = vi.mocked(llm.generateStream).mock.calls[0][0]
+    expect(prompt).toContain('第 2 章末才揭晓身份')
+    expect(prompt).toContain('前章读者尚不知道他的真实身份')
+    expect(out[0]).toMatchObject({ ruleId: 'spoiler', severity: 'error', offset: 0 })
   })
 
   it('filters out algorithm-class checkIds (only LLM checks run)', async () => {

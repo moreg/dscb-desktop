@@ -631,6 +631,10 @@ export interface BuildPromptArgs {
    * 缺省字段仍回退题材默认值。
    */
   scene?: CoverScene
+  /**
+   * 作者填写了提炼方向。风格锁和题材默认人物让路，只保留方向没写到的场景和排版。
+   */
+  directionWins?: boolean
 }
 
 /** 取覆盖值，空串/全空白视为未提供 */
@@ -660,7 +664,9 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
       ? COVER_STYLE_PRESETS[args.stylePreset]
       : undefined
   )
-  const mediumRequirement = args.stylePreset ? COVER_STYLE_MEDIUM_REQUIREMENTS[args.stylePreset] : undefined
+  const mediumRequirement = args.directionWins
+    ? undefined
+    : args.stylePreset ? COVER_STYLE_MEDIUM_REQUIREMENTS[args.stylePreset] : undefined
   const effectiveComposition = preset?.noPeople ? 'scene' : args.composition
   const composition = COMPOSITION_DESC[effectiveComposition]
   const scene = args.scene
@@ -687,7 +693,9 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     // 已明确选风格时只保留平台的移动端可读性与比例要求，避免平台默认的
     // “人物占满画面”等描述和水墨/无人物风格互相打架。
     lines.push(`Chinese web novel cover design for ${platform.label}, optimized for mobile thumbnail readability.`)
-    lines.push(`Selected visual style lock (${preset.label}): ${preset.prompt}.`)
+    lines.push(args.directionWins
+      ? `Style reference only (${preset.label}), subordinate to the author visual direction. Do not let this reference replace the directed subject or medium.`
+      : `Selected visual style lock (${preset.label}): ${preset.prompt}.`)
   } else {
     lines.push(`Chinese web novel cover design, ${platform.prompt}.`)
   }
@@ -704,16 +712,21 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     'Frame safety: the finished cover will be cropped slightly on all four sides for platform upload, so every glyph of both the title and the author byline must sit well within a safe margin — at least 6 percent of the cover height from the top and bottom edges and 6 percent of the width from the sides. No text may touch, overlap, or run off any edge; the author byline in particular must float clearly above the bottom edge, never flush against it.'
   )
   if (args.learningRules?.length) {
-    lines.push(`Learned cover rules: ${args.learningRules.join(' ')}`)
+    const learnedPrefix = args.directionWins
+      ? 'Learned cover rules, subordinate to the author visual direction: '
+      : 'Learned cover rules: '
+    lines.push(learnedPrefix + args.learningRules.join(' '))
   }
   // 题材 + 构图 + 画面层
-  lines.push(`${mediumRequirement ? GENRE_SUBJECTS[args.genre] : style.tag}.`)
+  lines.push(`${args.directionWins || mediumRequirement ? GENRE_SUBJECTS[args.genre] : style.tag}.`)
   lines.push(`${composition}.`)
   // 纯场景构图不描述主体人物，否则与「no human figure as main subject」自相矛盾
   if (effectiveComposition !== 'scene') {
-    const defaultCharacter = mediumRequirement && args.genre === 'light_novel'
-      ? 'an original fictional protagonist with story-appropriate age, appearance and clothing, natural character proportions and an expressive face'
-      : style.characterDesc
+    const defaultCharacter = args.directionWins
+      ? 'the subject specified by the author visual direction, including that direction\'s gender, ethnicity, identity, pose, clothing and art medium'
+      : mediumRequirement && args.genre === 'light_novel'
+        ? 'an original fictional protagonist with story-appropriate age, appearance and clothing, natural character proportions and an expressive face'
+        : style.characterDesc
     lines.push(sentence(pick(scene?.characterDesc, defaultCharacter)))
   }
   lines.push('Background: ' + sentence(pick(scene?.backgroundDesc, style.backgroundDesc)))
@@ -727,9 +740,11 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     lines.push(sentence(args.styleHint))
   }
   // 通用修饰
-  const finish = preset
-    ? 'professional print-ready cover art, faithfully preserve the selected medium and visual language'
-    : 'professional book cover, high detail digital painting style'
+  const finish = args.directionWins
+    ? 'professional print-ready cover art, the author visual direction outranks this style reference'
+    : preset
+      ? 'professional print-ready cover art, faithfully preserve the selected medium and visual language'
+      : 'professional book cover, high detail digital painting style'
   lines.push(
     `${finish}, portrait ${platform.ratio} ratio, keep title and author name inside the central safe area away from edges (inner ~85%), no watermark, no text other than the title and author name`
   )

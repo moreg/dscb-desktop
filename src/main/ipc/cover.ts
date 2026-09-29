@@ -73,6 +73,7 @@ const generateCoverSchema = z.object({
   stylePreset: stylePresetSchema.optional(),
   typography: typographySchema.optional(),
   styleHint: z.string().max(500).optional(),
+  visualDirection: z.string().max(500).optional(),
   // 手改后的整段提示词。8000 字符远超模板拼装长度，又低于图像 API 的上限
   promptOverride: z.string().max(8000).optional(),
   refImagePath: z.string().max(1000).optional()

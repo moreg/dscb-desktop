@@ -1,12 +1,17 @@
 import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
-import { join } from 'path'
+import { basename, dirname, join } from 'path'
 import { LibraryRepository } from './library-repository'
 import { ProjectRepository } from './project-repository'
 import { SettingsRepository } from './settings-repository'
 import { writeTextAtomic } from './atomic'
 import { scanProjectsRoot } from './skill-format/library-scanner'
-import { ProjectSkillRepo } from './skill-format/project-skill-repo'
+import { readText } from './skill-format/md-parser'
+import {
+  ProjectSkillRepo,
+  replaceCoreBookName,
+  replaceOutlineBookName
+} from './skill-format/project-skill-repo'
 import type {
   CreateProjectDataInput,
   ListProjectsQuery,
@@ -187,20 +192,66 @@ export class ProjectService {
     return next
   }
 
-  /** 保存对外展示的小说信息，同时同步 project.json 与 library.json。 */
+  /**
+   * 保存书名和简介。书名会同步成同级文件夹名，并写回大纲标题与核心设定。
+   * 文件夹名不能用的符号换成全角，返回的 name 就是最终文件夹名。
+   */
   async updateProjectInfo(
     projectId: string,
     info: { name: string; description?: string }
   ): Promise<ProjectData> {
-    const next = await this.updateProjectData(projectId, {
-      name: info.name,
-      description: info.description
-    })
-    await this.library.update(projectId, {
-      name: next.name,
-      description: next.description
-    })
-    return next
+    const folderName = toFolderName(info.name)
+    if (!folderName) throw new Error('这个名称不能用作文件夹名')
+
+    const currentDir = await this.resolveDir(projectId)
+    const nextDir = await this.renameProjectFolder(projectId, currentDir, folderName)
+    try {
+      const next = await this.updateProjectData(projectId, {
+        name: folderName,
+        description: info.description
+      })
+      await writeFolderTitle(nextDir, folderName)
+      await this.library.update(projectId, {
+        name: folderName,
+        description: next.description,
+        path: nextDir
+      })
+      return { ...next, name: folderName }
+    } catch (err) {
+      if (nextDir !== currentDir) {
+        try {
+          await renameDir(nextDir, currentDir)
+          this.dirCache.set(projectId, currentDir)
+        } catch {
+          // 文件夹已经改名，但书名没写完。保留新路径，避免索引指回不存在的旧目录。
+          this.dirCache.set(projectId, nextDir)
+        }
+      }
+      throw err
+    }
+  }
+
+  /** 把项目目录改成同级下的新文件夹名。名字没变时原地返回。 */
+  private async renameProjectFolder(projectId: string, currentDir: string, folderName: string): Promise<string> {
+    if (basename(currentDir) === folderName) return currentDir
+    const target = join(dirname(currentDir), folderName)
+    if (await pathExists(target) && !samePath(currentDir, target)) {
+      throw new Error(`已经有同名文件夹：${folderName}`)
+    }
+    try {
+      await renameDir(currentDir, target)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
+        throw new Error('文件夹正在被占用，请关掉正在使用这本书的程序后再保存')
+      }
+      if (code === 'EEXIST' || code === 'ENOTEMPTY') {
+        throw new Error(`已经有同名文件夹：${folderName}`)
+      }
+      throw err
+    }
+    this.dirCache.set(projectId, target)
+    return target
   }
 
   /** 追加灵感抽签候选；同名同简介视为重复，最新的排在最前。 */
@@ -255,14 +306,139 @@ export class ProjectService {
     const root = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
     const discovered = await scanProjectsRoot(root)
     const existing = await this.library.list()
-    const knownPaths = new Set(existing.map((project) => project.path))
     for (const item of discovered) {
-      if (!knownPaths.has(item.path)) {
-        await this.library.create({ name: item.name, path: item.path })
-        knownPaths.add(item.path)
+      const folderName = basename(item.path)
+      // 旧目录已不在，说明这本书是改文件夹名之后又被扫到的。文件夹名就是要同步的新书名。
+      const renamed =
+        isUsableFolderTitle(folderName) && (await folderWasRenamed(existing, item.path, item.name))
+      const title = renamed ? folderName : item.name
+      const known = existing.find((project) => project.path === item.path)
+      if (!known) {
+        const created = await this.library.create({ name: title, path: item.path })
+        existing.push(created)
+      } else if (known.name !== title) {
+        await this.library.update(known.id, { name: title })
+        known.name = title
       }
+      if (title !== item.name) await writeFolderTitle(item.path, title)
     }
     return this.listProjects()
+  }
+}
+
+const FOLDER_CHAR: Record<string, string> = {
+  '<': '＜',
+  '>': '＞',
+  ':': '：',
+  '"': '＂',
+  '/': '／',
+  '\\': '＼',
+  '|': '｜',
+  '?': '？',
+  '*': '＊'
+}
+
+/** 书名转成 Windows 能用的文件夹名。非法符号换成全角，返回值就是要保存的书名。 */
+export function toFolderName(name: string): string {
+  const replaced = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, (ch) => FOLDER_CHAR[ch] ?? '')
+  const cleaned = replaced.replace(/[. ]+$/g, '').trim()
+  if (!cleaned || cleaned === '.' || cleaned === '..') return ''
+  if (isReservedWindowsName(cleaned)) return ''
+  return [...cleaned].slice(0, 255).join('')
+}
+
+function isReservedWindowsName(name: string): boolean {
+  const stem = name.split('.')[0]?.toUpperCase() ?? ''
+  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)
+}
+
+function samePath(a: string, b: string): boolean {
+  const norm = (value: string) => (process.platform === 'win32' ? value.replace(/\\/g, '/').toLowerCase() : value)
+  return norm(a) === norm(b)
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function renameDir(from: string, to: string): Promise<void> {
+  if (from === to) return
+  const caseOnly = process.platform === 'win32' && samePath(from, to)
+  if (caseOnly) {
+    const temp = join(dirname(from), `.rename-${randomUUID()}`)
+    await renameDirOnce(from, temp)
+    await renameDirOnce(temp, to)
+    return
+  }
+  await renameDirOnce(from, to)
+}
+
+async function renameDirOnce(from: string, to: string): Promise<void> {
+  let last: unknown
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await fs.rename(from, to)
+      return
+    } catch (err) {
+      last = err
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err
+      await new Promise((resolve) => setTimeout(resolve, 80 * (attempt + 1)))
+    }
+  }
+  throw last
+}
+
+/** 纯数字、uuid 这类目录名不是书名，扫描时不拿来覆盖大纲标题。 */
+function isUsableFolderTitle(name: string): boolean {
+  const title = name.trim()
+  if (title.length < 2) return false
+  if (/^\d+$/.test(title)) return false
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(title)) return false
+  return true
+}
+
+/**
+ * 书架里还有一条同名记录，但它的目录已经没有大纲。
+ * 这是同一本书被改了文件夹名，不是另一本恰好同名的新书。
+ */
+async function folderWasRenamed(
+  existing: ProjectMeta[],
+  newPath: string,
+  outlineName: string
+): Promise<boolean> {
+  if (!outlineName) return false
+  for (const project of existing) {
+    if (project.path === newPath) continue
+    if (project.name !== outlineName && basename(project.path) !== outlineName) continue
+    if (!(await hasV3Outline(project.path))) return true
+  }
+  return false
+}
+
+/** 把大纲标题、核心设定和 project.json 里的书名写成文件夹名。 */
+async function writeFolderTitle(dir: string, folderName: string): Promise<void> {
+  const outlinePath = join(dir, '大纲', '大纲.md')
+  const outline = await readText(outlinePath)
+  if (outline) {
+    const next = replaceOutlineBookName(outline, folderName)
+    if (next !== outline) await writeTextAtomic(outlinePath, next)
+  }
+  const corePath = join(dir, '设定', '核心设定.md')
+  const core = await readText(corePath)
+  if (core) {
+    const next = replaceCoreBookName(core, folderName)
+    if (next !== core) await writeTextAtomic(corePath, next)
+  }
+  const repo = new ProjectRepository(dir)
+  const data = await repo.read()
+  if (data && data.name !== folderName) {
+    await repo.write({ ...data, name: folderName, updatedAt: new Date().toISOString() })
   }
 }
 

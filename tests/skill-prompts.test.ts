@@ -63,6 +63,12 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('边界铁律')
   })
 
+  it.each([undefined, 'extend', 'finish'] as const)('keeps the reader knowledge boundary in %s mode', (mode) => {
+    const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
+    expect(prompt).toContain('以读者读到当前位置时已获知的信息为边界')
+    expect(prompt).toContain('章末钩子只呈现本章当下发生的事件或可感知线索')
+  })
+
   it('embeds default narration rules from the editable section registry', () => {
     const prompt = buildSystemPrompt()
     const narration = CHAPTER_RULE_SECTIONS.find((section) => section.key === 'deai')!
@@ -163,6 +169,8 @@ describe('buildSystemPrompt', () => {
     expect(continuation).toContain('不得插入动作或另起一句打断')
     expect(continuation).toContain('不强制动作起手')
     expect(continuation).toContain('先续完进行中的剧情点')
+    expect(continuation).toContain('剧情第一与禁止华丽辞藻堆砌')
+    expect(continuation).toContain('文笔是为剧情服务的')
     expect(continuation).not.toContain('第一句必须**立刻切入具体物理动作')
     expect(continuation).not.toContain('本次要新增**的字数下限')
   })

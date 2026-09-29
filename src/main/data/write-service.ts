@@ -892,6 +892,7 @@ export class WriteService {
             [
               'character_breakdown',
               'logic_hole',
+              'spoiler',
               'low_iq_plot',
               'emotion_cliff',
               'hook_grade',

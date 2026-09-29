@@ -33,6 +33,7 @@ const StyleProfilePage = lazy(() => import('./StyleProfilePage'))
 const CoverLearningLibraryPage = lazy(() => import('./CoverLearningLibraryPage'))
 const TeardownPage = lazy(() => import('./TeardownPage'))
 const CoverPage = lazy(() => import('./CoverPage'))
+const BookTestPage = lazy(() => import('./BookTestPage'))
 const ScanPage = lazy(() => import('./ScanPage'))
 const ProjectInspirationPage = lazy(() => import('./ProjectInspirationPage'))
 const ProjectInfoPage = lazy(() => import('./ProjectInfoPage'))
@@ -59,6 +60,7 @@ type View =
   | { kind: 'styles' }
   | { kind: 'coverLearningLibrary' }
   | { kind: 'covers'; projectId: string }
+  | { kind: 'bookTest'; projectId: string }
   | { kind: 'settings'; tab?: string }
 
 const ENTITY_LABELS: Record<MemoryEntityType, string> = {
@@ -117,6 +119,7 @@ function isNavActive(view: View, kind: string, projectId: string | null): boolea
   if (kind === 'rhythm') return view.kind === 'rhythm'
   if (kind === 'figures') return view.kind === 'figures'
   if (kind === 'covers') return view.kind === 'covers'
+  if (kind === 'bookTest') return view.kind === 'bookTest'
   if (kind === 'characters') return view.kind === 'characters'
   if (kind === 'relationships') return view.kind === 'relationships'
   if (kind === 'memoryCenter') return view.kind === 'memoryCenter'
@@ -435,6 +438,13 @@ export default function App() {
               >
                 <span className="icon">🖼</span>
                 封面
+              </button>
+              <button
+                className={`nav-item ${isNavActive(view, 'bookTest', currentProjectId) ? 'active' : ''}`}
+                onClick={() => setView({ kind: 'bookTest', projectId: currentProjectId })}
+              >
+                <span className="icon">🧪</span>
+                书测
               </button>
 
               <div className="sidebar-section">人物</div>
@@ -764,6 +774,13 @@ export default function App() {
           ) : view.kind === 'covers' ? (
             <ErrorBoundary>
               <CoverPage projectId={view.projectId} />
+            </ErrorBoundary>
+          ) : view.kind === 'bookTest' ? (
+            <ErrorBoundary>
+              <BookTestPage
+                projectId={view.projectId}
+                onOpenCovers={() => setView({ kind: 'covers', projectId: view.projectId })}
+              />
             </ErrorBoundary>
           ) : null}
           </Suspense>

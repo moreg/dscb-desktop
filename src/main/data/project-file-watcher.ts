@@ -31,6 +31,10 @@ export class ProjectFileWatcher {
 
   constructor(private readonly windowGetter: () => BrowserWindow | null) {}
 
+  watchingProjectId(): string | null {
+    return this.currentProjectId
+  }
+
   watchProject(projectId: string, dir: string): void {
     // 切项目：先释放旧 watcher
     this.stopWatching()

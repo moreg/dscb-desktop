@@ -4,26 +4,34 @@ import {
   FANQIE_CONTENT_TAGS,
   FANQIE_READING_LIMITS,
   FANQIE_CONTENT_LIMITS,
+  FANQIE_CATEGORY_FALLBACK,
   recommendFanqieTags
 } from '../src/shared/fanqie-tags'
 
 describe('番茄标签词表', () => {
-  it('阅读标签词表取自作者区接口，层分类齐全', () => {
+  it('阅读标签词表只保留建书页能勾选的词，层分类齐全', () => {
     expect(FANQIE_READING_TAGS.length).toBe(260)
     const layers = new Set(FANQIE_READING_TAGS.map((t) => t.layer))
     expect(layers).toEqual(new Set(['主分类', '主题', '角色', '情节']))
-    // 主分类恰好 36 个（书架分类单选）
+    // 主分类恰好 36 个（女频 21 + 男频 19，两边都有的 4 个只算一次）
     const mains = FANQIE_READING_TAGS.filter((t) => t.layer === '主分类')
     expect(mains).toHaveLength(36)
     // categoryId 唯一
     expect(new Set(FANQIE_READING_TAGS.map((t) => t.categoryId)).size).toBe(260)
+    for (const name of ['开局', '现代言情', '古代言情', '幻想言情', '都市', '玄幻', '悬疑', '历史', '体育', '武侠']) {
+      expect(FANQIE_READING_TAGS.find((t) => t.name === name)?.layer).toBe('主题')
+    }
   })
 
   it('内容标签词表取自作者区接口，四组齐全', () => {
-    expect(FANQIE_CONTENT_TAGS.length).toBe(359)
+    expect(FANQIE_CONTENT_TAGS.length).toBe(356)
+    const contentNames = new Set(FANQIE_CONTENT_TAGS.map((t) => t.name))
+    for (const gone of ['带球跑', '去父留子', '后宫']) {
+      expect(contentNames.has(gone)).toBe(false)
+    }
     const groups = new Set(FANQIE_CONTENT_TAGS.map((t) => t.group))
     expect(groups).toEqual(new Set(['世界观', '人设', '情感', '情节']))
-    expect(new Set(FANQIE_CONTENT_TAGS.map((t) => t.labelId)).size).toBe(359)
+    expect(new Set(FANQIE_CONTENT_TAGS.map((t) => t.labelId)).size).toBe(356)
   })
 })
 
@@ -76,6 +84,19 @@ describe('recommendFanqieTags（题材驱动）', () => {
     expect(readingNames).toContain('女强')
   })
 
+  it('简介里的「开局」「现代言情」推荐建书页上能勾的主题', () => {
+    const r = recommendFanqieTags({
+      name: '开局那天',
+      description: '这是一本现代言情，开局就在雨里相遇。',
+      genre: '现代言情'
+    })
+    expect(r.mainCategory?.name).toBe('现言脑洞')
+    const readingNames = r.readingTags.map((t) => t.name)
+    expect(readingNames).toContain('现代言情')
+    expect(readingNames).toContain('开局')
+    expect(r.contentTags.map((t) => t.name)).not.toContain('开局辞退')
+  })
+
   it('纯函数：同一输入两次输出一致', () => {
     const input = { name: '时间循环的追凶', description: '悬疑推理，破案抓凶手。', genre: '悬疑' }
     expect(recommendFanqieTags(input)).toEqual(recommendFanqieTags(input))
@@ -118,5 +139,44 @@ describe('recommendFanqieTags（题材驱动）', () => {
       expect(n).toBeLessThanOrEqual(FANQIE_CONTENT_LIMITS[group as keyof typeof FANQIE_CONTENT_LIMITS])
     }
     expect(r.contentTags.length).toBeLessThanOrEqual(11)
+  })
+
+  it('有文本时每个分类至少 1 个，空输入不硬凑', () => {
+    const empty = recommendFanqieTags({})
+    expect(empty.mainCategory).toBeUndefined()
+    expect(empty.readingTags).toEqual([])
+    expect(empty.contentTags).toEqual([])
+
+    const mains = FANQIE_READING_TAGS.filter((t) => t.layer === '主分类').map((t) => t.name)
+    expect(Object.keys(FANQIE_CATEGORY_FALLBACK).sort()).toEqual([...mains].sort())
+
+    for (const main of mains) {
+      const r = recommendFanqieTags({ name: '占位书名', genre: main })
+      expect(r.mainCategory?.name).toBeTruthy()
+      for (const layer of ['主题', '角色', '情节'] as const) {
+        const n = r.readingTags.filter((t) => FANQIE_READING_TAGS.find((x) => x.categoryId === t.id)?.layer === layer).length
+        expect(n, `${main} 阅读 ${layer}`).toBeGreaterThanOrEqual(1)
+        expect(n).toBeLessThanOrEqual(FANQIE_READING_LIMITS[layer])
+      }
+      for (const group of ['世界观', '人设', '情感', '情节'] as const) {
+        const n = r.contentTags.filter((t) => FANQIE_CONTENT_TAGS.find((x) => x.labelId === t.id)?.group === group).length
+        expect(n, `${main} 内容 ${group}`).toBeGreaterThanOrEqual(1)
+        expect(n).toBeLessThanOrEqual(FANQIE_CONTENT_LIMITS[group])
+      }
+    }
+  })
+
+  it('微观末世基建：主题、角色、人设、情感不再空着', () => {
+    const r = recommendFanqieTags({
+      name: '全员缩小：我靠吃大米还原高楼',
+      description: '人造物缩小一万倍后，人类蜷缩于手办废墟，靠吃东西把建筑还原，并建起堡垒。',
+      genre: '末世 + 微观基建 + 异能（质量热量置换）+ 慢热感情线'
+    })
+    expect(r.mainCategory?.name).toBe('科幻末世')
+    const reading = r.readingTags.map((t) => t.name)
+    expect(reading).toEqual(expect.arrayContaining(['末日求生', '都市异能', '单女主', '末世']))
+    const content = r.contentTags.map((t) => t.name)
+    expect(content).toEqual(expect.arrayContaining(['丧尸', '基建', '末世种田', '超凡者', '日久生情']))
+    expect(content).not.toContain('开局辞退')
   })
 })

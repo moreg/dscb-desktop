@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { mkdtemp, readFile, stat } from 'fs/promises'
+import { cp, mkdtemp, readFile, rename, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -133,16 +133,59 @@ describe('ProjectService', () => {
       name: '抽到的新书名',
       description: '抽到的新简介'
     })
+    const nextDir = path.join(path.dirname(meta.path), '抽到的新书名')
     expect(updated).toMatchObject({ name: '抽到的新书名', description: '抽到的新简介' })
+    expect(await service.resolveDir(meta.id)).toBe(nextDir)
+    await expect(stat(meta.path)).rejects.toThrow()
     expect((await service.listProjects())[0]).toMatchObject({
       name: '抽到的新书名',
-      description: '抽到的新简介'
+      description: '抽到的新简介',
+      path: nextDir
     })
     expect((await service['library'].list())[0]).toMatchObject({
       name: '抽到的新书名',
       description: '抽到的新简介',
-      path: meta.path
+      path: nextDir
     })
+    const outline = await readFile(path.join(nextDir, '大纲', '大纲.md'), 'utf-8')
+    expect(outline).toContain('《抽到的新书名》大纲')
+    expect(outline).not.toContain('旧书名')
+    const core = await readFile(path.join(nextDir, '设定', '核心设定.md'), 'utf-8')
+    expect(core).toContain('- **书名**：抽到的新书名')
+  })
+
+  it('只改简介时，文件夹已经是书名就不再改名', async () => {
+    const meta = await service.create({ name: '旧书名', description: '旧简介' })
+    await service.updateProjectInfo(meta.id, { name: '已对齐的书名', description: '旧简介' })
+    const aligned = await service.resolveDir(meta.id)
+    const updated = await service.updateProjectInfo(meta.id, {
+      name: '已对齐的书名',
+      description: '只改简介'
+    })
+    expect(updated.description).toBe('只改简介')
+    expect(await service.resolveDir(meta.id)).toBe(aligned)
+  })
+
+  it('书名里的 Windows 非法符号换成全角后再当文件夹名', async () => {
+    const meta = await service.create({ name: '旧书名' })
+    const updated = await service.updateProjectInfo(meta.id, { name: '书名?' })
+    expect(updated.name).toBe('书名？')
+    expect(path.basename(await service.resolveDir(meta.id))).toBe('书名？')
+  })
+
+  it('同级已经有这个文件夹时不改名也不改书名', async () => {
+    const first = await service.create({ name: '甲书' })
+    const second = await service.create({ name: '乙书' })
+    await service.updateProjectInfo(first.id, { name: '甲书' })
+    await expect(service.updateProjectInfo(second.id, { name: '甲书' })).rejects.toThrow(/同名文件夹/)
+    expect(await service.resolveDir(second.id)).toBe(second.path)
+    expect((await service.getProjectData(second.id)).name).toBe('乙书')
+  })
+
+  it('CON 这类保留名不能用作文件夹', async () => {
+    const meta = await service.create({ name: '旧书名' })
+    await expect(service.updateProjectInfo(meta.id, { name: 'CON' })).rejects.toThrow(/不能用作文件夹名/)
+    expect(await service.resolveDir(meta.id)).toBe(meta.path)
   })
 
   it('keeps title candidates without changing the current name, deduped and removable', async () => {
@@ -179,6 +222,51 @@ describe('ProjectService', () => {
     expect(all.map((p) => p.id).sort()).toEqual([kept.id, archived.id].sort())
     expect(all.find((p) => p.id === archived.id)?.archivedAt).toBeTruthy()
     expect(await service.resolveDir(archived.id)).toBe(archived.path)
+  })
+
+  it('扫描时把改名后的文件夹名同步为书名', async () => {
+    const oldName = '让你演财阀恶女，你怎么成全首尔的白月光了？'
+    const folderName = '让你演财阀恶女，你怎么成白月光了'
+    const meta = await service.create({ name: oldName })
+    const nextDir = path.join(path.dirname(meta.path), folderName)
+    await rename(meta.path, nextDir)
+    // 上一次扫描已经按大纲里的旧书名登记了新路径
+    await service['library'].create({ name: oldName, path: nextDir })
+
+    const listed = await service.scanProjects()
+    expect(listed.map((item) => item.name)).toEqual([folderName])
+
+    const outline = await readFile(path.join(nextDir, '大纲', '大纲.md'), 'utf-8')
+    expect(outline).toContain(`《${folderName}》大纲`)
+    expect(outline).not.toContain(oldName)
+    const projectJson = JSON.parse(await readFile(path.join(nextDir, 'project.json'), 'utf-8'))
+    expect(projectJson.name).toBe(folderName)
+    const core = await readFile(path.join(nextDir, '设定', '核心设定.md'), 'utf-8')
+    expect(core).toContain(`- **书名**：${folderName}`)
+    expect(core).not.toContain(oldName)
+  })
+
+  it('旧目录还在时，不把另一份大纲相同的书改成文件夹名', async () => {
+    const meta = await service.create({ name: '潮屿之主' })
+    const copy = path.join(path.dirname(meta.path), '师父的七个师姐')
+    await cp(meta.path, copy, { recursive: true })
+
+    const listed = await service.scanProjects()
+    expect(listed.find((item) => item.path === copy)?.name).toBe('潮屿之主')
+    expect(listed.find((item) => item.id === meta.id)?.name).toBe('潮屿之主')
+    const outline = await readFile(path.join(copy, '大纲', '大纲.md'), 'utf-8')
+    expect(outline).toContain('《潮屿之主》大纲')
+  })
+
+  it('纯数字文件夹名不当成新书名', async () => {
+    const meta = await service.create({ name: '穿成财阀恶女，我靠砸钱成了全校白月光' })
+    const nextDir = path.join(path.dirname(meta.path), '1')
+    await rename(meta.path, nextDir)
+
+    const listed = await service.scanProjects()
+    expect(listed.map((item) => item.name)).toEqual(['穿成财阀恶女，我靠砸钱成了全校白月光'])
+    const outline = await readFile(path.join(nextDir, '大纲', '大纲.md'), 'utf-8')
+    expect(outline).toContain('《穿成财阀恶女，我靠砸钱成了全校白月光》')
   })
 
   it('scan does not resurrect an archived project as a new shelf entry', async () => {

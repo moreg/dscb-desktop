@@ -2,7 +2,13 @@
    番茄小说作者区标签推荐（调研数据落地）
    ==========================================================
 
-/** 阅读标签（作者区 /api/author/book/category_list/v0/）。layer：主分类/主题/角色/情节 */
+/**
+ * 阅读标签（作者区建书页可勾选的词）。
+ * layer：主分类/主题/角色/情节。
+ *
+ * 2026-09-29 建书页核对：女频 182 条、男频 154 条，并集 260。
+ * 开局、都市、玄幻、历史、体育只在男频主题；现代言情、古代言情、幻想言情只在女频主题；悬疑、武侠两个频道的主题都有。
+ */
 export interface FanqieReadingTag {
   /** 主分类 → category_id；其余层可通过后四位规则识别（保留原值即可） */
   categoryId: number
@@ -61,7 +67,6 @@ export const FANQIE_READING_TAGS: FanqieReadingTag[] = [
   { categoryId: 851, layer: "主题", name: "规则怪谈", description: "" },
   { categoryId: 778, layer: "主题", name: "搞笑轻松", description: "" },
   { categoryId: 758, layer: "主题", name: "古代", description: "" },
-  { categoryId: 10, layer: "主题", name: "悬疑", description: "" },
   { categoryId: 705, layer: "主题", name: "克苏鲁", description: "" },
   { categoryId: 516, layer: "主题", name: "都市异能", description: "" },
   { categoryId: 515, layer: "主题", name: "末日求生", description: "" },
@@ -82,17 +87,18 @@ export const FANQIE_READING_TAGS: FanqieReadingTag[] = [
   { categoryId: 465, layer: "主题", name: "综漫", description: "" },
   { categoryId: 464, layer: "主题", name: "异世穿越", description: "" },
   { categoryId: 460, layer: "主题", name: "独宠", description: "" },
-  { categoryId: 453, layer: "主题", name: "开局", description: "" },
   { categoryId: 452, layer: "主题", name: "架空", description: "" },
   { categoryId: 259, layer: "主题", name: "奇幻仙侠", description: "" },
-  { categoryId: 1, layer: "主题", name: "都市", description: "" },
   { categoryId: 3, layer: "主题", name: "现代言情", description: "" },
   { categoryId: 5, layer: "主题", name: "古代言情", description: "" },
+  { categoryId: 32, layer: "主题", name: "幻想言情", description: "" },
+  { categoryId: 10, layer: "主题", name: "悬疑", description: "" },
+  { categoryId: 16, layer: "主题", name: "武侠", description: "" },
+  { categoryId: 453, layer: "主题", name: "开局", description: "" },
+  { categoryId: 1, layer: "主题", name: "都市", description: "" },
   { categoryId: 7, layer: "主题", name: "玄幻", description: "" },
   { categoryId: 12, layer: "主题", name: "历史", description: "" },
   { categoryId: 15, layer: "主题", name: "体育", description: "" },
-  { categoryId: 16, layer: "主题", name: "武侠", description: "" },
-  { categoryId: 32, layer: "主题", name: "幻想言情", description: "" },
   { categoryId: 1456, layer: "角色", name: "位尊权重", description: "" },
   { categoryId: 29, layer: "角色", name: "总裁", description: "" },
   { categoryId: 91, layer: "角色", name: "多女主", description: "" },
@@ -286,7 +292,6 @@ export const FANQIE_CONTENT_TAGS: FanqieContentTag[] = [
   { labelId: 9211, group: "情节", name: "互撩", gender: 0 },
   { labelId: 9212, group: "情节", name: "和亲", gender: 0 },
   { labelId: 9213, group: "情节", name: "独宠", gender: 0 },
-  { labelId: 9214, group: "情节", name: "带球跑", gender: 0 },
   { labelId: 9215, group: "情节", name: "攻略反派", gender: 0 },
   { labelId: 9216, group: "情节", name: "寄人篱下", gender: 0 },
   { labelId: 9217, group: "情节", name: "冷宫", gender: 0 },
@@ -296,7 +301,6 @@ export const FANQIE_CONTENT_TAGS: FanqieContentTag[] = [
   { labelId: 9221, group: "情节", name: "男二上位", gender: 0 },
   { labelId: 9222, group: "情节", name: "女扮男装", gender: 0 },
   { labelId: 9223, group: "情节", name: "强强", gender: 0 },
-  { labelId: 9224, group: "情节", name: "去父留子", gender: 0 },
   { labelId: 9225, group: "情节", name: "深情错付", gender: 0 },
   { labelId: 9226, group: "情节", name: "失忆", gender: 0 },
   { labelId: 9227, group: "情节", name: "双向奔赴", gender: 0 },
@@ -318,7 +322,6 @@ export const FANQIE_CONTENT_TAGS: FanqieContentTag[] = [
   { labelId: 9243, group: "情节", name: "时间循环", gender: 1 },
   { labelId: 9244, group: "情节", name: "封地", gender: 1 },
   { labelId: 9245, group: "情节", name: "古武传承", gender: 1 },
-  { labelId: 9246, group: "情节", name: "后宫", gender: 1 },
   { labelId: 9247, group: "情节", name: "争霸", gender: 1 },
   { labelId: 9248, group: "情节", name: "赶山赶海", gender: 1 },
   { labelId: 9249, group: "情节", name: "黑科技", gender: 1 },

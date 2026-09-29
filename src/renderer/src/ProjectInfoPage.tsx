@@ -68,7 +68,11 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
       setDescription(updated.description ?? '')
       setInitialName(updated.name)
       setInitialDescription(updated.description ?? '')
-      setMessage('已保存，书架和灵感抽签将同步使用这份信息')
+      setMessage(
+        updated.name === nextName
+          ? '已保存。书架和本地文件夹都会使用这个名称'
+          : `已保存。不能放进文件夹名的符号已换成全角，文件夹名为「${updated.name}」`
+      )
       onProjectUpdated?.(updated.name)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -202,7 +206,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
         </aside>
       </div>
 
-      <FanqieTagPanel projectId={projectId} />
+      <FanqieTagPanel projectId={projectId} name={name} description={description} />
     </div>
   )
 }

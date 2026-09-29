@@ -64,10 +64,25 @@ export function registerProjectsIpc(service: ProjectService): () => void {
     'projects:updateInfo',
     async (_e, payload: { projectId: string; name: string; description?: string }) => {
       const validated = validateInput(updateProjectInfoSchema, payload)
-      return service.updateProjectInfo(validated.projectId, {
+      const info = {
         name: validated.name.trim(),
         description: validated.description?.trim() || undefined
-      })
+      }
+      // Windows 上监听着的目录改不了名，先松开，保存完再听新路径。
+      const affected = [...watchers.values()].filter((watcher) => watcher.watchingProjectId() === validated.projectId)
+      for (const watcher of affected) watcher.stopWatching()
+      try {
+        const updated = await service.updateProjectInfo(validated.projectId, info)
+        const dir = await service.resolveDir(validated.projectId)
+        for (const watcher of affected) watcher.watchProject(validated.projectId, dir)
+        return updated
+      } catch (err) {
+        const dir = await service.resolveDir(validated.projectId).catch(() => null)
+        if (dir) {
+          for (const watcher of affected) watcher.watchProject(validated.projectId, dir)
+        }
+        throw err
+      }
     }
   )
   safeHandle(

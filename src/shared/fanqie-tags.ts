@@ -1,17 +1,19 @@
 /**
  * 番茄小说作者区标签推荐（纯函数，主/渲染进程共用）。
  *
- * 数据源：作者区真实接口调研结果（2026-08 抓取）——阅读标签
- * /api/author/book/category_list/v0/（260 个，分「主分类/主题/角色/情节」四层），
- * 内容标签 /app/book/label_list/v0/（359 个，分「世界观/人设/情感/情节」四组）。
- * 完整词表见 fanqie-tags-data.ts。
+ * 数据源：2026-09-29 作家专区建书页当前能勾的词。
+ * 阅读标签 260 个（主分类/主题/角色/情节），内容标签 356 个
+ * （世界观/人设/情感/情节）。完整词表见 fanqie-tags-data.ts。
+ * 有些阅读标签只在男频或女频出现，推荐不按频道过滤。
+ * 关键词仍把「现代言情」等说法指到对应主分类，主题层靠标签名自报家门命中。
  *
  * 打标签思路：以「关键词 → 标签」映射为主，书名/简介/题材里出现关键词即加分；
  * 标签名自报家门或题材直接命中给更高分。最后按层截断输出，
  * 每个命中都带 via（命中理由）供人工核对。
  *
- * 注意：番茄建书时「阅读标签」主分类是书架分类的必备项（layer=主分类），
- * 其余阅读标签与内容标签都属于书架标签墙 / 推荐画像，可多选。
+ * 建书页上限：阅读标签主分类 1、主题/角色/情节各 2；
+ * 内容标签世界观 1、人设 4、情感 2、情节 4。
+ * 推荐时每个分类至少 1 个。文本没命中的分类，按主分类补 1 个保底词。
  */
 
 import type { FanqieReadingTag, FanqieContentTag } from './fanqie-tags-data'
@@ -69,7 +71,10 @@ const READING_KEYWORDS: Record<string, string[]> = {
   民国: ['民国言情', '民国'],
   穿越: ['穿越', '古穿今', '今穿古', '群穿', '异世穿越', '清穿'],
   重生: ['重生', '双重生'],
-  末世: ['科幻末世', '末世'],
+  末世: ['科幻末世', '末世', '末日求生'],
+  异能: ['都市异能'],
+  感情: ['单女主'],
+  慢热: ['单女主'],
   丧尸: ['科幻末世'],
   星际: ['科幻末世', '星际'],
   机甲: ['科幻末世'],
@@ -77,7 +82,7 @@ const READING_KEYWORDS: Record<string, string[]> = {
   规则怪谈: ['悬疑脑洞', '规则怪谈'],
   惊悚: ['悬疑脑洞', '惊悚游戏'],
   灵异: ['悬疑灵异', '灵异'],
-  悬疑: ['悬疑脑洞', '悬疑灵异', '悬疑'],
+  悬疑: ['悬疑脑洞', '悬疑灵异'],
   推理: ['悬疑脑洞', '推理'],
   探案: ['悬疑脑洞', '破案'],
   破案: ['悬疑脑洞', '破案'],
@@ -108,14 +113,17 @@ const READING_KEYWORDS: Record<string, string[]> = {
   娱乐圈: ['星光璀璨', '娱乐圈'],
   明星: ['星光璀璨', '明星'],
   电竞: ['游戏体育', '电竞'],
-  体育: ['游戏体育', '体育'],
+  体育: ['游戏体育'],
   游戏: ['游戏体育', '网游'],
   网游: ['游戏体育', '网游'],
   卡牌: ['游戏体育', '卡牌'],
   同人: ['男频衍生', '女频衍生', '同人'],
   衍生: ['男频衍生', '女频衍生', '动漫衍生', '衍生'],
   二次元: ['动漫衍生', '二次元'],
-  现言: ['现言脑洞', '现代言情'],
+  现言: ['现言脑洞'],
+  现代言情: ['现言脑洞'],
+  古代言情: ['古风世情'],
+  幻想言情: ['玄幻言情'],
   职场: ['职场婚恋', '职场商战', '职场'],
   婚恋: ['职场婚恋', '婚恋'],
   双男主: ['双男主'],
@@ -162,7 +170,7 @@ const READING_KEYWORDS: Record<string, string[]> = {
   废土: ['科幻末世', '废土'],
   赛博朋克: ['科幻末世', '赛博朋克'],
   克苏鲁: ['悬疑灵异', '克苏鲁'],
-  武侠: ['武侠', '传统玄幻'],
+  武侠: ['传统玄幻'],
   剑修: ['东方仙侠', '剑修'],
   剑道: ['东方仙侠', '剑道'],
   无CP: ['双男主', '无CP'],
@@ -173,7 +181,6 @@ const READING_KEYWORDS: Record<string, string[]> = {
   无后宫: ['无后宫'],
   搞笑: ['都市脑洞', '搞笑轻松'],
   轻小说: ['动漫衍生', '搞笑轻松'],
-  开局: ['开局'],
   龙傲天: ['都市高武', '无脑爽']
 }
 
@@ -189,6 +196,9 @@ const CONTENT_KEYWORDS: Record<string, string[]> = {
   江湖: ['综武'],
   都市: ['都市江湖'],
   末世: ['丧尸', '末世种田'],
+  异能: ['超凡者'],
+  感情: ['日久生情', '单女主'],
+  慢热: ['日久生情'],
   丧尸: ['丧尸'],
   天灾: ['末世冰封'],
   废土: ['废土'],
@@ -254,7 +264,6 @@ const CONTENT_KEYWORDS: Record<string, string[]> = {
   仕途: ['仕途'],
   权谋: ['权谋'],
   夺嫡: ['夺嫡'],
-  后宫: ['后宫'],
   家族: ['豪门世家'],
   豪门: ['豪门世家'],
   女帝: ['女帝'],
@@ -513,15 +522,130 @@ function truncateBy(layerOf: (id: number) => string | undefined, limits: Record<
   })
 }
 
+/** 某一类没有命中时，按主分类补的那一个词。词都必须在对应层/组里。 */
+interface CategoryFallback {
+  主题: string
+  角色: string
+  情节: string
+  世界观: string
+  人设: string
+  情感: string
+  内容情节: string
+}
+
+const GENERIC_CATEGORY_FALLBACK: CategoryFallback = {
+  主题: '架空',
+  角色: '大佬',
+  情节: '打脸',
+  世界观: '都市江湖',
+  人设: '满级大佬',
+  情感: '日久生情',
+  内容情节: '逆袭'
+}
+
+export const FANQIE_CATEGORY_FALLBACK: Record<string, CategoryFallback> = {
+  女频悬疑: { 主题: '悬疑', 角色: '女强', 情节: '推理', 世界观: '规则怪谈', 人设: '高智商', 情感: '智性恋', 内容情节: '破案' },
+  西方奇幻: { 主题: '奇幻仙侠', 角色: '贵族', 情节: '升级流', 世界观: '位面', 人设: '勇者', 情感: '救赎', 内容情节: '打怪升级' },
+  东方仙侠: { 主题: '奇幻仙侠', 角色: '天才', 情节: '剑修', 世界观: '诸天万界', 人设: '修仙者', 情感: '道侣', 内容情节: '打怪升级' },
+  古风世情: { 主题: '古代言情', 角色: '女强', 情节: '甜宠', 世界观: '历史演义', 人设: '王妃', 情感: '1v1', 内容情节: '门阀斗争' },
+  科幻末世: { 主题: '末日求生', 角色: '天才', 情节: '求生', 世界观: '废土', 人设: '超凡者', 情感: '救赎', 内容情节: '避难所' },
+  男频衍生: { 主题: '衍生', 角色: '大佬', 情节: '同人', 世界观: '综影视', 人设: '满级大佬', 情感: '1v1', 内容情节: '逆袭' },
+  女频衍生: { 主题: '衍生', 角色: '女强', 情节: '同人', 世界观: '综影视', 人设: '满级大佬', 情感: '1v1', 内容情节: '逆袭' },
+  民国言情: { 主题: '架空', 角色: '女强', 情节: '民国', 世界观: '历史演义', 人设: '名媛', 情感: '1v1', 内容情节: '民国传奇' },
+  都市高武: { 主题: '高武世界', 角色: '天才', 情节: '升级流', 世界观: '神话复苏', 人设: '超凡者', 情感: '单女主', 内容情节: '全民觉醒' },
+  悬疑灵异: { 主题: '悬疑', 角色: '神探', 情节: '灵异', 世界观: '九叔', 人设: '玄学大佬', 情感: '死对头', 内容情节: '捉鬼' },
+  悬疑脑洞: { 主题: '规则怪谈', 角色: '神探', 情节: '推理', 世界观: '规则怪谈', 人设: '高智商', 情感: '智性恋', 内容情节: '推理' },
+  抗战谍战: { 主题: '谍战', 角色: '特工', 情节: '求生', 世界观: '抗战', 人设: '间谍特工', 情感: '无CP', 内容情节: '保家卫国' },
+  青春甜宠: { 主题: '现代言情', 角色: '校花', 情节: '校园', 世界观: '都市江湖', 人设: '学霸', 情感: '青梅竹马', 内容情节: '恋爱日常' },
+  双男主: { 主题: '纯爱', 角色: '大佬', 情节: '1v1', 世界观: '都市江湖', 人设: '满级大佬', 情感: '1v1', 内容情节: '双向奔赴' },
+  古言脑洞: { 主题: '古代言情', 角色: '女强', 情节: '系统', 世界观: '历史演义', 人设: '女帝', 情感: '1v1', 内容情节: '逆袭' },
+  历史古代: { 主题: '历史', 角色: '皇帝', 情节: '争霸', 世界观: '历史演义', 人设: '领主', 情感: '无CP', 内容情节: '权谋' },
+  历史脑洞: { 主题: '历史', 角色: '皇帝', 情节: '系统', 世界观: '历史演义', 人设: '满级大佬', 情感: '单女主', 内容情节: '权谋' },
+  现言脑洞: { 主题: '现代言情', 角色: '女强', 情节: '系统', 世界观: '都市江湖', 人设: '灰姑娘', 情感: '1v1', 内容情节: '逆袭' },
+  都市种田: { 主题: '都市', 角色: '全能', 情节: '发家致富', 世界观: '都市江湖', 人设: '职工', 情感: '日久生情', 内容情节: '经营建设' },
+  都市脑洞: { 主题: '都市', 角色: '大佬', 情节: '系统', 世界观: '都市江湖', 人设: '超凡者', 情感: '单女主', 内容情节: '逆袭' },
+  都市日常: { 主题: '都市', 角色: '全能', 情节: '家庭', 世界观: '都市江湖', 人设: '职工', 情感: '日久生情', 内容情节: '家长里短' },
+  玄幻脑洞: { 主题: '玄幻', 角色: '大佬', 情节: '系统', 世界观: '位面', 人设: '满级大佬', 情感: '单女主', 内容情节: '打怪升级' },
+  玄幻言情: { 主题: '幻想言情', 角色: '女强', 情节: '甜宠', 世界观: '位面', 人设: '女帝', 情感: '1v1', 内容情节: '逆袭' },
+  宫斗宅斗: { 主题: '古代言情', 角色: '女强', 情节: '打脸', 世界观: '历史演义', 人设: '宠妃', 情感: '1v1', 内容情节: '夺嫡' },
+  豪门总裁: { 主题: '现代言情', 角色: '总裁', 情节: '甜宠', 世界观: '都市江湖', 人设: '总裁', 情感: '先婚后爱', 内容情节: '豪门世家' },
+  战神赘婿: { 主题: '都市', 角色: '赘婿', 情节: '打脸', 世界观: '都市江湖', 人设: '战神', 情感: '单女主', 内容情节: '逆袭' },
+  动漫衍生: { 主题: '衍生', 角色: '大佬', 情节: '同人', 世界观: '综漫', 人设: '满级大佬', 情感: '1v1', 内容情节: '逆袭' },
+  星光璀璨: { 主题: '都市', 角色: '明星', 情节: '娱乐圈', 世界观: '文娱', 人设: '网红', 情感: '1v1', 内容情节: '逆袭' },
+  游戏体育: { 主题: '体育', 角色: '游戏主播', 情节: '电竞', 世界观: '都市江湖', 人设: '满级大佬', 情感: '无CP', 内容情节: '电竞' },
+  职场婚恋: { 主题: '现代言情', 角色: '女强', 情节: '职场', 世界观: '都市江湖', 人设: '职工', 情感: '日久生情', 内容情节: '商战' },
+  双女主: { 主题: '纯爱', 角色: '女强', 情节: '1v1', 世界观: '都市江湖', 人设: '名媛', 情感: '1v1', 内容情节: '双向奔赴' },
+  传统玄幻: { 主题: '玄幻', 角色: '天才', 情节: '升级流', 世界观: '位面', 人设: '废材', 情感: '单女主', 内容情节: '打怪升级' },
+  都市修真: { 主题: '都市异能', 角色: '天才', 情节: '系统', 世界观: '都市江湖', 人设: '修仙者', 情感: '单女主', 内容情节: '打怪升级' },
+  年代: { 主题: '都市', 角色: '女强', 情节: '发家致富', 世界观: '乡村', 人设: '知青', 情感: '日久生情', 内容情节: '致富' },
+  种田: { 主题: '古代', 角色: '女强', 情节: '美食', 世界观: '乡村', 人设: '农女', 情感: '1v1', 内容情节: '经营建设' },
+  快穿: { 主题: '架空', 角色: '大佬', 情节: '穿书', 世界观: '穿书', 人设: '炮灰', 情感: '1v1', 内容情节: '逆袭' }
+}
+
+function readingFallback(layer: '主题' | '角色' | '情节', name: string): FanqieTagHit | undefined {
+  const tag = FANQIE_READING_TAGS.find((t) => t.layer === layer && t.name === name)
+  if (!tag) return undefined
+  return { id: tag.categoryId, name: tag.name, via: ['保底'], score: 0 }
+}
+
+function contentFallback(group: '世界观' | '人设' | '情感' | '情节', name: string): FanqieTagHit | undefined {
+  const tag = FANQIE_CONTENT_TAGS.find((t) => t.group === group && t.name === name)
+  if (!tag) return undefined
+  return { id: tag.labelId, name: tag.name, via: ['保底'], score: 0 }
+}
+
+function profileFor(mainName: string | undefined): CategoryFallback {
+  if (mainName && FANQIE_CATEGORY_FALLBACK[mainName]) return FANQIE_CATEGORY_FALLBACK[mainName]
+  return GENERIC_CATEGORY_FALLBACK
+}
+
+/** 空分类补 1 个。已有命中的分类不动。 */
+function fillReadingMinimum(hits: FanqieTagHit[], profile: CategoryFallback): FanqieTagHit[] {
+  const layers = ['主题', '角色', '情节'] as const
+  const out: FanqieTagHit[] = []
+  for (const layer of layers) {
+    const existing = hits.filter((hit) => readingLayerOf(hit.id) === layer)
+    if (existing.length > 0) {
+      out.push(...existing)
+      continue
+    }
+    const hit = readingFallback(layer, profile[layer]) ?? readingFallback(layer, GENERIC_CATEGORY_FALLBACK[layer])
+    if (hit) out.push(hit)
+  }
+  return out
+}
+
+function fillContentMinimum(hits: FanqieTagHit[], profile: CategoryFallback): FanqieTagHit[] {
+  const groups = ['世界观', '人设', '情感', '情节'] as const
+  const field: Record<(typeof groups)[number], keyof CategoryFallback> = {
+    世界观: '世界观',
+    人设: '人设',
+    情感: '情感',
+    情节: '内容情节'
+  }
+  const out: FanqieTagHit[] = []
+  for (const group of groups) {
+    const existing = hits.filter((hit) => contentGroupOf(hit.id) === group)
+    if (existing.length > 0) {
+      out.push(...existing)
+      continue
+    }
+    const hit =
+      contentFallback(group, profile[field[group]]) ??
+      contentFallback(group, GENERIC_CATEGORY_FALLBACK[field[group]])
+    if (hit) out.push(hit)
+  }
+  return out
+}
+
 /**
  * 推荐番茄作者区建书时的阅读标签（书架分类 + 标签墙）与内容标签（推荐画像）。
  *
  * - mainCategory：layer=主分类 得分最高的一个（最多 1 个），建书时用作书架分类；
- * - readingTags：主题/角色/情节层推荐，按上限截断（主题 2/角色 2/情节 2）；
- * - contentTags：内容标签推荐，按上限截断（世界观 1/人设 4/情感 2/情节 4）。
+ * - readingTags：主题/角色/情节，每类至少 1 个、不超过上限；
+ * - contentTags：世界观/人设/情感/情节，每类至少 1 个、不超过上限。
  *
- * 每次调用都受 FANQIE_READING_LIMITS / FANQIE_CONTENT_LIMITS 约束，保证输出可直接用于建书。
- * 纯函数：同一输入恒同一输出，便于测试与「重新推荐」。
+ * 书名、简介、题材都空时不补保底。纯函数：同一输入恒同一输出。
  */
 export function recommendFanqieTags(input: FanqieTagInput): FanqieTagRecommendation {
   const haystack = buildHaystack(input)
@@ -550,10 +674,18 @@ export function recommendFanqieTags(input: FanqieTagInput): FanqieTagRecommendat
   )
 
   // 阅读标签（其余层，按层限度截断，主分类不在此列）
-  const readingTags = truncateBy(readingLayerOf as (id: number) => string | undefined, FANQIE_READING_LIMITS, allReadingHits.filter((hit) => readingLayerOf(hit.id) !== '主分类'))
+  let readingTags = truncateBy(readingLayerOf as (id: number) => string | undefined, FANQIE_READING_LIMITS, allReadingHits.filter((hit) => readingLayerOf(hit.id) !== '主分类'))
 
   // 内容标签（按组限度截断）
-  const contentTags = truncateBy(contentGroupOf as (id: number) => string | undefined, FANQIE_CONTENT_LIMITS, allContentHits)
+  let contentTags = truncateBy(contentGroupOf as (id: number) => string | undefined, FANQIE_CONTENT_LIMITS, allContentHits)
+
+  const hasText = [input.name, input.description, input.genre].some((part) => part?.trim())
+  const scored = Boolean(mainCategory) || readingTags.length > 0 || contentTags.length > 0
+  if (hasText && scored) {
+    const profile = profileFor(mainCategory?.name)
+    readingTags = fillReadingMinimum(readingTags, profile)
+    contentTags = fillContentMinimum(contentTags, profile)
+  }
 
   return { mainCategory, readingTags, contentTags }
 }

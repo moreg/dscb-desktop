@@ -48,6 +48,10 @@ import type {
   CoverImageConfigInput,
   CoverLearningLibrarySummary,
   CoverLearningRunResult,
+  BookTestState,
+  PatchBookTestInput,
+  GenerateBookTestTitlesInput,
+  UpdateBookTestCandidateInput,
   ReviewRulesConfig,
   MobileServerStatus,
   StreamHandleOf
@@ -1106,6 +1110,21 @@ const api = {
     ipcRenderer.invoke('cover:chooseLearningLibraryDirectory') as Promise<CoverLearningLibrarySummary | null>,
   chooseAndLearnCoverFolder: () =>
     ipcRenderer.invoke('cover:chooseAndLearnFolder') as Promise<CoverLearningRunResult | null>,
+
+  getBookTest: (projectId: string) =>
+    ipcRenderer.invoke('bookTest:get', projectId) as Promise<BookTestState>,
+  patchBookTest: (input: PatchBookTestInput) =>
+    ipcRenderer.invoke('bookTest:patch', input) as Promise<BookTestState>,
+  generateBookTestTitles: (input: GenerateBookTestTitlesInput) =>
+    ipcRenderer.invoke('bookTest:generateTitles', input) as Promise<BookTestState>,
+  replaceBookTestTitle: (projectId: string, candidateId: string) =>
+    ipcRenderer.invoke('bookTest:replaceTitle', { projectId, id: candidateId }) as Promise<BookTestState>,
+  updateBookTestCandidate: (input: UpdateBookTestCandidateInput) =>
+    ipcRenderer.invoke('bookTest:update', input) as Promise<BookTestState>,
+  deleteBookTestCandidate: (projectId: string, candidateId: string) =>
+    ipcRenderer.invoke('bookTest:delete', { projectId, id: candidateId }) as Promise<BookTestState>,
+  generateBookTestCover: (projectId: string, candidateId: string, authorName?: string) =>
+    ipcRenderer.invoke('bookTest:generateCover', { projectId, id: candidateId, authorName }) as Promise<BookTestState>,
 
   onProjectFilesChanged: (
     cb: (e: { projectId: string; kind: 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' }) => void

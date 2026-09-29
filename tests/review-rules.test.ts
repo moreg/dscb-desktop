@@ -124,7 +124,7 @@ describe('review-checks registry integrity', () => {
 
   it('algorithm checkIds count matches llm checkIds count expectation', () => {
     expect(ALGORITHM_CHECK_IDS.size).toBe(12)
-    expect(LLM_CHECK_IDS.size).toBe(8)
+    expect(LLM_CHECK_IDS.size).toBe(9)
   })
 })
 

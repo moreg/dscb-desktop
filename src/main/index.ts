@@ -41,6 +41,8 @@ import { registerTeardownIpc } from './ipc/teardown'
 import { registerDeslopIpc } from './ipc/deslop'
 import { registerDeslopRulesIpc } from './ipc/deslop-rules'
 import { registerCoverIpc } from './ipc/cover'
+import { BookTestService } from './data/book-test-service'
+import { registerBookTestIpc } from './ipc/book-test'
 import { registerScanIpc } from './ipc/scan'
 import { registerWindowsIpc, type ProjectWindowResult } from './ipc/windows'
 import { ScanService } from './data/scan/scan-service'
@@ -227,6 +229,8 @@ if (!hasSingleInstanceLock) {
     coverLearningLibrary
   )
   registerCoverIpc(coverService, settings, coverPromptService, coverLearningLibrary)
+  const bookTestService = new BookTestService(projectService, outlineService, llmService, coverService)
+  registerBookTestIpc(bookTestService)
 
   // 扫榜（story-long-scan / story-short-scan）—— 采集 + 选题决策
   const scanService = new ScanService(userData, llmService)

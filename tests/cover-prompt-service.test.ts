@@ -289,7 +289,34 @@ describe('CoverPromptService.extract', () => {
   it('额外要求写进提示词', async () => {
     const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
     await service.extract({ ...input, extraHint: '主角改成女性' })
-    expect(generateStream.mock.calls[0][0]).toContain('主角改成女性')
+    const extractionPrompt = generateStream.mock.calls[0][0] as string
+    expect(extractionPrompt).toContain('【作者画面方向，优先级最高】')
+    expect(extractionPrompt).toContain('主角改成女性')
+    expect(extractionPrompt).toContain('压过小说资料里的主角')
+    expect(extractionPrompt).toContain('不要改回小说主角')
+    expect(extractionPrompt.indexOf('【作者画面方向，优先级最高】')).toBeLessThan(extractionPrompt.indexOf('断刀行'))
+  })
+
+  it('有画面方向时，不再要求人物性别和画风服从小说资料', async () => {
+    const { service, generateStream } = makeService({
+      llmResponse: '{"genre":"urban","characterDesc":"a Korean woman"}'
+    })
+    const draft = await service.extract({
+      ...input,
+      stylePreset: 'photorealistic',
+      extraHint: '主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格'
+    })
+    const extractionPrompt = generateStream.mock.calls[0][0] as string
+    expect(extractionPrompt).toContain('主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格')
+    expect(extractionPrompt).toContain('优先级低于作者画面方向')
+    expect(extractionPrompt).not.toContain('人物年龄、身份、体型和服饰遵循小说资料')
+    expect(extractionPrompt).not.toContain('视觉风格已锁定为')
+    expect(extractionPrompt).not.toContain('Photographic medium lock')
+    expect(extractionPrompt).not.toContain('Use no illustration, digital painting, anime')
+    expect(draft.prompt).not.toContain('Selected visual style lock')
+    expect(draft.prompt).not.toContain('Photographic medium lock')
+    expect(draft.prompt).not.toContain('a confident young man in a sharp tailored suit')
+    expect(draft.prompt).toContain('a Korean woman')
   })
 
   it('选择的封面风格同时约束提炼模型和最终生图提示词', async () => {

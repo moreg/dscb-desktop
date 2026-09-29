@@ -8,7 +8,7 @@ import {
   COMPOSITION_DESC,
   GENRE_RULES
 } from '../src/main/data/skill-prompts/cover/cover-styles'
-import { CoverService, DEFAULT_COVER_OUTPUT_SIZE } from '../src/main/data/cover-service'
+import { CoverService, DEFAULT_COVER_OUTPUT_SIZE, withVisualDirection } from '../src/main/data/cover-service'
 import type { CoverGenre, CoverPlatform, CoverStylePreset } from '../src/shared/types'
 
 describe('inferGenre 书名题材推断', () => {
@@ -475,6 +475,15 @@ describe('CoverService.resolvePrompt 手改优先', () => {
     expect(service.resolvePrompt({ ...base, promptOverride: mine })).toBe(mine)
   })
 
+  it('visualDirection 不写进编辑框用的提示词', () => {
+    const mine = 'my own prompt, nothing else'
+    expect(service.resolvePrompt({
+      ...base,
+      promptOverride: mine,
+      visualDirection: '主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格'
+    })).toBe(mine)
+  })
+
   it.each(['photorealistic', 'anime_illustration'] as const)('%s 也保留手改提示词的最高优先级', (stylePreset) => {
     const mine = 'my own visual direction'
     expect(service.resolvePrompt({ ...base, stylePreset, promptOverride: mine })).toBe(mine)
@@ -518,6 +527,71 @@ describe('CoverService.resolvePrompt 手改优先', () => {
     expect(prompt).toContain('3:4')
     expect(prompt).not.toContain('9:16')
     expect(prompt).toContain('Keep the title readable at thumbnail size.')
+  })
+})
+
+describe('withVisualDirection', () => {
+  it('方向为空时提示词不变', () => {
+    expect(withVisualDirection('keep me')).toBe('keep me')
+    expect(withVisualDirection('keep me', '')).toBe('keep me')
+    expect(withVisualDirection('keep me', '   \n')).toBe('keep me')
+  })
+
+  it('方向放在最前和最后，并删掉冲突的写实锁和小说人物锁', () => {
+    const out = withVisualDirection(
+      [
+        'Selected visual style lock (真人写实封面): photorealistic live-action novel cover, cinematic photographic composition.',
+        'Photographic medium lock: render the chosen composition as a live-action film poster. Use no illustration, digital painting, anime, cartoon or 3D-rendered plastic skin. Preserve the story characters ages, identities and period-appropriate clothing.',
+        'no human figure as main subject, landscape composition.',
+        'a confident young man in a sharp tailored suit.',
+        'professional print-ready cover art, faithfully preserve the selected medium and visual language, portrait 3:4 ratio, no watermark'
+      ].join('\n'),
+      '主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格'
+    )
+    expect(out.startsWith('Author visual direction, absolute highest priority.')).toBe(true)
+    expect(out.endsWith('主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格')).toBe(true)
+    expect(out.indexOf('主角画韩国财阀女性')).toBeLessThan(out.indexOf('a confident young man'))
+    expect(out).toContain('a confident young man')
+    expect(out).toContain('3:4')
+    expect(out).toContain('no watermark')
+    expect(out).not.toContain('Photographic medium lock')
+    expect(out).not.toContain('Use no illustration, digital painting, anime')
+    expect(out).not.toContain('photorealistic live-action')
+    expect(out).not.toContain('Preserve the story characters')
+    expect(out).not.toContain('no human figure as main subject')
+    expect(out).not.toContain('faithfully preserve the selected medium')
+  })
+
+  it('方向没改画风时保留媒介锁，但仍放在正文之前', () => {
+    const out = withVisualDirection(
+      'Photographic medium lock: live-action.\na man standing.',
+      '只要把光线调暗'
+    )
+    expect(out.startsWith('Author visual direction, absolute highest priority.')).toBe(true)
+    expect(out).toContain('Photographic medium lock')
+    expect(out.indexOf('只要把光线调暗')).toBeLessThan(out.indexOf('Photographic medium lock'))
+  })
+})
+
+describe('buildCoverPrompt 提炼方向让路', () => {
+  it('有方向时不锁写实媒介，也不回退成默认男主', () => {
+    const prompt = buildCoverPrompt({
+      bookName: '让你演财阀恶女',
+      authorName: '有空一起撸猫',
+      platform: 'fanqie',
+      genre: 'urban',
+      composition: 'fullbody',
+      stylePreset: 'photorealistic',
+      directionWins: true,
+      scene: { characterDesc: 'a Korean chaebol woman seated with an arrogant pose' }
+    })
+    expect(prompt).toContain('a Korean chaebol woman seated with an arrogant pose')
+    expect(prompt).toContain('Style reference only (真人写实封面)')
+    expect(prompt).not.toContain('Selected visual style lock')
+    expect(prompt).not.toContain('Photographic medium lock')
+    expect(prompt).not.toContain('a confident young man')
+    expect(prompt).not.toContain('faithfully preserve the selected medium')
+    expect(prompt).toContain('3:4')
   })
 })
 

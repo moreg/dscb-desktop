@@ -20,6 +20,54 @@ export const COVER_GENERATION_SIZE = '1024x1536'
 /** 由 1024×1536 居中裁切得到，不放大、不拉伸；1023:1364 精确等于 3:4。 */
 export const DEFAULT_COVER_OUTPUT_SIZE = '1023x1364'
 
+const ANIME_DIRECTION = /二次元|动漫|漫画|插画|赛璐璐|国漫|日漫|卡通|anime|manga|cel[- ]?shad/i
+const PHOTO_DIRECTION = /写实|真人|摄影|照片|photorealistic|live-action|photograph/i
+const PERSON_DIRECTION = /主角|人物|女性|男性|女人|男人|少女|少年|坐姿|站姿|跪姿/
+
+/**
+ * 作者指定的画面方向，优先级高于提示词正文、风格预设和小说主角。
+ * 放在出图提示词的最前和最后。编辑框本身不改，避免方向被写进框里之后重复叠加。
+ * 正文里「保住小说人物」以及和方向相反的媒介禁令会删掉，否则图像模型会照着禁令画。
+ */
+export function withVisualDirection(prompt: string, direction?: string): string {
+  const text = direction?.trim()
+  if (!text) return prompt
+  const body = subordinateCoverPrompt(prompt, text)
+  const header =
+    'Author visual direction, absolute highest priority. It overrides the subordinate prompt, the selected cover style, learned style rules, and the novel protagonist. Where they conflict, discard the subordinate prompt\'s gender, ethnicity, identity, pose, clothing, and art medium, including any photographic or anime lock and any order to preserve the story character. Keep the title text, the author byline, the aspect ratio, and the frame safety. Direction: ' +
+    text
+  return (
+    `${header}\n\n` +
+    `Subordinate cover prompt:\n${body}\n\n` +
+    `Author visual direction reminder, still the highest priority. Obey this and discard conflicts: ${text}`
+  )
+}
+
+function subordinateCoverPrompt(prompt: string, direction: string): string {
+  const wantsAnime = ANIME_DIRECTION.test(direction) && !PHOTO_DIRECTION.test(direction)
+  const wantsPhoto = PHOTO_DIRECTION.test(direction) && !ANIME_DIRECTION.test(direction)
+  const wantsPerson = PERSON_DIRECTION.test(direction)
+  const lines = prompt.split('\n').flatMap((line) => {
+    const next = line
+      .replace(/preserve the story characters ages, identities and period-appropriate clothing;?\s*/gi, '')
+      .trim()
+    if (!next) return []
+    if (wantsAnime && /photographic medium lock|photorealistic live-action|use no illustration, digital painting, anime|真人写实封面/i.test(next)) {
+      return []
+    }
+    if (wantsPhoto && /2d anime medium lock|no live-action photography, photorealistic skin|high-quality 2d anime novel cover|二次元动漫封面/i.test(next)) {
+      return []
+    }
+    if (wantsPerson && /no human figure as main subject/i.test(next)) return []
+    return [next]
+  })
+  return lines
+    .join('\n')
+    .replace(/faithfully preserve the selected medium and visual language/gi, 'let the author visual direction override the selected medium')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 /**
  * 封面生成服务（编排 Step 1-4）。
  *
@@ -46,9 +94,9 @@ export class CoverService {
    * 解析本次出图实际使用的提示词。
    *
    * 用户手改过（promptOverride）就**原样**用，一个字不加 —— 界面上那个可编辑框
-   * 是唯一事实来源，否则「所见 ≠ 所发」。空白时按平台/题材模板拼装。
+   * 是唯一事实来源。空白时按平台/题材模板拼装。
    *
-   * 界面拿这个方法给编辑框填初值，出图也走它，所以两者永远一致。
+   * 出图时 visualDirection 包在这段外面，优先级更高。那一步不改编辑框。
    */
   resolvePrompt(input: GenerateCoverInput): string {
     const override = input.promptOverride?.trim()
@@ -96,8 +144,11 @@ export class CoverService {
     const genre: CoverGenre = input.genreOverride ?? inferGenre(input.bookName)
     const platform = PLATFORM_STYLES[input.platform]
 
-    // Step 2：确定提示词（手改优先）
-    const prompt = await this.resolvePromptWithLibrary(input)
+    // Step 2：编辑框原样保留。提炼方向不写进框，出图时包在提示词外面，优先级最高。
+    const prompt = withVisualDirection(
+      await this.resolvePromptWithLibrary(input),
+      input.visualDirection
+    )
 
     // Step 3：出图（参考图路径需校验在项目目录内 + 图片扩展名，防任意文件读取外传）
     const safeRefPath = input.refImagePath

@@ -31,7 +31,7 @@ interface CheckSpec {
   instruction: string
 }
 
-/** 8 类 LLM 检查的 prompt 规格表。 */
+/** LLM 检查的 prompt 规格表。 */
 const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
   character_breakdown: {
     checkId: 'character_breakdown',
@@ -43,6 +43,11 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
     instruction: `检查「逻辑漏洞/逻辑断层」：前后矛盾、时间线混乱、因果关系不衔接、人物行为动机不明确。
 同时核查剧情推进：连续段落是否只是同义复述、反复心理活动、机械扩写或铺陈打转，没有新增行动、信息、关系变化、冲突升级或结果。对仅重复计划却未行动、只提事件关键词却未完成事件的情况，指出原文证据与缺失结果。
 只报告能在正文和历史证据中核实的问题；不能凭关键词认定事件已完成。短暂氛围描写、必要铺垫、刻意呼应和人物对白不自动算水文。不得按字数要求机械扩写，不得在缺少外部对照时断言抄袭或缺乏原创性。`
+  },
+  spoiler: {
+    checkId: 'spoiler',
+    instruction: `检查「提前剧透」：以读者读到相应段落时已知的信息为边界，找出旁白、人物心理、对话或章末钩子在细纲安排的揭晓情节点之前，直接说破反转、真实身份、伏笔答案或结局的地方。
+可以留下人物当下能感知的线索；读者已从其他视角获知的信息不算剧透。请引用正文原句并说明它提前揭晓了什么、应在哪个情节点揭晓；无法从正文、细纲与历史证据确认揭晓顺序时，不要凭猜测报错。`
   },
   low_iq_plot: {
     checkId: 'low_iq_plot',
@@ -96,6 +101,7 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
 const LLM_CHECK_IDS: ReadonlySet<ReviewCheckId> = new Set([
   'character_breakdown',
   'logic_hole',
+  'spoiler',
   'low_iq_plot',
   'emotion_cliff',
   'hook_grade',
@@ -195,14 +201,16 @@ export class ReviewFlowService {
     for (const spec of specs) {
       const chunks = spec.checkId === 'hook_grade'
         ? [{ text: content.slice(-REVIEW_CHUNK_SIZE), offset: Math.max(0, content.length - REVIEW_CHUNK_SIZE) }]
-        : spec.checkId === 'logic_hole' && content.length <= FULL_CONSISTENCY_LIMIT
+        : (spec.checkId === 'logic_hole' || spec.checkId === 'spoiler') && content.length <= FULL_CONSISTENCY_LIMIT
           ? [{ text: content, offset: 0 }]
           : reviewChunks(content)
-      if (spec.checkId === 'logic_hole' && content.length > FULL_CONSISTENCY_LIMIT) {
+      if ((spec.checkId === 'logic_hole' || spec.checkId === 'spoiler') && content.length > FULL_CONSISTENCY_LIMIT) {
         all.push({
           category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:cross_chunk',
-          message: '正文超过 40000 字，已按块检查，跨块一致性尚未完整核验',
-          suggestion: '请人工对照相隔较远的人物状态、时间与因果变化，或分章后分别审稿；分块无发现不能视为全章一致性通过。'
+          message: `正文超过 40000 字，已按块检查，${spec.checkId === 'spoiler' ? '跨块揭晓顺序' : '跨块一致性'}尚未完整核验`,
+          suggestion: spec.checkId === 'spoiler'
+            ? '请人工对照相隔较远的正文与细纲揭晓顺序，或分章后分别审稿；分块无发现不能视为全章通过。'
+            : '请人工对照相隔较远的人物状态、时间与因果变化，或分章后分别审稿；分块无发现不能视为全章一致性通过。'
         })
       }
       for (const chunk of chunks) {
