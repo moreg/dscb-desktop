@@ -33,6 +33,7 @@ const FEATURE_LABELS: Record<string, string> = {
   'outline-main': '总纲生成',
   'outline-detailed': '细纲生成',
   chapter: '正文续写',
+  chapterSummary: '章节概要',
   review: '改稿建议',
   cast: '登场识别',
   relationship: '关系推断',

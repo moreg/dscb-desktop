@@ -153,7 +153,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('- 结尾必须用一句试探意味很强的对话收束')
   })
 
-  it('user prompt includes prev chapter content tail when available', async () => {
+  it('user prompt includes the complete previous chapter when available', async () => {
     const dir = await ps.resolveDir(projectId)
     // 新数据源：上一章正文写入 ProseRepo
     const longPrev = '开头无关内容。'.repeat(200) + '上一章末尾的关键悬念。'
@@ -162,10 +162,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 2)
 
-    expect(user).toContain('上一章正文结尾')
+    expect(user).toContain('上一章完整正文')
+    expect(user).toContain('开头无关内容。'.repeat(200))
     expect(user).toContain('上一章末尾的关键悬念')
-    // 应当截尾，不会塞整段
-    expect(user.length).toBeLessThan(longPrev.length + 5000)
   })
 
   it('gracefully degrades when no outline/prev chapter/foreshadowings present', async () => {
@@ -173,7 +172,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const { user } = await service.buildChapterPrompt(projectId, 1)
     expect(user).toContain('青云志')
     expect(user).toContain('（本章无细纲')
-    expect(user).not.toContain('上一章正文结尾')
+    expect(user).not.toContain('上一章完整正文')
   })
 
   it('reminds due foreshadowings without injecting unrelated pending plans', async () => {

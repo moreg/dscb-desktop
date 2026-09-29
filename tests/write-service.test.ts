@@ -79,7 +79,7 @@ describe('WriteService', () => {
 
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 5)
-    expect(user).toContain('近期已写章节摘要')
+    expect(user).toContain('较早已写章节概要')
     expect(user).toContain('实际正文')
     expect(user).toContain('第 3 章')
     expect(user).toContain('击败赵乾')
@@ -499,6 +499,13 @@ describe('WriteService', () => {
   })
 
   describe('generateChaptersBatch / resumeChaptersBatch', () => {
+    beforeEach(() => {
+      vi.spyOn(WriteService.prototype, 'generateChapterSummary').mockImplementation(async (_pid, ch) => ({
+        chapterNumber: ch, sourceHash: 'test', generatedAt: '', events: [], stateChanges: [], openThreads: [], stale: false
+      }))
+    })
+
+    afterEach(() => vi.restoreAllMocks())
     function makeFlowResult(ch: number, content: string): ChapterFlowResult {
       return {
         chapterNumber: ch,

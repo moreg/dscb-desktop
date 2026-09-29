@@ -536,6 +536,18 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  safeHandle('write:getChapterSummary', async (_e, payload: { projectId: string; chapterNumber: number; content: string }) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
+      content: chapterContentSchema }), payload)
+    return service.getChapterSummary(input.projectId, input.chapterNumber, input.content)
+  })
+
+  safeHandle('write:generateChapterSummary', async (_e, payload: { projectId: string; chapterNumber: number; content: string; force?: boolean }) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
+      content: chapterContentSchema, force: z.boolean().optional() }), payload)
+    return service.generateChapterSummary(input.projectId, input.chapterNumber, input.content, { force: input.force })
+  })
+
   safeHandle('write:invalidateChapterMemorySync', async (_e, payload: { projectId: string; chapterNumber: number }) => {
     const validated = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema }), payload)
     service.invalidateChapterMemorySync(validated.projectId, validated.chapterNumber)

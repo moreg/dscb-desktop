@@ -193,6 +193,7 @@ function friendlyLlmError(err: string | undefined): string {
     LLM_PROSE_REPETITION: '续写大段复制了已有正文，已撤回本次生成，请重试',
     LLM_EMPTY_PROSE: '模型没有返回正文，请重试',
     CHAPTER_CONTEXT_TOO_LARGE: '本章已写正文超过4万字符，请先分章后续写，以便完整核对前文',
+    PREVIOUS_CHAPTER_CONTEXT_TOO_LARGE: '上一章正文超过4万字符，请先分章后续写，以便完整读取上一章',
     LLM_RESPONSE_TOO_LARGE: '生成内容过长，请尝试简化提示词',
     LLM_REQUEST_FAILED: '请求失败，请检查网络连接',
     NETWORK_ERROR: '网络连接失败，请检查网络',
@@ -814,6 +815,7 @@ export default function ChapterEditor({
     details: { title: string; subtitle?: string; content?: string }
   } | null>(null)
   const [flowSyncTrigger, setFlowSyncTrigger] = useState(0)
+  const [summaryRefreshTrigger, setSummaryRefreshTrigger] = useState(0)
   /** 写后自动同步结果，回填流程面板避免二次 extract */
   const [autoSyncSeed, setAutoSyncSeed] = useState<{
     extraction: import('../../shared/types').MemoryExtraction
@@ -2815,13 +2817,21 @@ export default function ChapterEditor({
 
       const depth = syncHistoryRef.current.length
       const sc = selfCheckTrackerRef.current.accepts(selfCheckRequest) ? sync.selfCheck ?? null : null
+      let summaryError = ''
+      try {
+        await window.api.generateChapterSummary(projectId, chapterNumber, contentSnapshot)
+      } catch (err) {
+        summaryError = `章节概要生成失败：${(err as Error).message}`
+      }
+      if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
+      setSummaryRefreshTrigger((value) => value + 1)
       setPostWriteSync({
-        phase,
+        phase: summaryError && phase === 'ok' ? 'partial' : phase,
         message:
           undoable && depth > 1
-            ? `${message}（可撤销 ${depth} 次）`
-            : message,
-        errors: summary.errors,
+            ? `${message}（可撤销 ${depth} 次）${summaryError ? `；${summaryError}` : '；概要已更新'}`
+            : `${message}${summaryError ? `；${summaryError}` : '；概要已更新'}`,
+        errors: [...summary.errors, ...(summaryError ? [summaryError] : [])],
         contentForRetry: contentSnapshot,
         at: Date.now(),
         canUndo: depth > 0,
@@ -2840,7 +2850,9 @@ export default function ChapterEditor({
         setFlowSyncTrigger((t) => t + 1)
       }
 
-      if (phase === 'failed') {
+      if (summaryError && phase !== 'failed') {
+        setUndoToast({ message: summaryError, type: 'warning' })
+      } else if (phase === 'failed') {
         setUndoToast({
           message: '记忆同步失败，已入队；可点「重新同步」补跑',
           type: 'warning'
@@ -5068,6 +5080,7 @@ export default function ChapterEditor({
           onUndoRewriteByKey={undoRewriteByKey}
           onRedoRewrite={redoLastRewrite}
           syncAllTrigger={flowSyncTrigger}
+          summaryRefreshTrigger={summaryRefreshTrigger}
           autoSyncSeed={autoSyncSeed}
           skipMemoryOnAutoSyncAll={skipMemoryOnAutoSyncAll}
           onFocusQuote={focusQuoteInEditor}

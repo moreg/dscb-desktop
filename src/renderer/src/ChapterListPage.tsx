@@ -650,6 +650,7 @@ function NewChapterDialog({
  */
 export interface BatchChapterSummary {
   chapter: number
+  summaryReady: boolean
   words: number
   auditError: number
   auditWarn: number
@@ -725,6 +726,7 @@ export function summarizeChapterResult(result: ChapterFlowResult): BatchChapterS
   const apply = result.memoryApply
   return {
     chapter: result.chapterNumber,
+    summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
     auditError: deduped.filter((v) => v.severity === 'error').length,
     auditWarn: deduped.filter((v) => v.severity === 'warn').length,
@@ -1897,6 +1899,7 @@ function BatchWriteDialog({
                 {lastResult.memory.newForeshadowings.length} / 状态变化{' '}
                 {lastResult.memory.characterStateChanges.length}
               </li>
+              <li>章节概要：{lastSummary?.summaryReady ? '已生成' : '待补跑'}</li>
               {lastSummary && lastSummary.memory.reviewRequired.length > 0 ? (
                 <li className="batch-last-result-warn">
                   整章待核对：{lastSummary.memory.reviewRequired.join('；')}
@@ -1954,6 +1957,7 @@ function BatchWriteDialog({
                 <li key={item.chapter} className={hasChapterIssue(item) ? 'has-issue' : ''}>
                   <span className="batch-chapter-summary-no">第 {item.chapter} 章</span>
                   <span>{item.words} 字</span>
+                   <span>{item.summaryReady ? '概要已生成' : '概要待补'}</span>
                   <span>
                     {item.auditError > 0
                       ? `质检 ${item.auditError} 错误`

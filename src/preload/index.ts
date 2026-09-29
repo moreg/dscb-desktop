@@ -550,6 +550,10 @@ const api = {
       content,
       force: opts?.force === true
     }),
+  getChapterSummary: (projectId: string, chapterNumber: number, content: string) =>
+    ipcRenderer.invoke('write:getChapterSummary', { projectId, chapterNumber, content }),
+  generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force = false) =>
+    ipcRenderer.invoke('write:generateChapterSummary', { projectId, chapterNumber, content, force }),
   selfCheckChapter: (projectId: string, chapterNumber: number, content: string) =>
     ipcRenderer.invoke('write:selfCheckChapter', {
       projectId,

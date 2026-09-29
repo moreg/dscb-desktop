@@ -50,6 +50,9 @@ describe('batch safety and recovery', () => {
     dir = await ps.resolveDir(projectId)
     llm = { generateStream: vi.fn().mockResolvedValue('[]') } as unknown as LlmService
     service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
+    vi.spyOn(service, 'generateChapterSummary').mockImplementation(async (_pid, ch) => ({
+      chapterNumber: ch, sourceHash: 'test', generatedAt: '', events: [], stateChanges: [], openThreads: [], stale: false
+    }))
     flow = (service as unknown as { flow: WriteFlowService }).flow
     await mkdir(path.join(dir, '细纲'), { recursive: true })
     for (const ch of [1, 2, 3, 4]) {
@@ -168,6 +171,21 @@ describe('batch safety and recovery', () => {
     // 细纲对照不重跑，只补跑失败的记忆提取
     expect(flow.checkOutlineStream).toHaveBeenCalledOnce()
     expect(flow.extractMemoryStream).toHaveBeenCalledTimes(4)
+  })
+
+  it('pauses on summary failure and resumes from saved prose without regenerating it', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.generateChapterSummary).mockRejectedValueOnce(new Error('概要请求失败'))
+    const first = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    expect(first.pendingPostProcessChapter).toBe(1)
+    expect(first.pauseReason).toContain('概要请求失败')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    const second = await service.resumeChaptersBatch(projectId, 1, 2, () => {}, null, {}, first, { autoContinue: true })
+    expect(second.status).toBe('completed')
+    expect(generate).toHaveBeenCalledTimes(2)
+    expect(service.generateChapterSummary).toHaveBeenCalledTimes(3)
   })
 
   it('retries a flaky outline check in place instead of pausing the batch', async () => {

@@ -4,6 +4,7 @@ import type {
   AdjustPlanComplianceResult,
   AuditReport,
   ChapterReviewReport,
+  ChapterSummaryView,
   ChapterSelfCheckReport,
   DetailedOutlineItem,
   FigureDraft,
@@ -114,6 +115,7 @@ interface Props {
    * 用于 full 后处理或外部「一键同步」。
    */
   syncAllTrigger?: number
+  summaryRefreshTrigger?: number
   /**
    * 外部已完成的自动记忆/设定同步结果。
    * 注入后展示 extraction/diffs，避免面板再跑一次 extractMemory。
@@ -203,6 +205,7 @@ export default function ChapterFlowPanel(props: Props) {
     onCompleteRhythm,
     onCompleteFigure,
     syncAllTrigger,
+    summaryRefreshTrigger,
     autoSyncSeed,
     skipMemoryOnAutoSyncAll,
     postWriteSyncBanner,
@@ -248,6 +251,10 @@ export default function ChapterFlowPanel(props: Props) {
 
   // 记忆提取状态
   const [memoryExtracting, setMemoryExtracting] = useState(false)
+  const [chapterSummary, setChapterSummary] = useState<ChapterSummaryView | null>(null)
+  const [summaryContent, setSummaryContent] = useState('')
+  const [summaryGenerating, setSummaryGenerating] = useState(false)
+  const [summaryError, setSummaryError] = useState('')
   const [memoryExtraction, setMemoryExtraction] = useState<MemoryExtraction | null>(null)
   const [memoryError, setMemoryError] = useState('')
   const [memoryApplying, setMemoryApplying] = useState(false)
@@ -380,6 +387,10 @@ export default function ChapterFlowPanel(props: Props) {
     setOutlineApplyError('')
     setOutlineChecking(false)
     setMemoryExtracting(false)
+    setChapterSummary(null)
+    setSummaryContent('')
+    setSummaryGenerating(false)
+    setSummaryError('')
     setMemoryExtraction(null)
     setMemoryError('')
     setMemoryApplying(false)
@@ -410,6 +421,36 @@ export default function ChapterFlowPanel(props: Props) {
     setReportLoading(false)
     setReportError('')
   }, [projectId, chapterNumber])
+
+  useEffect(() => {
+    let active = true
+    void window.api.getChapterSummary(projectId, chapterNumber, draft).then((value) => {
+      if (!active) return
+      setChapterSummary(value)
+      setSummaryContent(draft)
+    }).catch((err) => { if (active) setSummaryError(friendlyFlowError((err as Error).message)) })
+    return () => { active = false }
+    // Refresh only when switching chapters or when the write-after-sync process has finished.
+  }, [projectId, chapterNumber, summaryRefreshTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const runSummaryGenerate = async (force: boolean) => {
+    if (!draft.trim()) { setSummaryError('正文为空，无法生成概要'); return }
+    if (summaryGenerating) return
+    setSummaryGenerating(true)
+    setSummaryError('')
+    const epoch = flowEpochRef.current
+    const snapshot = draft
+    try {
+      const value = await window.api.generateChapterSummary(projectId, chapterNumber, snapshot, force)
+      if (epoch !== flowEpochRef.current) return
+      setChapterSummary(value)
+      setSummaryContent(snapshot)
+    } catch (err) {
+      if (epoch === flowEpochRef.current) setSummaryError(friendlyFlowError((err as Error).message))
+    } finally {
+      if (epoch === flowEpochRef.current) setSummaryGenerating(false)
+    }
+  }
 
   const runOutlineCheck = async () => {
     if (!draft.trim()) {
@@ -897,6 +938,7 @@ export default function ChapterFlowPanel(props: Props) {
       tasks.push(runMemoryExtract())
     }
     await Promise.allSettled(tasks)
+    await runSummaryGenerate(false)
     // 操作完成后刷新记忆索引（追踪/时间线 + 追踪/伏笔 -> 记忆/ 派生视图）
     try {
       await window.api.syncMemoryIndex(projectId)
@@ -992,9 +1034,9 @@ export default function ChapterFlowPanel(props: Props) {
             className="btn btn-sm"
             onClick={() => void runAllSync({ skipMemory: false })}
             disabled={
-              outlineChecking || memoryExtracting || rhythmEvaluating || figureGenerating
+              outlineChecking || memoryExtracting || rhythmEvaluating || figureGenerating || summaryGenerating
             }
-            title="依次触发细纲对照、记忆提取、节奏评估、图解生成"
+            title="触发细纲对照、记忆提取、节奏评估、图解生成和章节概要"
           >
             ⟳ 一键同步
           </button>
@@ -1377,6 +1419,30 @@ export default function ChapterFlowPanel(props: Props) {
                 </ul>
               </div>
             )
+          ) : null}
+        </div>
+
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line-soft)', paddingTop: 10 }}>
+          <div className="row" style={{ alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>本章概要</strong>
+            <button className="btn btn-sm" style={{ marginLeft: 'auto' }}
+              disabled={summaryGenerating || !draft.trim()}
+              onClick={() => void runSummaryGenerate(true)}>
+              {summaryGenerating ? '生成中…' : chapterSummary ? '重新生成概要' : '生成概要'}
+            </button>
+          </div>
+          <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
+            {chapterSummary
+              ? (chapterSummary.stale || draft !== summaryContent ? '正文已修改，概要过期；续写不会读取旧概要' : '概要与当前正文一致')
+              : '尚未生成概要'}
+          </p>
+          {summaryError ? <p className="err" style={{ fontSize: 12.5 }}>{summaryError}</p> : null}
+          {chapterSummary ? (
+            <div style={{ fontSize: 12.5, lineHeight: 1.6, marginTop: 6 }}>
+              {chapterSummary.events.map((item, i) => <p key={`event-${i}`}>事件：{item.text}</p>)}
+              {chapterSummary.stateChanges.map((item, i) => <p key={`state-${i}`}>状态：{item.text}</p>)}
+              {chapterSummary.openThreads.map((item, i) => <p key={`open-${i}`}>未结：{item.text}</p>)}
+            </div>
           ) : null}
         </div>
 

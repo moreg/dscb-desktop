@@ -7,6 +7,7 @@ import {
   fieldToStr
 } from '../skill-format/md-parser'
 import { hashProse, listProseSources, splitProsePassages } from './prose-memory-index'
+import { ChapterSummaryRepo, chapterSummaryText } from './chapter-summary-repo'
 import { extractEntityNameFromDoc } from './entity-helpers'
 import type { MemoryEntity } from '../../../shared/types'
 
@@ -15,9 +16,9 @@ export interface PlotChapterSummary {
   chapterNumber: number
   /** 章标题（可空） */
   title: string
-  /** 核心事件摘要（已截断） */
+  /** 核心事件概要；旧剧情点与摘录有长度限制，独立章节概要保留完整结构化内容。 */
   summary: string
-  source?: 'memory' | 'prose_excerpt'
+  source?: 'chapter_summary' | 'memory' | 'prose_excerpt'
   sourcePath?: string
   /** True only for exact prose or a summary bound to the current prose hash. */
   verified?: boolean
@@ -108,6 +109,7 @@ export class PlotPointRepo {
     }
 
     const out: PlotChapterSummary[] = []
+    const summaryRepo = new ChapterSummaryRepo(this.projectDir)
     for (const n of targetChapters) {
       const memories = buckets.get(n) ?? []
       const source = sourcesByChapter.get(n)
@@ -120,6 +122,13 @@ export class PlotPointRepo {
         continue
       }
       const sourceHash = hashProse(prose)
+      const generated = await summaryRepo.readCurrent(n, prose)
+      if (generated) {
+        out.push({ chapterNumber: n, title: source?.title ?? '', summary: chapterSummaryText(generated),
+          source: 'chapter_summary', sourcePath: `记忆/章节概要/第${String(n).padStart(3, '0')}章.json`,
+          sourceHash, verified: true })
+        continue
+      }
       const verified = memories.filter((m) => m.sourceHash === sourceHash)
       if (verified.length) {
         out.push({ chapterNumber: n, title: verified[0].title,

@@ -98,9 +98,9 @@ describe('续写质量与长篇记忆集成', () => {
     await mkdir(join(dir, '细纲'), { recursive: true })
     await writeFile(join(dir, '细纲', '细纲_第001章_寻找.md'), '# 寻找\n\n- **核心事件**：陆安救出了母亲，渡船沉没。')
     const p = await service.buildChapterPrompt(id, 2)
-    const memories = p.user.split('# 近期已写章节摘要')[1]?.split('# 伏笔追踪')[0] ?? ''
-    expect(memories).toContain('陆安仍未找到母亲')
-    expect(memories).not.toContain('陆安救出了母亲')
+    const previousProse = p.user.split('**上一章完整正文**')[1]?.split('```')[1] ?? ''
+    expect(previousProse).toContain('陆安仍未找到母亲')
+    expect(previousProse).not.toContain('陆安救出了母亲')
   })
 
   it('回写旧章不注入未来时间线与已撤销的设定演进', async () => {

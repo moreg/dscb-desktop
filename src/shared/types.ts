@@ -826,6 +826,8 @@ export interface RendererApi {
     selfCheck?: ChapterSelfCheckReport | null
     deepReview?: AuditViolation[]
   } | null>
+  getChapterSummary: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterSummaryView | null>
+  generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force?: boolean) => Promise<ChapterSummaryView>
   /** 单独跑写后自检（不写记忆） */
   selfCheckChapter: (
     projectId: string,
@@ -2431,6 +2433,26 @@ export interface ChapterFlowResult {
   deepReview?: AuditViolation[]
   /** 写后自检清单对照（算法） */
   selfCheck?: ChapterSelfCheckReport | null
+  /** Batch post-processing writes this before moving to the next chapter. */
+  chapterSummary?: ChapterSummaryView
+}
+
+/** Generated from the chapter prose. A changed prose hash makes the summary stale. */
+export interface ChapterSummaryFact {
+  text: string
+  evidence: string
+}
+
+export interface ChapterSummaryView {
+  chapterNumber: number
+  sourceHash: string
+  generatedAt: string
+  events: ChapterSummaryFact[]
+  stateChanges: ChapterSummaryFact[]
+  openThreads: ChapterSummaryFact[]
+  stale: boolean
+  /** True when a generation request reused a summary for the same prose. */
+  reused?: boolean
 }
 
 /* ==========================================================
