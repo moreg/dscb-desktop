@@ -65,6 +65,12 @@ export interface StoredMemoryCandidate {
   itemIssues?: string[]
   status?: string
   updatedAt?: string
+  appliedEntities?: {
+    characters: number
+    locations: number
+    items: number
+    foreshadowings: number
+  }
   /**
    * 作者确认属实后强制写入的条目，不再报为待核对。
    * 存 key 不存 index：重跑会重新提取一次，数组顺序变了 index 就认错人。

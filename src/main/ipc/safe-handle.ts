@@ -12,7 +12,20 @@ export function safeHandle(
       return await handler(event, ...args)
     } catch (err) {
       // 仅记录 message + name，避免错误对象中可能包含的敏感字段（路径/token 片段等）泄漏到主进程日志
-      const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      let message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      // 若底层网络请求抛出 TypeError: fetch failed，且包含更具体的 cause（如 ECONNREFUSED/ENOTFOUND/ETIMEDOUT 等），
+      // 将 cause 详情附加上，避免关键网络诊断信息在 IPC 边界被吞掉
+      if (
+        err instanceof Error &&
+        err.name === 'TypeError' &&
+        err.message === 'fetch failed' &&
+        'cause' in err &&
+        err.cause
+      ) {
+        const cause = err.cause as { code?: string; message?: string }
+        const causeDetail = cause.code || cause.message || String(err.cause)
+        message = `TypeError: fetch failed (${causeDetail})`
+      }
       console.error(`[ipc:${channel}]`, message)
       // 抛出脱敏后的错误，避免原始 err.stack（含主进程绝对路径）经 IPC 序列化回传渲染进程。
       // cause 仅存在于主进程侧（Electron invoke 拒绝只序列化 message），不会随 IPC 泄漏。

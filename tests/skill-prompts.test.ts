@@ -141,7 +141,18 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('剧情完整与可读性优先')
     expect(prompt).toContain('剩余剧情点已经完整落实时允许提前结束')
     expect(prompt).toContain('Markdown')
-    expect(prompt).toContain('段落之间用空行分隔')
+    expect(prompt).toContain('正文禁止出现出版章号')
+    expect(prompt).toContain('只是检索坐标，禁止写入正文')
+    expect(prompt).toContain('写网文尽量直白')
+    expect(prompt).toContain('不要过多的拽词、长篇的华丽词藻反复描写')
+    expect(prompt).toContain('文笔必须为剧情服务')
+  })
+
+  it.each([undefined, 'extend', 'finish'] as const)('无论在标准模式还是续写模式(%s)，都落实"写网文尽量直白/文笔为剧情服务"', (mode) => {
+    const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
+    expect(prompt).toContain('写网文尽量直白')
+    expect(prompt).toContain('不要过多的拽词、长篇的华丽词藻反复描写')
+    expect(prompt).toContain('文笔必须为剧情服务')
   })
 
   it('未提供对标书时也约束原创表达、人物动机与场景变化，并允许有用途的情绪氛围', () => {

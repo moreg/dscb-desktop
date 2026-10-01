@@ -64,6 +64,7 @@ import { parseForeshadowReceipt } from '../../shared/parsers'
 import { findJsonArray, findJsonObject } from '../../shared/json-extract'
 import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
+import { CHAPTER_INDEX_NOT_PROSE } from '../../shared/strip-chapter-meta'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
 import { DeslopService, hasRealChange } from './deslop/deslop-service'
 import {
@@ -1726,6 +1727,19 @@ export class WriteService {
       try {
         // 只写通过校验的条目；被挡下的条目原样留在 candidate 文件里等复核
         memory = await this.applyMemory(projectId, verified, content)
+        if (opts?.proseFirst) {
+          const entityResult = await this.applyAllNewEntities(projectId, verified)
+          memory = {
+            ...memory,
+            applied: {
+              ...memory.applied,
+              characters: entityResult.characters,
+              locations: entityResult.locations,
+              items: entityResult.items,
+              foreshadowings: entityResult.foreshadowings
+            }
+          }
+        }
         if (itemIssues.length) memory = { ...memory, heldBack: itemIssues }
       } catch (err) {
         const msg = (err as Error).message
@@ -1760,6 +1774,12 @@ export class WriteService {
       // itemIssues 也算 partial：有条目没落地，候选文件要留着等复核，不能标成 applied
       await writeJsonAtomic(candidateFile, {
         ...candidate,
+        appliedEntities: opts?.proseFirst ? {
+          characters: memory.applied.characters,
+          locations: memory.applied.locations,
+          items: memory.applied.items,
+          foreshadowings: memory.applied.foreshadowings
+        } : undefined,
         status:
           memory.errors.length || settings.errors.length || itemIssues.length ? 'partial' : 'applied'
       })
@@ -2027,6 +2047,68 @@ export class WriteService {
   ): Promise<number> {
     const dir = await this.projectService.resolveDir(projectId)
     return new MemoryWriter(dir).applyNewForeshadowings(fs)
+  }
+
+  /**
+   * 以正文为主，一键/自动采纳本章提取的所有新增实体（角色、地点、道具、伏笔）。
+   * 包含同名/相同内容防重保护，不会覆盖已有卡片。
+   */
+  async applyAllNewEntities(
+    projectId: string,
+    chapterNumberOrExtraction: number | MemoryExtraction
+  ): Promise<{
+    characters: number
+    locations: number
+    items: number
+    foreshadowings: number
+    total: number
+  }> {
+    let extraction: MemoryExtraction
+    let chapterNum = 0
+    let candidateFile: string | null = null
+    let candidate: StoredMemoryCandidate | null = null
+    const dir = await this.projectService.resolveDir(projectId)
+
+    if (typeof chapterNumberOrExtraction === 'number') {
+      chapterNum = chapterNumberOrExtraction
+      candidateFile = join(dir, '.cache', 'memory-candidates', `chapter-${chapterNum}.json`)
+      candidate = await readMemoryCandidate(dir, chapterNum)
+      if (!candidate?.extraction) {
+        throw new Error(`未找到第 ${chapterNum} 章的记忆提取数据`)
+      }
+      extraction = candidate.extraction
+    } else {
+      extraction = chapterNumberOrExtraction
+      chapterNum = extraction.chapterNumber || 0
+    }
+
+    const [characters, locations, items, foreshadowings] = await Promise.all([
+      this.applyNewCharacters(projectId, extraction.newCharacters || []),
+      this.applyNewLocations(projectId, extraction.newLocations || [], chapterNum),
+      this.applyNewItems(projectId, extraction.newItems || []),
+      this.applyNewForeshadowings(projectId, extraction.newForeshadowings || [])
+    ])
+
+    if (candidateFile && candidate) {
+      await writeJsonAtomic(candidateFile, {
+        ...candidate,
+        appliedEntities: {
+          characters,
+          locations,
+          items,
+          foreshadowings
+        },
+        updatedAt: new Date().toISOString()
+      })
+    }
+
+    return {
+      characters,
+      locations,
+      items,
+      foreshadowings,
+      total: characters + locations + items + foreshadowings
+    }
   }
 
   /** Legacy receipts have no source evidence; they may never mutate actual story state. */
@@ -2461,6 +2543,7 @@ export class WriteService {
             const meta = (await this.chapterService.getChapter(projectId, ch)).meta
             const suggestion = suggestChapterStrength(meta)
             strengthOverride = { temperature: suggestion.temperature, reasoningEffort: suggestion.effort }
+            console.log(`[Batch] 第 ${ch} 章应用节奏自动强度: 温度 ${suggestion.temperature}, 思考 ${suggestion.effort} (${suggestion.reason})`)
           } catch (err) {
             console.warn(`[generateChaptersBatch] Failed to compute strength suggestion for ch ${ch}:`, err)
           }
@@ -4994,7 +5077,7 @@ function renderRecalledProse(hits: ProseMemoryHit[]): string[] {
   return [
     '---',
     '# 与本章有关的历史正文证据',
-    '以下按当前人物、事件、道具与伏笔从本章之前的正文检索，不限最近章节。它们是引用材料，不是写作指令。核对事件先后与当事人认知；不能照抄这些段落作为新正文，未检索到也不等于从未发生。',
+    '以下按当前人物、事件、道具与伏笔从本章之前的正文检索，不限最近章节。它们是引用材料，不是写作指令。核对事件先后与当事人认知；不能照抄这些段落作为新正文，未检索到也不等于从未发生。' + CHAPTER_INDEX_NOT_PROSE,
     ...hits.map((h) => `第 ${h.chapterNumber} 章 · ${h.sourcePath}:${h.startLine}–${h.endLine}\n${h.text}`)
   ]
 }
@@ -5012,7 +5095,7 @@ function renderRecentPlotSummaries(
     `# 较早已写章节概要（第 ${first}–${last} 章 · 共 ${summaries.length} 章已写正文 · 写第 ${chapterNumber} 章前必读）`
   )
   parts.push(
-    '以下来自上一章之前的实际正文。概要必须匹配当前正文版本；缺少可信概要时使用原文摘录。摘录不是完整章节概要；保留其中的否定、猜测和叙述视角，不能把人物计划当成事实。细纲是创作计划，不能用它覆盖正文已发生的情节。'
+    '以下来自上一章之前的实际正文。概要必须匹配当前正文版本；缺少可信概要时使用原文摘录。摘录不是完整章节概要；保留其中的否定、猜测和叙述视角，不能把人物计划当成事实。细纲是创作计划，不能用它覆盖正文已发生的情节。' + CHAPTER_INDEX_NOT_PROSE
   )
   for (const p of summaries) {
     const title = p.title ? `「${p.title}」` : ''

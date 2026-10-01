@@ -354,21 +354,30 @@ export class MemoryWriter {
     }
   }
 
-  /** 用户确认后：应用新增角色（写 记忆/人物/<name>.md） */
+  /** 用户确认后：应用新增角色（写 记忆/人物/<name>.md），支持同名防重与去重 */
   async applyNewCharacters(
     chars: MemoryExtraction['newCharacters']
   ): Promise<number> {
     const repo = new CharacterRepo(this.projectDir)
+    const existing = await repo.list().catch(() => [])
+    const existingNames = new Set(existing.map((c) => c.name.trim().toLowerCase()))
     let n = 0
     for (const c of chars) {
+      const name = c.name?.trim()
+      if (!name) continue
+      if (existingNames.has(name.toLowerCase())) {
+        n++
+        continue
+      }
       try {
         const created = await repo.create({
-          name: c.name,
+          name,
           role: c.role,
           identity: c.identity,
           personality: c.personality,
           abilities: c.abilities
         })
+        existingNames.add(name.toLowerCase())
         if (c.appearance?.trim()) {
           await repo.update(created.id, {
             customFields: { 外貌: c.appearance.trim() }
@@ -382,13 +391,22 @@ export class MemoryWriter {
     return n
   }
 
-  /** 用户确认后：应用新增地点（写 记忆/地点/<name>.md） */
+  /** 用户确认后：应用新增地点（写 记忆/地点/<name>.md），支持同名防重与去重 */
   async applyNewLocations(locs: MemoryExtraction['newLocations']): Promise<number> {
     const repo = new LocationRepo(this.projectDir)
+    const existing = await repo.list().catch(() => [])
+    const existingNames = new Set(existing.map((l) => l.name.trim().toLowerCase()))
     let n = 0
     for (const l of locs) {
+      const name = l.name?.trim()
+      if (!name) continue
+      if (existingNames.has(name.toLowerCase())) {
+        n++
+        continue
+      }
       try {
-        await repo.create({ name: l.name, category: l.category, notes: l.notes })
+        await repo.create({ name, category: l.category, notes: l.notes })
+        existingNames.add(name.toLowerCase())
         n++
       } catch {
         // skip
@@ -397,13 +415,22 @@ export class MemoryWriter {
     return n
   }
 
-  /** 用户确认后：应用新增道具（写 记忆/道具/<name>.md） */
+  /** 用户确认后：应用新增道具（写 记忆/道具/<name>.md），支持同名防重与去重 */
   async applyNewItems(items: MemoryExtraction['newItems']): Promise<number> {
     const repo = new ItemRepo(this.projectDir)
+    const existing = await repo.list().catch(() => [])
+    const existingNames = new Set(existing.map((it) => it.name.trim().toLowerCase()))
     let n = 0
     for (const it of items) {
+      const name = it.name?.trim()
+      if (!name) continue
+      if (existingNames.has(name.toLowerCase())) {
+        n++
+        continue
+      }
       try {
-        await repo.create({ name: it.name, category: it.category, notes: it.notes })
+        await repo.create({ name, category: it.category, notes: it.notes })
+        existingNames.add(name.toLowerCase())
         n++
       } catch {
         // skip
@@ -412,19 +439,28 @@ export class MemoryWriter {
     return n
   }
 
-  /** 用户确认后：应用新增伏笔（写 追踪/伏笔.md） */
+  /** 用户确认后：应用新增伏笔（写 追踪/伏笔.md），支持同内容防重与去重 */
   async applyNewForeshadowings(
     fs: MemoryExtraction['newForeshadowings']
   ): Promise<number> {
     const repo = new ForeshadowingMdRepo(this.projectDir)
+    const existing = await repo.list().catch(() => [])
+    const existingContents = new Set(existing.map((f) => f.content.trim().toLowerCase()))
     let n = 0
     for (const f of fs) {
+      const content = f.content?.trim()
+      if (!content) continue
+      if (existingContents.has(content.toLowerCase())) {
+        n++
+        continue
+      }
       try {
         await repo.create({
-          content: f.content,
+          content,
           expectedCollect: f.expectedCollect,
           note: f.note
         })
+        existingContents.add(content.toLowerCase())
         n++
       } catch {
         // skip

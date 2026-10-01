@@ -3,30 +3,77 @@
  * - 去掉汉字间与行首尾的多余空白；英文词间空白归一为空格
  * - 去掉空行（连续换行压成单个换行）
  * - **保留**段落换行
+ * - 对话动作排版归一：严禁同一人台词中间夹动作打断（“话1”动作，“话2”），自动将动作前置独立成行并合并台词
  *
  * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
+import { stripPublishedChapterRefs } from './strip-chapter-meta'
+
 const LATIN_SPACE_NEIGHBOR = /[\p{Script=Latin}\p{M}0-9.,!?;:'"“”‘’–—…()[\]{}@#%&+/\\=<>_-]/u
+
+/**
+ * 将同一人台词中间被动作打断的句式重构为规范网文排版：
+ * “不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒……”
+ * 转换为：
+ * 朴博士把图像放大。
+ * “不是今晚才沾上的，旧切片里就有主毒……”
+ */
+export function separateDialogueInterruption(text: string): string {
+  if (!text) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // 匹配单行内“台词1”动作“台词2”的夹塞动作结构
+    const m = trimmed.match(/^([“"「])([^”"」\n]+?)([”"」])\s*([^“”"「」\n]{1,60}?)\s*([“"「])([^”"」\n]+?)([”"」])$/)
+    if (m) {
+      const openQ = m[1]
+      const closeQ = m[3]
+      const rawQ1 = m[2]
+      let action = m[4].trim().replace(/^[，,：:\s]+|[，,：:\s]+$/g, '')
+      if (action && !/[。！？…~～]$/.test(action)) action += '。'
+
+      let sep = '，'
+      if (/[？！?!~～…]+$/.test(rawQ1)) {
+        sep = rawQ1.match(/[？！?!~～…]+$/)![0]
+      }
+      const q1Clean = rawQ1.replace(/[。！？，；、…!?~～]+$/, '')
+      const q2 = m[6]
+
+      if (action) {
+        out.push(action)
+      }
+      out.push(`${openQ}${q1Clean}${sep}${q2}${closeQ}`)
+    } else {
+      out.push(line)
+    }
+  }
+
+  return out.join('\n')
+}
 
 export function formatChapterProse(text: string): string {
   if (!text) return text
-  return (
-    text
-      // 统一换行
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-      // 汉字间去空白；英文词、数字与英文标点之间保留一个分词空格。
-      .replace(/[^\S\n]+/g, (space, offset: number, input: string) => {
-        const left = input[offset - 1] ?? ''
-        const right = input[offset + space.length] ?? ''
-        return LATIN_SPACE_NEIGHBOR.test(left) && LATIN_SPACE_NEIGHBOR.test(right) ? ' ' : ''
-      })
-      // 连续空行压成单行换行
-      .replace(/\n{2,}/g, '\n')
-      // 去掉首尾空行
-      .replace(/^\n+/, '')
-      .replace(/\n+$/, '')
-  )
+  const normalized = text
+    // 统一换行
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    // 汉字间去空白；英文词、数字与英文标点之间保留一个分词空格。
+    .replace(/[^\S\n]+/g, (space, offset: number, input: string) => {
+      const left = input[offset - 1] ?? ''
+      const right = input[offset + space.length] ?? ''
+      return LATIN_SPACE_NEIGHBOR.test(left) && LATIN_SPACE_NEIGHBOR.test(right) ? ' ' : ''
+    })
+    // 连续空行压成单行换行
+    .replace(/\n{2,}/g, '\n')
+    // 去掉首尾空行
+    .replace(/^\n+/, '')
+    .replace(/\n+$/, '')
+
+  const proseWithDialogue = separateDialogueInterruption(normalized)
+  // 空白收干净之后再认章号：「第 9 章」会先变成「第9章」。
+  return stripPublishedChapterRefs(proseWithDialogue)
 }
 
 /**

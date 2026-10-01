@@ -87,6 +87,7 @@ describe('WriteService', () => {
     expect(user).toContain('林远离开大殿')
     expect(user).not.toContain('林远拒绝并立下赌约')
     expect(user).toContain('不能用它覆盖正文已发生的情节')
+    expect(user).toContain('只是检索坐标，禁止写入正文')
   })
 
   it('buildChapterPrompt injects chapter self-check checklist (suspense, foreshadow, power bounds)', async () => {

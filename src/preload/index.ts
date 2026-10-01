@@ -632,6 +632,10 @@ const api = {
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
   ) => ipcRenderer.invoke('write:applyNewForeshadowings', { projectId, fs }),
+  applyAllNewEntities: (
+    projectId: string,
+    chapterNumber: number
+  ) => ipcRenderer.invoke('write:applyAllNewEntities', { projectId, chapterNumber }),
   /** 应用 LLM 在正文末尾写下的【本章伏笔回执】到伏笔库 */
   applyForeshadowReceipt: (
     projectId: string,

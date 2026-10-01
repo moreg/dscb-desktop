@@ -319,7 +319,7 @@ describe('批量续写逐章小结', () => {
         expect(hasChapterIssue(s)).toBe(false)
       })
 
-      it('已确认写入的新增实体从待办里扣掉', () => {
+      it('已确认写入的新增实体从待办里扣掉并展示已入库实体数', () => {
         const s = summarizeChapterResult(
           makeResult(24, '正文', {
             newPlotPoints: 1,
@@ -328,7 +328,19 @@ describe('批量续写逐章小结', () => {
           })
         )
         expect(s.memory.pending).toBe(0)
-        expect(describeMemoryCell(s)).toBe('记忆写入 1/1 条')
+        expect(s.memory.appliedEntities).toBe(2)
+        expect(describeMemoryCell(s)).toBe('记忆写入 1/1 条，已自动入库 2 项新实体')
+      })
+
+      it('开启 autoStrength 时保留传入的 strengthSuggestion', () => {
+        const suggestion = {
+          effort: 'high' as const,
+          tier: 'High' as const,
+          temperature: 1.0,
+          reason: '爽点 3 级大高潮，放开写'
+        }
+        const s = summarizeChapterResult(makeResult(26, '正文'), suggestion)
+        expect(s.strengthSuggestion).toEqual(suggestion)
       })
 
       it('证据不足与待确认新增同时出现时分开说', () => {

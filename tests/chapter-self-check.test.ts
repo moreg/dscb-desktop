@@ -40,6 +40,21 @@ describe('splitEventClauses', () => {
 })
 
 describe('evaluateChapterSelfCheck', () => {
+  it('章中的中文章号也算泄露，书中章节不算', () => {
+    const leaked = evaluateChapterSelfCheck({
+      chapterNumber: 12,
+      content: '这一次取出的样本与第九章检测所用样本来自同一批封存物。'
+    }).items.find((item) => item.id === 'meta_narration')
+    expect(leaked?.verdict).toBe('warn')
+    expect(leaked?.detail).toContain('第九章')
+
+    const inWorld = evaluateChapterSelfCheck({
+      chapterNumber: 12,
+      content: '他翻开《验尸录》第九章，对照封存记录。'
+    }).items.find((item) => item.id === 'meta_narration')
+    expect(inWorld?.verdict).toBe('pass')
+  })
+
   it('空正文 fail', () => {
     const r = evaluateChapterSelfCheck({ chapterNumber: 1, content: '' })
     expect(r.ok).toBe(false)

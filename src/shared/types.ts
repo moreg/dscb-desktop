@@ -896,6 +896,17 @@ export interface RendererApi {
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
   ) => Promise<number>
+  /** 以正文为主：一键将本章全部待确认新增实体（角色/地点/道具/伏笔）自动入库 */
+  applyAllNewEntities: (
+    projectId: string,
+    chapterNumber: number
+  ) => Promise<{
+    characters: number
+    locations: number
+    items: number
+    foreshadowings: number
+    total: number
+  }>
   /** 应用 LLM 在正文末尾写下的【本章伏笔回执】到伏笔库 */
   applyForeshadowReceipt: (
     projectId: string,

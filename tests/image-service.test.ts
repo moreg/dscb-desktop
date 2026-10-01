@@ -84,6 +84,28 @@ describe('ImageService 通道分派', () => {
     vi.unstubAllGlobals()
   })
 
+  it('api 通道网络报错（fetch failed / ECONNREFUSED）抛出易读的 IMAGE_NETWORK_ERROR', async () => {
+    const fetchMock = vi.fn(async () => {
+      const err = new TypeError('fetch failed')
+      Object.assign(err, { cause: { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:7890' } })
+      throw err
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(svc.generate('a cat', '1024x1536')).rejects.toThrow(/IMAGE_NETWORK_ERROR.*ECONNREFUSED/)
+    vi.unstubAllGlobals()
+  })
+
+  it('api 通道超时报错（TimeoutError）抛出易读的 IMAGE_TIMEOUT', async () => {
+    const fetchMock = vi.fn(async () => {
+      const err = new Error('The operation was aborted due to timeout')
+      err.name = 'TimeoutError'
+      throw err
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(svc.generate('a cat', '1024x1536')).rejects.toThrow('IMAGE_TIMEOUT')
+    vi.unstubAllGlobals()
+  })
+
   it('cli 通道不校验 apiKey（缺 Key 不抛 IMAGE_NOT_CONFIGURED）——通过配置读取结果直接断言', async () => {
     const settings = makeSettings('codex', '')
     const cfg = await settings.getCoverImageConfig()

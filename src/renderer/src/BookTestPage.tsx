@@ -65,6 +65,19 @@ function describeError(err: unknown): string {
     const detail = raw.split('BOOK_TEST_TITLE_INVALID:')[1]?.trim()
     return detail || '这套书名还不符合番茄多书名实验的规则。'
   }
+  if (raw.includes('IMAGE_NOT_CONFIGURED')) {
+    return '请先在封面页配置图像生成 API Key，或改用 codex / grok CLI 通道。'
+  }
+  if (raw.includes('IMAGE_TIMEOUT')) {
+    const detail = raw.replace(/^.*IMAGE_TIMEOUT[（(]?/, '').replace(/[）)]?$/, '').trim()
+    return detail || '出封面超时了。绘图模型耗时较长，请稍后重试。'
+  }
+  if (raw.includes('IMAGE_NETWORK_ERROR') || raw.includes('fetch failed')) {
+    return '出封面失败：网络请求失败，请检查封面配置中的 Base URL 与网络连通性。'
+  }
+  if (raw.includes('IMAGE_EMPTY_RESPONSE')) {
+    return '出封面失败：API 未返回图片数据，请确认所选模型是否支持图像生成。'
+  }
   if (raw.includes('IMAGE_CLI_NOT_FOUND')) {
     return '未检测到本机 codex / grok CLI。请先安装并完成登录，或到封面页改用 API 通道。'
   }

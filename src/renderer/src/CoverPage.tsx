@@ -260,6 +260,20 @@ function describeError(err: unknown): string {
   if (raw.includes('LLM_TIMEOUT')) {
     return '提炼超时。素材较多时可先精简大纲，或换一个更快的模型。'
   }
+  if (raw.includes('IMAGE_NOT_CONFIGURED')) {
+    return '请先配置图像生成（点右上「封面配置」填写 API Key，或选用 codex / grok CLI 通道）。'
+  }
+  if (raw.includes('IMAGE_TIMEOUT')) {
+    const detail = raw.replace(/^.*IMAGE_TIMEOUT[（(]?/, '').replace(/[）)]?$/, '').trim()
+    return detail || '出图超时（服务端耗时较长）。请重试一次，或检查 API 状态。'
+  }
+  if (raw.includes('IMAGE_NETWORK_ERROR')) {
+    const detail = raw.replace(/^.*IMAGE_NETWORK_ERROR[（(]?/, '').replace(/[）)]?$/, '').trim()
+    return detail || '网络连接失败：无法访问图像 API 服务器。请检查 Base URL、网络连接或代理设置。'
+  }
+  if (raw.includes('IMAGE_EMPTY_RESPONSE')) {
+    return '出图失败：API 成功响应但未返回图片数据（b64_json），请确认该模型是否支持图像生成。'
+  }
   if (raw.includes('IMAGE_CLI_NOT_FOUND')) {
     return '未检测到本机 codex / grok CLI。请先安装并完成登录（终端运行 codex login 或 grok login）。'
   }
@@ -268,6 +282,9 @@ function describeError(err: unknown): string {
   }
   if (raw.includes('IMAGE_CLI_GENERATE_FAILED')) {
     return 'CLI 生图失败：模型没有产出图片文件。请确认 CLI 登录态有效后重试（详情见原始报错）。'
+  }
+  if (raw.includes('fetch failed')) {
+    return '网络请求失败：无法连接到图像 API 服务器。请检查「封面配置」中的 Base URL 是否正确、网络是否通畅或代理是否已开启。'
   }
   return raw.replace(/^Error:\s*/, '')
 }

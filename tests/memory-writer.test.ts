@@ -440,6 +440,22 @@ describe('MemoryWriter (v4)', () => {
       const list = await repo.list()
       expect(list.find((c) => c.name === '青云子')).toBeDefined()
     })
+
+    it('deduplicates existing characters without overwriting existing cards', async () => {
+      await writer.applyNewCharacters([
+        { name: '守门人', role: '守卫', identity: '金丹守卫', personality: '严厉' }
+      ])
+      const n = await writer.applyNewCharacters([
+        { name: '守门人', role: '错误覆盖', identity: '凡人', personality: '懦弱' },
+        { name: '守门人', role: '再次重复', identity: '凡人', personality: '懦弱' }
+      ])
+      expect(n).toBe(2)
+      const repo = new CharacterRepo(dir)
+      const list = await repo.list()
+      const matches = list.filter((c) => c.name === '守门人')
+      expect(matches.length).toBe(1)
+      expect(matches[0].role).toBe('守卫')
+    })
   })
 
   describe('applyNewLocations', () => {

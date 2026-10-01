@@ -6,9 +6,9 @@ import { basename, join } from 'path'
 import type { SettingsRepository } from './settings-repository'
 import { killProcessTree } from './kill-process-tree'
 
-/** 图像生成请求超时（毫秒）。文生图 3 分钟，图生图 4 分钟 */
-const GENERATE_TIMEOUT_MS = 180_000
-const EDIT_TIMEOUT_MS = 240_000
+/** 图像生成请求超时（毫秒）。大型绘图模型常需 3-6 分钟，预留 10 分钟与 CLI 对齐 */
+const GENERATE_TIMEOUT_MS = 600_000
+const EDIT_TIMEOUT_MS = 600_000
 
 /** CLI 生图超时（秒）：codex/grok 走模型工具，预留更长 */
 const CLI_GENERATE_TIMEOUT_SEC = 600
@@ -210,6 +210,79 @@ export function buildCliImagePrompt(channel: 'codex' | 'grok', model: string, pr
  * 支持 gpt-image-2 及兼容模型。注意：请求体不要带 response_format
  * （旧 DALL-E 参数，gpt-image 系列不支持）。
  */
+function isAbortError(err: unknown): boolean {
+  if (!err) return false
+  if (err instanceof Error) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') return true
+    const msg = err.message.toLowerCase()
+    if (msg.includes('timeout') || msg.includes('aborted') || msg.includes('timed out')) return true
+    if ('cause' in err && isAbortError((err as { cause?: unknown }).cause)) return true
+  }
+  return false
+}
+
+function wrapImageFetchError(err: unknown, errorLabel: string, url: string): Error {
+  if (err instanceof Error && err.message.startsWith(errorLabel)) {
+    return err
+  }
+  if (isAbortError(err)) {
+    return new Error(
+      `IMAGE_TIMEOUT（图像生成请求超时，服务端在限定时间内未完成响应。大型绘图模型通常需 3-8 分钟，请稍后重试或检查接口提供方状态）`,
+      { cause: err }
+    )
+  }
+
+  let domain = ''
+  try {
+    domain = new URL(url).hostname
+  } catch {
+    domain = url
+  }
+
+  const cause =
+    err instanceof Error && 'cause' in err
+      ? (err.cause as Record<string, unknown> | undefined)
+      : undefined
+  const code = typeof cause?.code === 'string' ? cause.code : ''
+  const causeMsg = typeof cause?.message === 'string' ? cause.message : ''
+
+  if (code === 'ECONNREFUSED') {
+    return new Error(
+      `IMAGE_NETWORK_ERROR（无法连接到 API 服务地址 [${domain}]，连接被拒绝 [ECONNREFUSED]。请检查 Base URL 端口是否正确或本地代理服务是否已开启）`,
+      { cause: err }
+    )
+  }
+  if (code === 'ENOTFOUND') {
+    return new Error(
+      `IMAGE_NETWORK_ERROR（无法解析 API 域名 [${domain}] [ENOTFOUND]，请检查网络是否连通或 Base URL 拼写是否正确）`,
+      { cause: err }
+    )
+  }
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return new Error(
+      `IMAGE_NETWORK_ERROR（连接 API 服务器 [${domain}] 超时 [${code}]。可能是网络受阻，请检查网络连接或开启代理）`,
+      { cause: err }
+    )
+  }
+  if (code === 'ECONNRESET') {
+    return new Error(
+      `IMAGE_NETWORK_ERROR（与 API 服务器 [${domain}] 的连接被重置 [ECONNRESET]，网络中断或被防火墙拦截，请重试）`,
+      { cause: err }
+    )
+  }
+  if (causeMsg && /certificate|self[- ]?signed/i.test(causeMsg)) {
+    return new Error(
+      `IMAGE_NETWORK_ERROR（SSL/TLS 证书校验失败: ${causeMsg}）`,
+      { cause: err }
+    )
+  }
+  const detail = causeMsg || (err instanceof Error ? err.message : String(err))
+  return new Error(
+    `IMAGE_NETWORK_ERROR（网络请求失败 [${domain}]: ${detail}）`,
+    { cause: err }
+  )
+}
+
 export class ImageService {
   constructor(private readonly settings: SettingsRepository) {}
 
@@ -222,13 +295,17 @@ export class ImageService {
     const url = `${cfg.baseUrl.replace(/\/+$/, '')}/images/generations`
     // 不带 response_format（gpt-image 系列）
     const body: Record<string, unknown> = { model: cfg.model, prompt, size }
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS)
-    })
-    return this.parseImageResponse(res, 'IMAGE_REQUEST_FAILED')
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS)
+      })
+      return await this.parseImageResponse(res, 'IMAGE_REQUEST_FAILED')
+    } catch (err) {
+      throw wrapImageFetchError(err, 'IMAGE_REQUEST_FAILED', url)
+    }
   }
 
   /** 图生图：传参考图本地路径，返回 base64 */
@@ -248,13 +325,17 @@ export class ImageService {
     form.append('prompt', prompt)
     form.append('image', imgBlob, basename(imagePath))
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
-      body: form,
-      signal: AbortSignal.timeout(EDIT_TIMEOUT_MS)
-    })
-    return this.parseImageResponse(res, 'IMAGE_EDIT_FAILED')
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${cfg.apiKey}` },
+        body: form,
+        signal: AbortSignal.timeout(EDIT_TIMEOUT_MS)
+      })
+      return await this.parseImageResponse(res, 'IMAGE_EDIT_FAILED')
+    } catch (err) {
+      throw wrapImageFetchError(err, 'IMAGE_EDIT_FAILED', url)
+    }
   }
 
   /** CLI 通道生图：调 codex/grok，模型自动调 image_gen，读回最新产物 */

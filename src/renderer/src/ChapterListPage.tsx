@@ -16,6 +16,10 @@ import { countPendingConfirms } from '../../shared/post-write-sync'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
+import {
+  suggestChapterStrength,
+  type ChapterStrengthSuggestion
+} from '../../shared/chapter-strength-suggestion'
 
 interface Props {
   projectId: string
@@ -543,6 +547,7 @@ export default function ChapterListPage({
         <BatchWriteDialog
           key={projectId}
           projectId={projectId}
+          chapters={chapters}
           maxChapter={
             chapters.length > 0
               ? Math.max(...chapters.map((c) => c.chapterNumber))
@@ -650,6 +655,8 @@ function NewChapterDialog({
  */
 export interface BatchChapterSummary {
   chapter: number
+  /** 本章按节奏自动调整的生成强度建议（开启 autoStrength 时记录） */
+  strengthSuggestion?: ChapterStrengthSuggestion
   summaryReady: boolean
   words: number
   auditError: number
@@ -675,6 +682,8 @@ export interface BatchChapterSummary {
     applied: number
     /** 待作者确认的新增实体数（新角色/地点/道具/伏笔），不是失败 */
     pending: number
+    /** 已自动/一键入库的新增实体数（新角色/地点/道具/伏笔） */
+    appliedEntities?: number
     /** 整章都没入库的原因 */
     reviewRequired: string[]
     /** 其余已入库，这几条证据不过关被单独挡下 */
@@ -721,11 +730,15 @@ function resolveOutlineState(report: ChapterFlowResult['outlineDiff']): BatchCha
  * 从整章流程结果里抽出小结。
  * 违禁词做前缀重叠去重后再数，与质检面板一致（report.counts 含未去重命中，会偏大）。
  */
-export function summarizeChapterResult(result: ChapterFlowResult): BatchChapterSummary {
+export function summarizeChapterResult(
+  result: ChapterFlowResult,
+  strengthSuggestion?: ChapterStrengthSuggestion
+): BatchChapterSummary {
   const deduped = dedupeForbiddenViolations(result.audit.violations)
   const apply = result.memoryApply
   return {
     chapter: result.chapterNumber,
+    ...(strengthSuggestion ? { strengthSuggestion } : {}),
     summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
     auditError: deduped.filter((v) => v.severity === 'error').length,
@@ -746,6 +759,9 @@ export function summarizeChapterResult(result: ChapterFlowResult): BatchChapterS
       candidates: countMemoryCandidates(result.memory),
       applied: apply ? countMemoryApplied(apply.applied) : 0,
       pending: countMemoryPending(result.memory, apply?.applied),
+      appliedEntities: apply
+        ? apply.applied.characters + apply.applied.locations + apply.applied.items + apply.applied.foreshadowings
+        : 0,
       reviewRequired: apply?.reviewRequired ?? [],
       heldBack: apply?.heldBack ?? [],
       superseded: apply?.superseded === true,
@@ -776,16 +792,17 @@ export function describeSelfCheckCell(s: BatchChapterSummary): string {
  * 「待确认新增」不算没写进去——那四类本来就等作者点确认，混进分数会让人以为丢了记忆。
  */
 export function describeMemoryCell(s: BatchChapterSummary): string {
-  const { candidates, applied, pending, reviewRequired, heldBack, superseded, missing, errors } = s.memory
+  const { candidates, applied, pending, appliedEntities, reviewRequired, heldBack, superseded, missing, errors } = s.memory
   if (superseded) return '记忆未写入（正文已变）'
   if (reviewRequired.length > 0) return `整章记忆待核对 ${reviewRequired.length} 项，未写入`
   if (missing) return '记忆同步未执行'
   if (errors.length > 0) return `记忆同步失败 ${errors.length} 项（已写入 ${applied}/${candidates} 条）`
   const held = heldBack.length > 0 ? `，${heldBack.length} 项证据不足未写入` : ''
+  const autoEntities = appliedEntities && appliedEntities > 0 ? `，已自动入库 ${appliedEntities} 项新实体` : ''
   const confirm = pending > 0 ? `，待确认新增 ${pending} 项` : ''
-  if (candidates === 0) return pending > 0 ? `待确认新增 ${pending} 项` : '无新记忆'
-  if (applied === 0) return `记忆提取 ${candidates} 条，未写入${held}${confirm}`
-  return `记忆写入 ${applied}/${candidates} 条${held}${confirm}`
+  if (candidates === 0) return pending > 0 ? `待确认新增 ${pending} 项` : (appliedEntities && appliedEntities > 0 ? `已自动入库 ${appliedEntities} 项新实体` : '无新记忆')
+  if (applied === 0) return `记忆提取 ${candidates} 条，未写入${held}${autoEntities}${confirm}`
+  return `记忆写入 ${applied}/${candidates} 条${held}${autoEntities}${confirm}`
 }
 
 /**
@@ -1292,6 +1309,7 @@ function saveBatchSession(projectId: string, session: SavedBatchSession | null):
 
 function BatchWriteDialog({
   projectId,
+  chapters,
   maxChapter,
   unwrittenChapters,
   draftedChapters,
@@ -1300,6 +1318,7 @@ function BatchWriteDialog({
   onChapterCompleted
 }: {
   projectId: string
+  chapters?: ChapterMeta[]
   maxChapter: number
   /** 升序的未写章节号（细纲/节奏表里存在但没正文）；用于定位真正的续写起点 */
   unwrittenChapters: number[]
@@ -1347,6 +1366,45 @@ function BatchWriteDialog({
    * 只在这次调用里生效（GenerateOptions.strengthOverride），不碰你保存的 provider 默认值。
    */
   const [autoStrength, setAutoStrength] = useState(restoredSession?.autoStrength ?? false)
+  const [providerProtocol, setProviderProtocol] = useState<string | null>(null)
+  useEffect(() => {
+    window.api?.listProviders?.().then((cfg) => {
+      const routing = cfg.featureRouting?.chapter
+      const routedId = routing?.providerId
+      const baseProvider =
+        cfg.providers?.find((p) => p.id === routedId) ??
+        cfg.providers?.find((p) => p.id === cfg.activeId) ??
+        cfg.providers?.[0] ??
+        null
+      setProviderProtocol(baseProvider?.protocol ?? 'openai')
+    }).catch(() => {})
+  }, [])
+
+  const rangeChapters = useMemo(() => {
+    if (!chapters || !Number.isSafeInteger(fromChapter) || !Number.isSafeInteger(toChapter) || fromChapter > toChapter) return []
+    return chapters.filter((c) => c.chapterNumber >= fromChapter && c.chapterNumber <= toChapter)
+  }, [chapters, fromChapter, toChapter])
+
+  const rhythmStats = useMemo(() => {
+    if (rangeChapters.length === 0) return null
+    let withRhythm = 0
+    let climaxCount = 0
+    let transitionCount = 0
+    for (const c of rangeChapters) {
+      const hasRhythm = (c.emotion !== undefined && c.emotion > 0) || (c.climax !== undefined && c.climax > 0)
+      if (hasRhythm) {
+        withRhythm++
+        if ((c.climax ?? 0) >= 3 || (c.emotion ?? 0) >= 9) climaxCount++
+        else if ((c.emotion ?? 0) > 0 && (c.emotion ?? 0) <= 3 && (c.climax ?? 0) === 0) transitionCount++
+      }
+    }
+    return {
+      total: rangeChapters.length,
+      withRhythm,
+      climaxCount,
+      transitionCount
+    }
+  }, [rangeChapters])
   /**
    * 限流退避等待的实时状态：撞上 429 时后端会自己等 30/60/120 秒重试，
    * 这段时间外表看起来像卡住了，必须把「正在等、不是卡死」显示出来。
@@ -1433,6 +1491,65 @@ function BatchWriteDialog({
   const noOutlineCount = summaries.filter((item) => item.outline === 'none').length
   const outlineFailedCount = summaries.filter((item) => item.outline === 'failed').length
   const heldBackTotal = summaries.reduce((n, item) => n + item.memory.heldBack.length, 0)
+  const pendingEntitiesTotal = summaries.reduce((n, item) => n + item.memory.pending, 0)
+  const [adoptingChapter, setAdoptingChapter] = useState<number | null>(null)
+  const [adoptingAll, setAdoptingAll] = useState(false)
+
+  const adoptChapterEntities = async (chapterNumber: number) => {
+    try {
+      setAdoptingChapter(chapterNumber)
+      const res = await window.api.applyAllNewEntities(projectId, chapterNumber)
+      setSummaries((prev) =>
+        prev.map((item) => {
+          if (item.chapter !== chapterNumber) return item
+          const appliedEntities = (item.memory.appliedEntities ?? 0) + res.total
+          return {
+            ...item,
+            memory: {
+              ...item.memory,
+              pending: Math.max(0, item.memory.pending - res.total),
+              appliedEntities
+            }
+          }
+        })
+      )
+    } catch (err) {
+      alert(`采纳失败: ${(err as Error).message}`)
+    } finally {
+      setAdoptingChapter(null)
+    }
+  }
+
+  const adoptAllPendingEntities = async () => {
+    const targets = summaries.filter((s) => s.memory.pending > 0)
+    if (!targets.length) return
+    try {
+      setAdoptingAll(true)
+      for (const target of targets) {
+        try {
+          const res = await window.api.applyAllNewEntities(projectId, target.chapter)
+          setSummaries((prev) =>
+            prev.map((item) => {
+              if (item.chapter !== target.chapter) return item
+              const appliedEntities = (item.memory.appliedEntities ?? 0) + res.total
+              return {
+                ...item,
+                memory: {
+                  ...item.memory,
+                  pending: Math.max(0, item.memory.pending - res.total),
+                  appliedEntities
+                }
+              }
+            })
+          )
+        } catch (err) {
+          console.warn(`第 ${target.chapter} 章采纳失败:`, err)
+        }
+      }
+    } finally {
+      setAdoptingAll(false)
+    }
+  }
 
   useEffect(() => {
     if (progress && !running && !recovering) {
@@ -1473,9 +1590,11 @@ function BatchWriteDialog({
   const markChapterDone = (chapter: number, rangeTo: number, result: ChapterFlowResult): void => {
     setLiveCompleted((prev) => (prev.includes(chapter) ? prev : [...prev, chapter]))
     setLiveChapter(Math.min(chapter + 1, rangeTo))
+    const chMeta = chapters?.find((c) => c.chapterNumber === chapter)
+    const suggestion = autoStrength ? suggestChapterStrength(chMeta) : undefined
     setSummaries((prev) =>
       // 重试同一章时替换旧小结，而不是留两条
-      [...prev.filter((item) => item.chapter !== chapter), summarizeChapterResult(result)].sort(
+      [...prev.filter((item) => item.chapter !== chapter), summarizeChapterResult(result, suggestion)].sort(
         (a, b) => a.chapter - b.chapter
       )
     )
@@ -1811,6 +1930,37 @@ function BatchWriteDialog({
           </span>
         </label>
 
+        {autoStrength ? (
+          <div
+            style={{
+              margin: '-4px 0 10px 24px',
+              padding: '6px 10px',
+              borderRadius: 6,
+              fontSize: 12,
+              backgroundColor: 'rgba(0, 0, 0, 0.03)',
+              border: '1px solid rgba(128, 128, 128, 0.18)',
+              lineHeight: 1.5
+            }}
+          >
+            {providerProtocol && ['codex', 'antigravity', 'grok'].includes(providerProtocol) ? (
+              <span className="meta">
+                ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）协议不支持单次动态调温，本批将保持你当前的配置稳步生成。
+              </span>
+            ) : rhythmStats && rhythmStats.withRhythm === 0 ? (
+              <span style={{ color: '#d97706' }}>
+                ⚠️ 所选范围（第 {fromChapter}~{toChapter} 章）暂无细纲/节奏标注，每章将使用默认稳态生成（温度 0.8）。
+              </span>
+            ) : rhythmStats ? (
+              <span className="meta">
+                💡 节奏预检：所选 {rhythmStats.total} 章中有 {rhythmStats.withRhythm} 章具备节奏数据
+                {rhythmStats.climaxCount > 0 ? `（${rhythmStats.climaxCount} 章大高潮拉高温度 1.0` : ''}
+                {rhythmStats.transitionCount > 0 ? `，${rhythmStats.transitionCount} 章过渡章调低至 0.6` : ''}
+                {rhythmStats.climaxCount > 0 || rhythmStats.transitionCount > 0 ? '）' : ''}，其余常规推进（0.8）。
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         {progress || running ? (
           <div className="batch-progress">
             <div className="batch-progress-head">
@@ -1821,10 +1971,39 @@ function BatchWriteDialog({
             </div>
             {displayChapter ? (
               <div className="batch-progress-current">
-                当前：第 {displayChapter} 章
-                {running && autoContinue && displayChapter < runningTo
-                  ? `（写完自动接着写到第 ${runningTo} 章）`
-                  : ''}
+                <div>
+                  当前：第 {displayChapter} 章
+                  {running && autoContinue && displayChapter < runningTo
+                    ? `（写完自动接着写到第 ${runningTo} 章）`
+                    : ''}
+                </div>
+                {autoStrength ? (() => {
+                  const chMeta = chapters?.find((c) => c.chapterNumber === displayChapter)
+                  const suggestion = suggestChapterStrength(chMeta)
+                  const isHigh = suggestion.effort === 'high'
+                  const isLow = suggestion.effort === 'low'
+                  const badgeIcon = isHigh ? '🔥' : isLow ? '🌱' : '⚖️'
+                  const badgeName = isHigh ? '大高潮 · 温度 1.0' : isLow ? '过渡章 · 温度 0.6' : '常规推进 · 温度 0.8'
+                  return (
+                    <div
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        marginTop: 4,
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        backgroundColor: isHigh ? 'rgba(239, 68, 68, 0.12)' : isLow ? 'rgba(59, 130, 246, 0.12)' : 'rgba(156, 163, 175, 0.12)',
+                        color: isHigh ? '#ef4444' : isLow ? '#3b82f6' : 'var(--ink-2)',
+                        border: `1px solid ${isHigh ? 'rgba(239, 68, 68, 0.25)' : isLow ? 'rgba(59, 130, 246, 0.25)' : 'rgba(156, 163, 175, 0.25)'}`
+                      }}
+                    >
+                      <span>{badgeIcon} <b>{badgeName}</b></span>
+                      <span style={{ opacity: 0.85 }}>（{suggestion.reason}）</span>
+                    </div>
+                  )
+                })() : null}
               </div>
             ) : null}
             {running && retryWait ? (
@@ -1932,12 +2111,13 @@ function BatchWriteDialog({
                   : '未发现需返工的问题，检查执行情况见下方'}
               </span>
             </div>
-            {noOutlineCount > 0 || outlineFailedCount > 0 || heldBackTotal > 0 ? (
-              <div className="batch-chapter-summary-note">
+            {noOutlineCount > 0 || outlineFailedCount > 0 || heldBackTotal > 0 || pendingEntitiesTotal > 0 ? (
+              <div className="batch-chapter-summary-note" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                 {[
                   noOutlineCount > 0 ? `${noOutlineCount} 章没有细纲可对照（自由发挥）` : '',
                   outlineFailedCount > 0 ? `${outlineFailedCount} 章细纲对照没跑成` : '',
-                  heldBackTotal > 0 ? `共 ${heldBackTotal} 条记忆证据不足未写入` : ''
+                  heldBackTotal > 0 ? `共 ${heldBackTotal} 条记忆证据不足未写入` : '',
+                  pendingEntitiesTotal > 0 ? `共 ${pendingEntitiesTotal} 项新实体待确认` : ''
                 ]
                   .filter(Boolean)
                   .join(' · ')}
@@ -1950,13 +2130,54 @@ function BatchWriteDialog({
                     复核未写入的记忆
                   </button>
                 ) : null}
+                {pendingEntitiesTotal > 0 ? (
+                  <button
+                    className="btn btn-ghost"
+                    style={{
+                      padding: '1px 8px',
+                      fontSize: 12,
+                      marginLeft: 8,
+                      color: '#2563eb',
+                      borderColor: 'rgba(37, 99, 235, 0.35)',
+                      backgroundColor: 'rgba(37, 99, 235, 0.08)'
+                    }}
+                    disabled={adoptingAll || adoptingChapter !== null}
+                    onClick={adoptAllPendingEntities}
+                    title="以正文为主：一键将全部章节中待确认的新增角色、地点、道具、伏笔自动入库"
+                  >
+                    {adoptingAll ? '正在批量采纳…' : `⚡ 一键采纳全部新增（${pendingEntitiesTotal} 项）`}
+                  </button>
+                ) : null}
               </div>
             ) : null}
             <ul className="batch-chapter-summary-list">
-              {summaries.map((item) => (
-                <li key={item.chapter} className={hasChapterIssue(item) ? 'has-issue' : ''}>
-                  <span className="batch-chapter-summary-no">第 {item.chapter} 章</span>
-                  <span>{item.words} 字</span>
+              {summaries.map((item) => {
+                const suggestion = item.strengthSuggestion ?? (autoStrength ? suggestChapterStrength(chapters?.find((c) => c.chapterNumber === item.chapter)) : undefined)
+                const isHigh = suggestion?.effort === 'high'
+                const isLow = suggestion?.effort === 'low'
+                return (
+                  <li key={item.chapter} className={hasChapterIssue(item) ? 'has-issue' : ''}>
+                    <span className="batch-chapter-summary-no" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      第 {item.chapter} 章
+                      {suggestion ? (
+                        <span
+                          className="chip"
+                          style={{
+                            fontSize: 10,
+                            padding: '0 5px',
+                            lineHeight: '16px',
+                            height: '18px',
+                            backgroundColor: isHigh ? 'rgba(239, 68, 68, 0.1)' : isLow ? 'rgba(59, 130, 246, 0.1)' : 'rgba(156, 163, 175, 0.1)',
+                            color: isHigh ? '#ef4444' : isLow ? '#3b82f6' : 'var(--ink-2)',
+                            borderColor: isHigh ? 'rgba(239, 68, 68, 0.25)' : isLow ? 'rgba(59, 130, 246, 0.25)' : 'rgba(156, 163, 175, 0.25)'
+                          }}
+                          title={`生成强度：${suggestion.reason}（温度 ${suggestion.temperature} / 思考 ${suggestion.effort}）`}
+                        >
+                          {isHigh ? '🔥 1.0 高潮' : isLow ? '🌱 0.6 过渡' : '⚖️ 0.8 常规'}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span>{item.words} 字</span>
                    <span>{item.summaryReady ? '概要已生成' : '概要待补'}</span>
                   <span>
                     {item.auditError > 0
@@ -1971,12 +2192,32 @@ function BatchWriteDialog({
                   </span>
                   <span title={item.memory.reviewRequired.join('；') || undefined}>
                     {describeMemoryCell(item)}
+                    {item.memory.pending > 0 ? (
+                      <button
+                        className="btn btn-ghost"
+                        style={{
+                          fontSize: 11,
+                          padding: '1px 6px',
+                          height: 20,
+                          marginLeft: 6,
+                          color: '#2563eb',
+                          borderColor: 'rgba(37, 99, 235, 0.35)',
+                          backgroundColor: 'rgba(37, 99, 235, 0.08)'
+                        }}
+                        disabled={adoptingChapter === item.chapter || adoptingAll}
+                        onClick={() => adoptChapterEntities(item.chapter)}
+                        title="以正文为主：将本章识别出的新角色、地点、道具、伏笔自动入库"
+                      >
+                        {adoptingChapter === item.chapter ? '采纳中…' : '⚡ 一键采纳'}
+                      </button>
+                    ) : null}
                   </span>
                   {item.settingsErrors.length > 0 ? (
                     <span title={item.settingsErrors.join('；')}>设定同步失败 {item.settingsErrors.length} 项</span>
                   ) : null}
                 </li>
-              ))}
+              )
+            })}
             </ul>
           </div>
         ) : null}

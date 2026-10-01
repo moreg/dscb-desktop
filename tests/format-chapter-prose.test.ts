@@ -40,6 +40,32 @@ describe('formatChapterProse', () => {
     expect(formatChapterProse('  Hello World  \n\n  下 一 行  ')).toBe('Hello World\n下一行')
   })
 
+  it('把抄进正文的章号改成故事内说法，书中章节保留', () => {
+    expect(formatChapterProse(
+      '这一次取出的样本与第九章检测所用样本来自同一批封存物。'
+    )).toBe('这一次取出的样本与先前检测所用样本来自同一批封存物。')
+    expect(formatChapterProse('与第 9 章检测所用样本相同。')).toBe('与先前检测所用样本相同。')
+    expect(formatChapterProse('上一章里他说过这句话。')).toBe('先前他说过这句话。')
+    expect(formatChapterProse('他翻开《验尸录》第九章，对照封存记录。')).toBe(
+      '他翻开《验尸录》第九章，对照封存记录。'
+    )
+    expect(formatChapterProse('他读到第九章，才合上笔记。')).toBe('他读到第九章，才合上笔记。')
+    expect(formatChapterProse('第九章\n他推开门。')).toBe('他推开门。')
+    expect(formatChapterProse('话说完了。下章见。')).toBe('话说完了。')
+  })
+
+  it('重构单行内同一人台词被动作打断的结构为规范排版', () => {
+    const raw = '“不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
+    expect(formatChapterProse(raw)).toBe(
+      '朴博士把图像放大。\n“不是今晚才沾上的，旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
+    )
+
+    const questionCase = '“你敢反抗我？”赵执事拔出佩剑，“今日休想走出大殿！”'
+    expect(formatChapterProse(questionCase)).toBe(
+      '赵执事拔出佩剑。\n“你敢反抗我？今日休想走出大殿！”'
+    )
+  })
+
   it('needsChapterProseFormat detects residual issues', () => {
     expect(needsChapterProseFormat('有 空格')).toBe(true)
     expect(needsChapterProseFormat('有\n\n空行')).toBe(true)

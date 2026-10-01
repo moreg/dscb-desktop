@@ -776,6 +776,20 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  safeHandle(
+    'write:applyAllNewEntities',
+    async (
+      _e,
+      payload: { projectId: string; chapterNumber: number }
+    ) => {
+      const validated = validateInput(
+        z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema }),
+        payload
+      )
+      return service.applyAllNewEntities(validated.projectId, validated.chapterNumber)
+    }
+  )
+
   /**
    * 解析并应用伏笔回执：把 LLM 在正文末尾写下的【本章伏笔回执】同步到伏笔库。
    * 输入 chapterNumber + receipt JSON；返回实际变更条数 + skipped 列表。

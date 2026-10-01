@@ -115,8 +115,21 @@ describe('check-ai-patterns: Gate A 句式与禁用词', () => {
     expect(hit[0].excerpt).toBe('手里的算盘停了')
   })
 
-  it('道具停止式覆盖"X的手/动作"与"一顿/停在半空"变体', () => {
-    for (const text of ['擦刀的手停了下来。', '她拨算珠的手停住了。', '数钱的动作停了。', '他的手停在半空中。', '他的手一顿。']) {
+  it('道具停止式覆盖"X的手/动作"与"一顿/停在半空"变体以及手停住了/脚停住了', () => {
+    for (const text of [
+      '擦刀的手停了下来。',
+      '她拨算珠的手停住了。',
+      '数钱的动作停了。',
+      '他的手停在半空中。',
+      '他的手一顿。',
+      '手停住了。',
+      '脚停住了。',
+      '脚步停住了。',
+      '脚步一顿。',
+      '他的脚停住了。',
+      '脚下一顿。',
+      '动作一滞。'
+    ]) {
       expect(scanAiPatterns(text).some((f) => f.type === 'hand_stops')).toBe(true)
     }
   })
@@ -142,6 +155,13 @@ describe('check-ai-patterns: Gate A 句式与禁用词', () => {
     expect(scanAiPatterns('话音从喉咙深处挤出来。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
     expect(scanAiPatterns('连他自己听着都觉得陌生。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
     expect(scanAiPatterns('字句从牙缝里崩出来。').some((f) => f.type === 'voice_squeeze_stranger')).toBe(true)
+  })
+
+  it('检测发声解说套路"声音发紧 / 喉头发紧"', () => {
+    expect(scanAiPatterns('他声音发紧，问了一句。').some((f) => f.type === 'voice_tense')).toBe(true)
+    expect(scanAiPatterns('喉头猛地发紧。').some((f) => f.type === 'voice_tense')).toBe(true)
+    expect(scanAiPatterns('他的语气有些发紧。').some((f) => f.type === 'voice_tense')).toBe(true)
+    expect(scanAiPatterns('声线猛地一紧。').some((f) => f.type === 'voice_tense')).toBe(true)
   })
 
   it('道具停止式不误报真实停止与具体动作', () => {
@@ -503,6 +523,13 @@ describe('scanAiPatterns: 新增高毒/套路句式检测', () => {
   it('检测"顿了一下/愣了一下"停顿占位词（blocking）', () => {
     const findings = scanAiPatterns('他顿了一下，缓缓转过身来。')
     expect(findings.some((f) => f.type === 'fake_pause_moment' && f.severity === 'blocking')).toBe(true)
+  })
+
+  it('检测"碎了/掉了，两人都没顾上看"道具献祭式摆拍反差套路', () => {
+    const findings = scanAiPatterns('手里的培养皿撞到台沿，碎了。\n两人都没顾上看。')
+    expect(findings.some((f) => f.type === 'prop_ignored_cliche')).toBe(true)
+    expect(scanAiPatterns('茶杯摔在地上，碎成几瓣。谁也没顾上去捡。').some((f) => f.type === 'prop_ignored_cliche')).toBe(true)
+    expect(scanAiPatterns('文件散落一地，两人谁也没看一眼。').some((f) => f.type === 'prop_ignored_cliche')).toBe(true)
   })
 })
 

@@ -13,6 +13,7 @@ import type {
 } from '../../shared/types'
 import type { SettingsContext } from './skill-format/settings-md-repo'
 import { extractPowerBoundaryBullets } from './power-boundary'
+import { findPublishedChapterLeak } from '../../shared/strip-chapter-meta'
 import { TOXIC_PATTERNS } from './deslop/banned-words'
 
 export type {
@@ -562,22 +563,22 @@ function findAffirmativePowerMention(content: string, pattern: RegExp): RegExpMa
 }
 
 function checkMetaNarration(content: string): SelfCheckItemResult {
-  const tail = content.slice(-400)
-  if (/第\s*\d+\s*章/.test(tail) || /下[一]?章见|未完待续|请看下回/.test(tail)) {
+  const leak = findPublishedChapterLeak(content)
+  if (leak) {
     return {
       id: 'meta_narration',
       category: 'ban',
-      label: '章末无元叙述/章号泄露',
+      label: '正文无章号泄露',
       verdict: 'warn',
-      detail: '章末疑似出现章号或「下章见」类元叙述'
+      detail: `正文出现出版章号「${leak.replace(/\s+/g, '')}」，应改成故事内的时间或事件`
     }
   }
   return {
     id: 'meta_narration',
     category: 'ban',
-    label: '章末无元叙述/章号泄露',
+    label: '正文无章号泄露',
     verdict: 'pass',
-    detail: '未见章末元叙述'
+    detail: '未见章号或「下章见」类元叙述'
   }
 }
 
