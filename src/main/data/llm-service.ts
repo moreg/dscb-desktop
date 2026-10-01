@@ -2,6 +2,7 @@ import type { SecretStore } from './secret-store'
 import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity } from './antigravity-runner'
+import { buildAntigravityPrompt } from './antigravity-prompt'
 import { runCodex, probeCodex } from './codex-runner'
 import { runGrok, probeGrok } from './grok-runner'
 import { runClaude, probeClaude } from './claude-runner'
@@ -592,11 +593,7 @@ export class LlmService {
     opts: GenerateOptions
   ): Promise<string> {
     // 合并 system + user：agy -p 单轮，把 system 作为前置指令
-    const body =
-      opts.systemPrompt && opts.systemPrompt.trim()
-        ? `${opts.systemPrompt}\n\n---\n\n${prompt}`
-        : prompt
-    const merged = CLI_PROSE_ONLY_PREAMBLE + body
+    const merged = buildAntigravityPrompt(prompt, opts.systemPrompt, CLI_PROSE_ONLY_PREAMBLE)
 
     const timeoutMs = resolveStreamTimeoutMs(opts)
     // 仅传用户 signal；超时由 runner 的 timeoutSec / agy --print-timeout 负责，

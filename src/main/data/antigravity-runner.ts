@@ -18,7 +18,7 @@ import { killProcessTree } from './kill-process-tree'
  *
  * 命令行长度限制：Windows CreateProcess 上限约 32767 字符（含 exe 路径 + 所有参数）。
  * 网文正文生成的 systemPrompt + prompt 通常在数千字以内，远低于限制。
- * 超长 prompt（> 30000 字符）时回退到临时文件 + stdin 兜底，避免 spawn 失败。
+ * 超长 prompt（> 30000 字符）直接报错；调用层会先精简可省略的章节背景。
  *
  * 注意：不要加 `--sandbox`。该标志会让 agy 在受限沙箱里运行（无当前 workspace），
  * 触发 agy 内置的"是否创建 sandbox 目录"引导话术，被当成模型输出返回。
