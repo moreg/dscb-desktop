@@ -33,7 +33,25 @@ jobs:
       - run: npm run typecheck:web
       - run: npx vitest run tests/app-updates.test.ts
       - run: npm run build
-      - name: Build installer and upload draft release
-        run: npx electron-builder --win --x64 --publish always
+      - name: Build installer and update metadata
+        run: npx electron-builder --win --x64 --publish never
+      - name: Upload files to one draft release
+        shell: pwsh
+        run: |
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json tagName 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:GITHUB_REF_NAME
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create draft release" }
+          }
+          $releaseFiles = @(
+            "release/dscb-desktop-setup-$((Get-Content package.json -Raw | ConvertFrom-Json).version)-x64.exe",
+            "release/dscb-desktop-setup-$((Get-Content package.json -Raw | ConvertFrom-Json).version)-x64.exe.blockmap",
+            "release/latest.yml"
+          )
+          foreach ($releaseFile in $releaseFiles) {
+            if (-not (Test-Path -LiteralPath $releaseFile)) { throw "Missing release file: $releaseFile" }
+          }
+          gh release upload $env:GITHUB_REF_NAME @releaseFiles --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release files" }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
