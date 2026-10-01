@@ -51,11 +51,13 @@ import { ProjectWindowRegistry } from './data/project-window-registry'
 import { MobileServer } from './mobile/mobile-server'
 import { registerMobileIpc } from './ipc/mobile'
 import { MobileReferenceService } from './mobile/mobile-reference-service'
+import { registerAppUpdates } from './app-updates'
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const projectWindows = new ProjectWindowRegistry<BrowserWindow>()
 let disposeProjectWatchers: (() => void) | null = null
 let mobileServer: MobileServer | null = null
+let disposeAppUpdates: (() => void) | null = null
 
 function createWindow(projectId: string | null = null): BrowserWindow {
   const window = new BrowserWindow({
@@ -249,6 +251,7 @@ if (!hasSingleInstanceLock) {
     })
   }
 
+  disposeAppUpdates = await registerAppUpdates()
   createWindow()
 
   app.on('activate', () => {
@@ -261,6 +264,8 @@ app.on('before-quit', () => {
   disposeProjectWatchers?.()
   void mobileServer?.stop()
 })
+
+app.on('will-quit', () => { disposeAppUpdates?.() })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

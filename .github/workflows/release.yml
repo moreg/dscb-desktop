@@ -1,0 +1,39 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Validate tag version
+        shell: pwsh
+        run: |
+          $releaseVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$releaseVersion") {
+            throw "Tag must match package.json version: v$releaseVersion"
+          }
+      - run: npm ci
+      - run: npm run typecheck:node
+      - run: npm run typecheck:web
+      - run: npx vitest run tests/app-updates.test.ts
+      - run: npm run build
+      - name: Build installer and upload draft release
+        run: npx electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

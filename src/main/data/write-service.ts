@@ -55,7 +55,8 @@ import {
   isLegacyCandidate,
   readMemoryCandidate,
   storedChapterIssues,
-  updateMemoryCandidate
+  updateMemoryCandidate,
+  type StoredMemoryCandidate
 } from './memory/candidate-repository'
 import { writeJsonAtomic } from './atomic'
 import { extractPowerBoundaryBullets } from './power-boundary'

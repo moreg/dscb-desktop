@@ -37,6 +37,7 @@ import {
   type WritingRequirementTemplate
 } from '../../shared/writing-requirement-templates'
 import FeatureRoutingForm from './FeatureRoutingForm'
+import AppUpdatePanel from './AppUpdatePanel'
 import { useStreamAborter } from './hooks/useStreamAborter'
 import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
 
@@ -211,6 +212,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
   const TABS = [
     { id: 'appearance', label: '外观' },
     { id: 'storage', label: '保存位置' },
+    { id: 'updates', label: '应用更新' },
     { id: 'model', label: '模型服务' },
     { id: 'usage', label: '用量与费用' },
     { id: 'aiwords', label: 'AI 高频词' },
@@ -657,6 +659,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
           ))}
         </nav>
         <div className="settings-content">
+          {activeTab === 'updates' && <AppUpdatePanel />}
           {/* 全局消息提示 */}
           {msg ? (
             <p

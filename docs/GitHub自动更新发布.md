@@ -1,0 +1,50 @@
+# GitHub 自动更新与发布
+
+更新源为公开仓库 https://github.com/moreg/dscb-desktop 的正式 Releases。客户端无需令牌；不要把 GitHub Token 写进应用。
+
+## 应用行为
+
+- 已安装的 Windows 版本仅在启动 15 秒后自动检查一次，运行期间不再自动检查。
+- 设置 → 应用更新可以关闭自动检查，或手动检查。
+- 有更新时页面顶部提示，用户确认下载后才下载；显示下载进度。
+- 下载完成后在用户正常退出整个应用时安装，不主动退出或重启。多窗口时需关闭所有窗口；退出前自行保存正文并结束 AI 写作、手机写作等任务。
+- 自动检查失败不会弹窗打断写作，错误可在设置中查看；未发布版本、缺少 latest.yml 或网络无法连接 GitHub 时会失败。
+- 开发模式不检查更新，也不下载或安装。
+
+## 首次发布
+
+1. 将这次功能改动提交并推送到 GitHub。
+2. 确认 package.json 的版本号（目前为 0.1.0）。
+3. 创建对应标签并推送，例如：
+
+   ```powershell
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+4. GitHub Actions 的 Windows release 工作流会构建 x64 NSIS 安装程序，并上传到草稿 Release。
+5. 到 GitHub Releases 检查草稿：需要包含 `.exe`、`.exe.blockmap`、`latest.yml`。填写更新说明，确认文件齐全后点击 Publish release。稳定版本不要勾选 prerelease。
+6. 旧版本没有更新功能，用户需要手动安装这次带更新功能的安装包。
+
+如果仓库禁用了 Actions 或限制工作流写权限，需要在仓库设置中启用；发布令牌使用工作流自带的 GITHUB_TOKEN。
+
+## 后续发布
+
+先提高版本号，再提交并推送标签。例如发布 0.1.1：
+
+```powershell
+npm version 0.1.1 --no-git-tag-version
+git add package.json package-lock.json
+git commit -m "chore: release 0.1.1"
+git push origin HEAD
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+版本号必须与标签一致；同一个标签不要复用。工作流产物先作为草稿上传，最后人工发布，保证客户端看到的正式 Release 文件完整。
+
+本地 `npm run package` 只打包，不上传。更新元数据由 electron-builder 自动生成，不手工编辑其中的文件名或哈希。
+
+## 验证
+
+安装较低版本，再发布较高版本，检查：自动提示、手动检查、下载进度、断网重试、关闭自动检查后重启仍关闭、关闭最后一个窗口后安装，以及新版本启动后正文和设置仍存在。正式发布和真实跨版本安装需在 GitHub 与已安装应用中验证；开发模式或单元测试不能代替这一流程。

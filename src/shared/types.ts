@@ -1,4 +1,5 @@
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
+import type { AppUpdateState } from './app-update'
 
 export interface ProjectMeta {
   id: string
@@ -492,6 +493,11 @@ export interface MobileServerStatus {
 }
 
 export interface RendererApi {
+  getAppUpdateState(): Promise<AppUpdateState>
+  checkAppUpdate(): Promise<AppUpdateState>
+  downloadAppUpdate(): Promise<AppUpdateState>
+  setAppUpdateAutoCheck(enabled: boolean): Promise<AppUpdateState>
+  onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
   listProjects: (query?: ListProjectsQuery) => Promise<ProjectMeta[]>
   /** 归档/移回书案。归档不删文件，只从书案列表隐藏。 */
   setProjectArchived: (projectId: string, archived: boolean) => Promise<ProjectMeta>

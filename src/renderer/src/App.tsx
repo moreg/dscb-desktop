@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 import MobileConnectPanel from './MobileConnectPanel'
+import AppUpdatePanel from './AppUpdatePanel'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
 import type { Diagnostic, DiagnosticFixKind, MemoryEntityType, ProjectMeta } from '../../shared/types'
@@ -528,6 +529,7 @@ export default function App() {
       </aside>
 
       <main className="main-content">
+        <AppUpdatePanel compact />
         <div className={mainInnerClass}>
           {bootSyncHint ? (
             <div className="diag-banner boot-sync-hint" role="status">

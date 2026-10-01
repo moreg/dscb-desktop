@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "package": "electron-vite build && electron-builder",
+    "package": "electron-vite build && electron-builder --publish never",
     "icon": "node scripts/generate-icon.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -20,6 +20,12 @@
     "appId": "com.aiwriter.desktop",
     "productName": "大神持笔 桌面版",
     "icon": "build/icon.ico",
+    "publish": {
+      "provider": "github",
+      "owner": "moreg",
+      "repo": "dscb-desktop",
+      "releaseType": "draft"
+    },
     "directories": {
       "output": "release"
     },
@@ -32,6 +38,7 @@
       "**/node_modules/skia-canvas/**/*"
     ],
     "win": {
+      "artifactName": "dscb-desktop-setup-${version}-${arch}.${ext}",
       "target": [
         "nsis"
       ]
@@ -64,6 +71,7 @@
   "dependencies": {
     "@floating-ui/react": "^0.27.20",
     "d3-force": "^3.0.0",
+    "electron-updater": "^6.8.9",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

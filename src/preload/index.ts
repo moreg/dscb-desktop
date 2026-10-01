@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AppUpdateState } from '../shared/app-update'
 import type {
   DiagnosticFixKind,
   ListProjectsQuery,
@@ -74,6 +75,15 @@ function makeStreamHandle<T>(
 }
 
 const api = {
+  getAppUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<AppUpdateState>,
+  checkAppUpdate: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateState>,
+  downloadAppUpdate: () => ipcRenderer.invoke('updates:download') as Promise<AppUpdateState>,
+  setAppUpdateAutoCheck: (enabled: boolean) => ipcRenderer.invoke('updates:setAutoCheck', enabled) as Promise<AppUpdateState>,
+  onAppUpdateState: (callback: (state: AppUpdateState) => void) => {
+    const handler = (_event: unknown, state: AppUpdateState) => callback(state)
+    ipcRenderer.on('updates:state', handler)
+    return () => { ipcRenderer.removeListener('updates:state', handler) }
+  },
   listProjects: (query?: ListProjectsQuery) => ipcRenderer.invoke('library:list', query ?? {}),
   setProjectArchived: (projectId: string, archived: boolean) =>
     ipcRenderer.invoke('library:setArchived', { projectId, archived }),
