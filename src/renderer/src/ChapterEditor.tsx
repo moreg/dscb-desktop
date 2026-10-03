@@ -795,6 +795,7 @@ export default function ChapterEditor({
   const [deslopCollapsedGates, setDeslopCollapsedGates] = useState<Set<string>>(new Set())
   const [tempContextInput, setTempContextInput] = useState('')
   const [allChapters, setAllChapters] = useState<{ chapterNumber: number; title: string }[]>([])
+  const chapterNavigationSeqRef = useRef(0)
 
   // 章名命名 / 手动改名（ChapterEditor 正文区 P39）
   const [titleEditing, setTitleEditing] = useState(false)
@@ -1150,6 +1151,22 @@ export default function ChapterEditor({
     })
   }
 
+  const refreshChapterNavigation = (loadEpoch = sessionEpochRef.current) => {
+    const seq = ++chapterNavigationSeqRef.current
+    void window.api.listChapters(projectId)
+      .then((chapters) => {
+        if (sessionEpochRef.current !== loadEpoch || chapterNavigationSeqRef.current !== seq) return
+        // 与章节列表共用读取路径：节奏图谱缺失时仍可从大纲逐章表回退。
+        setAllChapters(chapters.map((c) => ({ chapterNumber: c.chapterNumber, title: c.title }))
+          .sort((a, b) => a.chapterNumber - b.chapterNumber))
+      })
+      .catch((err) => {
+        if (sessionEpochRef.current !== loadEpoch || chapterNavigationSeqRef.current !== seq) return
+        console.error('[ChapterEditor] listChapters for navigation failed', err)
+        setAllChapters([])
+      })
+  }
+
   useEffect(() => {
     // 切章：递增会话世代 + 打断全部流，避免旧章 token 落到新章
     // （含 hasLlmKey 等待中、尚未拿到 requestId 的异步）
@@ -1224,13 +1241,8 @@ export default function ChapterEditor({
         console.error('[ChapterEditor] getChapter failed', err)
         setLoadError(err instanceof Error ? err.message : String(err))
       })
-    void window.api.getChapterWordSummary(projectId).then((res) => {
-      if (res) {
-        const sorted = res.chapters.map((c) => ({ chapterNumber: c.chapterNumber, title: c.title }))
-          .sort((a, b) => a.chapterNumber - b.chapterNumber)
-        setAllChapters(sorted)
-      }
-    })
+    setAllChapters([])
+    refreshChapterNavigation(loadEpoch)
     refreshCharacters()
     refreshMemory()
     refreshChapterOutline()
@@ -1308,11 +1320,12 @@ export default function ChapterEditor({
   }, [projectId, chapterNumber, reloadTick])
 
   // 订阅外部文件变更：细纲/节奏图谱变 → 刷新本章 meta（标题/情绪/爽点等）。
-  // 仅当用户无未保存正文输入（!dirty）时刷新，避免覆盖正在编辑的内容。
+  // 导航独立刷新；本章正文仅在无未保存输入（!dirty）时刷新，避免覆盖正在编辑的内容。
   useEffect(() => {
     const off = window.api.onProjectFilesChanged((e) => {
       if (e.projectId !== projectId) return
       if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'progress') return
+      refreshChapterNavigation()
       if (dirty) return // 用户有未保存输入，跳过，保存后会重新读盘
       void window.api
         .getChapter(projectId, chapterNumber)

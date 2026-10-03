@@ -105,7 +105,8 @@ describe('GitHub app updates', () => {
       autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
       return ['installer.exe']
     })
-    expect((await invoke('updates:download')).status).toBe('downloaded')
+    await invoke('updates:download')
+    await vi.waitFor(async () => expect((await invoke('updates:getState')).status).toBe('downloaded'))
     await invoke('updates:check')
     await invoke('updates:download')
     expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
@@ -119,13 +120,97 @@ describe('GitHub app updates', () => {
     expect(failed.status).toBe('error')
     expect(failed.error).not.toContain('private network details')
     await invoke('updates:check')
-    autoUpdater.emit('update-available', updateInfo)
+    const releaseNotes = '- 增加更新内容预览\n- 修复下载中断后的重试'
+    autoUpdater.emit('update-available', { ...updateInfo, releaseNotes })
     vi.mocked(autoUpdater.downloadUpdate).mockRejectedValueOnce(new Error('disconnected'))
-    expect((await invoke('updates:download')).status).toBe('error')
     await invoke('updates:download')
+    await vi.waitFor(async () => expect((await invoke('updates:getState')).status).toBe('error'))
+    expect((await invoke('updates:getState')).releaseNotes).toBe(releaseNotes)
+    expect((await invoke('updates:download')).releaseNotes).toBe(releaseNotes)
     expect(autoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
     autoUpdater.emit('error', new Error('connection failed'))
     expect((await invoke('updates:getState')).status).toBe('error')
+    expect((await invoke('updates:getState')).releaseNotes).toBe(releaseNotes)
+  })
+
+  it('keeps GitHub HTML release notes through progress and a completion event without notes', async () => {
+    dispose = await registerAppUpdates()
+    const releaseNotes = '<p>更新内容</p>\n<ul><li>支持后台下载</li><li>修复重试</li></ul>'
+    autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: `\n${releaseNotes}\n` })
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'available', releaseNotes })
+    expect(mocks.send).toHaveBeenLastCalledWith({}, 'updates:state', expect.objectContaining({ releaseNotes }))
+    expect((await invoke('updates:download')).releaseNotes).toBe(releaseNotes)
+    autoUpdater.emit('download-progress', { percent: 67, total: 100, delta: 67, transferred: 67, bytesPerSecond: 67 })
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'downloading', percent: 67, releaseNotes })
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'downloaded', percent: 100, releaseNotes })
+  })
+
+  it('combines full changelog notes with their versions and ignores empty entries', async () => {
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-available', {
+      ...updateInfo,
+      releaseNotes: [
+        { version: '0.1.1', note: '<ul><li>新增功能</li></ul>' },
+        { version: '0.1.0', note: '  - 修复旧版本问题\n' },
+        { version: '0.0.9', note: null },
+        { version: '0.0.8', note: ' \n ' }
+      ]
+    })
+    expect((await invoke('updates:getState')).releaseNotes).toBe('## 0.1.1\n\n<ul><li>新增功能</li></ul>\n\n## 0.1.0\n\n- 修复旧版本问题')
+  })
+
+  it.each([undefined, null, '', ' \n ', [], [{ version: '0.1.1', note: null }]])(
+    'clears stale notes when an available update has no usable notes: %j',
+    async releaseNotes => {
+      dispose = await registerAppUpdates()
+      autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: '旧说明' })
+      autoUpdater.emit('update-available', { ...updateInfo, version: '0.1.2', releaseNotes })
+      expect(await invoke('updates:getState')).toMatchObject({ version: '0.1.2', releaseNotes: undefined })
+    }
+  )
+
+  it('clears notes while checking again and when no update is available', async () => {
+    let resolveCheck!: (value: null) => void
+    vi.mocked(autoUpdater.checkForUpdates).mockImplementation(() => new Promise(resolve => { resolveCheck = resolve }))
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: '旧说明' })
+    const checking = invoke('updates:check')
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'checking', version: undefined, releaseNotes: undefined })
+    autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: '本次说明' })
+    resolveCheck(null)
+    await checking
+    autoUpdater.emit('update-not-available', updateInfo)
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'current', version: undefined, releaseNotes: undefined })
+  })
+
+  it('uses completion notes when supplied and never carries notes across different versions', async () => {
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: '检查时的说明' })
+    autoUpdater.emit('update-downloaded', { ...updateInfo, releaseNotes: '下载完成时的说明', downloadedFile: 'installer.exe' })
+    expect((await invoke('updates:getState')).releaseNotes).toBe('下载完成时的说明')
+    autoUpdater.emit('update-downloaded', { ...updateInfo, version: '0.1.2', downloadedFile: 'installer.exe' })
+    expect(await invoke('updates:getState')).toMatchObject({ version: '0.1.2', releaseNotes: undefined })
+  })
+
+  it('returns immediately while the main process keeps downloading and tracking progress', async () => {
+    let finishDownload!: (files: string[]) => void
+    vi.mocked(autoUpdater.downloadUpdate).mockImplementation(() => new Promise(resolve => { finishDownload = resolve }))
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-available', updateInfo)
+    // A pending download must not hold the renderer's IPC request open.
+    expect((await invoke('updates:download')).status).toBe('downloading')
+    expect(autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+    await invoke('updates:check')
+    await invoke('updates:download')
+    expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
+    expect(autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+    autoUpdater.emit('download-progress', { percent: 67, total: 100, delta: 67, transferred: 67, bytesPerSecond: 67 })
+    // Reopening the panel can obtain the current progress without restarting the download.
+    expect((await invoke('updates:getState')).percent).toBe(67)
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    finishDownload(['installer.exe'])
+    await vi.waitFor(async () => expect((await invoke('updates:getState')).status).toBe('downloaded'))
   })
 
   it('does no network or downloads in development mode and disposes timers', async () => {

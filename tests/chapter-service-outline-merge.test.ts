@@ -243,6 +243,32 @@ describe('ChapterService outline merge', () => {
     expect(ch1.wordCount).toBe(meta.wordCount)
   })
 
+  it('JSON 节奏图谱使用卷名时，已写下一章仍可从章节列表打开', async () => {
+    const entries = [
+      { chapter: 1, title: '奉命下山', emotion: 7, climax: 2, volume: '下山风云', actualized: true },
+      { chapter: 2, title: '婚书背后的名字', emotion: 8, climax: 3, volume: '下山风云', actualized: true },
+      { chapter: 3, title: '入城', emotion: 6, climax: 1, volume: '风云际会', actualized: false }
+    ]
+    await writeFile(
+      path.join(dir, '图解', '节奏图谱.html'),
+      `<script>const rhythmData = ${JSON.stringify(entries)};</script>`,
+      'utf-8'
+    )
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    await writeFile(path.join(dir, '正文', '第002章_婚书背后的名字.md'), '第二章已写正文。', 'utf-8')
+
+    const service = new ChapterService(ps)
+    const list = await service.listChapters(projectId)
+    expect(list.map((c) => [c.chapterNumber, c.title, c.volume])).toEqual([
+      [1, '奉命下山', 1], [2, '婚书背后的名字', 1], [3, '入城', 2]
+    ])
+    expect(list[1]).toMatchObject({ status: 'draft' })
+    const chapter = await service.getChapter(projectId, list[1].chapterNumber)
+    expect(chapter.content).toBe('第二章已写正文。')
+    expect(chapter.meta.title).toBe(list[1].title)
+    expect(chapter.meta.wordCount).toBe(list[1].wordCount)
+  })
+
   it('同一基础版本的并发写入只允许一个成功', async () => {
     const service = new ChapterService(ps)
     await service.updateContent(projectId, 1, '基础正文')

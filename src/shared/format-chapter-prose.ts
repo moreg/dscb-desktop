@@ -4,6 +4,7 @@
  * - 去掉空行（连续换行压成单个换行）
  * - **保留**段落换行
  * - 对话动作排版归一：严禁同一人台词中间夹动作打断（“话1”动作，“话2”），自动将动作前置独立成行并合并台词
+ * - 完整台词内部的中文句号改为逗号，保留末尾句号与问号、叹号
  *
  * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
@@ -71,7 +72,10 @@ export function formatChapterProse(text: string): string {
     .replace(/^\n+/, '')
     .replace(/\n+$/, '')
 
-  const proseWithDialogue = separateDialogueInterruption(normalized)
+  const proseWithDialogue = separateDialogueInterruption(normalized).replace(
+    /“[^“”\n]*”|「[^「」\n]*」|"[^"\n]*"/g,
+    (dialogue) => dialogue.replace(/。(?!\s*[”」"]$)/g, '，')
+  )
   // 空白收干净之后再认章号：「第 9 章」会先变成「第9章」。
   return stripPublishedChapterRefs(proseWithDialogue)
 }

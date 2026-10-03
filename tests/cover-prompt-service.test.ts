@@ -5,7 +5,7 @@ import {
   parseDraftJson,
   pickProtagonists
 } from '../src/main/data/cover-prompt-service'
-import { buildCoverPrompt, GENRE_STYLES } from '../src/main/data/skill-prompts/cover/cover-styles'
+import { buildCoverPrompt, GENRE_STYLES, COVER_STYLE_PRESETS } from '../src/main/data/skill-prompts/cover/cover-styles'
 import type { Character } from '../src/shared/types'
 
 /* =========================================================
@@ -124,9 +124,9 @@ describe('buildCoverPrompt scene 覆盖', () => {
 
   it('keyProps 有值才输出', () => {
     const withProps = buildCoverPrompt({ ...base, scene: { keyProps: 'a shattered bronze sword' } })
-    expect(withProps).toContain('Key symbolic elements: a shattered bronze sword.')
+    expect(withProps).toContain('关键象征物：a shattered bronze sword。')
     const without = buildCoverPrompt({ ...base, scene: { characterDesc: 'x' } })
-    expect(without).not.toContain('Key symbolic elements')
+    expect(without).not.toContain('关键象征物')
   })
 
   it('scene 构图不描述主体人物（避免与 no human figure 矛盾）', () => {
@@ -135,7 +135,7 @@ describe('buildCoverPrompt scene 覆盖', () => {
       composition: 'scene',
       scene: { characterDesc: 'a lone swordsman' }
     })
-    expect(prompt).toContain('no human figure as main subject')
+    expect(prompt).toContain('无主体人物')
     expect(prompt).not.toContain('a lone swordsman')
     expect(prompt).not.toContain(GENRE_STYLES.xianxia.characterDesc)
   })
@@ -151,7 +151,7 @@ describe('buildCoverPrompt scene 覆盖', () => {
       ...base,
       scene: { colorPalette: 'rust red and ash grey.' }
     })
-    expect(prompt).toContain('Color palette: rust red and ash grey.')
+    expect(prompt).toContain('配色：rust red and ash grey。')
     expect(prompt).not.toContain('..')
   })
 })
@@ -166,6 +166,7 @@ function makeService(opts: {
   llmError?: Error
   synopsis?: string | null
   characters?: Character[]
+  learningLibrary?: ConstructorParameters<typeof CoverPromptService>[4]
 }): {
   service: CoverPromptService
   generateStream: ReturnType<typeof vi.fn>
@@ -197,9 +198,16 @@ function makeService(opts: {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     outlineService as any,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    chapterService as any
+    chapterService as any,
+    opts.learningLibrary
   )
   return { service, generateStream }
+}
+
+function completeResponse(fields: Record<string, unknown> = {}): string {
+  return JSON.stringify({ genre: 'urban', composition: 'closeup',
+    characterDesc: 'a sixty-year-old one-armed fictional warrior in weathered armor',
+    backgroundDesc: 'a ruined stone fortress', ...fields })
 }
 
 describe('CoverPromptService.extract', () => {
@@ -209,6 +217,173 @@ describe('CoverPromptService.extract', () => {
     authorName: '老猫',
     platform: 'fanqie' as const
   }
+
+  it('提炼字段和schema统一要求自然中文，中文人物道具逐字进入草稿且保留稳定枚举', async () => {
+    const scene = {
+      characterDesc: '六十岁的独臂女刀客，灰发束起，身穿旧铜甲，握着一把断刀',
+      backgroundDesc: '雪山脚下的残破石堡，城墙上积着薄雪',
+      colorPalette: '铁灰为主，暗红与旧铜色点缀',
+      lighting: '左侧冷月光照亮人物面部，远处有微弱火光',
+      keyProps: '刀身缺了一角的旧铜刀'
+    }
+    const { service, generateStream } = makeService({ llmResponse: JSON.stringify({ genre: 'xianxia', composition: 'fullbody', ...scene,
+      styleHintZh: '冷色调，独臂刀客，残破石堡', summaryZh: '独臂女刀客守在雪山石堡前' }) })
+    const draft = await service.extract({ ...input, stylePreset: 'ink_minimal' })
+    const [instruction, options] = generateStream.mock.calls[0]
+    expect(instruction).toContain('五个字段全部用**自然简体中文**书写')
+    expect(instruction).toContain('不附英文翻译')
+    expect(instruction).not.toContain('用**英文**书写')
+    expect(draft.scene).toEqual(scene)
+    expect(draft).toMatchObject({ genre: 'xianxia', composition: 'fullbody', styleHint: '冷色调，独臂刀客，残破石堡', summary: '独臂女刀客守在雪山石堡前' })
+    for (const value of Object.values(scene)) expect(draft.prompt).toContain(value)
+    expect(options.jsonSchema).toBe(COVER_DRAFT_SCHEMA)
+    for (const field of ['characterDesc', 'backgroundDesc', 'colorPalette', 'lighting', 'keyProps', 'styleHintZh', 'summaryZh'] as const) {
+      expect(COVER_DRAFT_SCHEMA.properties[field].description).toContain('自然简体中文')
+      expect(COVER_DRAFT_SCHEMA.properties[field].description).not.toContain('English')
+    }
+    expect(COVER_DRAFT_SCHEMA.properties.composition.enum).toEqual(['closeup', 'fullbody', 'scene', 'duo'])
+  })
+
+  it('明确男频高于模型性别、旧scene与无人物方向，保留小说人物其他属性和写实媒介', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'scene',
+      characterDesc: 'a sixty-year-old one-armed female detective in a weathered grey coat',
+      backgroundDesc: 'an old railway station', styleHintZh: '女主，冷色调', summaryZh: '女性侦探站在车站' }) })
+    const draft = await service.extract({ ...input, channel: 'male', stylePreset: 'photorealistic',
+      compositionOverride: 'scene', extraHint: '女性主角，不要人物，只改光线' })
+    const instruction = generateStream.mock.calls[0][0] as string
+    expect(instruction).toContain('用户明确选择男频，封面主体必须是男性（male）')
+    expect(instruction).toContain('构图已锁定为 "closeup"')
+    expect(instruction).not.toContain('当前风格要求无人物')
+    expect(draft.composition).toBe('closeup')
+    expect(draft.scene?.characterDesc).toBe('a sixty-year-old one-armed male detective in a weathered grey coat')
+    expect(draft.scene?.backgroundDesc).toBe('an old railway station')
+    expect(draft.prompt).toContain('写实媒介约束')
+    expect(draft.styleHint).toBe('男主角，冷色调')
+    expect(draft.summary).toBe('男性侦探站在车站')
+  })
+
+  it('女频duo确定性校正模型两位人物，不因无人物风格退掉双人或修改两种服饰', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ genre: 'modern_romance', composition: 'scene',
+      characterDesc: 'an elderly woman in a red dress and a middle-aged man in a grey suit' }) })
+    const draft = await service.extract({ ...input, channel: 'female', stylePreset: 'concept_symbol', compositionOverride: 'duo', extraHint: '不要人物' })
+    expect(generateStream.mock.calls[0][0]).toContain('构图已锁定为 "duo"')
+    expect(draft.composition).toBe('duo')
+    expect(draft.scene?.characterDesc).toContain('两个主体均为女性')
+    expect(draft.scene?.characterDesc).toContain('an elderly woman in a red dress and a middle-aged woman in a grey suit')
+    expect(draft.prompt).toContain('双人构图')
+    expect(draft.prompt).not.toContain('无主体人物')
+  })
+
+  it('明确频道解除预设无人物要求，但模型仍未返回人物时明确报错而非凭空换通用角色', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'scene', characterDesc: '' }) })
+    await expect(service.extract({ ...input, channel: 'female', stylePreset: 'concept_symbol' })).rejects.toThrow('人物外貌与服饰')
+    expect(generateStream.mock.calls[0][0]).toContain('构图已锁定为 "closeup"')
+    expect(generateStream.mock.calls[0][0]).not.toContain('当前风格要求无人物')
+  })
+
+  it('频道只锁人物性别和存在，方向不再声明第二个最高优先级，提炼结果仍确定性校正', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({
+      characterDesc: 'an elderly female general in weathered copper armor', backgroundDesc: 'a ruined mountain fortress'
+    }) })
+    const draft = await service.extract({ ...input, channel: 'male', stylePreset: 'photorealistic', extraHint: '主角画成女性，只改光线' })
+    const instruction = generateStream.mock.calls[0][0] as string
+    expect(instruction).toContain('人物性别和可见存在优先于下方资料、方向及预设')
+    expect(instruction).toContain('人物性别和存在仍服从上方频道选择')
+    expect(instruction).toContain('【作者画面方向，仅覆盖指定维度】')
+    expect(instruction).not.toContain('作者画面方向，优先级最高')
+    expect(draft.scene?.characterDesc).toBe('an elderly male general in weathered copper armor')
+    expect(draft.prompt).toContain('写实媒介约束')
+    expect(draft.scene?.backgroundDesc).toBe('a ruined mountain fortress')
+  })
+
+  it('水墨预设的小说提炼不再混入轻小说萌系画风，中文冲突规则不覆盖自选竖排', async () => {
+    const rules = ['标题占画面80%，放在上方三分之一。', '标题保持清晰的高对比。']
+    const learningLibrary = {
+      load: async () => ({ library: { updatedAt: 'old-source', source: { sampleCount: 8 }, styles: {} }, summary: { rules: [] } }),
+      resolveStyle: () => ({ key: 'ink_minimal', definition: COVER_STYLE_PRESETS.ink_minimal }),
+      getRulesForGenre: () => rules
+    }
+    const { service } = makeService({ learningLibrary: learningLibrary as unknown as ConstructorParameters<typeof CoverPromptService>[4],
+      llmResponse: completeResponse({ genre: 'light_novel', characterDesc: 'an elderly warrior in weathered bronze armor' }) })
+    const draft = await service.extract({ ...input, stylePreset: 'ink_minimal', typography: { titlePosition: 'vertical_left', authorPosition: 'vertical_side' } })
+    expect(draft.prompt).toContain(COVER_STYLE_PRESETS.ink_minimal.prompt)
+    expect(draft.prompt).not.toContain(GENRE_STYLES.light_novel.tag)
+    expect(draft.prompt).toContain('an elderly warrior in weathered bronze armor')
+    expect(draft.prompt).toContain('单列竖排')
+    expect(draft.prompt).not.toContain('独立底部署名区')
+    expect(draft.learningContext?.rules).toEqual([rules[1]])
+    expect(draft.learningContext?.libraryVersion).toMatch(/^old-source@/)
+    expect(rules).toEqual(['标题占画面80%，放在上方三分之一。', '标题保持清晰的高对比。'])
+  })
+
+  it('仅改变光线时提炼与出图仍保留媒介锁、角色属性和用户构图锁定', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'closeup' }) })
+    const draft = await service.extract({ ...input, stylePreset: 'photorealistic', compositionOverride: 'fullbody', extraHint: '不要二次元，只改光线' })
+    const instruction = generateStream.mock.calls[0][0] as string
+    expect(instruction).toContain('视觉风格已锁定为“真人写实封面”')
+    expect(instruction).toContain('写实媒介约束')
+    expect(instruction).toContain('构图已锁定为 "fullbody"')
+    expect(instruction).toContain('人物未被明确更换')
+    expect(draft.composition).toBe('fullbody')
+    expect(draft.prompt).toContain('写实媒介约束')
+    expect(draft.prompt).toContain('a sixty-year-old one-armed fictional warrior')
+  })
+
+  it('色调方向不会让无人物风格突然改为人物封面', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'fullbody' }) })
+    const draft = await service.extract({ ...input, stylePreset: 'concept_symbol', extraHint: '改为冷色调' })
+    expect(draft.composition).toBe('scene')
+    expect(draft.prompt).toContain('无主体人物')
+    expect(generateStream.mock.calls[0][0]).toContain('当前风格要求无人物')
+  })
+
+  it('有效JSON缺关键字段也明确失败，不生成通用人物冒充专属提炼', async () => {
+    const { service } = makeService({ llmResponse: '{}' })
+    await expect(service.extract(input)).rejects.toThrow('COVER_PROMPT_INCOMPLETE')
+    const missingCharacter = makeService({ llmResponse: '{"composition":"fullbody","backgroundDesc":"a mountain pass"}' }).service
+    await expect(missingCharacter.extract(input)).rejects.toThrow('人物外貌与服饰')
+  })
+
+  it('返回可保留的结构化画面和按实际题材筛选的学习快照，两条构建路径使用相同比例过滤', async () => {
+    const getRulesForGenre = vi.fn(() => [
+      'Use a portrait 9:16 master canvas.', 'SCI_FI_GENRE_RULE: keep the planet silhouette clear.'
+    ])
+    const learningLibrary = {
+      load: async () => ({
+        library: { updatedAt: 'learned-version', source: { sampleCount: 20 }, styles: {} },
+        summary: { rules: [] }
+      }),
+      resolveStyle: () => ({ key: 'game_neon', definition: COVER_STYLE_PRESETS.game_neon }),
+      getRulesForGenre
+    }
+    const { service } = makeService({
+      learningLibrary: learningLibrary as unknown as ConstructorParameters<typeof CoverPromptService>[4],
+      llmResponse: JSON.stringify({ genre: 'scifi', composition: 'scene',
+        characterDesc: '', backgroundDesc: 'a ruined orbital station', colorPalette: 'cobalt and copper',
+        lighting: 'a dying red sun', keyProps: 'a broken reactor', styleHintZh: '太空废墟', summaryZh: '空间站废墟' })
+    })
+    const draft = await service.extract(input)
+    expect(getRulesForGenre).toHaveBeenCalledWith(expect.anything(), 'scifi')
+    expect(draft.scene).toMatchObject({ backgroundDesc: 'a ruined orbital station', keyProps: 'a broken reactor' })
+    expect(draft.styleHint).toBe('太空废墟')
+    expect(draft.learningContext?.rules).toEqual(['SCI_FI_GENRE_RULE: keep the planet silhouette clear.'])
+    expect(draft.learningContext?.libraryVersion).toMatch(/^learned-version@/)
+    expect(draft.prompt).toContain('SCI_FI_GENRE_RULE')
+    expect(draft.prompt).toContain('3:4')
+    expect(draft.prompt).not.toContain('9:16')
+  })
+
+  it('提炼方向指定人物时，无人物风格不会再让最终提示词丢失人物', async () => {
+    const { service } = makeService({ llmResponse: JSON.stringify({
+      genre: 'historical', composition: 'fullbody', characterDesc: 'an elderly female general in bronze armor',
+      backgroundDesc: 'a mountain fortress', colorPalette: 'bronze and slate', lighting: 'clouded daylight',
+      keyProps: 'a battle standard', styleHintZh: '女将军', summaryZh: '山城中的女将军'
+    }) })
+    const draft = await service.extract({ ...input, stylePreset: 'concept_symbol', extraHint: '画一位老年女将军' })
+    expect(draft.composition).toBe('fullbody')
+    expect(draft.prompt).toContain('an elderly female general in bronze armor')
+    expect(draft.prompt).not.toContain('无主体人物')
+  })
 
   it('正常提炼：字段回填 + 来源记录', async () => {
     const { service, generateStream } = makeService({
@@ -233,12 +408,12 @@ describe('CoverPromptService.extract', () => {
 
     // 返回的是拼好的整段提示词：提炼要素 + 文字层 + 通用约束全在里面
     expect(draft.prompt).toContain('a one-armed blade master')
-    expect(draft.prompt).toContain('Key symbolic elements: a shattered blade.')
-    expect(draft.prompt).toContain('Color palette: ash grey and blood red.')
+    expect(draft.prompt).toContain('关键象征物：a shattered blade。')
+    expect(draft.prompt).toContain('配色：ash grey and blood red。')
     expect(draft.prompt).toContain('偏冷色调，雪山，断刀')
-    expect(draft.prompt).toContain("Title text '断刀行'")
+    expect(draft.prompt).toContain("书名文字：'断刀行'")
     expect(draft.prompt).toContain("'老猫'")
-    expect(draft.prompt).toContain('no watermark')
+    expect(draft.prompt).toContain('不加水印')
 
     // 走 auxiliary 路由，且带上 projectId 便于用量归属
     expect(generateStream).toHaveBeenCalledTimes(1)
@@ -249,7 +424,7 @@ describe('CoverPromptService.extract', () => {
   })
 
   it('素材原文进入提示词（不是只发书名）', async () => {
-    const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ genre: 'urban' }) })
     await service.extract(input)
     const prompt = generateStream.mock.calls[0][0] as string
     expect(prompt).toContain('断刀行')
@@ -258,22 +433,23 @@ describe('CoverPromptService.extract', () => {
   })
 
   it('genreOverride 锁定题材，模型返回值不生效', async () => {
-    const { service } = makeService({ llmResponse: '{"genre":"light_novel"}' })
+    const { service } = makeService({ llmResponse: completeResponse({ genre: 'light_novel' }) })
     const draft = await service.extract({ ...input, genreOverride: 'mystery' })
     expect(draft.genre).toBe('mystery')
   })
 
   it('compositionOverride 锁定构图，模型返回值不生效', async () => {
-    const { service } = makeService({ llmResponse: '{"composition":"duo"}' })
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'duo' }) })
     const draft = await service.extract({ ...input, compositionOverride: 'scene' })
     expect(draft.composition).toBe('scene')
     // scene 构图不描述主体人物
-    expect(draft.prompt).toContain('no human figure as main subject')
+    expect(draft.prompt).toContain('无主体人物')
+    expect(generateStream.mock.calls[0][0]).toContain('构图已锁定为 "scene"')
   })
 
   it('模型给出非法 genre / composition 时兜底', async () => {
     const { service } = makeService({
-      llmResponse: '{"genre":"不存在的题材","composition":"bogus"}'
+      llmResponse: completeResponse({ genre: '不存在的题材', composition: 'bogus' })
     })
     const draft = await service.extract(input)
     // 书名「断刀行」不含题材关键词——回落 urban
@@ -287,19 +463,19 @@ describe('CoverPromptService.extract', () => {
   })
 
   it('额外要求写进提示词', async () => {
-    const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ genre: 'urban' }) })
     await service.extract({ ...input, extraHint: '主角改成女性' })
     const extractionPrompt = generateStream.mock.calls[0][0] as string
-    expect(extractionPrompt).toContain('【作者画面方向，优先级最高】')
+    expect(extractionPrompt).toContain('【作者画面方向，仅覆盖指定维度】')
     expect(extractionPrompt).toContain('主角改成女性')
     expect(extractionPrompt).toContain('压过小说资料里的主角')
     expect(extractionPrompt).toContain('不要改回小说主角')
-    expect(extractionPrompt.indexOf('【作者画面方向，优先级最高】')).toBeLessThan(extractionPrompt.indexOf('断刀行'))
+    expect(extractionPrompt.indexOf('【作者画面方向，仅覆盖指定维度】')).toBeLessThan(extractionPrompt.indexOf('断刀行'))
   })
 
   it('有画面方向时，不再要求人物性别和画风服从小说资料', async () => {
     const { service, generateStream } = makeService({
-      llmResponse: '{"genre":"urban","characterDesc":"a Korean woman"}'
+      llmResponse: completeResponse({ genre: 'urban', characterDesc: 'a Korean woman' })
     })
     const draft = await service.extract({
       ...input,
@@ -311,10 +487,10 @@ describe('CoverPromptService.extract', () => {
     expect(extractionPrompt).toContain('优先级低于作者画面方向')
     expect(extractionPrompt).not.toContain('人物年龄、身份、体型和服饰遵循小说资料')
     expect(extractionPrompt).not.toContain('视觉风格已锁定为')
-    expect(extractionPrompt).not.toContain('Photographic medium lock')
-    expect(extractionPrompt).not.toContain('Use no illustration, digital painting, anime')
-    expect(draft.prompt).not.toContain('Selected visual style lock')
-    expect(draft.prompt).not.toContain('Photographic medium lock')
+    expect(extractionPrompt).not.toContain('写实媒介约束')
+    expect(extractionPrompt).not.toContain('禁止插画、数字绘画、动漫')
+    expect(draft.prompt).not.toContain('画风约束')
+    expect(draft.prompt).not.toContain('写实媒介约束')
     expect(draft.prompt).not.toContain('a confident young man in a sharp tailored suit')
     expect(draft.prompt).toContain('a Korean woman')
   })
@@ -333,12 +509,12 @@ describe('CoverPromptService.extract', () => {
     const draft = await service.extract({ ...input, stylePreset: 'dark_suspense' })
     const extractionPrompt = generateStream.mock.calls[0][0] as string
     expect(extractionPrompt).toContain('视觉风格已锁定为“暗黑悬疑电影”')
-    expect(draft.prompt).toContain('Selected visual style lock (暗黑悬疑电影)')
+    expect(draft.prompt).toContain('画风约束（暗黑悬疑电影）')
   })
 
   it('提炼内容后仍保留用户选择的文字排版', async () => {
     const { service } = makeService({
-      llmResponse: '{"genre":"xianxia","composition":"fullbody","characterDesc":"a blade master"}'
+      llmResponse: completeResponse({ genre: 'xianxia', composition: 'fullbody', characterDesc: 'a blade master' })
     })
     const draft = await service.extract({
       ...input,
@@ -350,16 +526,16 @@ describe('CoverPromptService.extract', () => {
         authorPosition: 'bottom_right'
       }
     })
-    expect(draft.prompt).toContain('oversized ultra-bold stacked Chinese display lettering')
-    expect(draft.prompt).toContain('across the lower third')
-    expect(draft.prompt).toContain('metallic gold or silver material')
-    expect(draft.prompt).toContain('small refined Chinese Song-style serif lettering')
-    expect(draft.prompt).toContain('at the lower right inside the safe area')
+    expect(draft.prompt).toContain('超大堆叠中文超粗标题')
+    expect(draft.prompt).toContain('横排于下三分之一区域')
+    expect(draft.prompt).toContain('金或银金属材质')
+    expect(draft.prompt).toContain('小号精致中文宋体')
+    expect(draft.prompt).toContain('位于右下方安全区')
   })
 
   it.each([
-    ['photorealistic', '真人写实封面', 'Photographic medium lock'],
-    ['anime_illustration', '二次元动漫封面', '2D anime medium lock']
+    ['photorealistic', '真人写实封面', '写实媒介约束'],
+    ['anime_illustration', '二次元动漫封面', '二次元媒介约束']
   ] as const)('%s 的提炼与最终提示词锁定媒介，保留故事中的年龄和服饰', async (stylePreset, label, medium) => {
     const { service, generateStream } = makeService({
       synopsis: '主角是一位六十岁的女将军，穿旧铜甲，守卫山中残破的堡垒。',
@@ -386,7 +562,7 @@ describe('CoverPromptService.extract', () => {
 
   it('无人物概念风格即使模型返回人物构图也强制改为 scene', async () => {
     const { service } = makeService({
-      llmResponse: '{"genre":"mystery","composition":"closeup","characterDesc":"a detective"}'
+      llmResponse: completeResponse({ genre: 'mystery', composition: 'closeup', characterDesc: 'a detective' })
     })
     const draft = await service.extract({ ...input, stylePreset: 'concept_symbol' })
     expect(draft.composition).toBe('scene')
@@ -394,13 +570,13 @@ describe('CoverPromptService.extract', () => {
   })
 
   it('下发 JSON Schema 供支持结构化输出的 provider 强约束', async () => {
-    const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ genre: 'urban' }) })
     await service.extract(input)
     expect(generateStream.mock.calls[0][1].jsonSchema).toBe(COVER_DRAFT_SCHEMA)
   })
 
   it('提示词仍自带 JSON 格式要求（不支持 schema 的 provider 靠它）', async () => {
-    const { service, generateStream } = makeService({ llmResponse: '{"genre":"urban"}' })
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ genre: 'urban' }) })
     await service.extract(input)
     const prompt = generateStream.mock.calls[0][0] as string
     expect(prompt).toContain('只输出一个 JSON 对象')
@@ -410,15 +586,10 @@ describe('CoverPromptService.extract', () => {
     }
   })
 
-  it('空字段回退题材模板，不会往提示词里塞空描述', async () => {
+  it('关键画面字段为空时明确失败，不再静默替换成通用题材人物', async () => {
     const { service } = makeService({
       llmResponse: '{"genre":"urban","characterDesc":"","keyProps":"   "}'
     })
-    const draft = await service.extract(input)
-    // characterDesc 空 → 用 urban 模板的默认人物描述
-    expect(draft.prompt).toContain(GENRE_STYLES.urban.characterDesc)
-    // keyProps 空 → 整行不出现
-    expect(draft.prompt).not.toContain('Key symbolic elements')
-    expect(draft.prompt).not.toContain('..')
+    await expect(service.extract(input)).rejects.toThrow('COVER_PROMPT_INCOMPLETE')
   })
 })

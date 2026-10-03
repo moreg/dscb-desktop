@@ -332,6 +332,26 @@ beforeEach(() => {
 })
 
 describe('runCodex (app-server)', () => {
+  it('turn/start preserves text and supplies native image inputs', async () => {
+    let turnInput: unknown
+    fakeChildFactory = () => {
+      const child = createAutoAppServerChild({ deltas: ['好'] })
+      const original = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          const message = JSON.parse(line)
+          if (message.method === 'turn/start') turnInput = message.params.input
+        }
+        return original(raw)
+      })
+      return child
+    }
+    await runCodex('看封面', { images: ['data:image/png;base64,iVBORw0KGgo='] })
+    expect(turnInput).toEqual([
+      { type: 'text', text: '看封面', text_elements: [] },
+      { type: 'image', url: 'data:image/png;base64,iVBORw0KGgo=', detail: 'high' }
+    ])
+  })
   it('spawn app-server 而非 exec --json', async () => {
     fakeChildFactory = () =>
       createAutoAppServerChild({ deltas: ['好'], usage: { input: 10, output: 1 } })

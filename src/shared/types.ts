@@ -1140,6 +1140,9 @@ export interface RendererApi {
   buildCoverPrompt: (input: GenerateCoverInput) => Promise<string>
   /** 生成封面（调图像 API），返回封面文件信息 */
   generateCover: (input: GenerateCoverInput) => Promise<CoverFile>
+  getCoverGenerationTask: (projectId: string) => Promise<CoverGenerationTaskState | null>
+  cancelCoverGenerationTask: (projectId: string) => Promise<{ ok: boolean }>
+  updateCoverCrop: (input: UpdateCoverCropInput) => Promise<CoverFile>
   /** 列出项目内已有封面 */
   listCovers: (projectId: string) => Promise<CoverFile[]>
   /** 读取封面为 base64 data URL（前端预览用） */
@@ -1157,7 +1160,13 @@ export interface RendererApi {
   /** 选择本地封面学习库目录 */
   chooseCoverLearningLibraryDirectory: () => Promise<CoverLearningLibrarySummary | null>
   /** 选择封面文件夹并学习；取消选择时返回 null */
-  chooseAndLearnCoverFolder: () => Promise<CoverLearningRunResult | null>
+  chooseAndLearnCoverFolder: (options?: CoverLearningOptions) => Promise<CoverLearningRunResult | null>
+  getCoverLearningTask: () => Promise<CoverLearningTaskState | null>
+  cancelCoverLearningTask: () => Promise<{ ok: boolean }>
+  rollbackCoverLearningRules: () => Promise<CoverLearningLibrarySummary>
+  setCoverLearningRuleEnabled: (input: { id: string; enabled: boolean }) => Promise<CoverLearningLibrarySummary>
+  getCoverPromptContext: (input: GenerateCoverInput) => Promise<CoverLearningContext>
+  updateCoverFeedback: (input: UpdateCoverFeedbackInput) => Promise<CoverFile>
   /* ---- 番茄书测（多书名实验）---- */
   /** 读取本书的测试书名和封面记录；没有记录时返回空列表 */
   getBookTest: (projectId: string) => Promise<BookTestState>
@@ -2811,6 +2820,9 @@ export type CoverGenre =
 /** 构图变体 */
 export type CoverComposition = 'closeup' | 'fullbody' | 'scene' | 'duo'
 
+/** 封面频道仅约束人物性别；不传时按小说内容自动选择。 */
+export type CoverChannel = 'male' | 'female'
+
 /**
  * 封面视觉风格。题材决定“画什么”，构图决定“怎么摆”，本字段决定“用什么视觉语言”。
  * 其中 fanqie_* 系列来自番茄榜单封面的共性提炼，不对应或复刻任何具体作品。
@@ -2897,10 +2909,9 @@ export interface CoverTypographyOptions {
  * 从小说内容提炼出的画面要素。
  * 逐字段覆盖 GENRE_STYLES 的通用模板——不填的字段仍回退题材默认值，
  * 所以每本书的封面不再是同一个「白衣剑客站在云海上」。
- * 各字段用英文（直接进图像模型 prompt）。
+ * 新提炼的画面字段使用中文，兼容既有英文内容（直接进入图像模型提示词）。
  *
- * 仅存在于主进程内部：CoverPromptService 拿它拼出完整提示词后就丢弃，
- * 界面上暴露的是拼好的整段提示词（见 CoverPromptDraft.prompt）。
+ * 提炼后保留在界面中，调整文字设计时复用同一画面资料。
  */
 export interface CoverScene {
   /** 主体人物：外貌 / 服饰 / 神态 / 手持物 */
@@ -2925,6 +2936,8 @@ export interface GenerateCoverInput {
   authorName: string
   /** 目标平台 */
   platform: CoverPlatform
+  /** 男频使用男性人物，女频使用女性人物；优先于其他画面资料中的性别与无人物要求。 */
+  channel?: CoverChannel
   /** 题材（不传则按书名自动推断） */
   genreOverride?: CoverGenre
   /** 构图变体（默认 closeup） */
@@ -2935,15 +2948,21 @@ export interface GenerateCoverInput {
   typography?: CoverTypographyOptions
   /** 风格偏好补充（可选，追加到 prompt） */
   styleHint?: string
+  /** 已提炼的画面资料；修改文字设置时保留。 */
+  scene?: CoverScene
+  /** 仅重编已有提示词的文字层，保留作者对画面的修改。 */
+  typographyBasePrompt?: string
+  /** 提示词实际采用的学习库快照，供生成记录与反馈追溯。 */
+  learningContext?: CoverLearningContext
+  promptSource?: 'template' | 'edited'
   /**
-   * 封面页「提炼方向」，优先级最高。出图时包在提示词外面，压过小说主角、视觉风格和提示词里冲突的人物、姿态、服饰、画风。
+   * 封面页「提炼方向」。出图时包在提示词外面，覆盖明确指定的画面维度；频道选项仍锁定人物性别与人物存在。
    * 不写进提示词编辑框。
    */
   visualDirection?: string
   /**
-   * 用户在界面上手改过的完整提示词。给了就**原样**送进图像模型，
-   * 不再按平台/题材模板拼装 —— 界面上那个可编辑提示词框即是唯一事实来源。
-   * 空白时回退模板拼装。visualDirection 的优先级仍高于这段提示词。
+   * 用户在界面上手改过的完整提示词。提供后保留编辑内容，不再按平台/题材模板拼装。
+   * 空白时回退模板拼装；出图时仍应用 visualDirection、明确选择的 channel 和实际画布的裁剪安全区。
    */
   promptOverride?: string
   /** 参考图本地路径（设置后走图生图） */
@@ -2952,7 +2971,7 @@ export interface GenerateCoverInput {
 
 /** 封面提示词提炼结果（「✦ 从小说内容提炼」的产物） */
 export interface CoverPromptDraft {
-  /** 组装好的完整英文提示词，直接填进界面上的可编辑框 */
+  /** 组装好的完整中文提示词，直接填进界面上的可编辑框；兼容旧英文内容 */
   prompt: string
   /** 模型判定的题材（回填下拉框） */
   genre: CoverGenre
@@ -2962,6 +2981,9 @@ export interface CoverPromptDraft {
   summary: string
   /** 实际读到的素材来源，让用户知道信息够不够（如「大纲」「人物卡 3 张」「第 1 章正文」） */
   sources: string[]
+  scene?: CoverScene
+  styleHint?: string
+  learningContext?: CoverLearningContext
 }
 
 /** 提炼封面提示词的入参 */
@@ -2973,6 +2995,8 @@ export interface ExtractCoverPromptInput {
   authorName: string
   /** 目标平台（影响构图/风格建议与比例） */
   platform: CoverPlatform
+  /** 用户选择的封面人物频道；不传时按小说内容自动选择。 */
+  channel?: CoverChannel
   /** 用户已锁定的题材；给了就不让模型再判 */
   genreOverride?: CoverGenre
   /** 用户已锁定的构图；给了就不让模型再判 */
@@ -2982,7 +3006,7 @@ export interface ExtractCoverPromptInput {
   /** 书名与作者名的字体、位置和文字特效 */
   typography?: CoverTypographyOptions
   /**
-   * 封面页「提炼方向」，优先级最高。提炼提示词和生成封面时都压过小说主角、视觉风格和提示词里冲突的人物、姿态、服饰、画风。
+   * 封面页「提炼方向」，覆盖明确指定的画面维度；频道选项仍锁定人物性别与人物存在。
    * 生成封面时以 visualDirection 包在出图提示词外面，不写进编辑框。
    */
   extraHint?: string
@@ -3004,6 +3028,35 @@ export interface CoverFile {
   genre: CoverGenre
   /** 生成时间 */
   createdAt: string
+  generationMetadata?: CoverGenerationMetadata
+  feedback?: CoverFeedback
+  /** 模型完整原图，供预览与重新裁剪；旧版本可能没有。 */
+  originalFileName?: string
+  warnings?: string[]
+}
+
+export interface CoverCropOptions {
+  offsetX: number
+  offsetY: number
+  fit: 'cover' | 'contain'
+}
+
+export interface UpdateCoverCropInput {
+  projectId: string
+  fileName: string
+  offsetX?: number
+  offsetY?: number
+  fit?: 'cover' | 'contain'
+}
+
+export interface CoverGenerationTaskState {
+  id: string
+  projectId: string
+  phase: 'preparing' | 'generating' | 'saving' | 'completed' | 'cancelled' | 'failed'
+  startedAt: string
+  updatedAt: string
+  cover?: CoverFile
+  error?: string
 }
 
 /** 图像生成 API 配置（存 settings） */
@@ -3041,11 +3094,95 @@ export interface CoverLearningLibrarySummary {
   sampleCount: number
   categoryCount: number
   updatedAt: string
-  /** 通过文件夹学习功能建立了内容指纹的样本数。 */
+  /** 已分析并可通过指纹追踪的独立封面数，不包含仅有历史总数的旧样本。 */
   trackedSampleCount: number
   learningRunCount: number
   lastLearnedAt?: string
   error?: string
+  legacySampleCount?: number
+  analyzedSampleCount?: number
+  genreSampleCounts?: Partial<Record<CoverGenre, number>>
+  rules?: CoverLearningRuleSummary[]
+  canRollbackRules?: boolean
+  feedbackSummary?: { adopted: number; rejected: number; unrated: number }
+}
+
+export interface CoverLearningOptions {
+  genre?: CoverGenre
+  /** off 为纯本地；summary 只发送统计；vision 发送代表样本缩略图。 */
+  aiMode?: 'off' | 'summary' | 'vision'
+}
+
+export interface CoverLearningRuleSummary {
+  id: string
+  text: string
+  source: 'builtin' | 'user' | 'statistics' | 'ai'
+  genre?: CoverGenre
+  sampleCount: number
+  enabled: boolean
+  evidence?: string[]
+}
+
+export interface CoverLearningIssue {
+  path: string
+  reason: string
+  kind: 'failed' | 'rejected'
+}
+
+export interface CoverLearningTaskState {
+  id: string
+  phase: 'scanning' | 'analyzing' | 'summarizing' | 'saving' | 'completed' | 'cancelled' | 'failed'
+  directory: string
+  scanned: number
+  processed: number
+  learned: number
+  duplicates: number
+  rejected: number
+  failed: number
+  currentFile?: string
+  startedAt: string
+  error?: string
+  result?: CoverLearningRunResult
+}
+
+export interface CoverLearningContext {
+  libraryVersion: string
+  rules: string[]
+  sourceSampleCount: number
+  resolvedStylePreset: CoverStylePreset
+  sources?: string[]
+}
+
+export interface CoverGenerationMetadata {
+  learningContext?: CoverLearningContext
+  promptSource: 'template' | 'edited'
+  generatedAt: string
+  genre?: CoverGenre
+  platform?: CoverPlatform
+  channel?: CoverChannel
+  stylePreset?: CoverStylePreset
+  storageVersion?: 2
+  originalFileName?: string
+  sourceWidth?: number
+  sourceHeight?: number
+  outputWidth?: number
+  outputHeight?: number
+  crop?: CoverCropOptions
+  cropUpdatedAt?: string
+  warnings?: string[]
+}
+
+export interface CoverFeedback {
+  status: 'adopted' | 'rejected' | 'unrated'
+  reason: string
+  updatedAt: string
+}
+
+export interface UpdateCoverFeedbackInput {
+  projectId: string
+  fileName: string
+  status: CoverFeedback['status']
+  reason?: string
 }
 
 /**
@@ -3114,6 +3251,11 @@ export interface CoverLearningRunResult {
   completedAt: string
   observations: string[]
   summary: CoverLearningLibrarySummary
+  rejected?: number
+  issues?: CoverLearningIssue[]
+  cancelled?: boolean
+  aiStatus?: 'off' | 'skipped' | 'completed' | 'failed' | 'unsupported'
+  aiMessage?: string
 }
 
 /* ==========================================================

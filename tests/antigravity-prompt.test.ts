@@ -26,10 +26,14 @@ const longPrompt = [
 ].join('\n')
 
 describe('agy prompt budget', () => {
-  it('leaves short requests and arbitrary long source inputs unchanged', () => {
+  it('leaves short requests unchanged and caps long review inputs', () => {
     expect(buildAntigravityPrompt('任务', '规则', '前缀')).toBe('前缀规则\n\n---\n\n任务')
     const source = '审核原文，不可遗漏：' + '文'.repeat(40000)
-    expect(buildAntigravityPrompt(source, undefined, '')).toBe(source)
+    const out = buildAntigravityPrompt(source + '\n只输出 JSON', undefined, '')
+    expect(out.length).toBe(AGY_PROMPT_BUDGET)
+    expect(out).toMatch(/^审核原文，不可遗漏：/)
+    expect(out.endsWith('只输出 JSON')).toBe(true)
+    expect(out).toContain('中间部分已截取省略')
   })
 
   it('fits large chapter backgrounds while retaining instructions, draft, state and document names', () => {
@@ -43,9 +47,33 @@ describe('agy prompt budget', () => {
     expect(out).toContain('此处省略部分背景')
   })
 
-  it('does not silently truncate oversized essential task or continuation prose', () => {
+  it('caps oversized essential task text while retaining the final writing instructions', () => {
     const prompt = [task, '本章细纲'.repeat(10000), ending].join('\n')
-    expect(buildAntigravityPrompt(prompt, undefined, '')).toBe(prompt)
+    const out = buildAntigravityPrompt(prompt, undefined, '')
+    expect(out.length).toBe(AGY_PROMPT_BUDGET)
+    expect(out).toContain(task)
+    expect(out.endsWith(ending)).toBe(true)
+  })
+
+  it('caps oversized system prompts and continuation drafts too', () => {
+    for (const prompt of ['正文审核', [task, draft, '正文'.repeat(25000), ending].join('\n')]) {
+      const out = buildAntigravityPrompt(prompt, '规则'.repeat(25000), '前缀')
+      expect(out.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+      expect(out.startsWith('前缀')).toBe(true)
+      expect(out.endsWith(prompt.slice(-100))).toBe(true)
+    }
+  })
+
+  it('includes merged overhead in the limit and handles exact boundaries and emoji', () => {
+    for (const size of [AGY_PROMPT_BUDGET - 1, AGY_PROMPT_BUDGET, AGY_PROMPT_BUDGET + 1]) {
+      const prompt = '字'.repeat(size)
+      const out = buildAntigravityPrompt(prompt, undefined, '')
+      expect(out.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+      if (size <= AGY_PROMPT_BUDGET) expect(out).toBe(prompt)
+    }
+    const out = buildAntigravityPrompt('😀'.repeat(20000), '规则', '前缀')
+    expect(out.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
   })
 
   it('protects the entire continuation draft appended to a background section', () => {
@@ -67,5 +95,9 @@ describe('agy prompt budget', () => {
     expect(vi.mocked(runAntigravity).mock.calls.at(-1)![0].length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
     await service.generateStream(longPrompt, { systemPrompt: '保留规则' })
     expect(vi.mocked(runCodex).mock.calls.at(-1)![0]).toContain(longPrompt)
+    await service.generateStream('审核：' + '文'.repeat(40000), {
+      systemPrompt: '严格输出 JSON', meta: { feature: 'chapter' }
+    })
+    expect(vi.mocked(runAntigravity).mock.calls.at(-1)![0].length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
   })
 })

@@ -1,9 +1,19 @@
 import { app, BrowserWindow } from 'electron'
-import { autoUpdater } from 'electron-updater'
+import { autoUpdater, type UpdateInfo } from 'electron-updater'
 import { join } from 'path'
 import { readJson, writeJsonAtomic } from './data/atomic'
 import { safeHandle, safeSend } from './ipc/safe-handle'
 import type { AppUpdateState } from '../shared/app-update'
+
+function normalizeReleaseNotes(notes: UpdateInfo['releaseNotes']): string | undefined {
+  if (typeof notes === 'string') return notes.trim() || undefined
+  if (!Array.isArray(notes)) return undefined
+  // GitHub may supply HTML; preserve the source for safe formatting in the renderer.
+  return notes.map(({ version, note }) => {
+    const content = note?.trim()
+    return content ? `## ${version}\n\n${content}` : undefined
+  }).filter(Boolean).join('\n\n') || undefined
+}
 
 /** No forced quit: installation runs only after the user closes the app normally. */
 export async function registerAppUpdates(): Promise<() => void> {
@@ -29,10 +39,16 @@ export async function registerAppUpdates(): Promise<() => void> {
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.allowPrerelease = false
   autoUpdater.allowDowngrade = false
-  const onAvailable = (info: { version: string }) => publish({ status: 'available', version: info.version, error: undefined })
-  const onCurrent = () => publish({ status: 'current', version: undefined, error: undefined })
+  const onAvailable = (info: UpdateInfo) => publish({
+    status: 'available', version: info.version,
+    releaseNotes: normalizeReleaseNotes(info.releaseNotes), error: undefined
+  })
+  const onCurrent = () => publish({ status: 'current', version: undefined, releaseNotes: undefined, error: undefined })
   const onProgress = (progress: { percent: number }) => publish({ status: 'downloading', percent: Math.max(0, Math.min(100, progress.percent)) })
-  const onDownloaded = (info: { version: string }) => publish({ status: 'downloaded', version: info.version, percent: 100, error: undefined })
+  const onDownloaded = (info: UpdateInfo) => publish({
+    status: 'downloaded', version: info.version, percent: 100, error: undefined,
+    releaseNotes: normalizeReleaseNotes(info.releaseNotes) ?? (state.version === info.version ? state.releaseNotes : undefined)
+  })
   autoUpdater.on('update-available', onAvailable)
   autoUpdater.on('update-not-available', onCurrent)
   autoUpdater.on('download-progress', onProgress)
@@ -44,7 +60,7 @@ export async function registerAppUpdates(): Promise<() => void> {
     // Respect the startup-check preference and keep an already available update visible.
     if (automatic && (!state.autoCheck || state.status === 'available')) return state
     busy = true
-    publish({ status: 'checking', error: undefined, version: undefined, percent: undefined })
+    publish({ status: 'checking', error: undefined, version: undefined, releaseNotes: undefined, percent: undefined })
     try {
       await autoUpdater.checkForUpdates()
     } catch {
@@ -62,17 +78,15 @@ export async function registerAppUpdates(): Promise<() => void> {
     publish({ autoCheck: enabled })
     return state
   })
-  safeHandle('updates:download', async () => {
+  safeHandle('updates:download', () => {
     if (!state.supported || busy || !state.version || !['available', 'error'].includes(state.status)) return state
     busy = true
     publish({ status: 'downloading', percent: 0, error: undefined })
-    try {
-      await autoUpdater.downloadUpdate()
-    } catch {
-      fail()
-    } finally {
+    // The main process owns the download; closing the panel or switching pages has no effect.
+    // Return immediately so the renderer can send the download to the background.
+    void Promise.resolve().then(() => autoUpdater.downloadUpdate()).catch(fail).finally(() => {
       busy = false
-    }
+    })
     return state
   })
 

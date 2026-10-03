@@ -1,9 +1,14 @@
 import { CharacterRepository } from './character-repository'
+import { createHash } from 'crypto'
+import { analyzeCoverVisualDirection } from './cover-visual-direction'
+import { applyCoverChannelToCharacter, applyCoverChannelToStyle, resolveCoverChannelComposition } from './cover-channel'
 import {
   buildCoverPrompt,
+  compileCoverLearningRules,
   COVER_STYLE_MEDIUM_REQUIREMENTS,
   COVER_STYLE_PRESETS,
   inferGenre,
+  migrateBuiltinCoverStyle,
   type CoverStyleDefinition
 } from './skill-prompts/cover/cover-styles'
 import type { ChapterService } from './chapter-service'
@@ -16,6 +21,8 @@ import type {
   CoverComposition,
   CoverGenre,
   CoverPromptDraft,
+  CoverScene,
+  CoverLearningContext,
   ExtractCoverPromptInput
 } from '../../shared/types'
 
@@ -44,9 +51,8 @@ const COMPOSITIONS: readonly CoverComposition[] = ['closeup', 'fullbody', 'scene
  * 不支持的 provider 会忽略它 —— 所以提示词里的 JSON 格式要求必须保留，
  * parseDraftJson 的容错也必须保留。
  *
- * 全 ASCII（字段名与描述都不用中文）：schema 经 argv 下发，
- * 中文会踩 Windows argv 编码问题（runner 里的 toAsciiJson 会兜底转义，
- * 这里从源头避免，可读性也更好）。
+ * 字段名与枚举保持稳定，说明明确要求中文画面描述。
+ * 经 argv 下发时由 runner 的 toAsciiJson 转义，兼容 Windows 命令行。
  */
 export const COVER_DRAFT_SCHEMA = {
   type: 'object',
@@ -55,14 +61,14 @@ export const COVER_DRAFT_SCHEMA = {
     composition: { type: 'string', enum: [...COMPOSITIONS] },
     characterDesc: {
       type: 'string',
-      description: 'English. Subject appearance, clothing, expression, held item. Empty when composition is scene.'
+      description: '使用自然简体中文描述人物外貌、服饰、神态和手持物；composition 为 scene 时留空。'
     },
-    backgroundDesc: { type: 'string', description: 'English. Concrete location and environment details.' },
-    colorPalette: { type: 'string', description: 'English. Dominant and accent colors.' },
-    lighting: { type: 'string', description: 'English. Light source, direction and mood.' },
-    keyProps: { type: 'string', description: 'English. Signature prop or symbol; empty string if none.' },
-    styleHintZh: { type: 'string', description: 'Chinese. Comma separated style phrases for the author to tweak.' },
-    summaryZh: { type: 'string', description: 'Chinese. One sentence describing the cover.' }
+    backgroundDesc: { type: 'string', description: '使用自然简体中文描述具体地点与环境细节，例如雪山脚下破旧的石堡。' },
+    colorPalette: { type: 'string', description: '使用自然简体中文描述主色和点缀色，例如铁灰为主、暗红点缀。' },
+    lighting: { type: 'string', description: '使用自然简体中文描述光源、方向和氛围，例如左侧冷月光照亮残破城墙。' },
+    keyProps: { type: 'string', description: '使用自然简体中文描述标志性道具或符号，没有则留空。' },
+    styleHintZh: { type: 'string', description: '使用自然简体中文，以逗号分隔的短语概括风格，供作者调整。' },
+    summaryZh: { type: 'string', description: '使用自然简体中文，用一句话概括封面画面。' }
   },
   required: [
     'genre',
@@ -112,7 +118,7 @@ const PROTAGONIST_HINTS = ['主角', '主人公', '男主', '女主', '主视角
  * 不碰图像 API。因此没有配置图像 Key 的用户也能先把提示词调好，
  * 且可以走 codex / grok CLI 这类靠本机登录、无需 API Key 的 provider。
  *
- * 产出 CoverPromptDraft：题材 + 构图 + 英文画面要素 + 中文风格补充，
+ * 产出 CoverPromptDraft：题材 + 构图 + 中文画面要素 + 中文风格补充，
  * 由 CoverService.buildCoverPrompt 逐字段覆盖题材模板。
  */
 export class CoverPromptService {
@@ -125,7 +131,7 @@ export class CoverPromptService {
   ) {}
 
   /**
-   * 读项目素材 → 调文本模型提炼画面要素 → 拼成完整英文提示词。
+   * 读项目素材 → 调文本模型提炼画面要素 → 拼成完整中文提示词。
    *
    * 结构化的画面要素只是中间产物：拼完就丢，界面拿到的是可直接编辑的整段提示词。
    * 拆成字段问模型是为了让它逐项想清楚（人物/场景/色调/光效），
@@ -174,41 +180,69 @@ export class CoverPromptService {
       : undefined
     const selectedPreset = learned?.definition ?? explicitStyle
     const direction = input.extraHint?.trim() ?? ''
+    const visual = analyzeCoverVisualDirection(direction)
     const modelComposition = COMPOSITIONS.includes(parsed.composition as CoverComposition)
       ? (parsed.composition as CoverComposition)
       : undefined
-    const composition = direction
-      ? modelComposition ?? 'closeup'
-      : selectedPreset?.noPeople
+    const requestedComposition = visual.noPeople === true && input.channel
+      ? input.compositionOverride ?? modelComposition ?? 'closeup'
+      : visual.composition ?? input.compositionOverride ?? modelComposition ?? 'closeup'
+    const composition = input.channel && requestedComposition === 'duo' ? 'duo' : resolveCoverChannelComposition(visual.composition ?? (visual.noPeople === true
+      ? 'scene'
+      : selectedPreset?.noPeople && visual.noPeople !== false
         ? 'scene'
-        : input.compositionOverride ?? modelComposition ?? 'closeup'
+        : input.compositionOverride ?? modelComposition ?? 'closeup'), input.channel)
 
+    const characterDesc = cleanField(parsed.characterDesc)
+    const scene: CoverScene = {
+      characterDesc: characterDesc ? applyCoverChannelToCharacter(characterDesc, input.channel, composition) : undefined,
+      backgroundDesc: cleanField(parsed.backgroundDesc),
+      colorPalette: cleanField(parsed.colorPalette),
+      lighting: cleanField(parsed.lighting),
+      keyProps: cleanField(parsed.keyProps)
+    }
+    const missing = [!scene.backgroundDesc ? '背景场景' : '', composition !== 'scene' && !scene.characterDesc ? '人物外貌与服饰' : ''].filter(Boolean)
+    if (missing.length) {
+      throw new Error(`COVER_PROMPT_INCOMPLETE: 模型未返回必要画面字段（${missing.join('、')}），已保留当前提示词，请重新提炼；不会替换成通用题材人物。`)
+    }
+    const rawStyleHint = cleanField(parsed.styleHintZh)
+    const styleHint = rawStyleHint ? applyCoverChannelToStyle(rawStyleHint, input.channel) : undefined
+    const rules = loadedLibrary && this.learningLibrary
+      ? compileCoverLearningRules(this.learningLibrary.getRulesForGenre(loadedLibrary.library, genre), input.typography)
+      : []
+    const learningContext: CoverLearningContext | undefined = loadedLibrary ? {
+      libraryVersion: `${loadedLibrary.library.updatedAt}@${createHash('sha256').update(JSON.stringify([learned?.definition, rules])).digest('hex').slice(0, 12)}`,
+      rules,
+      sourceSampleCount: loadedLibrary.library.source.sampleCount,
+      resolvedStylePreset: learned?.key ?? input.stylePreset ?? 'auto',
+      sources: [...material.sources, ...new Set((loadedLibrary.summary.rules ?? [])
+        .filter((rule) => rules.includes(rule.text))
+        .map((rule) => `${rule.source}${rule.genre ? `:${rule.genre}` : ''}${rule.evidence?.length ? ` · ${rule.evidence.slice(0, 2).join(', ')}` : ''}`))].slice(0, 30)
+    } : undefined
     const prompt = buildCoverPrompt({
       bookName: input.bookName,
       authorName: input.authorName,
       platform: input.platform,
       genre,
       composition,
-      stylePreset: input.stylePreset,
+      channel: input.channel,
+      stylePreset: learned?.key ?? input.stylePreset,
       learningPreset: learned?.definition,
-      learningRules: loadedLibrary?.library.globalRules,
+      learningRules: rules,
       typography: input.typography,
-      styleHint: cleanField(parsed.styleHintZh),
-      ...(direction ? { directionWins: true } : {}),
-      scene: {
-        characterDesc: cleanField(parsed.characterDesc),
-        backgroundDesc: cleanField(parsed.backgroundDesc),
-        colorPalette: cleanField(parsed.colorPalette),
-        lighting: cleanField(parsed.lighting),
-        keyProps: cleanField(parsed.keyProps)
-      }
+      styleHint,
+      ...(direction ? { visualDirection: direction } : {}),
+      scene
     })
 
     return {
       prompt,
       genre,
       composition,
-      summary: cleanField(parsed.summaryZh) ?? '',
+      scene,
+      styleHint,
+      learningContext,
+      summary: applyCoverChannelToStyle(cleanField(parsed.summaryZh) ?? '', input.channel),
       sources: material.sources
     }
   }
@@ -320,8 +354,8 @@ export class CoverPromptService {
      ========================================================= */
 
   /**
-   * 构建提炼指令。要求严格 JSON —— 画面字段用英文（直接进图像模型），
-   * summary/styleHint 用中文（给用户看和改）。
+   * 构建提炼指令。要求严格 JSON，所有画面与说明字段都用自然中文，
+   * 直接进入可编辑的生图提示词。
    */
   private buildExtractionPrompt(
     material: string,
@@ -331,39 +365,58 @@ export class CoverPromptService {
     const genreLine = input.genreOverride
       ? `题材已由用户锁定为 "${input.genreOverride}"，genre 字段原样返回该值。`
       : `从下列题材中选最贴切的一个填入 genre：${GENRES.join(' / ')}。`
-    const selectedStyle = learnedStyle ?? (input.stylePreset && input.stylePreset !== 'auto'
+    const selectedStyle = learnedStyle ? migrateBuiltinCoverStyle(input.stylePreset, learnedStyle) : (input.stylePreset && input.stylePreset !== 'auto'
       ? COVER_STYLE_PRESETS[input.stylePreset]
       : undefined)
     const direction = input.extraHint?.trim() ?? ''
+    const visual = analyzeCoverVisualDirection(direction)
     const styleLine = selectedStyle
-      ? direction
+      ? visual.medium
         ? `界面当前视觉风格是“${selectedStyle.label}”（${selectedStyle.description}），只给方向没写到的细节做参考，优先级低于作者画面方向。`
-        : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 色彩、光线和画面组织必须符合该风格，不要另选画风。`
+        : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 除作者方向明确修改的属性外，配色、光线和画面组织符合该风格，不要另选画风。`
       : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
-    const mediumRequirement = !direction && input.stylePreset
+    const baseMediumRequirement = !visual.medium && input.stylePreset
       ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset]
       : undefined
+    const mediumRequirement = visual.subjectFields.length && baseMediumRequirement
+      ? baseMediumRequirement.replace(/Preserve the story characters ages, identities and period-appropriate clothing|保留故事(?:人物|角色)的年龄、身份和符合时代的服饰/gi,
+        '保留作者方向未明确修改的全部人物属性')
+      : baseMediumRequirement
     const mediumLine = mediumRequirement
-      ? `\n   媒介要求：${mediumRequirement}。所有画面字段与 styleHintZh 都必须遵守该媒介，不得因题材或平台改成另一种画风。人物年龄、身份、体型和服饰遵循小说资料；更换画风不等于更换角色，不要擅自改成少年、学生、Q版人物或现代装。`
+      ? `\n   媒介要求：${mediumRequirement}。所有画面字段与 styleHintZh 都必须遵守该媒介，不得因题材或平台改成另一种画风。${visual.subjectFields.length ? '只修改作者方向明确指定的角色属性，其余年龄、身份、体型和服饰仍遵循小说资料。' : '人物年龄、身份、体型和服饰遵循小说资料；更换画风不等于更换角色，不要擅自改成少年、学生、Q版人物或现代装。'}`
       : ''
-    const noPeopleLine = !direction && selectedStyle?.noPeople
+    const noPeopleLine = !input.channel && (visual.noPeople === true || (visual.noPeople !== false && selectedStyle?.noPeople))
       ? '当前风格要求无人物，composition 必须返回 scene，characterDesc 必须留空。'
       : ''
+    const requestedComposition = visual.noPeople === true && input.channel
+      ? input.compositionOverride
+      : visual.composition ?? input.compositionOverride
+    const lockedComposition = requestedComposition
+      ? resolveCoverChannelComposition(requestedComposition, input.channel)
+      : input.channel && selectedStyle?.noPeople ? 'closeup' : undefined
+    const channelBlock = input.channel
+      ? `【封面主体选择，人物性别和存在的最终优先级】
+用户明确选择${input.channel === 'male' ? '男频，封面主体必须是男性（male）' : '女频，封面主体必须是女性（female）'}，人物性别和可见存在优先于下方资料、方向及预设。只校正冲突的性别或人物缺席，其余年龄、族裔、身份、身体特征、服饰、道具、姿态、环境和画风保留，不套读者或题材刻板印象。无人物要求回退 closeup；duo 保留，两位主体均为${input.channel === 'male' ? '男性' : '女性'}并具体描述。characterDesc 不得留空；styleHintZh 与 summaryZh 同步这一主体选择。
+
+`
+      : ''
+    const fieldLabels = { age: '年龄', gender: '性别', ethnicity: '族裔', identity: '身份', pose: '姿态', clothing: '服饰' }
+    const directedSubjectFields = visual.subjectFields.filter((field) => !input.channel || field !== 'gender').map((field) => fieldLabels[field])
     const directionBlock = direction
-      ? `【作者画面方向，优先级最高】
+      ? `【作者画面方向，仅覆盖指定维度】
 ${direction}
-这是封面画面的最高优先级，高于小说资料、界面上选中的视觉风格、媒介锁和学习库规则。characterDesc、composition、styleHintZh、summaryZh 必须服从这段方向。它压过小说资料里的主角：性别、族裔、身份、姿态、服饰、画风凡是和方向冲突的，按方向改，丢掉冲突的那一部分。不要改回小说主角。方向没有写到的场景、道具、色调和情节，仍从小说资料里补。
+仅在明确指定的维度覆盖小说资料或预设。${input.channel ? '人物性别和存在仍服从上方频道选择。' : ''}${directedSubjectFields.length ? `它压过小说资料里的主角属性：${directedSubjectFields.join('、')}；这些已指定的属性不要改回小说主角。` : '人物未被明确更换，必须保留小说资料中的角色。'}${visual.medium ? '作者明确指定了画风，覆盖冲突的媒介锁。' : '作者没有要求更换画风，必须保持当前媒介锁。'}方向没有写到的年龄、性别、身份、姿态、服饰、构图、场景、道具和情节，仍服从已锁定的选择与小说资料。否定某画风不代表要求采用该画风。
 
 `
       : ''
     const taskBody = direction
-      ? '封面要在一眼之内传达这本书的题材与卖点。作者画面方向已经指定的人物和画风必须照方向画，不要改回小说主角。方向没写的场景、道具和背景，再从资料里补。'
+      ? '封面要在一眼之内传达这本书的题材与卖点。仅更改作者方向明确指定的维度；其余人物属性、画风和构图保留。场景、道具和背景仍从资料里补。'
       : `封面要在一眼之内传达这本书的题材与卖点。请判断：主角长什么样、穿什么、拿什么，站在什么场景里，整体什么色调和光线。
 必须基于上面的资料，不要套用泛泛的题材模板——如果资料写了主角是断臂的中年刀客，就不要写成白衣少年剑仙。`
 
     return `你是中文网文封面美术指导。请阅读下面这本小说的资料，提炼出**这本书专属**的封面画面要素。
 
-${directionBlock}${material}
+${channelBlock}${directionBlock}${material}
 
 【任务】
 ${taskBody}
@@ -371,10 +424,10 @@ ${taskBody}
 【约束】
 1. ${genreLine}
 2. ${styleLine}${mediumLine}
-3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视，言情用）中选一个。目标平台是 ${input.platform}。${noPeopleLine}
-4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段用**英文**书写（它们会直接送进图像模型），每项一句话，具体到可画出来的程度。
+3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视）中选一个。目标平台是 ${input.platform}。${noPeopleLine}${lockedComposition && !noPeopleLine ? `构图已锁定为 "${lockedComposition}"，composition 字段原样返回该值，人物姿态、取景范围和背景字段必须共同服从该构图；duo 必须具体描述两位人物。` : ''}
+4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段全部用**自然简体中文**书写（它们会直接送进图像模型，并供作者阅读和修改），每项一句话，具体到可画出来的程度，不附英文翻译。JSON 字段名及 genre、composition 枚举保持上述格式。
    - characterDesc：年龄、性别、发型、服饰材质与颜色、神态、手持物。
-   - backgroundDesc：具体地点与环境细节，不要只写 "fantasy world"。
+   - backgroundDesc：具体地点与环境细节，例如“雪山脚下的残破石堡，城墙上积着薄雪”，不要只写“幻想世界”。
    - keyProps：这本书的标志性道具或符号，没有就留空字符串。
    - composition 选 scene 时，characterDesc 留空字符串。
 5. styleHintZh 用**中文**，逗号分隔的短语，概括风格取向，供作者在界面上继续微调。例："偏暗黑系，冷色调，主角黑衣断刀，背景残破城墙"。

@@ -45,6 +45,8 @@ export interface GenerateOptions {
    * 因此**调用方的提示词必须始终自带 JSON 格式要求**，schema 只是叠加的保险。
    */
   jsonSchema?: object
+  /** 受限的内存缩略图输入；仅看图请求使用，纯文本调用保持原有形状。 */
+  images?: string[]
 
   /**
    * 单次调用的强度覆盖（温度/思考强度），只影响这一次请求，不写回 provider 配置。
@@ -482,6 +484,11 @@ export class LlmService {
         }
       : resolved
     const proto = protocolOf(p)
+    const images = opts.images ?? []
+    validateVisionImages(images)
+    if (images.length && !['openai', 'openai-responses', 'anthropic', 'codex'].includes(proto)) {
+      throw new Error('LLM_VISION_UNSUPPORTED: 当前通道不支持图片输入，请选择支持看图的 API 模型或 Codex')
+    }
     // antigravity 协议：走本机 agy CLI 子进程，不需 apiKey（靠本机 OAuth 登录）
     if (proto === 'antigravity') {
       return this.generateViaAntigravity(p, prompt, opts)
@@ -523,7 +530,8 @@ export class LlmService {
           prompt,
           combinedSignal,
           opts.systemPrompt,
-          opts.maxTokens
+          opts.maxTokens,
+          images
         )
         const res = await fetch(url, init)
 
@@ -642,7 +650,8 @@ export class LlmService {
       model: p.model && p.model !== 'default' ? p.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
-      signal: opts.signal
+      signal: opts.signal,
+      ...(opts.images?.length ? { images: opts.images } : {})
     })
 
     if (this.usage && usage) {
@@ -748,6 +757,19 @@ export class LlmService {
    请求构造：按协议分流
    ========================================================= */
 
+function validateVisionImages(images: string[]): void {
+  if (images.length > 6) throw new Error('LLM_VISION_INVALID: 每次最多分析 6 张代表样本')
+  let totalLength = 0
+  for (const image of images) {
+    if (typeof image !== 'string' || image.length > 4 * 1024 * 1024 ||
+        !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
+      throw new Error('LLM_VISION_INVALID: 图片必须为有效的 PNG、JPEG、WEBP 或 GIF 缩略图')
+    }
+    totalLength += image.length
+  }
+  if (totalLength > 12 * 1024 * 1024) throw new Error('LLM_VISION_INVALID: 缩略图输入过大')
+}
+
 function buildPingRequest(p: ProviderConfig): { url: string; init: RequestInit } {
   const url = endpointOf(p)
   if (protocolOf(p) === 'openai-responses') {
@@ -805,7 +827,8 @@ function buildStreamRequest(
   prompt: string,
   signal?: AbortSignal,
   systemPrompt?: string,
-  maxTokens?: number
+  maxTokens?: number,
+  images: string[] = []
 ): { url: string; init: RequestInit } {
   const url = endpointOf(p)
   const init: RequestInit = { method: 'POST', signal }
@@ -815,9 +838,11 @@ function buildStreamRequest(
   // 采样温度：仅在 provider 显式配置时透传，否则走模型默认
   const hasTemp = typeof p.temperature === 'number' && Number.isFinite(p.temperature)
   if (protocolOf(p) === 'openai-responses') {
-    const input: Array<{ role: string; content: string }> = []
+    const input: Array<{ role: string; content: unknown }> = []
     if (hasSystem) input.push({ role: 'developer', content: systemPrompt as string })
-    input.push({ role: 'user', content: prompt })
+    input.push({ role: 'user', content: images.length
+      ? [{ type: 'input_text', text: prompt }, ...images.map((image) => ({ type: 'input_image', image_url: image, detail: 'high' }))]
+      : prompt })
     init.headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${p.apiKey}`
@@ -836,7 +861,12 @@ function buildStreamRequest(
     const body: Record<string, unknown> = {
       model: p.model,
       max_tokens: cap,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: images.length
+        ? [{ type: 'text', text: prompt }, ...images.map((image) => {
+            const match = image.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,(.+)$/)!
+            return { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } }
+          })]
+        : prompt }],
       stream: true
     }
     if (hasSystem) body.system = systemPrompt
@@ -847,9 +877,11 @@ function buildStreamRequest(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${p.apiKey}`
     }
-    const messages: Array<{ role: string; content: string }> = []
+    const messages: Array<{ role: string; content: unknown }> = []
     if (hasSystem) messages.push({ role: 'system', content: systemPrompt as string })
-    messages.push({ role: 'user', content: prompt })
+    messages.push({ role: 'user', content: images.length
+      ? [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: image, detail: 'high' } }))]
+      : prompt })
     const body: Record<string, unknown> = {
       model: p.model,
       messages,

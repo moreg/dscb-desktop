@@ -6,6 +6,18 @@ import {
 } from '../src/shared/format-chapter-prose'
 
 describe('formatChapterProse', () => {
+  it('修复完整台词内部句号，保留台词末尾与叙述标点', () => {
+    const bad = '大家都等着看预告，结果制片助理连素材都没交齐。明川，先签字，别让全组陪你耗。'
+    for (const [open, close] of [['“', '”'], ['「', '」'], ['"', '"']]) {
+      expect(formatChapterProse(`他把笔递过来。\n${open}${bad}${close}`)).toBe(
+        `他把笔递过来。\n${open}${bad.replace('交齐。', '交齐，')}${close}`
+      )
+    }
+    expect(formatChapterProse('“先签字。还等什么？”\n“我不签！”')).toBe('“先签字，还等什么？”\n“我不签！”')
+    expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。他把笔递过来。\n“先签字。')
+    expect(formatChapterProse('“Hello. World.”')).toBe('“Hello. World.”')
+  })
+
   it('removes half-width spaces but keeps single newlines', () => {
     expect(formatChapterProse('沈 渡 皱 眉\n他走了。')).toBe('沈渡皱眉\n他走了。')
   })

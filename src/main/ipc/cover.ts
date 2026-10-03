@@ -31,6 +31,7 @@ const genreSchema = z.enum([
   'light_novel'
 ])
 const compositionSchema = z.enum(['closeup', 'fullbody', 'scene', 'duo'])
+const channelSchema = z.enum(['male', 'female'])
 const stylePresetSchema = z.enum([
   'auto',
   'photorealistic',
@@ -68,14 +69,31 @@ const generateCoverSchema = z.object({
   bookName: bookNameSchema,
   authorName: authorNameSchema,
   platform: platformSchema,
+  channel: channelSchema.optional(),
   genreOverride: genreSchema.optional(),
   composition: compositionSchema.optional(),
   stylePreset: stylePresetSchema.optional(),
   typography: typographySchema.optional(),
+  scene: z.object({
+    characterDesc: z.string().max(4000).optional(),
+    backgroundDesc: z.string().max(4000).optional(),
+    colorPalette: z.string().max(2000).optional(),
+    lighting: z.string().max(2000).optional(),
+    keyProps: z.string().max(2000).optional()
+  }).optional(),
   styleHint: z.string().max(500).optional(),
   visualDirection: z.string().max(500).optional(),
   // 手改后的整段提示词。8000 字符远超模板拼装长度，又低于图像 API 的上限
   promptOverride: z.string().max(8000).optional(),
+  typographyBasePrompt: z.string().max(15000).optional(),
+  promptSource: z.enum(['template', 'edited']).optional(),
+  learningContext: z.object({
+    libraryVersion: z.string().max(200),
+    rules: z.array(z.string().max(8000)).max(200),
+    sourceSampleCount: z.number().int().nonnegative(),
+    resolvedStylePreset: stylePresetSchema,
+    sources: z.array(z.string().max(1000)).max(30).optional()
+  }).optional(),
   refImagePath: z.string().max(1000).optional()
 })
 
@@ -84,6 +102,7 @@ const extractCoverPromptSchema = z.object({
   bookName: bookNameSchema,
   authorName: authorNameSchema,
   platform: platformSchema,
+  channel: channelSchema.optional(),
   genreOverride: genreSchema.optional(),
   compositionOverride: compositionSchema.optional(),
   stylePreset: stylePresetSchema.optional(),
@@ -116,16 +135,49 @@ export function registerCoverIpc(
     return coverService.resolvePromptWithLibrary({ ...validated, promptOverride: undefined })
   })
 
+  safeHandle('cover:getPromptContext', async (_e, input: unknown) => {
+    const validated = validateInput(generateCoverSchema, input)
+    return coverService.getPromptContext(validated)
+  })
+
   /* 生成封面 */
   safeHandle('cover:generate', async (_e, input: unknown) => {
     const validated = validateInput(generateCoverSchema, input)
     return coverService.generate(validated)
   })
 
+  safeHandle('cover:getGenerationTask', async (_e, projectId: unknown) =>
+    coverService.getGenerationTask(validateInput(projectIdSchema, projectId)))
+  safeHandle('cover:cancelGenerationTask', async (_e, projectId: unknown) =>
+    coverService.cancelGeneration(validateInput(projectIdSchema, projectId)))
+  safeHandle('cover:updateCrop', async (_e, input: unknown) => {
+    const validated = validateInput(z.object({
+      projectId: projectIdSchema,
+      fileName: fileNameSchema,
+      offsetX: z.number().min(0).max(1).optional(),
+      offsetY: z.number().min(0).max(1).optional(),
+      fit: z.enum(['cover', 'contain']).optional()
+    }), input)
+    return coverService.updateCrop(validated)
+  })
+
   /* 列出项目封面 */
   safeHandle('cover:list', async (_e, projectId: string) => {
     const validated = validateInput(projectIdSchema, projectId)
     return coverService.list(validated)
+  })
+
+  safeHandle('cover:updateFeedback', async (_e, input: unknown) => {
+    const validated = validateInput(
+      z.object({
+        projectId: projectIdSchema,
+        fileName: fileNameSchema,
+        status: z.enum(['adopted', 'rejected', 'unrated']),
+        reason: z.string().trim().max(1000).optional()
+      }),
+      input
+    )
+    return coverService.updateFeedback(validated)
   })
 
   /* 读取封面为 data URL */
@@ -177,6 +229,17 @@ export function registerCoverIpc(
 
   safeHandle('cover:getLearningLibrary', async () => learningLibrary.initialize())
 
+  safeHandle('cover:getLearningTask', async () => learningLibrary.getTaskState())
+  safeHandle('cover:cancelLearningTask', async () => learningLibrary.cancelLearning())
+  safeHandle('cover:rollbackLearningRules', async () => learningLibrary.rollbackLastLearningRules())
+  safeHandle('cover:setLearningRuleEnabled', async (_e, input: unknown) => {
+    const validated = validateInput(
+      z.object({ id: z.string().trim().min(1).max(200), enabled: z.boolean() }),
+      input
+    )
+    return learningLibrary.setRuleEnabled(validated.id, validated.enabled)
+  })
+
   safeHandle('cover:setLearningLibraryDirectory', async (_e, directory: unknown) => {
     const validated = validateInput(
       z.string().trim().min(1).max(2000).refine((value) => /^[a-zA-Z]:[\\/]|^\\\\/.test(value), '学习库必须使用本地绝对路径'),
@@ -196,12 +259,19 @@ export function registerCoverIpc(
     return learningLibrary.setDirectory(result.filePaths[0])
   })
 
-  safeHandle('cover:chooseAndLearnFolder', async () => {
+  safeHandle('cover:chooseAndLearnFolder', async (_e, options: unknown = {}) => {
+    const validated = validateInput(
+      z.object({
+        genre: genreSchema.optional(),
+        aiMode: z.enum(['off', 'summary', 'vision']).default('off')
+      }),
+      options
+    )
     const result = await dialog.showOpenDialog({
       title: '选择要学习的封面文件夹',
       properties: ['openDirectory']
     })
     if (result.canceled || !result.filePaths[0]) return null
-    return learningLibrary.learnFolder(result.filePaths[0])
+    return learningLibrary.learnFolder(result.filePaths[0], validated)
   })
 }

@@ -1,6 +1,19 @@
 /** Leave room below the runner's 30,000-character argument limit. */
 export const AGY_PROMPT_BUDGET = 28_000
 
+/** Last resort for every agy request: keep both initial rules and final task instructions. */
+function capPrompt(text: string): string {
+  if (text.length <= AGY_PROMPT_BUDGET) return text
+  const marker = '\n[agy 长度限制：输入过长，中间部分已截取省略；仅依据保留内容执行任务。]\n'
+  const available = AGY_PROMPT_BUDGET - marker.length
+  let headEnd = Math.ceil(available / 2)
+  let tailStart = text.length - Math.floor(available / 2)
+  // Do not leave half of a UTF-16 surrogate pair at either cut boundary.
+  if (/[\uD800-\uDBFF]/.test(text[headEnd - 1])) headEnd--
+  if (/[\uDC00-\uDFFF]/.test(text[tailStart])) tailStart++
+  return text.slice(0, headEnd) + marker + text.slice(tailStart)
+}
+
 interface Section {
   title: string
   text: string
@@ -68,9 +81,9 @@ function fitBackground(section: Section, budget: number): string {
 }
 
 /**
- * Applied only by the resolved antigravity provider. Never truncate task text,
- * current outlines, continuation drafts or arbitrary review/JSON inputs.
- * Unrecognized/oversized essential inputs still reach the runner's explicit error.
+ * Applied only by the resolved antigravity provider. First compact chapter
+ * backgrounds while preserving task text and drafts; if still oversized (or
+ * another request format), directly cut the middle to enforce the final budget.
  */
 export function buildAntigravityPrompt(prompt: string, system: string | undefined, preamble: string): string {
   const merge = (user: string) => preamble + (system?.trim() ? `${system}\n\n---\n\n${user}` : user)
@@ -78,7 +91,7 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
   if (original.length <= AGY_PROMPT_BUDGET) return original
   const parts = sections(prompt, 1)
   if (!parts.some((part) => /^# 第 \d+ 章 写作任务$/.test(part.title)) ||
-      !parts.some((part) => /^# 现在请写第 \d+ 章正文$/.test(part.title))) return original
+      !parts.some((part) => /^# 现在请写第 \d+ 章正文$/.test(part.title))) return capPrompt(original)
 
   const background = (part: Section) => !part.title ||
     /^# (项目设定|卷级定位：|角色信息|角色状态追踪|相关旧章概要|伏笔追踪)/.test(part.title) ||
@@ -88,7 +101,7 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
   const essential = parts.filter((part) => !background(part))
   const fixedCost = merge('').length + essential.reduce((sum, part) => sum + part.text.length, 0) + parts.length
   const budget = AGY_PROMPT_BUDGET - fixedCost
-  if (budget <= optional.length * 150) return original
+  if (budget <= optional.length * 150) return capPrompt(original)
   // Allocate by section, then by individual setting/character document.
   const allocations = fit(optional.map((part) => part.text), budget)
   let index = 0
@@ -102,5 +115,5 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
     }
     return fitBackground(part, allocation)
   }).join('\n')
-  return merge(user)
+  return capPrompt(merge(user))
 }

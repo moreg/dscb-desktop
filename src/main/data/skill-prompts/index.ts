@@ -214,9 +214,7 @@ function renderStyleProfileMarkdown(style: StyleProfile): string {
   if (style.tone.length > 0) {
     lines.push(`- 语气：${style.tone.join('；')}`)
   }
-  if (style.narrativeTemplates.length > 0) {
-    lines.push(`- 基础叙事模板：${style.narrativeTemplates.join('；')}`)
-  }
+  // 正文生成不注入叙事模板，避免文风参考诱导固定结构；原配置仍保留供作者管理。
   // P28：三栏约束（文风 / 人设 / 剧情）—— 告诉续写模型每条归属哪一类，便于精准遵循。
   // 老数据只有 dos/donts 时会被解析层迁到 plotConstraints，这里优先用新三栏，老字段已弃用不再渲染。
   if (style.styleConstraints.length > 0) {

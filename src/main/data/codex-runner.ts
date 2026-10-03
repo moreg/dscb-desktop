@@ -29,6 +29,8 @@ export interface CodexOptions {
   onToken?: (token: string) => void
   /** 中止信号（仅用户取消；超时由 timeoutSec 处理） */
   signal?: AbortSignal
+  /** 内存缩略图 data URL，通过 turn/start 原生图片输入传递。 */
+  images?: string[]
 }
 
 export interface CodexResult {
@@ -472,7 +474,10 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
 
         const turnParams: Record<string, unknown> = {
           threadId,
-          input: [{ type: 'text', text: prompt, text_elements: [] }],
+          input: [
+            { type: 'text', text: prompt, text_elements: [] },
+            ...(opts.images ?? []).map((url) => ({ type: 'image', url, detail: 'high' }))
+          ],
           approvalPolicy: 'never'
         }
         if (opts.model && opts.model.trim()) {

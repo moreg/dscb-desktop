@@ -5,6 +5,7 @@ import type {
   CoverGenre,
   CoverImageConfigSummary,
   CoverPlatform,
+  CoverChannel,
   CoverComposition,
   CoverStylePreset,
   CoverTypographyOptions,
@@ -13,8 +14,13 @@ import type {
   CoverTitleEffect,
   CoverAuthorFontStyle,
   CoverAuthorPosition,
+  CoverLearningContext,
+  CoverScene,
+  CoverFeedback,
+  CoverGenerationTaskState,
   GenerateCoverInput
 } from '../../shared/types'
+import { CoverPromptRequestGuard, coverTextSettingsKey, coverCustomTextConfirmationKey, inspectCoverPromptText, isCoverGenerationActive, describeCoverGenerationPhase, coverCropObjectPosition, coverChannelFields, resolveCoverChannelComposition } from './cover-page-state'
 
 const PLATFORM_OPTIONS: { value: CoverPlatform; label: string }[] = [
   { value: 'fanqie', label: '番茄小说（默认 3:4）' },
@@ -45,6 +51,26 @@ const COMPOSITION_OPTIONS: { value: CoverComposition; label: string }[] = [
   { value: 'scene', label: '纯场景/氛围' },
   { value: 'duo', label: '双人（言情）' }
 ]
+const CHANNEL_OPTIONS: { value: CoverChannel | 'auto'; label: string }[] = [
+  { value: 'auto', label: '自动（按小说内容）' },
+  { value: 'male', label: '男频（男性人物）' },
+  { value: 'female', label: '女频（女性人物）' }
+]
+const MAX_COVER_PROMPT_CHARACTERS = 8000
+
+/** 先读取规则快照，再按该版本构建，避免学习恰好完成时提示词与来源对不上。 */
+async function buildPromptSnapshot(input: GenerateCoverInput): Promise<{ text: string; context: CoverLearningContext }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const context = await window.api.getCoverPromptContext(input)
+    try {
+      const text = await window.api.buildCoverPrompt({ ...input, learningContext: context })
+      return { text, context }
+    } catch (error) {
+      if (attempt > 0 || !String(error).includes('COVER_LIBRARY_CHANGED')) throw error
+    }
+  }
+  throw new Error('学习规则正在更新，请重新构建提示词')
+}
 
 const STYLE_PRESET_OPTIONS: Array<{
   value: CoverStylePreset
@@ -294,19 +320,42 @@ interface Props {
 }
 
 export default function CoverPage({ projectId }: Props): React.ReactElement {
+  return <CoverPageContent key={projectId} projectId={projectId} />
+}
+
+function CoverPageContent({ projectId }: Props): React.ReactElement {
   const [covers, setCovers] = useState<CoverFile[]>([])
   const [config, setConfig] = useState<CoverImageConfigSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [buildingPrompt, setBuildingPrompt] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [configError, setConfigError] = useState('')
+  const [coverRevision, setCoverRevision] = useState(0)
+  const [generationTask, setGenerationTask] = useState<CoverGenerationTaskState | null>(null)
+  const [generationTaskReady, setGenerationTaskReady] = useState(false)
+  const [generationTaskError, setGenerationTaskError] = useState('')
+  const [cancellingGeneration, setCancellingGeneration] = useState(false)
+  const [generationNotice, setGenerationNotice] = useState('')
   const [error, setError] = useState('')
+  const mounted = useRef(true)
+  const activeProject = useRef(projectId)
+  activeProject.current = projectId
+  const historyRequest = useRef(0)
+  const configRequest = useRef(0)
+  const handledGenerationTask = useRef('')
+  const promptWork = useRef(new CoverPromptRequestGuard())
+  const appliedBuildKey = useRef('')
 
   // 表单
   const [bookName, setBookName] = useState('')
   const [authorName, setAuthorName] = useState('')
   const [platform, setPlatform] = useState<CoverPlatform>('fanqie')
   const [genreOverride, setGenreOverride] = useState<CoverGenre | ''>('')
-  const [composition, setComposition] = useState<CoverComposition>('closeup')
+  const [channel, setChannel] = useState<CoverChannel | 'auto'>('auto')
+  const [composition, setComposition] = useState<CoverComposition | 'auto'>('auto')
+  const [automaticComposition, setAutomaticComposition] = useState<CoverComposition>('closeup')
   const [stylePreset, setStylePreset] = useState<CoverStylePreset>('fanqie_impact')
   const [typography, setTypography] = useState<CoverTypographyOptions>({
     titleFont: 'auto',
@@ -318,7 +367,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const [extraHint, setExtraHint] = useState('')
 
   /**
-   * 唯一的提示词事实来源：框里是什么，就原样送给图像模型。
+   * 保留编辑框原文；明确选择的人物频道和提炼方向由后端处理冲突约束。
    * 未手改时跟随上方表单自动重拼；手改后停止自动覆盖（否则会吞掉用户的编辑）。
    */
   const [prompt, setPrompt] = useState('')
@@ -327,27 +376,86 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const [promptPlatform, setPromptPlatform] = useState<CoverPlatform | null>(null)
   const [summary, setSummary] = useState('')
   const [sources, setSources] = useState<string[]>([])
+  const [scene, setScene] = useState<CoverScene | undefined>()
+  const [sceneStyleHint, setSceneStyleHint] = useState<string | undefined>()
+  const [promptContext, setPromptContext] = useState<CoverLearningContext | undefined>()
+  const [availableContext, setAvailableContext] = useState<CoverLearningContext | undefined>()
+  const [promptNotice, setPromptNotice] = useState('')
+  const [appliedTextKey, setAppliedTextKey] = useState('')
+  const [customTextConfirmation, setCustomTextConfirmation] = useState('')
 
   // 配置弹窗
   const [showConfig, setShowConfig] = useState(false)
 
-  const refresh = useCallback(async () => {
+  const refreshHistory = useCallback(async (): Promise<void> => {
+    const request = ++historyRequest.current
     setLoading(true)
+    setHistoryError('')
     try {
-      const [list, cfg] = await Promise.all([
-        window.api.listCovers(projectId),
-        window.api.getCoverImageConfig()
-      ])
+      const list = await window.api.listCovers(projectId)
+      if (!mounted.current || activeProject.current !== projectId || request !== historyRequest.current) return
       setCovers(list)
-      setConfig(cfg)
+      setCoverRevision((revision) => revision + 1)
+    } catch (err) {
+      if (mounted.current && activeProject.current === projectId && request === historyRequest.current) setHistoryError(describeError(err))
     } finally {
-      setLoading(false)
+      if (mounted.current && activeProject.current === projectId && request === historyRequest.current) setLoading(false)
     }
   }, [projectId])
 
+  const refreshConfig = useCallback(async (): Promise<void> => {
+    const request = ++configRequest.current
+    setConfigError('')
+    try {
+      const cfg = await window.api.getCoverImageConfig()
+      if (mounted.current && request === configRequest.current) setConfig(cfg)
+    } catch (err) {
+      if (mounted.current && request === configRequest.current) setConfigError(describeError(err))
+    }
+  }, [])
+
+  const invalidatePromptWork = useCallback((): void => {
+    promptWork.current.invalidate()
+    setBuildingPrompt(false)
+  }, [])
+
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    mounted.current = true
+    const promptGuard = promptWork.current
+    void refreshHistory()
+    void refreshConfig()
+    setGenerationTaskReady(false)
+    let querying = false
+    let active = true
+    const pollTask = async (): Promise<void> => {
+      if (querying) return
+      querying = true
+      try {
+        const task = await window.api.getCoverGenerationTask(projectId)
+        if (!active) return
+        setGenerationTask(task)
+        setGenerationTaskReady(true)
+        setGenerationTaskError('')
+        if (task && !isCoverGenerationActive(task.phase) && handledGenerationTask.current !== task.id + task.phase) {
+          handledGenerationTask.current = task.id + task.phase
+          setCancellingGeneration(false)
+          setGenerationNotice(describeCoverGenerationPhase(task.phase))
+          if (task.phase === 'completed') void refreshHistory()
+          if (task.phase === 'failed') setError(describeError(task.error ?? '封面生成失败'))
+        }
+      } catch (err) {
+        if (active) { setGenerationTaskReady(false); setGenerationTaskError(describeError(err)) }
+      } finally { querying = false }
+    }
+    void pollTask()
+    const timer = window.setInterval(() => void pollTask(), 900)
+    return () => {
+      active = false
+      mounted.current = false
+      promptGuard.invalidate()
+      window.clearInterval(timer)
+    }
+  }, [projectId, refreshHistory, refreshConfig])
 
   // 书名默认取项目名，省得每次手打；用户改过就不再覆盖
   const bookNamePrefilled = useRef(false)
@@ -372,6 +480,12 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   const trimmedBook = bookName.trim()
   const trimmedAuthor = authorName.trim()
   const canBuild = Boolean(trimmedBook && trimmedAuthor)
+  const textSettingsKey = coverTextSettingsKey(trimmedBook, trimmedAuthor, typography)
+  const promptTextState = inspectCoverPromptText(prompt, trimmedBook, trimmedAuthor)
+  const customTextConfirmed = customTextConfirmation === coverCustomTextConfirmationKey(prompt, textSettingsKey)
+  const textMismatch = promptTextState === 'mismatch' || (promptTextState === 'custom' && !customTextConfirmed)
+  const textSettingsPending = !!prompt.trim() && appliedTextKey !== textSettingsKey && !customTextConfirmed
+  const generationBusy = generating || isCoverGenerationActive(generationTask?.phase)
 
   /** 当前表单折算成出图入参（拼装与生成共用，保证所见即所发） */
   const buildInput = useCallback(
@@ -380,60 +494,130 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       bookName: trimmedBook,
       authorName: trimmedAuthor,
       platform,
-      composition,
+      composition: resolveCoverChannelComposition(composition === 'auto' ? automaticComposition : composition, channel === 'auto' ? undefined : channel),
+      ...coverChannelFields(channel),
       stylePreset,
       typography,
+      scene,
+      styleHint: sceneStyleHint,
       ...(genreOverride ? { genreOverride } : {}),
       ...overrides
     }),
-    [projectId, trimmedBook, trimmedAuthor, platform, composition, stylePreset, typography, genreOverride]
+    [projectId, trimmedBook, trimmedAuthor, platform, composition, automaticComposition, channel, stylePreset, typography, genreOverride, scene, sceneStyleHint]
   )
+  const inputBuildKey = JSON.stringify(buildInput())
+  const templateBuildPending = !promptDirty && !!prompt.trim() && appliedBuildKey.current !== inputBuildKey
+
+  const selectChannel = (next: CoverChannel | 'auto'): void => {
+    invalidatePromptWork()
+    setChannel(next)
+    if (next !== 'auto') {
+      if (composition === 'scene') setComposition('closeup')
+      setAutomaticComposition((current) => resolveCoverChannelComposition(current, next))
+    }
+    if (promptDirty) {
+      setPromptNotice(next === 'auto'
+        ? '已解除人物频道锁，并保留当前提示词与画面资料。原文自身的人物性别要求仍会生效；重新提炼或重置为模板可按小说内容更新。'
+        : `已保留当前提示词；生成时将按${next === 'male' ? '男性' : '女性'}人物处理，覆盖原文或提炼方向中冲突的性别、无人物要求。重新提炼可同步更新画面描述。`)
+    }
+    setError('')
+  }
 
   const selectStylePreset = (next: CoverStylePreset): void => {
+    invalidatePromptWork()
     setStylePreset(next)
-    if (next === 'concept_symbol') setComposition('scene')
-    setSummary('')
-    setSources([])
-    // 风格卡片就是一次明确的“按当前选择重生成模板提示词”操作。
-    setPromptDirty(false)
+    if (next === 'concept_symbol' && composition === 'auto') setAutomaticComposition(resolveCoverChannelComposition('scene', channel === 'auto' ? undefined : channel))
+    if (promptDirty) setPromptNotice('已保留当前提示词。要应用新风格，请重新提炼，或重置为模板。')
     setError('')
   }
 
   const updateTypography = (patch: Partial<CoverTypographyOptions>): void => {
-    setTypography((current) => ({ ...current, ...patch }))
-    setSummary('')
-    setSources([])
-    setPromptDirty(false)
+    invalidatePromptWork()
+    setTypography({ ...typography, ...patch })
     setError('')
   }
 
   // 未手改时跟随表单重拼提示词；手改后不再自动覆盖，改由「重置」显式放弃编辑
   useEffect(() => {
-    if (promptDirty || !canBuild) return
-    let active = true
-    void window.api
-      .buildCoverPrompt(buildInput())
-      .then((text) => {
-        if (active) {
+    if (promptDirty || !canBuild || appliedBuildKey.current === inputBuildKey) return
+    const token = promptWork.current.begin()
+    setBuildingPrompt(true)
+    void buildPromptSnapshot(buildInput())
+      .then(({ text, context }) => {
+        if (mounted.current && promptWork.current.isCurrent(token)) {
           setPrompt(text)
           setPromptPlatform(platform)
+          setPromptContext(context)
+          setAvailableContext(context)
+          setAppliedTextKey(textSettingsKey)
+          appliedBuildKey.current = inputBuildKey
         }
       })
-      .catch(() => {
-        /* 拼装失败不打断填表 */
+      .catch((err) => {
+        if (mounted.current && promptWork.current.isCurrent(token)) setError(describeError(err))
       })
-    return () => {
-      active = false
+      .finally(() => {
+        if (mounted.current && promptWork.current.isCurrent(token)) setBuildingPrompt(false)
+      })
+  }, [promptDirty, canBuild, buildInput, platform, inputBuildKey, textSettingsKey])
+
+  const recompileText = useCallback(async (): Promise<void> => {
+    if (!canBuild || !prompt.trim()) return
+    if (inspectCoverPromptText(prompt, trimmedBook, trimmedAuthor) === 'custom') {
+      setPromptNotice('当前自定义提示词没有完整的标准文字层。请手动同步书名、署名和文字设计，再确认。')
+      return
     }
-  }, [promptDirty, canBuild, buildInput, platform])
+    const token = promptWork.current.begin()
+    const original = prompt
+    const input = buildInput({ typographyBasePrompt: original, learningContext: promptContext })
+    setBuildingPrompt(true)
+    try {
+      const context = await window.api.getCoverPromptContext(input)
+      const text = await window.api.buildCoverPrompt({ ...input, learningContext: context })
+      if (!mounted.current || !promptWork.current.isCurrent(token)) return
+      setPrompt(text)
+      setPromptDirty(true)
+      setAppliedTextKey(textSettingsKey)
+      setPromptContext(context)
+      setAvailableContext(context)
+      setPromptNotice('已同步书名、署名与文字设计，保留画面、其余手改内容和原学习规则快照。')
+    } catch (err) {
+      if (mounted.current && promptWork.current.isCurrent(token)) setError(describeError(err))
+    } finally {
+      if (mounted.current && promptWork.current.isCurrent(token)) setBuildingPrompt(false)
+    }
+  }, [canBuild, prompt, trimmedBook, trimmedAuthor, buildInput, promptContext, textSettingsKey])
+
+  useEffect(() => {
+    if (!promptDirty || !canBuild || appliedTextKey === textSettingsKey || customTextConfirmed) return
+    void recompileText()
+  }, [promptDirty, canBuild, appliedTextKey, textSettingsKey, customTextConfirmed, recompileText])
+
+  const refreshLearningContext = async (): Promise<void> => {
+    if (!canBuild) return
+    try {
+      const context = await window.api.getCoverPromptContext(buildInput())
+      setAvailableContext(context)
+      setPromptNotice(context.libraryVersion === promptContext?.libraryVersion
+        ? '当前题材的学习规则已是最新。'
+        : '学习规则已更新；当前提示词保留原快照。重新提炼或重置为模板后应用新规则。')
+    } catch (err) {
+      setError(describeError(err))
+    }
+  }
 
   /**
    * 手改过的提示词里也包含平台风格。之后改平台不会覆盖手改内容，
    * 因此提醒用户重置提示词，避免新平台和旧风格互相冲突。
    */
   const platformStale = promptDirty && promptPlatform !== null && promptPlatform !== platform
+  const promptOverBudget = prompt.length > MAX_COVER_PROMPT_CHARACTERS
 
   const handleGenerate = async (): Promise<void> => {
+    if (!generationTaskReady || generationBusy) {
+      setError('正在确认或执行已有生成任务，请稍候。')
+      return
+    }
     if (!canBuild) {
       setError('书名和作者名必填')
       return
@@ -442,24 +626,59 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       setError('提示词不能为空')
       return
     }
+    if (buildingPrompt || extracting || textSettingsPending || templateBuildPending) {
+      setError('最新提示词或文字设计尚未就绪，请等待更新完成。')
+      return
+    }
+    if (textMismatch) {
+      setError(promptTextState === 'custom' ? '无法识别自定义提示词中的书名和署名。请手动同步后确认。' : '提示词中的书名或署名与表单不一致，请先同步文字层。')
+      return
+    }
+    if (promptOverBudget) {
+      setError(`提示词共 ${prompt.length} 字符，超过 ${MAX_COVER_PROMPT_CHARACTERS} 字符预算。请手动精简，或在学习库停用部分规则后重新提炼或重置。`)
+      return
+    }
     if (!config || (config.channel === 'api' && !config.hasKey)) {
       setError('请先配置图像生成（点右上「封面配置」：API Key 或 codex / grok CLI 通道）')
       return
     }
     setGenerating(true)
     setError('')
+    setGenerationNotice('')
+    const scope = projectId
     try {
-      // 编辑框原样发送。提炼方向不写进框里，只在出图时附加，压过框里冲突的人物和画风。
+      // 编辑框原样提交；后端先处理提炼方向，再落实明确选择的人物频道。
       const direction = extraHint.trim()
       await window.api.generateCover(buildInput({
         promptOverride: prompt,
+        promptSource: promptDirty ? 'edited' : 'template',
+        learningContext: promptContext,
         ...(direction ? { visualDirection: direction } : {})
       }))
-      await refresh()
+      if (mounted.current && activeProject.current === scope) {
+        setGenerationNotice('封面生成完成')
+        await refreshHistory()
+      }
     } catch (err) {
-      setError(describeError(err))
+      if (mounted.current && activeProject.current === scope) {
+        if (String(err).includes('IMAGE_ABORTED') || String(err).includes('COVER_GENERATION_CANCELLED')) setGenerationNotice('封面生成已取消')
+        else setError(describeError(err))
+      }
     } finally {
-      setGenerating(false)
+      if (mounted.current && activeProject.current === scope) setGenerating(false)
+    }
+  }
+
+  const cancelGeneration = async (): Promise<void> => {
+    setCancellingGeneration(true)
+    try {
+      const result = await window.api.cancelCoverGenerationTask(projectId)
+      if (mounted.current && !result.ok) {
+        setCancellingGeneration(false)
+        setGenerationNotice('任务已结束或正在保存，正在刷新状态。')
+      }
+    } catch (err) {
+      if (mounted.current) { setCancellingGeneration(false); setError(describeError(err)) }
     }
   }
 
@@ -472,10 +691,13 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
       setError('书名和作者名必填')
       return
     }
+    const token = promptWork.current.begin()
     setExtracting(true)
+    setBuildingPrompt(true)
     setError('')
     try {
       const hasLlm = await window.api.hasLlmKey()
+      if (!mounted.current || !promptWork.current.isCurrent(token)) return
       if (!hasLlm) {
         throw new Error('请先在全局设置中配置文本模型（API Key 或 codex / grok / claude CLI 均可）')
       }
@@ -484,42 +706,77 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
         bookName: trimmedBook,
         authorName: trimmedAuthor,
         platform,
+        ...coverChannelFields(channel),
         stylePreset,
         typography,
+        ...(composition !== 'auto' ? { compositionOverride: composition } : {}),
         ...(genreOverride ? { genreOverride } : {}),
         ...(extraHint.trim() ? { extraHint: extraHint.trim() } : {})
       })
+      if (!mounted.current || !promptWork.current.isCurrent(token)) return
       setPrompt(draft.prompt)
       // 提炼结果视同手改：后续改平台/题材不该把它冲掉
       setPromptDirty(true)
       setPromptPlatform(platform)
       setSummary(draft.summary)
       setSources(draft.sources)
-      setComposition(draft.composition)
+      setScene(draft.scene)
+      setSceneStyleHint(draft.styleHint)
+      setPromptContext(draft.learningContext)
+      setAvailableContext(draft.learningContext)
+      setPromptNotice('已保留提炼画面；后续文字调整只更新文字层。')
+      setAppliedTextKey(textSettingsKey)
+      setAutomaticComposition(resolveCoverChannelComposition(draft.composition, channel === 'auto' ? undefined : channel))
       if (!genreOverride) setGenreOverride(draft.genre)
     } catch (err) {
-      setError(describeError(err))
+      if (mounted.current && promptWork.current.isCurrent(token)) setError(describeError(err))
     } finally {
-      setExtracting(false)
+      if (mounted.current) setExtracting(false)
+      if (mounted.current && promptWork.current.isCurrent(token)) setBuildingPrompt(false)
     }
   }
 
   /** 丢弃提炼与手改，回到当前平台/题材/构图的模板提示词 */
   const handleResetPrompt = async (): Promise<void> => {
+    const token = promptWork.current.begin()
+    setBuildingPrompt(true)
     setError('')
-    setSummary('')
-    setSources([])
-    setPromptDirty(false)
     if (!canBuild) {
       setPrompt('')
       setPromptPlatform(null)
+      setPromptDirty(false)
+      setSummary('')
+      setSources([])
+      setScene(undefined)
+      setSceneStyleHint(undefined)
+      setPromptContext(undefined)
+      setAvailableContext(undefined)
+      setPromptNotice('')
+      setAppliedTextKey('')
+      appliedBuildKey.current = ''
+      setBuildingPrompt(false)
       return
     }
     try {
-      setPrompt(await window.api.buildCoverPrompt(buildInput()))
+      const resetInput = buildInput({ scene: undefined, styleHint: undefined })
+      const { text, context } = await buildPromptSnapshot(resetInput)
+      if (!mounted.current || !promptWork.current.isCurrent(token)) return
+      appliedBuildKey.current = JSON.stringify(resetInput)
+      setSummary('')
+      setSources([])
+      setScene(undefined)
+      setSceneStyleHint(undefined)
+      setPromptNotice('')
+      setPromptDirty(false)
+      setPrompt(text)
+      setPromptContext(context)
+      setAvailableContext(context)
       setPromptPlatform(platform)
+      setAppliedTextKey(textSettingsKey)
     } catch (err) {
-      setError(describeError(err))
+      if (mounted.current && promptWork.current.isCurrent(token)) setError(describeError(err))
+    } finally {
+      if (mounted.current && promptWork.current.isCurrent(token)) setBuildingPrompt(false)
     }
   }
 
@@ -548,6 +805,10 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
         </div>
       </div>
 
+      {configError ? <div className="placeholder" role="alert" style={{ marginTop: 12, textAlign: 'left' }}><p className="diag-msg" style={{ color: 'var(--danger)' }}>图像配置读取失败：{configError}</p><button className="btn btn-ghost" onClick={() => void refreshConfig()}>重试读取配置</button><button className="btn btn-ghost" onClick={() => setShowConfig(true)}>重新配置</button></div> : null}
+      {generationTaskError ? <p role="alert" className="diag-msg" style={{ color: 'var(--danger)' }}>无法确认生成任务：{generationTaskError}。恢复读取后才能开始新任务。</p> : null}
+      {generationBusy ? <div className="placeholder" role="status" style={{ marginTop: 12, textAlign: 'left' }}><div className="row row-wrap"><strong>{describeCoverGenerationPhase(generationTask?.phase ?? 'preparing')}</strong><button className="btn btn-ghost" disabled={cancellingGeneration || generationTask?.phase === 'saving'} onClick={() => void cancelGeneration()}>{cancellingGeneration ? '正在取消…' : '取消生成'}</button></div><p className="meta" style={{ marginBottom: 0 }}>耗时取决于图像模型和通道，可以切换页面，返回后会恢复状态。保存阶段请等待写入完成。</p></div> : generationNotice ? <p role="status" className="meta">{generationNotice}</p> : null}
+
       {config && !config.hasKey && config.channel === 'api' ? (
         <div className="placeholder" style={{ marginTop: 16 }}>
           <p style={{ margin: '0 0 6px', fontSize: 14, color: 'var(--danger)' }}>
@@ -574,7 +835,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
               id="cover-book-name"
               className="input"
               value={bookName}
-              onChange={(e) => setBookName(e.target.value)}
+              onChange={(e) => { invalidatePromptWork(); bookNamePrefilled.current = true; setBookName(e.target.value) }}
+              maxLength={120}
               placeholder="《剑道独尊》"
             />
           </div>
@@ -584,7 +846,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
               id="cover-author"
               className="input"
               value={authorName}
-              onChange={(e) => setAuthorName(e.target.value)}
+              onChange={(e) => { invalidatePromptWork(); setAuthorName(e.target.value) }}
+              maxLength={60}
               placeholder="青椒炒肉"
             />
           </div>
@@ -592,7 +855,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
         <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div className="field" style={{ flex: '1 1 140px' }}>
             <label htmlFor="cover-platform">目标平台</label>
-            <select id="cover-platform" className="input" value={platform} onChange={(e) => setPlatform(e.target.value as CoverPlatform)}>
+            <select id="cover-platform" className="input" value={platform} onChange={(e) => { invalidatePromptWork(); setPlatform(e.target.value as CoverPlatform) }}>
               {PLATFORM_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
@@ -606,7 +869,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
               id="cover-genre"
               className="input"
               value={genreOverride}
-              onChange={(e) => setGenreOverride(e.target.value as CoverGenre | '')}
+              onChange={(e) => { invalidatePromptWork(); setGenreOverride(e.target.value as CoverGenre | '') }}
             >
               <option value="">自动推断</option>
               {GENRE_OPTIONS.map((o) => (
@@ -617,21 +880,38 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             </select>
           </div>
           <div className="field" style={{ flex: '1 1 140px' }}>
+            <label htmlFor="cover-channel">封面人物频道</label>
+            <select
+              id="cover-channel"
+              className="input"
+              value={channel}
+              onChange={(event) => selectChannel(event.target.value as CoverChannel | 'auto')}
+            >
+              {CHANNEL_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ flex: '1 1 140px' }}>
             <label htmlFor="cover-composition">构图</label>
             <select
               id="cover-composition"
               className="input"
               value={composition}
-              onChange={(e) => setComposition(e.target.value as CoverComposition)}
+              onChange={(e) => { invalidatePromptWork(); setComposition(e.target.value as CoverComposition | 'auto'); if (promptDirty) setPromptNotice('已保留当前画面。应用新的构图时，请重新提炼或重置为模板。') }}
             >
+              <option value="auto">自动构图（提炼时由内容决定）</option>
               {COMPOSITION_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
+                <option key={o.value} value={o.value} disabled={channel !== 'auto' && o.value === 'scene'}>
                   {o.label}
                 </option>
               ))}
             </select>
           </div>
         </div>
+        <p className="meta" style={{ margin: '0 0 12px' }} role="status">
+          {channel === 'auto'
+            ? '自动频道不锁定人物性别，按小说内容提炼人物；手写提示词保留原有的人物要求。'
+            : `已锁定${channel === 'male' ? '男频（男性人物）' : '女频（女性人物）'}，双人构图的两个人物均按所选性别生成。频道选择会覆盖提炼方向和提示词中冲突的性别或无人物要求；男/女频需人物，纯场景不可选。`}
+        </p>
         <div className="field cover-style-field">
           <label>
             封面风格
@@ -733,11 +1013,13 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             <span>
               封面提示词
               <span className="meta" style={{ marginLeft: 6 }}>
-                {extraHint.trim()
+                {channel !== 'auto'
+                  ? `${channel === 'male' ? '男性' : '女性'}人物已锁定，冲突要求会按频道调整`
+                  : extraHint.trim()
                   ? '提炼方向优先级最高，压过这段提示词里冲突的人物和画风'
                   : promptDirty
-                    ? '已手改，出图按此原文'
-                    : '按平台/题材自动拼装，可直接编辑'}
+                    ? '已手改，保留画面内容并应用文字安全区'
+                    : '按平台/题材生成中文提示词，可直接编辑'}
               </span>
             </span>
             <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -755,8 +1037,8 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
                   opacity: extracting ? 0.7 : 1
                 }}
                 onClick={() => void handleExtractPrompt()}
-                disabled={extracting || !canBuild}
-                title="读本书的简介、大纲、人物卡与开篇正文，提炼出专属画面后重写整段提示词（只调文本模型，不消耗图像额度）"
+                disabled={extracting || buildingPrompt || generationBusy || !canBuild}
+                title="读本书的简介、大纲、人物卡与开篇正文，提炼出专属画面后重写为中文提示词（只调文本模型，不消耗图像额度）"
               >
                 {extracting ? (
                   <>
@@ -771,10 +1053,10 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
                 className="btn btn-ghost"
                 style={{ fontSize: 12, padding: '2px 10px', height: 24 }}
                 onClick={() => void handleResetPrompt()}
-                disabled={extracting}
-                title="丢弃提炼与手改，回到当前平台/题材/构图的模板提示词"
+                disabled={extracting || generationBusy}
+                title="丢弃提炼与手改，回到当前平台/题材/构图的中文模板提示词"
               >
-                ↺ 重置
+                ↺ 重置为模板
               </button>
             </span>
           </label>
@@ -783,6 +1065,7 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             className="input"
             value={prompt}
             onChange={(e) => {
+              invalidatePromptWork()
               setPrompt(e.target.value)
               setPromptDirty(true)
             }}
@@ -798,12 +1081,39 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
             }}
             rows={10}
           />
+          <p className="meta" style={{ margin: '6px 0 0', color: promptOverBudget ? 'var(--danger)' : undefined }}>
+            提示词 {prompt.length} / {MAX_COVER_PROMPT_CHARACTERS} 字符
+            {promptOverBudget ? ' · 内容完整保留，请手动精简或停用部分学习规则后重建。' : ''}
+          </p>
           {platformStale ? (
             <p className="meta" style={{ margin: '6px 0 0', color: 'var(--danger)' }}>
               平台已改为「{PLATFORM_OPTIONS.find((o) => o.value === platform)?.label}」，
               但提示词还是上一个平台的风格。点「重置」重新生成，或直接手动调整。
             </p>
           ) : null}
+          {promptNotice ? <p className="meta" style={{ margin: '6px 0 0' }}>{promptNotice}</p> : null}
+          {buildingPrompt ? <p role="status" className="meta">正在更新最新提示词和文字设计，完成后可生成封面。</p> : null}
+          {textMismatch && prompt.trim() ? <div role="alert" style={{ marginTop: 8 }}>
+            <p className="meta" style={{ color: 'var(--danger)' }}>{promptTextState === 'custom' ? '无法确认自定义提示词中的书名、署名和文字设置。请在正文中手动同步，确认后才能生成。' : '提示词中的书名或作者名与上方表单不一致，生成已暂停。'}</p>
+            {promptTextState === 'custom' ? <button className="btn btn-ghost" onClick={() => { invalidatePromptWork(); setCustomTextConfirmation(coverCustomTextConfirmationKey(prompt, textSettingsKey)); setAppliedTextKey(textSettingsKey); setPromptNotice('已确认自定义提示词中的书名、署名与文字设计；后续修改会重新要求确认。') }}>已手动同步书名与署名</button> : <button className="btn btn-ghost" disabled={buildingPrompt || extracting} onClick={() => void recompileText()}>同步书名与署名</button>}
+          </div> : null}
+          <details style={{ marginTop: 10 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12 }}>学习规则与版本</summary>
+            <p className="meta">当前提示词使用：{promptContext?.libraryVersion ?? '未记录'} · 学习库来源总数 {promptContext?.sourceSampleCount ?? 0} 张（含历史记录）</p>
+            <p className="meta">生成会使用编辑框中的现有提示词，并应用所选人物频道、提炼方向和裁剪后的文字安全区。学习库更新后，重新提炼或重置为模板才会应用新规则。</p>
+            <button type="button" className="btn btn-ghost" onClick={() => void refreshLearningContext()} disabled={!canBuild}>
+              检查最新学习规则
+            </button>
+            {availableContext && availableContext.libraryVersion !== promptContext?.libraryVersion ? (
+              <p className="meta">可用版本：{availableContext.libraryVersion}</p>
+            ) : null}
+            {(availableContext?.rules ?? promptContext?.rules)?.length ? (
+              <ul style={{ margin: '8px 0', paddingLeft: 20, fontSize: 12 }}>
+                {(availableContext?.rules ?? promptContext?.rules ?? []).map((rule) => <li key={rule}>{rule}</li>)}
+              </ul>
+            ) : <p className="meta">当前题材尚无可应用的学习建议。</p>}
+            {promptContext?.sources?.length ? <p className="meta">规则依据：{promptContext.sources.join(' · ')}</p> : null}
+          </details>
           {summary ? (
             <p style={{ margin: '6px 0 0', fontSize: 13 }}>{summary}</p>
           ) : null}
@@ -816,13 +1126,14 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
 
         <div className="field">
           <label htmlFor="cover-extra-hint" style={{ fontSize: 12 }}>
-            提炼方向（优先级最高，压过小说主角、视觉风格和提示词）
+            {channel === 'auto' ? '提炼方向（优先于小说主角、视觉风格和提示词）' : '提炼方向（人物性别与是否有人物以所选频道为准）'}
           </label>
           <input
             id="cover-extra-hint"
             className="input"
             value={extraHint}
-            onChange={(e) => setExtraHint(e.target.value)}
+            onChange={(e) => { invalidatePromptWork(); setExtraHint(e.target.value) }}
+            maxLength={500}
             placeholder="如：主角画韩国财阀女性，嚣张跋扈的坐姿，二次元风格"
           />
         </div>
@@ -832,15 +1143,16 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
           <button
             className="btn btn-primary"
             onClick={() => void handleGenerate()}
-            disabled={generating || !canBuild || !prompt.trim()}
+            disabled={!generationTaskReady || generationBusy || buildingPrompt || extracting || textSettingsPending || templateBuildPending || textMismatch || !canBuild || !prompt.trim() || promptOverBudget}
           >
-            {generating ? '生成中…（约 30-90 秒）' : '✦ 生成封面'}
+            {generationBusy ? '封面生成进行中…' : buildingPrompt || extracting ? '正在更新提示词…' : textMismatch ? '请确认文字同步' : textSettingsPending || templateBuildPending ? '正在更新提示词…' : !generationTaskReady ? '正在确认生成任务…' : '✦ 生成封面'}
           </button>
         </div>
       </div>
 
       {/* 封面历史 */}
       <h3 style={{ fontSize: 14, margin: '20px 0 12px' }}>封面版本</h3>
+      {historyError ? <div role="alert"><p className="diag-msg" style={{ color: 'var(--danger)' }}>封面历史读取失败：{historyError}</p><button className="btn btn-ghost" onClick={() => void refreshHistory()}>重试读取历史</button></div> : null}
       {loading ? (
         <p className="empty">加载中…</p>
       ) : covers.length === 0 ? (
@@ -856,18 +1168,17 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
           }}
         >
           {covers.map((c) => (
-            <CoverThumb key={c.relPath} cover={c} projectId={projectId} />
+              <CoverThumb key={c.relPath} cover={c} projectId={projectId} previewRevision={coverRevision} generationBusy={generationBusy || !generationTaskReady} onUpdated={() => void refreshHistory()} />
           ))}
         </div>
       )}
 
-      {showConfig && config ? (
+      {showConfig ? (
         <CoverConfigDialog
-          config={config}
+          config={config ?? { hasKey: false, keyMasked: '', baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-2', channel: 'api' }}
           onClose={() => setShowConfig(false)}
           onSaved={async () => {
-            const cfg = await window.api.getCoverImageConfig()
-            setConfig(cfg)
+            await refreshConfig()
             setShowConfig(false)
           }}
         />
@@ -876,20 +1187,90 @@ export default function CoverPage({ projectId }: Props): React.ReactElement {
   )
 }
 
-function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string }): React.ReactElement {
+function CoverThumb({ cover, projectId, onUpdated, previewRevision, generationBusy }: { cover: CoverFile; projectId: string; onUpdated: () => void; previewRevision: number; generationBusy: boolean }): React.ReactElement {
   const [dataUrl, setDataUrl] = useState<string | null>(null)
   const [locationError, setLocationError] = useState('')
   const [zoomed, setZoomed] = useState(false)
+  const [feedbackReason, setFeedbackReason] = useState(cover.feedback?.reason ?? '')
+  const [savingFeedback, setSavingFeedback] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const [previewRetry, setPreviewRetry] = useState(0)
+  const [showCrop, setShowCrop] = useState(false)
+  const [originalDataUrl, setOriginalDataUrl] = useState<string | null>(null)
+  const [originalError, setOriginalError] = useState('')
+  const [originalLoading, setOriginalLoading] = useState(false)
+  const [showFullOriginal, setShowFullOriginal] = useState(false)
+  const [cropFit, setCropFit] = useState<'cover' | 'contain'>(cover.generationMetadata?.crop?.fit ?? 'cover')
+  const [cropX, setCropX] = useState(cover.generationMetadata?.crop?.offsetX ?? 0.5)
+  const [cropY, setCropY] = useState(cover.generationMetadata?.crop?.offsetY ?? 0.5)
+  const [savingCrop, setSavingCrop] = useState(false)
+
+  useEffect(() => {
+    setCropFit(cover.generationMetadata?.crop?.fit ?? 'cover')
+    setCropX(cover.generationMetadata?.crop?.offsetX ?? 0.5)
+    setCropY(cover.generationMetadata?.crop?.offsetY ?? 0.5)
+  }, [cover.generationMetadata?.crop?.fit, cover.generationMetadata?.crop?.offsetX, cover.generationMetadata?.crop?.offsetY])
+
+  useEffect(() => {
+    setFeedbackReason(cover.feedback?.reason ?? '')
+  }, [cover.feedback?.reason])
+
+  const saveFeedback = async (status: CoverFeedback['status']): Promise<void> => {
+    setSavingFeedback(true)
+    setLocationError('')
+    try {
+      await window.api.updateCoverFeedback({ projectId, fileName: cover.fileName, status, reason: feedbackReason })
+      onUpdated()
+    } catch (err) {
+      setLocationError(describeError(err))
+    } finally {
+      setSavingFeedback(false)
+    }
+  }
 
   useEffect(() => {
     let active = true
+    setDataUrl(null)
+    setPreviewError('')
     void window.api.readCover(projectId, cover.fileName).then((url) => {
-      if (active) setDataUrl(url)
-    })
+      if (active) {
+        setDataUrl(url)
+        if (!url) setPreviewError('封面文件不存在或无法读取。')
+      }
+    }).catch((err) => { if (active) setPreviewError(describeError(err)) })
     return () => {
       active = false
     }
-  }, [projectId, cover.fileName])
+  }, [projectId, cover.fileName, previewRevision, previewRetry])
+
+  useEffect(() => {
+    if (!showCrop || !cover.originalFileName) return
+    let active = true
+    setOriginalLoading(true)
+    setOriginalError('')
+    void window.api.readCover(projectId, cover.originalFileName).then((url) => {
+      if (active) {
+        setOriginalDataUrl(url)
+        if (!url) setOriginalError('原图不存在或无法读取，无法重新裁剪。')
+      }
+    }).catch((err) => { if (active) setOriginalError(describeError(err)) })
+      .finally(() => { if (active) setOriginalLoading(false) })
+    return () => { active = false }
+  }, [showCrop, cover.originalFileName, projectId, previewRetry])
+
+  const applyCrop = async (): Promise<void> => {
+    if (savingCrop || generationBusy || !originalDataUrl) return
+    setSavingCrop(true)
+    setOriginalError('')
+    try {
+      await window.api.updateCoverCrop({ projectId, fileName: cover.fileName, offsetX: cropX, offsetY: cropY, fit: cropFit })
+      onUpdated()
+    } catch (err) {
+      setOriginalError(describeError(err))
+    } finally {
+      setSavingCrop(false)
+    }
+  }
 
   useEffect(() => {
     if (!zoomed) return
@@ -928,9 +1309,9 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
         title={dataUrl ? '点击放大查看' : undefined}
       >
         {dataUrl ? (
-          <img src={dataUrl} alt={cover.fileName} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          <img src={dataUrl} alt={cover.fileName} onError={() => { setPreviewError('封面图片无法解码，请检查文件或重试。'); setDataUrl(null) }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
         ) : (
-          <span className="meta">加载中…</span>
+          previewError ? <div className="meta" role="alert" style={{ padding: 8, color: 'var(--danger)' }}>{previewError}<button className="btn btn-ghost" onClick={(event) => { event.stopPropagation(); setPreviewRetry((retry) => retry + 1) }}>重试预览</button></div> : <span className="meta">加载中…</span>
         )}
       </div>
       {zoomed && dataUrl
@@ -996,6 +1377,56 @@ function CoverThumb({ cover, projectId }: { cover: CoverFile; projectId: string 
         <div className="meta">
           {GENRE_LABELS[cover.genre]} · {(cover.size / 1024).toFixed(0)} KB
         </div>
+        {cover.warnings?.length ? <ul className="meta" style={{ paddingLeft: 16, color: 'var(--danger)' }}>{cover.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+        {cover.originalFileName ? <div style={{ marginTop: 8 }}>
+          <button type="button" className="btn btn-ghost" disabled={savingCrop} onClick={() => setShowCrop((shown) => !shown)}>{showCrop ? '收起原图与裁剪' : '原图与裁剪'}</button>
+          {showCrop ? <div style={{ marginTop: 8 }}>
+            {originalLoading ? <p className="meta">正在读取完整原图…</p> : null}
+            {originalError ? <p role="alert" className="diag-msg" style={{ color: 'var(--danger)' }}>{originalError}<button className="btn btn-ghost" onClick={() => setPreviewRetry((retry) => retry + 1)}>重试读取</button></p> : null}
+            {originalDataUrl ? <>
+              <label className="meta"><input type="checkbox" checked={showFullOriginal} onChange={(event) => setShowFullOriginal(event.target.checked)} /> 查看完整原图</label>
+              <div style={{ marginTop: 6, width: '100%', aspectRatio: showFullOriginal ? undefined : '3 / 4', overflow: 'hidden', background: '#f8f4ee', borderRadius: 6 }}>
+                <img src={originalDataUrl} alt={showFullOriginal ? `${cover.fileName} 的模型完整原图` : `${cover.fileName} 的裁剪预览`} style={{ display: 'block', width: '100%', height: showFullOriginal ? 'auto' : '100%', objectFit: cropFit, objectPosition: coverCropObjectPosition(cropX, cropY) }} />
+              </div>
+              <div className="field" style={{ marginTop: 8 }}><label>成品方式</label><select aria-label={`${cover.fileName} 的裁剪方式`} className="input" value={cropFit} disabled={savingCrop || generationBusy} onChange={(event) => setCropFit(event.target.value as 'cover' | 'contain')}><option value="cover">填满 3:4，可调整取景</option><option value="contain">保留全图，浅色补边</option></select></div>
+              {cropFit === 'cover' ? <>
+                <label className="meta">水平取景 {Math.round(cropX * 100)}%<input aria-label={`${cover.fileName} 的水平取景`} type="range" min="0" max="1" step="0.01" value={cropX} disabled={savingCrop || generationBusy} onChange={(event) => setCropX(Number(event.target.value))} style={{ width: '100%' }} /></label>
+                <label className="meta">垂直取景 {Math.round(cropY * 100)}%<input aria-label={`${cover.fileName} 的垂直取景`} type="range" min="0" max="1" step="0.01" value={cropY} disabled={savingCrop || generationBusy} onChange={(event) => setCropY(Number(event.target.value))} style={{ width: '100%' }} /></label>
+              </> : null}
+              <p className="meta">同时更新本版成品与平台上传版，完整原图保留。</p>
+              <button type="button" className="btn btn-primary" disabled={savingCrop || savingFeedback || generationBusy || originalLoading} onClick={() => void applyCrop()}>{savingCrop ? '正在应用裁剪…' : '应用裁剪'}</button>
+            </> : null}
+          </div> : null}
+        </div> : null}
+        <div className="meta" style={{ marginTop: 5 }}>
+          {cover.feedback?.status === 'adopted' ? '已采用' : cover.feedback?.status === 'rejected' ? '已淘汰' : '待评价'}
+        </div>
+        <textarea
+          className="input"
+          aria-label={`${cover.fileName} 的评价原因`}
+          placeholder="原因，如书名清楚、人物不符、裁掉署名"
+          value={feedbackReason}
+          onChange={(event) => setFeedbackReason(event.target.value)}
+          maxLength={1000}
+          rows={2}
+          style={{ width: '100%', marginTop: 6, fontSize: 12, resize: 'vertical' }}
+        />
+        <div className="row" style={{ gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn-ghost" disabled={savingFeedback || savingCrop} onClick={() => void saveFeedback('adopted')}>采用</button>
+          <button type="button" className="btn btn-ghost" disabled={savingFeedback || savingCrop} onClick={() => void saveFeedback('rejected')}>淘汰</button>
+          <button type="button" className="btn btn-ghost" disabled={savingFeedback || savingCrop} onClick={() => void saveFeedback(cover.feedback?.status ?? 'unrated')}>保存原因</button>
+          {cover.feedback && cover.feedback.status !== 'unrated' ? <button type="button" className="btn btn-ghost" disabled={savingFeedback || savingCrop} onClick={() => void saveFeedback('unrated')}>撤销评价</button> : null}
+        </div>
+        {cover.generationMetadata?.learningContext ? (
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: 'pointer' }}>本次使用的学习规则</summary>
+            <p className="meta">版本 {cover.generationMetadata.learningContext.libraryVersion}</p>
+            <ul style={{ paddingLeft: 16 }}>
+              {cover.generationMetadata.learningContext.rules.map((rule) => <li key={rule}>{rule}</li>)}
+            </ul>
+            {cover.generationMetadata.learningContext.sources?.length ? <p className="meta">依据：{cover.generationMetadata.learningContext.sources.join(' · ')}</p> : null}
+          </details>
+        ) : <p className="meta">该封面没有学习规则来源记录。</p>}
         {locationError ? <div style={{ color: 'var(--danger)', marginTop: 4 }}>{locationError}</div> : null}
       </div>
     </div>
@@ -1009,7 +1440,7 @@ function CoverConfigDialog({
 }: {
   config: CoverImageConfigSummary
   onClose: () => void
-  onSaved: () => void
+  onSaved: () => Promise<void> | void
 }): React.ReactElement {
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState(config.baseUrl)
@@ -1028,7 +1459,7 @@ function CoverConfigDialog({
         model: model.trim() || undefined,
         channel
       })
-      onSaved()
+      await onSaved()
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -1043,7 +1474,7 @@ function CoverConfigDialog({
   }
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
+    <div className="dialog-overlay" onClick={() => { if (!saving) onClose() }}>
       <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <h3>封面配置</h3>
         <p className="meta" style={{ marginTop: 4 }}>
@@ -1058,6 +1489,7 @@ function CoverConfigDialog({
                 key={c}
                 type="button"
                 className={`btn ${channel === c ? 'btn-primary' : 'btn-ghost'}`}
+                 disabled={saving}
                 onClick={() => setChannel(c)}
                 style={{ fontSize: 12 }}
               >
@@ -1074,6 +1506,7 @@ function CoverConfigDialog({
               <input
                 className="input"
                 type="password"
+                disabled={saving}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder={config.hasKey ? '留空保留当前 key' : 'sk-...'}
@@ -1084,6 +1517,7 @@ function CoverConfigDialog({
               <input
                 className="input"
                 value={baseUrl}
+                disabled={saving}
                 onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder="https://api.openai.com/v1"
               />
@@ -1093,6 +1527,7 @@ function CoverConfigDialog({
               <input
                 className="input"
                 value={model}
+                disabled={saving}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="gpt-image-2"
               />
@@ -1108,7 +1543,7 @@ function CoverConfigDialog({
         )}
         {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
-          <button className="btn btn-ghost" onClick={onClose}>
+          <button className="btn btn-ghost" disabled={saving} onClick={onClose}>
             取消
           </button>
           <button className="btn btn-primary" onClick={() => void save()} disabled={saving}>

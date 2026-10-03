@@ -45,10 +45,16 @@ import type {
   ExtractCoverPromptInput,
   CoverPromptDraft,
   CoverFile,
+  CoverGenerationTaskState,
+  UpdateCoverCropInput,
   CoverImageConfigSummary,
   CoverImageConfigInput,
   CoverLearningLibrarySummary,
   CoverLearningRunResult,
+  CoverLearningOptions,
+  CoverLearningTaskState,
+  CoverLearningContext,
+  UpdateCoverFeedbackInput,
   BookTestState,
   PatchBookTestInput,
   GenerateBookTestTitlesInput,
@@ -1104,10 +1110,20 @@ const api = {
     ipcRenderer.invoke('cover:extractPrompt', input) as Promise<CoverPromptDraft>,
   buildCoverPrompt: (input: GenerateCoverInput) =>
     ipcRenderer.invoke('cover:buildPrompt', input) as Promise<string>,
+  getCoverPromptContext: (input: GenerateCoverInput) =>
+    ipcRenderer.invoke('cover:getPromptContext', input) as Promise<CoverLearningContext>,
   generateCover: (input: GenerateCoverInput) =>
     ipcRenderer.invoke('cover:generate', input) as Promise<CoverFile>,
+  getCoverGenerationTask: (projectId: string) =>
+    ipcRenderer.invoke('cover:getGenerationTask', projectId) as Promise<CoverGenerationTaskState | null>,
+  cancelCoverGenerationTask: (projectId: string) =>
+    ipcRenderer.invoke('cover:cancelGenerationTask', projectId) as Promise<{ ok: boolean }>,
+  updateCoverCrop: (input: UpdateCoverCropInput) =>
+    ipcRenderer.invoke('cover:updateCrop', input) as Promise<CoverFile>,
   listCovers: (projectId: string) =>
     ipcRenderer.invoke('cover:list', projectId) as Promise<CoverFile[]>,
+  updateCoverFeedback: (input: UpdateCoverFeedbackInput) =>
+    ipcRenderer.invoke('cover:updateFeedback', input) as Promise<CoverFile>,
   readCover: (projectId: string, fileName: string) =>
     ipcRenderer.invoke('cover:read', { projectId, fileName }) as Promise<string | null>,
   showCoverInFolder: (projectId: string, fileName: string) =>
@@ -1122,8 +1138,16 @@ const api = {
     ipcRenderer.invoke('cover:setLearningLibraryDirectory', directory) as Promise<CoverLearningLibrarySummary>,
   chooseCoverLearningLibraryDirectory: () =>
     ipcRenderer.invoke('cover:chooseLearningLibraryDirectory') as Promise<CoverLearningLibrarySummary | null>,
-  chooseAndLearnCoverFolder: () =>
-    ipcRenderer.invoke('cover:chooseAndLearnFolder') as Promise<CoverLearningRunResult | null>,
+  chooseAndLearnCoverFolder: (options: CoverLearningOptions = {}) =>
+    ipcRenderer.invoke('cover:chooseAndLearnFolder', options) as Promise<CoverLearningRunResult | null>,
+  getCoverLearningTask: () =>
+    ipcRenderer.invoke('cover:getLearningTask') as Promise<CoverLearningTaskState | null>,
+  cancelCoverLearningTask: () =>
+    ipcRenderer.invoke('cover:cancelLearningTask') as Promise<{ ok: boolean }>,
+  rollbackCoverLearningRules: () =>
+    ipcRenderer.invoke('cover:rollbackLearningRules') as Promise<CoverLearningLibrarySummary>,
+  setCoverLearningRuleEnabled: (input: { id: string; enabled: boolean }) =>
+    ipcRenderer.invoke('cover:setLearningRuleEnabled', input) as Promise<CoverLearningLibrarySummary>,
 
   getBookTest: (projectId: string) =>
     ipcRenderer.invoke('bookTest:get', projectId) as Promise<BookTestState>,
