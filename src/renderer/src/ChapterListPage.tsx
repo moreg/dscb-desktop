@@ -18,6 +18,7 @@ import { countPendingConfirms } from '../../shared/post-write-sync'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
+import BatchPolishDialog, { type BatchPolishRange } from './BatchPolishDialog'
 import {
   suggestChapterStrength,
   type ChapterStrengthSuggestion
@@ -129,6 +130,8 @@ export default function ChapterListPage({
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
+  const [showPolish, setShowPolish] = useState(false)
+  const [polishPreset, setPolishPreset] = useState<BatchPolishRange | undefined>(undefined)
   // 「一键写 10 章」带进批量对话框的预设（章数 + 连续模式）；手动入口不带
   const [batchPreset, setBatchPreset] = useState<
     { count: number; autoContinue: boolean } | undefined
@@ -320,6 +323,17 @@ export default function ChapterListPage({
             </p>
           </div>
           <div className="page-head-actions">
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                setPolishPreset(undefined)
+                setShowPolish(true)
+              }}
+              disabled={loading || showBatch || !chapters.some((c) => c.wordCount > 0)}
+              title="批量润色已保存的正文，自动核对并修复事实差异"
+            >
+              批量去 AI 味
+            </button>
             <button
               className="btn btn-ghost"
               onClick={() => setShowBenchmark(true)}
@@ -560,6 +574,22 @@ export default function ChapterListPage({
           preset={batchPreset}
           onClose={() => setShowBatch(false)}
           onChapterCompleted={() => refresh()}
+          onPolishBatch={(range) => {
+            setShowBatch(false)
+            setPolishPreset(range)
+            setShowPolish(true)
+          }}
+        />
+      ) : null}
+
+      {showPolish ? (
+        <BatchPolishDialog
+          key={projectId}
+          projectId={projectId}
+          chapters={chapters}
+          preset={polishPreset}
+          onClose={() => setShowPolish(false)}
+          onChapterCompleted={() => refresh()}
         />
       ) : null}
 
@@ -793,7 +823,9 @@ export function describeSelfCheckCell(s: BatchChapterSummary): string {
 
 export function describeAutoDeslopCell(s: BatchChapterSummary): string {
   if (!s.autoDeslop) return '本次未重新润色'
-  if (s.autoDeslop.status === 'applied') return '自动去 AI 味已完成'
+  if (s.autoDeslop.status === 'applied') return (s.autoDeslop.repairAttempts ?? 0) > 0
+    ? `自动修复 ${s.autoDeslop.repairAttempts} 次后去 AI 味已完成`
+    : '自动去 AI 味已完成'
   if (s.autoDeslop.status === 'unchanged') return '去 AI 味无需修改'
   return s.autoDeslop.message
 }
@@ -1336,7 +1368,8 @@ function BatchWriteDialog({
   draftedChapters,
   preset,
   onClose,
-  onChapterCompleted
+  onChapterCompleted,
+  onPolishBatch
 }: {
   projectId: string
   chapters?: ChapterMeta[]
@@ -1349,6 +1382,7 @@ function BatchWriteDialog({
   preset?: { count: number; autoContinue: boolean }
   onClose: () => void
   onChapterCompleted: () => void
+  onPolishBatch?: (range: BatchPolishRange) => void
 }) {
   const [restoredSession] = useState(() => readSavedBatchSession(projectId))
   const [recovering, setRecovering] = useState(restoredSession?.interruptedChapter !== undefined)
@@ -1826,7 +1860,7 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章生成正文并自动跑质检/细纲对照/记忆/节奏/图解流程。
+          逐章生成正文，自动去 AI 味并核对事实；发现差异会自动修复，最多两轮。随后跑质检、细纲对照和记忆同步。
           {autoContinue
             ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。仅细纲缺失或同步失败时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
@@ -2185,12 +2219,25 @@ function BatchWriteDialog({
                 {[
                   noOutlineCount > 0 ? `${noOutlineCount} 章没有细纲可对照（自由发挥）` : '',
                   outlineFailedCount > 0 ? `${outlineFailedCount} 章细纲对照没跑成` : '',
-                  autoDeslopAttentionCount > 0 ? `${autoDeslopAttentionCount} 章自动去 AI 味需处理，已保留生成原稿` : '',
+                  autoDeslopAttentionCount > 0 ? `${autoDeslopAttentionCount} 章去 AI 味未通过，已保留生成原稿，可批量重试` : '',
                   heldBackTotal > 0 ? `共 ${heldBackTotal} 条记忆证据不足未写入` : '',
                   pendingEntitiesTotal > 0 ? `共 ${pendingEntitiesTotal} 项新实体待确认` : ''
                 ]
                   .filter(Boolean)
                   .join(' · ')}
+                {autoDeslopAttentionCount > 0 && onPolishBatch ? (
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={running}
+                    onClick={() => onPolishBatch({
+                      from: Math.min(...summaries.map((item) => item.chapter)),
+                      to: Math.max(...summaries.map((item) => item.chapter))
+                    })}
+                    title="检查本批次已保存的正文并重新润色，自动核对和修复事实差异"
+                  >
+                    批量重试去 AI 味
+                  </button>
+                ) : null}
                 {heldBackTotal > 0 ? (
                   <button
                     className="btn btn-ghost"
@@ -2248,9 +2295,13 @@ function BatchWriteDialog({
                       ) : null}
                     </span>
                     <span>{item.words} 字</span>
-                    <span title={item.autoDeslop?.message} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
+                    <span title={[item.autoDeslop?.message, ...(item.autoDeslop?.issues ?? [])].filter(Boolean).join('；')} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
                       {describeAutoDeslopCell(item)}
+                      {item.autoDeslop?.status !== 'applied' && (item.autoDeslop?.repairAttempts ?? 0) > 0 ? `（已自动修复 ${item.autoDeslop!.repairAttempts} 次）` : ''}
                     </span>
+                    {item.autoDeslop?.issues?.length ? (
+                      <span style={{ color: 'var(--warn)' }}>{item.autoDeslop.issues.join('；')}</span>
+                    ) : null}
                    <span>{item.summaryReady ? '概要已生成' : '概要待补'}</span>
                   <span>
                     {item.auditError > 0

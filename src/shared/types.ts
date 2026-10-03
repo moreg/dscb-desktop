@@ -460,6 +460,17 @@ export interface AutoDeslopResult {
   status: 'applied' | 'unchanged' | 'review_required' | 'failed'
   message: string
   remainingIssues: number
+  issues?: string[]
+  repairAttempts?: number
+  verificationAttempts?: number
+}
+
+/** 已保存章节的批量精修结果；失败或需复核时保持原正文。 */
+export interface SavedChapterPolishResult {
+  chapterNumber: number
+  autoDeslop: AutoDeslopResult
+  changed: boolean
+  error?: string
 }
 
 /**
@@ -984,6 +995,16 @@ export interface RendererApi {
     onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
     onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
+  /** 仅精修已保存正文，不重新生成剧情；最多 100 章，可用 requestId 停止。 */
+  polishChaptersBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    styleProfileId: string | null | undefined,
+    onChapterComplete: (chapter: number, result: SavedChapterPolishResult) => void,
+    onProgress?: (chapter: number, step: string) => void,
+    requestId?: string
+  ) => Promise<{ ok: boolean; results?: SavedChapterPolishResult[]; error?: string }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
     projectId: string,

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AppUpdateState } from '../shared/app-update'
 import type {
   AutoDeslopResult,
+  SavedChapterPolishResult,
   DiagnosticFixKind,
   ListProjectsQuery,
   CreateProjectDataInput,
@@ -798,6 +799,31 @@ const api = {
         if (onGenerationStage) ipcRenderer.removeListener('write:batchGenerationStage', stageHandler as never)
         if (onAutoDeslopResult) ipcRenderer.removeListener('write:batchAutoDeslopResult', autoDeslopHandler as never)
       })
+  },
+  polishChaptersBatch: (
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    styleProfileId: string | null | undefined,
+    onChapterComplete: (chapter: number, result: SavedChapterPolishResult) => void,
+    onProgress?: (chapter: number, step: string) => void,
+    externalRequestId?: string
+  ) => {
+    const requestId = externalRequestId ?? crypto.randomUUID()
+    const chapterHandler = (_e: unknown, payload: { requestId: string; chapter: number; result: SavedChapterPolishResult }) => {
+      if (payload.requestId === requestId) onChapterComplete(payload.chapter, payload.result)
+    }
+    const progressHandler = (_e: unknown, payload: { requestId: string; chapter: number; step: string }) => {
+      if (payload.requestId === requestId) onProgress?.(payload.chapter, payload.step)
+    }
+    ipcRenderer.on('write:batchPolishChapterComplete', chapterHandler as never)
+    if (onProgress) ipcRenderer.on('write:batchPolishProgress', progressHandler as never)
+    return ipcRenderer.invoke('write:polishChaptersBatch', {
+      projectId, fromChapter, toChapter, styleProfileId, requestId
+    }).finally(() => {
+      ipcRenderer.removeListener('write:batchPolishChapterComplete', chapterHandler as never)
+      if (onProgress) ipcRenderer.removeListener('write:batchPolishProgress', progressHandler as never)
+    })
   },
   resumeBatch: (
     projectId: string,

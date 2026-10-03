@@ -77,6 +77,7 @@ import type {
   AuditReport,
   AuditViolation,
   AutoDeslopResult,
+  SavedChapterPolishResult,
   BatchProgress,
   ChapterGenerationStage,
   ChapterFlowResult,
@@ -353,7 +354,7 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts: { force?: boolean; signal?: AbortSignal } = {}
+    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string } = {}
   ): Promise<ChapterSummaryView> {
     if (!content.trim()) throw new Error('正文为空，无法生成章节概要')
     if (content.length > EXISTING_TEXT_MAX_CHARS) throw new Error('正文超过4万字符，请先分章后生成概要')
@@ -370,6 +371,10 @@ export class WriteService {
     this.summaryEpoch.set(key, epoch)
     const task = (async (): Promise<ChapterSummaryView> => {
       const savedBefore = await new ProseRepo(dir).read(chapterNumber)
+      if (opts.expectedRevision !== undefined && contentRevision(savedBefore) !== opts.expectedRevision) {
+        throw new Error('章节正文已改变，旧概要未写入')
+      }
+      throwIfAborted(opts.signal)
       const raw = await this.llm.generateStream([
         `请根据第 ${chapterNumber} 章的实际正文生成供后续章节续写使用的章节概要。`,
         '只写正文已经发生的事实；人物的猜测、谎言、计划和否定必须保留其性质。不要把细纲或未发生的情节写成事实。',
@@ -639,6 +644,7 @@ export class WriteService {
       result = await autoDeslopProse(prose, {
         service: this.deslopService, llm: this.llm, ...rules, whitelist,
         signal: opts.signal, isTail: opts.isTail,
+        formatCandidate: formatChapterProse,
         styleContext: { genre: project.genre ?? '通用', ...(style ? { style: {
           identifiedStyle: style.identifiedStyle, tone: style.tone, sentencePatterns: style.sentencePatterns,
           vocabularyPreferences: style.vocabularyPreferences, styleConstraints: style.styleConstraints, plotConstraints: style.plotConstraints
@@ -654,7 +660,7 @@ export class WriteService {
     }
     throwIfAborted(opts.signal)
     opts.onAutoDeslopResult?.(result.report)
-    return formatChapterProse(result.content)
+    return result.content
   }
 
   /**
@@ -2568,6 +2574,94 @@ export class WriteService {
       return [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:batch',
         message: '深度审稿未完成，记忆暂不自动生效' }]
     }
+  }
+
+  /** 逐章精修已保存正文；事实核验通过才保存，仅刷新对应概要，不重放全书状态。 */
+  async polishChaptersBatch(
+    projectId: string,
+    fromChapter: number,
+    toChapter: number,
+    styleProfileId: string | null | undefined,
+    onChapterComplete: (chapter: number, result: SavedChapterPolishResult) => void,
+    opts: { signal?: AbortSignal; onProgress?: (chapter: number, step: string) => void } = {}
+  ): Promise<{ ok: boolean; results: SavedChapterPolishResult[]; error?: string }> {
+    const results: SavedChapterPolishResult[] = []
+    const rangeError = getBatchRangeError(fromChapter, toChapter)
+    if (rangeError) return { ok: false, results, error: rangeError.replace('生成', '处理') }
+    for (let chapterNumber = fromChapter; chapterNumber <= toChapter; chapterNumber++) {
+      let saved = false
+      let report: AutoDeslopResult | undefined
+      try {
+        throwIfAborted(opts.signal)
+        const before = (await this.chapterService.getChapter(projectId, chapterNumber)).content
+        if (!before.trim()) throw new Error('本章没有已保存正文，已跳过')
+        opts.onProgress?.(chapterNumber, 'deslop')
+        const content = await this.autoDeslopGeneratedProse(projectId, chapterNumber, before, styleProfileId ?? null, {
+          signal: opts.signal,
+          isTail: true,
+          onAutoDeslopResult: (value) => { report = value }
+        })
+        throwIfAborted(opts.signal)
+        report ??= { status: 'failed', message: '精修未返回核验结果，已保留原正文。', remainingIssues: 0 }
+        report = { ...report, message: report.message.replaceAll('生成原稿', '原正文').replaceAll('生成稿', '原正文') }
+        // 自动精修未获通过时不得把格式整理或未核验的候选稿写回原正文。
+        const changed = report.status === 'applied' && content !== before
+        const postSaveErrors: string[] = []
+        if (changed) {
+          opts.onProgress?.(chapterNumber, 'saving')
+          throwIfAborted(opts.signal)
+          try {
+            await this.chapterService.updateContent(projectId, chapterNumber, content, contentRevision(before), {
+              source: 'reviewed', note: '批量轻度去 AI 味（事实核验通过）'
+            })
+            saved = true
+          } catch (err) {
+            // 正文落盘后的节奏/历史写入也可能失败，不能误报为正文未修改。
+            const dir = await this.projectService.resolveDir(projectId)
+            saved = await new ProseRepo(dir).read(chapterNumber) === content
+            if (!saved) throw err
+            postSaveErrors.push(`正文精修已保存，章节状态或历史记录更新未完成：${err instanceof Error ? err.message : String(err)}`)
+          }
+          throwIfAborted(opts.signal)
+          opts.onProgress?.(chapterNumber, 'summary')
+          throwIfAborted(opts.signal)
+          try {
+            // 旧章仅刷新按正文指纹索引的概要，不重放角色状态和伏笔，避免倒灌后续章节。
+            await this.generateChapterSummary(projectId, chapterNumber, content, {
+              force: true, signal: opts.signal, expectedRevision: contentRevision(content)
+            })
+          } catch (err) {
+            throwIfAborted(opts.signal)
+            if ((err as Error)?.message?.includes('LLM_ABORTED') || (err as Error)?.name === 'AbortError') throw err
+            postSaveErrors.push(`正文精修已保存，章节概要未更新：${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        const result: SavedChapterPolishResult = { chapterNumber, autoDeslop: report, changed,
+          ...(postSaveErrors.length ? { error: postSaveErrors.join('；') } : {}) }
+        results.push(result)
+        onChapterComplete(chapterNumber, result)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        const aborted = opts.signal?.aborted || message.includes('LLM_ABORTED') || (err as Error)?.name === 'AbortError'
+        // 若停止发生在保存之后，明确返回已保存结果；绝不把成功精修当成保留旧稿。
+        if (saved && report) {
+          const result: SavedChapterPolishResult = { chapterNumber, autoDeslop: report, changed: true,
+            error: aborted ? '正文精修已保存，已停止概要更新' : `正文精修已保存：${message}` }
+          results.push(result)
+          onChapterComplete(chapterNumber, result)
+        }
+        if (aborted) return { ok: false, results, error: '已停止批量去 AI 味' }
+        if (!saved) {
+          const result: SavedChapterPolishResult = { chapterNumber, changed: false, error: message,
+            autoDeslop: { status: 'failed', message: `本章未修改：${message}`, remainingIssues: 0, issues: [message] } }
+          results.push(result)
+          onChapterComplete(chapterNumber, result)
+        }
+      }
+    }
+    return opts.signal?.aborted
+      ? { ok: false, results, error: '已停止批量去 AI 味' }
+      : { ok: true, results }
   }
 
   /**

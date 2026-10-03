@@ -106,6 +106,7 @@ describe('自动写作去 AI 味', () => {
     llm = {
       generateStream: vi.fn(async (_prompt: string, opts: GenerateOptions = {}) => {
         if (opts.meta?.feature === 'deslop:verify') return verifierReply
+        if (opts.meta?.feature === 'deslop:repair') return JSON.stringify({ text: POLISHED })
         opts.onToken?.(RAW)
         return RAW
       })
@@ -305,17 +306,17 @@ describe('自动写作去 AI 味', () => {
   })
 
   it.each([
-    JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }),
-    JSON.stringify({ unchanged: true, issues: ['新增了道具'] }),
-    JSON.stringify({ unchanged: true }),
-    '无法确定是否保持原文事实'
-  ])('事实对比未明确通过时保留原稿：%s', async (reply) => {
+    [JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }), 3],
+    [JSON.stringify({ unchanged: true, issues: ['新增了道具'] }), 3],
+    [JSON.stringify({ unchanged: true }), 2],
+    ['无法确定是否保持原文事实', 2]
+  ])('事实对比经自动修复或格式重试仍未通过时保留原稿：%s', async (reply, expectedVerifications) => {
     verifierReply = reply
     const { reports, onAutoDeslopResult } = results()
 
     expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
 
-    expect(verificationCalls()).toHaveLength(1)
+    expect(verificationCalls()).toHaveLength(expectedVerifications)
     expect(reports[0].status).toBe('review_required')
   })
 

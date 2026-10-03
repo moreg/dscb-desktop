@@ -912,9 +912,48 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
-  // 同一项目只允许一个批量任务；暂停、失败和取消均在 finally 中释放。
+  // 写作与已有正文精修共用项目锁；暂停、失败和取消均在 finally 中释放。
   const activeBatchProjects = new Set<string>()
   const activeBatchRequests = new Set<string>()
+  ipcMain.handle('write:polishChaptersBatch', async (e, payload: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    try {
+      const validated = validateInput(batchWriteInputSchema, payload)
+      if (activeBatchProjects.has(validated.projectId)) {
+        throw new Error('BATCH_ALREADY_RUNNING: 该项目已有批量任务，请等待当前任务结束')
+      }
+      if (activeBatchRequests.has(validated.requestId)) {
+        throw new Error('BATCH_REQUEST_ALREADY_RUNNING: 请勿重复提交同一个批量任务')
+      }
+      activeBatchProjects.add(validated.projectId)
+      activeBatchRequests.add(validated.requestId)
+      try {
+        const signal = beginStream(validated.requestId)
+        const abortBatch = () => { abortStream(validated.requestId) }
+        e.sender.once('destroyed', abortBatch)
+        try {
+          if (e.sender.isDestroyed()) abortBatch()
+          return await service.polishChaptersBatch(
+            validated.projectId, validated.fromChapter, validated.toChapter, validated.styleProfileId,
+            (chapter, result) => safeSend(win, 'write:batchPolishChapterComplete', {
+              requestId: validated.requestId, chapter, result
+            }),
+            { signal, onProgress: (chapter, step) => safeSend(win, 'write:batchPolishProgress', {
+              requestId: validated.requestId, chapter, step
+            }) }
+          )
+        } finally {
+          e.sender.removeListener('destroyed', abortBatch)
+          endStream(validated.requestId)
+        }
+      } finally {
+        activeBatchProjects.delete(validated.projectId)
+        activeBatchRequests.delete(validated.requestId)
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   for (const channel of ['write:generateBatch', 'write:resumeBatch'] as const) {
     ipcMain.handle(channel, async (e, payload: unknown) => {
       const win = BrowserWindow.fromWebContents(e.sender)
