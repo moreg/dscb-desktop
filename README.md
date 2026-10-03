@@ -20,7 +20,7 @@ npx electron .   # 运行构建产物
 npm run package      # 构建并打包成 Windows 安装包（release/*.exe）
 ```
 
-产物：`release/大神持笔 桌面版 Setup <version>.exe`（NSIS；亦可能见 `ai-writer Setup` 别名产物）。
+产物：`release/dscb-desktop-setup-<version>-x64.exe`（NSIS 安装包）。发布与自动更新流程见 [GitHub 自动更新发布](docs/GitHub自动更新发布.md)。
 
 ## 数据位置
 

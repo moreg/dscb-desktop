@@ -18,7 +18,7 @@
 ## 首次发布
 
 1. 将这次功能改动提交并推送到 GitHub。
-2. 确认 package.json 的版本号（目前为 0.1.0）。
+2. 确认 package.json 的版本号，标签必须与该版本一致。下面以 0.1.0 为例。
 3. 创建对应标签并推送，例如：
 
    ```powershell
@@ -45,15 +45,15 @@ Release 正文就是用户在应用里看到的更新内容，请在发布前按
 
 ## 后续发布
 
-先提高版本号，再提交并推送标签。例如发布 0.1.1：
+仅提交并推送代码不会发布新版；本地重新打包相同版本也不会让已安装客户端发现更新。每次发布都要提高版本号，再提交并推送标签。例如从 0.1.2 发布 0.1.3：
 
 ```powershell
-npm version 0.1.1 --no-git-tag-version
+npm version 0.1.3 --no-git-tag-version
 git add package.json package-lock.json
-git commit -m "chore: release 0.1.1"
+git commit -m "chore: release 0.1.3"
 git push origin HEAD
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 版本号必须与标签一致；同一个标签不要复用。工作流产物先作为草稿上传，最后人工发布，保证客户端看到的正式 Release 文件完整。
