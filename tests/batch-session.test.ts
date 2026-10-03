@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getBatchResumeChapter,
   parseSavedBatchSession,
   recoverBatchProgress,
   type SavedBatchSession
@@ -15,6 +16,26 @@ function session(): SavedBatchSession {
 }
 
 describe('批量任务断线恢复', () => {
+  it('自动润色阶段停止最后一章，继续入口仍重新生成该章', () => {
+    const progress = recoverBatchProgress(10, 11, [10], 'LLM_ABORTED')
+    progress.status = 'paused'
+    expect(getBatchResumeChapter(progress)).toBe(11)
+  })
+
+  it('中断章没有完成时不跳章，完成后才推进到下一章', () => {
+    const progress = recoverBatchProgress(10, 19, [10], 'LLM_ABORTED')
+    expect(getBatchResumeChapter(progress)).toBe(11)
+    progress.completed.push(11)
+    expect(getBatchResumeChapter(progress)).toBe(12)
+  })
+
+  it('最后一章待检查时复用正文，全批完成检查后没有后续生成章', () => {
+    const progress = recoverBatchProgress(10, 11, [10, 11], '检查中断', 11)
+    expect(getBatchResumeChapter(progress)).toBe(11)
+    progress.pendingPostProcessChapter = undefined
+    expect(getBatchResumeChapter(progress)).toBeNull()
+  })
+
   it('异常未返回 progress 时保留整批进度，从首个未保存章重试', () => {
     expect(recoverBatchProgress(10, 19, [11, 10, 11], '断线')).toMatchObject({
       fromChapter: 10, toChapter: 19, total: 10, currentChapter: 12,

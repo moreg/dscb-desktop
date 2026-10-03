@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  AutoDeslopResult,
   ChapterMeta,
   Character,
   ChapterStatus,
   BatchProgress,
   ChapterFlowResult,
+  ChapterGenerationStage,
   MemoryApplyResult,
   MemoryCandidateDetail,
   MemoryCandidateItem,
@@ -659,6 +661,7 @@ export interface BatchChapterSummary {
   strengthSuggestion?: ChapterStrengthSuggestion
   summaryReady: boolean
   words: number
+  autoDeslop?: AutoDeslopResult
   auditError: number
   auditWarn: number
   /** 细纲对照里的 P0 差异条数 */
@@ -741,6 +744,7 @@ export function summarizeChapterResult(
     ...(strengthSuggestion ? { strengthSuggestion } : {}),
     summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
+    autoDeslop: result.autoDeslop,
     auditError: deduped.filter((v) => v.severity === 'error').length,
     auditWarn: deduped.filter((v) => v.severity === 'warn').length,
     p0: result.outlineDiff.diffs.filter((d) => d.priority === 'P0').length,
@@ -787,6 +791,13 @@ export function describeSelfCheckCell(s: BatchChapterSummary): string {
   return '自检通过'
 }
 
+export function describeAutoDeslopCell(s: BatchChapterSummary): string {
+  if (!s.autoDeslop) return '本次未重新润色'
+  if (s.autoDeslop.status === 'applied') return '自动去 AI 味已完成'
+  if (s.autoDeslop.status === 'unchanged') return '去 AI 味无需修改'
+  return s.autoDeslop.message
+}
+
 /**
  * 记忆一栏文案：提取到多少 ≠ 写进去多少，必须分开报。
  * 「待确认新增」不算没写进去——那四类本来就等作者点确认，混进分数会让人以为丢了记忆。
@@ -811,6 +822,8 @@ export function describeMemoryCell(s: BatchChapterSummary): string {
  */
 export function hasChapterIssue(s: BatchChapterSummary): boolean {
   return (
+    s.autoDeslop?.status === 'failed' ||
+    s.autoDeslop?.status === 'review_required' ||
     s.auditError > 0 ||
     s.p0 > 0 ||
     (s.selfCheck?.fail ?? 0) > 0 ||
@@ -1266,6 +1279,14 @@ export interface SavedBatchSession {
   interruptedChapter?: number
 }
 
+/** 中断章未完成时重写该章；已完成章则继续下一章，待检查稿始终优先复用。 */
+export function getBatchResumeChapter(progress: BatchProgress): number | null {
+  const chapter = progress.pendingPostProcessChapter ?? (
+    progress.completed.includes(progress.currentChapter) ? progress.currentChapter + 1 : progress.currentChapter
+  )
+  return chapter <= progress.toChapter ? chapter : null
+}
+
 /** 恢复记录也按范围契约校验，过期/损坏的浏览器存储不能成为续写参数。 */
 export function parseSavedBatchSession(raw: string | null): SavedBatchSession | null {
   if (!raw) return null
@@ -1443,6 +1464,8 @@ function BatchWriteDialog({
   const [lastResult, setLastResult] = useState<ChapterFlowResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [streamingText, setStreamingText] = useState('')
+  const [generationStage, setGenerationStage] = useState<ChapterGenerationStage | null>(null)
+  const [liveAutoDeslop, setLiveAutoDeslop] = useState<AutoDeslopResult | null>(null)
   const { projectData, styleProfiles } = useProjectStyleData(projectId)
   const [styleProfileId, setStyleProfileId] = useState<string | null>(restoredSession?.styleProfileId ?? null)
   // 当前批量运行的 requestId：「⏹ 停止」按钮用它 abortStream 中断当前章生成
@@ -1473,16 +1496,19 @@ function BatchWriteDialog({
   )
   const isPaused = status === 'paused'
   const pendingPostProcessChapter = progress?.pendingPostProcessChapter
-  const canResume = progress !== null && isPaused && (
-    pendingPostProcessChapter !== undefined || progress.currentChapter < progress.toChapter
-  )
+  const resumeChapter = progress ? getBatchResumeChapter(progress) : null
+  const resumeRewritesCurrent = progress !== null && pendingPostProcessChapter === undefined &&
+    !progress.completed.includes(progress.currentChapter)
+  const canResume = progress !== null && isPaused && resumeChapter !== null
   const rangeLocked = running || progress !== null
 
   // 展示用进度：运行中取实时计数，停下来后取后端返回的整批进度
   const displayCompleted = running ? liveCompleted : progress?.completed ?? []
   const displayTotal = progress?.total ?? (rangeValid ? toChapter - fromChapter + 1 : 0)
   const displayChapter = running ? liveChapter : progress?.currentChapter ?? null
-  const displayStatus: BatchProgress['status'] = running ? 'generating' : status
+  const displayStatus: BatchProgress['status'] = running
+    ? generationStage === null ? 'flow' : 'generating'
+    : status
   // 运行中以本次锁定的区间为准，没在跑时才回落到输入框
   const runningTo = activeTo ?? toChapter
   const issueSummaries = summaries.filter(hasChapterIssue)
@@ -1492,6 +1518,9 @@ function BatchWriteDialog({
   const outlineFailedCount = summaries.filter((item) => item.outline === 'failed').length
   const heldBackTotal = summaries.reduce((n, item) => n + item.memory.heldBack.length, 0)
   const pendingEntitiesTotal = summaries.reduce((n, item) => n + item.memory.pending, 0)
+  const autoDeslopAttentionCount = summaries.filter((item) =>
+    item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required'
+  ).length
   const [adoptingChapter, setAdoptingChapter] = useState<number | null>(null)
   const [adoptingAll, setAdoptingAll] = useState(false)
 
@@ -1600,6 +1629,8 @@ function BatchWriteDialog({
     )
     // 这一章写完了，之前显示的「限流重试中」状态（如果有）已经不适用
     setRetryWait(null)
+    setGenerationStage(null)
+    setLiveAutoDeslop(null)
   }
 
   const runBatch = async (mode: 'start' | 'resume' | 'retry') => {
@@ -1621,11 +1652,11 @@ function BatchWriteDialog({
     const previous = mode === 'start' ? null : progress
     const pendingChapter = previous?.pendingPostProcessChapter
     const runFrom = previous
-      ? pendingChapter ?? (mode === 'resume' ? previous.currentChapter + 1 : previous.currentChapter)
+      ? mode === 'resume' ? getBatchResumeChapter(previous) : pendingChapter ?? previous.currentChapter
       : fromChapter
     const rangeFrom = previous?.fromChapter ?? fromChapter
     const rangeTo = previous?.toChapter ?? toChapter
-    if (runFrom > rangeTo) return
+    if (runFrom === null || runFrom > rangeTo) return
     const completed = [...(previous?.completed ?? [])]
     let lastReportedChapter: number | undefined
     const requestId = crypto.randomUUID()
@@ -1639,6 +1670,8 @@ function BatchWriteDialog({
     setStopping(false)
     setError(null)
     setStreamingText('')
+    setGenerationStage('generating')
+    setLiveAutoDeslop(null)
     setRetryWait(null)
     setLiveCompleted(completed)
     setLiveChapter(runFrom)
@@ -1699,6 +1732,22 @@ function BatchWriteDialog({
           setStreamingText('')
           setLiveChapter(chapter)
           handleRetryWait(chapter, attempt, maxAttempts, waitMs)
+        },
+        (stage, chapterNumber) => {
+          if (batchRequestIdRef.current !== requestId) return
+          setGenerationStage(stage)
+          setLiveChapter(chapterNumber)
+          setRetryWait(null)
+          if (stage === 'generating') {
+            setStreamingText('')
+            setLiveAutoDeslop(null)
+          }
+        },
+        (result, chapterNumber) => {
+          if (batchRequestIdRef.current !== requestId) return
+          setGenerationStage(null)
+          setLiveChapter(chapterNumber)
+          setLiveAutoDeslop(result)
         }
       )
       if (batchRequestIdRef.current !== requestId) return
@@ -1718,6 +1767,8 @@ function BatchWriteDialog({
         setStopping(false)
         setStreamingText('')
         setRetryWait(null)
+        setGenerationStage(null)
+        setLiveAutoDeslop(null)
         batchRequestIdRef.current = null
         onChapterCompleted()
       }
@@ -1964,7 +2015,13 @@ function BatchWriteDialog({
         {progress || running ? (
           <div className="batch-progress">
             <div className="batch-progress-head">
-              <span className={`chip status-${displayStatus}`}>{statusLabel[displayStatus]}</span>
+              <span className={`chip status-${displayStatus}`}>
+                {running && generationStage === 'deslop'
+                  ? '自动去 AI 味中'
+                  : running && generationStage === null
+                    ? '写后检查中'
+                    : statusLabel[displayStatus]}
+              </span>
               <span className="batch-progress-count">
                 {displayCompleted.length} / {displayTotal} 章已保存
               </span>
@@ -2006,6 +2063,11 @@ function BatchWriteDialog({
                 })() : null}
               </div>
             ) : null}
+            {running && liveAutoDeslop ? (
+              <div className={liveAutoDeslop.status === 'failed' || liveAutoDeslop.status === 'review_required' ? 'batch-progress-reason' : 'meta'} role="status">
+                {liveAutoDeslop.message}
+              </div>
+            ) : null}
             {running && retryWait ? (
               <div className="batch-progress-reason">
                 第 {retryWait.chapter} 章遇到限流（LLM_RATE_LIMIT），
@@ -2037,7 +2099,11 @@ function BatchWriteDialog({
 
         {streamingText ? (
           <div className="batch-streaming" ref={streamingBoxRef}>
-            <div className="batch-streaming-head">正在生成…</div>
+            <div className="batch-streaming-head">
+              {generationStage === 'deslop'
+                ? '正文已生成，正在自动去 AI 味…'
+                : generationStage === null ? '正文预览，正在写后检查…' : '正在生成…'}
+            </div>
             <pre className="batch-streaming-text">{streamingText}</pre>
           </div>
         ) : null}
@@ -2050,6 +2116,9 @@ function BatchWriteDialog({
             <ul className="batch-last-result-list">
               <li>
                 字数：{lastResult.content.length}
+              </li>
+              <li className={lastSummary?.autoDeslop?.status === 'failed' || lastSummary?.autoDeslop?.status === 'review_required' ? 'batch-last-result-warn' : undefined}>
+                {lastSummary ? describeAutoDeslopCell(lastSummary) : ''}
               </li>
               <li>
                 质检：
@@ -2111,11 +2180,12 @@ function BatchWriteDialog({
                   : '未发现需返工的问题，检查执行情况见下方'}
               </span>
             </div>
-            {noOutlineCount > 0 || outlineFailedCount > 0 || heldBackTotal > 0 || pendingEntitiesTotal > 0 ? (
+            {noOutlineCount > 0 || outlineFailedCount > 0 || heldBackTotal > 0 || pendingEntitiesTotal > 0 || autoDeslopAttentionCount > 0 ? (
               <div className="batch-chapter-summary-note" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                 {[
                   noOutlineCount > 0 ? `${noOutlineCount} 章没有细纲可对照（自由发挥）` : '',
                   outlineFailedCount > 0 ? `${outlineFailedCount} 章细纲对照没跑成` : '',
+                  autoDeslopAttentionCount > 0 ? `${autoDeslopAttentionCount} 章自动去 AI 味需处理，已保留生成原稿` : '',
                   heldBackTotal > 0 ? `共 ${heldBackTotal} 条记忆证据不足未写入` : '',
                   pendingEntitiesTotal > 0 ? `共 ${pendingEntitiesTotal} 项新实体待确认` : ''
                 ]
@@ -2178,6 +2248,9 @@ function BatchWriteDialog({
                       ) : null}
                     </span>
                     <span>{item.words} 字</span>
+                    <span title={item.autoDeslop?.message} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
+                      {describeAutoDeslopCell(item)}
+                    </span>
                    <span>{item.summaryReady ? '概要已生成' : '概要待补'}</span>
                   <span>
                     {item.auditError > 0
@@ -2267,8 +2340,10 @@ function BatchWriteDialog({
               title={
                 pendingPostProcessChapter !== undefined
                   ? `保留第 ${pendingPostProcessChapter} 章正文，重新执行检查和同步流程`
+                  : resumeRewritesCurrent
+                  ? `继续将重新生成第 ${resumeChapter} 章并自动去 AI 味`
                   : autoContinue
-                  ? `从第 ${(progress?.currentChapter ?? 0) + 1} 章继续写到第 ${progress?.toChapter ?? ''} 章，重要问题时暂停`
+                  ? `从第 ${resumeChapter} 章继续写到第 ${progress?.toChapter ?? ''} 章，重要问题时暂停`
                   : '生成下一章后再次暂停'
               }
             >
@@ -2276,6 +2351,8 @@ function BatchWriteDialog({
                 ? '生成中…'
                 : pendingPostProcessChapter !== undefined
                   ? `重试第 ${pendingPostProcessChapter} 章检查`
+                  : resumeRewritesCurrent
+                  ? `重新生成第 ${resumeChapter} 章`
                   : autoContinue
                   ? `继续写到第 ${progress?.toChapter ?? ''} 章`
                   : '继续下一章'}

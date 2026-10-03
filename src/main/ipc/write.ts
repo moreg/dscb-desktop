@@ -3,6 +3,7 @@ import { WriteService } from '../data/write-service'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import { safeHandle, safeSend } from './safe-handle'
 import type {
+  AutoDeslopResult,
   MemoryApplyResult,
   MemoryExtraction,
   RhythmEvaluation,
@@ -128,7 +129,8 @@ export function registerWriteIpc(service: WriteService): void {
           let wordBudget:
             | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
             | undefined
-          await service.generateChapterStream(
+          let autoDeslop: AutoDeslopResult | undefined
+          const content = await service.generateChapterStream(
             validated.projectId,
             validated.chapterNumber,
             validated.styleProfileId,
@@ -136,6 +138,12 @@ export function registerWriteIpc(service: WriteService): void {
               tempContext: validated.tempContext,
               existingText: validated.existingText,
               signal,
+              onGenerationStage: (stage) =>
+                safeSend(win, 'write:generationStage', {
+                  requestId: validated.requestId,
+                  stage
+                }),
+              onAutoDeslopResult: (result) => { autoDeslop = result },
               onPromptMeta: (meta) => {
                 continueMode = meta.continueMode
                 wordBudget = {
@@ -155,7 +163,7 @@ export function registerWriteIpc(service: WriteService): void {
             }
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, continueMode, wordBudget }
+          return { ok: true, content, autoDeslop, continueMode, wordBudget }
         } finally {
           endStream(validated.requestId)
         }
@@ -251,7 +259,8 @@ export function registerWriteIpc(service: WriteService): void {
         )
         const signal = beginStream(validated.requestId)
         try {
-          await service.adjustChapterStream(
+          let autoDeslop: AutoDeslopResult | undefined
+          const content = await service.adjustChapterStream(
             validated.projectId,
             validated.chapterNumber,
             validated.content,
@@ -259,6 +268,12 @@ export function registerWriteIpc(service: WriteService): void {
             validated.styleProfileId,
             {
               signal,
+              onGenerationStage: (stage) =>
+                safeSend(win, 'write:generationStage', {
+                  requestId: validated.requestId,
+                  stage
+                }),
+              onAutoDeslopResult: (result) => { autoDeslop = result },
               onToken: (token) =>
                 safeSend(win, 'llm:token', {
                   requestId: validated.requestId,
@@ -269,7 +284,7 @@ export function registerWriteIpc(service: WriteService): void {
             validated.confirmedPlan
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true }
+          return { ok: true, content, autoDeslop }
         } finally {
           endStream(validated.requestId)
         }
@@ -937,6 +952,18 @@ export function registerWriteIpc(service: WriteService): void {
               validated.styleProfileId,
               {
                 signal,
+                onGenerationStage: (stage, chapterNumber) =>
+                  safeSend(win, 'write:batchGenerationStage', {
+                    requestId: validated.requestId,
+                    stage,
+                    chapterNumber
+                  }),
+                onAutoDeslopResult: (result, chapterNumber) =>
+                  safeSend(win, 'write:batchAutoDeslopResult', {
+                    requestId: validated.requestId,
+                    result,
+                    chapterNumber
+                  }),
                 onToken: (token) =>
                   safeSend(win, 'llm:token', {
                     requestId: validated.requestId,

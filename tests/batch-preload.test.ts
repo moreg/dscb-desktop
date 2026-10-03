@@ -41,12 +41,16 @@ describe('批量 preload 的请求隔离与事件生命周期', () => {
     const firstChapter = vi.fn()
     const firstToken = vi.fn()
     const firstRetry = vi.fn()
+    const firstStage = vi.fn()
+    const firstDeslop = vi.fn()
     const secondChapter = vi.fn()
     const secondToken = vi.fn()
     const secondRetry = vi.fn()
+    const secondStage = vi.fn()
+    const secondDeslop = vi.fn()
     const state = { fromChapter: 1, total: 10, completed: [1], pendingPostProcessChapter: 1 }
-    const first = api[method]('project-1', 1, 10, 'style-1', firstChapter, firstToken, 'batch-a', state, true, true, firstRetry)
-    const second = api[method]('project-2', 1, 10, null, secondChapter, secondToken, 'batch-b', undefined, false, false, secondRetry)
+    const first = api[method]('project-1', 1, 10, 'style-1', firstChapter, firstToken, 'batch-a', state, true, true, firstRetry, firstStage, firstDeslop)
+    const second = api[method]('project-2', 1, 10, null, secondChapter, secondToken, 'batch-b', undefined, false, false, secondRetry, secondStage, secondDeslop)
     expect(invoke.mock.calls[0]).toEqual([`write:${method}`, {
       projectId: 'project-1', fromChapter: 1, toChapter: 10, styleProfileId: 'style-1',
       requestId: 'batch-a', batchState: state, autoContinue: true, autoStrength: true
@@ -55,17 +59,23 @@ describe('批量 preload 的请求隔离与事件生命周期', () => {
       emit('write:batchChapterComplete', { requestId, chapter: 1, result: { chapterNumber: 1 } })
       emit('llm:token', { requestId, token: '正文', done: false })
       emit('write:batchRetryWait', { requestId, chapter: 2, attempt: 1, maxAttempts: 3, waitMs: 30_000 })
+      emit('write:batchGenerationStage', { requestId, chapterNumber: 1, stage: 'deslop' })
+      emit('write:batchAutoDeslopResult', { requestId, chapterNumber: 1, result: { status: 'applied', message: '已精修', remainingIssues: 0 } })
     }
     expect(firstChapter.mock.calls).toEqual([[1, { chapterNumber: 1 }]])
     expect(firstToken.mock.calls).toEqual([['正文', false]])
     expect(firstRetry.mock.calls).toEqual([[2, 1, 3, 30_000]])
+    expect(firstStage.mock.calls).toEqual([['deslop', 1]])
+    expect(firstDeslop.mock.calls).toEqual([[{ status: 'applied', message: '已精修', remainingIssues: 0 }, 1]])
     expect(secondChapter).not.toHaveBeenCalled()
     expect(secondToken).not.toHaveBeenCalled()
     expect(secondRetry).not.toHaveBeenCalled()
+    expect(secondStage).not.toHaveBeenCalled()
+    expect(secondDeslop).not.toHaveBeenCalled()
 
     finishFirst({ ok: true })
     await first
-    for (const channel of ['write:batchChapterComplete', 'llm:token', 'write:batchRetryWait']) {
+    for (const channel of ['write:batchChapterComplete', 'llm:token', 'write:batchRetryWait', 'write:batchGenerationStage', 'write:batchAutoDeslopResult']) {
       expect(listeners.get(channel)?.size).toBe(1)
     }
     emit('llm:token', { requestId: 'batch-a', token: '过期事件', done: true })
@@ -75,7 +85,7 @@ describe('批量 preload 的请求隔离与事件生命周期', () => {
     const rejection = expect(second).rejects.toThrow('IPC 通信失败')
     failSecond(new Error('IPC 通信失败'))
     await rejection
-    for (const channel of ['write:batchChapterComplete', 'llm:token', 'write:batchRetryWait']) {
+    for (const channel of ['write:batchChapterComplete', 'llm:token', 'write:batchRetryWait', 'write:batchGenerationStage', 'write:batchAutoDeslopResult']) {
       expect(listeners.get(channel)?.size).toBe(0)
     }
   })

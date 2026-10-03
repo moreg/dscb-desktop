@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AppUpdateState } from '../shared/app-update'
 import type {
+  AutoDeslopResult,
   DiagnosticFixKind,
   ListProjectsQuery,
   CreateProjectDataInput,
@@ -24,6 +25,8 @@ import type {
   ProviderConfig,
   RhythmEvaluation,
   ChapterFlowResult,
+  ChapterGenerationStage,
+  ChapterStreamResult,
   FeatureCategory,
   FeatureRoutingEntry,
   CreateStyleProfileInput,
@@ -311,7 +314,8 @@ const api = {
     styleProfileId: string | null | undefined,
     tempContext: string | undefined,
     existingText: string | undefined,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage) => void
   ) => {
     const requestId = crypto.randomUUID()
     const handler = (
@@ -320,7 +324,14 @@ const api = {
     ) => {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
+    const stageHandler = (
+      _e: unknown,
+      payload: { requestId: string; stage: ChapterGenerationStage }
+    ) => {
+      if (payload.requestId === requestId) onGenerationStage?.(payload.stage)
+    }
     ipcRenderer.on('llm:token', handler as never)
+    if (onGenerationStage) ipcRenderer.on('write:generationStage', stageHandler as never)
     const result = ipcRenderer
       .invoke('write:generateChapter', {
         projectId,
@@ -330,20 +341,10 @@ const api = {
         existingText,
         requestId
       })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
-      ok: boolean
-      error?: string
-      /** 本次是否为续写、以及续写到哪一步；extend 表示这一章还没写完 */
-      continueMode?: 'extend' | 'finish'
-      /** 本次实际下发的字数口径（本次目标 / 整章目标 / 已写），供编辑器提示 */
-      wordBudget?: {
-        targetWords: number
-        chapterTargetWords: number
-        writtenWords: number
-        fromOutline: boolean
-        bound?: 'min' | 'about'
-      }
-    }>
+      .finally(() => {
+        ipcRenderer.removeListener('llm:token', handler as never)
+        if (onGenerationStage) ipcRenderer.removeListener('write:generationStage', stageHandler as never)
+      }) as Promise<ChapterStreamResult>
     return makeStreamHandle(result, requestId)
   },
   planAdjustChapterStream: (
@@ -384,7 +385,8 @@ const api = {
     instruction: string,
     styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void,
-    confirmedPlan?: string | null
+    confirmedPlan?: string | null,
+    onGenerationStage?: (stage: ChapterGenerationStage) => void
   ) => {
     const requestId = crypto.randomUUID()
     const handler = (
@@ -393,7 +395,14 @@ const api = {
     ) => {
       if (payload.requestId === requestId) onToken(payload.token, payload.done)
     }
+    const stageHandler = (
+      _e: unknown,
+      payload: { requestId: string; stage: ChapterGenerationStage }
+    ) => {
+      if (payload.requestId === requestId) onGenerationStage?.(payload.stage)
+    }
     ipcRenderer.on('llm:token', handler as never)
+    if (onGenerationStage) ipcRenderer.on('write:generationStage', stageHandler as never)
     const result = ipcRenderer
       .invoke('write:adjustChapter', {
         projectId,
@@ -404,10 +413,10 @@ const api = {
         styleProfileId,
         requestId
       })
-      .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
-      ok: boolean
-      error?: string
-    }>
+      .finally(() => {
+        ipcRenderer.removeListener('llm:token', handler as never)
+        if (onGenerationStage) ipcRenderer.removeListener('write:generationStage', stageHandler as never)
+      }) as Promise<ChapterStreamResult>
     return makeStreamHandle(result, requestId)
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
@@ -725,7 +734,9 @@ const api = {
     /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
-    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -752,9 +763,23 @@ const api = {
         onRetryWait(payload.chapter, payload.attempt, payload.maxAttempts, payload.waitMs)
       }
     }
+    const stageHandler = (
+      _e: unknown,
+      payload: { requestId: string; stage: ChapterGenerationStage; chapterNumber: number }
+    ) => {
+      if (payload.requestId === requestId) onGenerationStage?.(payload.stage, payload.chapterNumber)
+    }
+    const autoDeslopHandler = (
+      _e: unknown,
+      payload: { requestId: string; result: AutoDeslopResult; chapterNumber: number }
+    ) => {
+      if (payload.requestId === requestId) onAutoDeslopResult?.(payload.result, payload.chapterNumber)
+    }
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
     if (onRetryWait) ipcRenderer.on('write:batchRetryWait', retryWaitHandler as never)
+    if (onGenerationStage) ipcRenderer.on('write:batchGenerationStage', stageHandler as never)
+    if (onAutoDeslopResult) ipcRenderer.on('write:batchAutoDeslopResult', autoDeslopHandler as never)
     return ipcRenderer
       .invoke('write:generateBatch', {
         projectId,
@@ -770,6 +795,8 @@ const api = {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
         if (onRetryWait) ipcRenderer.removeListener('write:batchRetryWait', retryWaitHandler as never)
+        if (onGenerationStage) ipcRenderer.removeListener('write:batchGenerationStage', stageHandler as never)
+        if (onAutoDeslopResult) ipcRenderer.removeListener('write:batchAutoDeslopResult', autoDeslopHandler as never)
       })
   },
   resumeBatch: (
@@ -787,7 +814,9 @@ const api = {
     /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
-    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   ) => {
     const requestId = externalRequestId ?? crypto.randomUUID()
     const chapterHandler = (
@@ -814,9 +843,23 @@ const api = {
         onRetryWait(payload.chapter, payload.attempt, payload.maxAttempts, payload.waitMs)
       }
     }
+    const stageHandler = (
+      _e: unknown,
+      payload: { requestId: string; stage: ChapterGenerationStage; chapterNumber: number }
+    ) => {
+      if (payload.requestId === requestId) onGenerationStage?.(payload.stage, payload.chapterNumber)
+    }
+    const autoDeslopHandler = (
+      _e: unknown,
+      payload: { requestId: string; result: AutoDeslopResult; chapterNumber: number }
+    ) => {
+      if (payload.requestId === requestId) onAutoDeslopResult?.(payload.result, payload.chapterNumber)
+    }
     ipcRenderer.on('write:batchChapterComplete', chapterHandler as never)
     if (onToken) ipcRenderer.on('llm:token', tokenHandler as never)
     if (onRetryWait) ipcRenderer.on('write:batchRetryWait', retryWaitHandler as never)
+    if (onGenerationStage) ipcRenderer.on('write:batchGenerationStage', stageHandler as never)
+    if (onAutoDeslopResult) ipcRenderer.on('write:batchAutoDeslopResult', autoDeslopHandler as never)
     return ipcRenderer
       .invoke('write:resumeBatch', {
         projectId,
@@ -832,6 +875,8 @@ const api = {
         ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
         if (onToken) ipcRenderer.removeListener('llm:token', tokenHandler as never)
         if (onRetryWait) ipcRenderer.removeListener('write:batchRetryWait', retryWaitHandler as never)
+        if (onGenerationStage) ipcRenderer.removeListener('write:batchGenerationStage', stageHandler as never)
+        if (onAutoDeslopResult) ipcRenderer.removeListener('write:batchAutoDeslopResult', autoDeslopHandler as never)
       })
   },
   listMemoryCandidates: (projectId: string) =>

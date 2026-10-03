@@ -1,4 +1,5 @@
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
+import { finalizeChapterRewrite } from './chapter-generation-finalize'
 import {
   useEffect,
   useLayoutEffect,
@@ -12,8 +13,10 @@ import {
 } from 'react'
 import type {
   AdjustPlanComplianceResult,
+  AutoDeslopResult,
   AuditReport,
   ChapterContent,
+  ChapterGenerationStage,
   ChapterStatus,
   ChapterVersion,
   Character,
@@ -461,6 +464,9 @@ export default function ChapterEditor({
   const [saving, setSaving] = useState(false)
 
   const [generating, setGenerating] = useState(false)
+  const [generationStage, setGenerationStage] = useState<ChapterGenerationStage | null>(null)
+  const [autoDeslopResult, setAutoDeslopResult] = useState<AutoDeslopResult | null>(null)
+  const [autoDeslopSnapshot, setAutoDeslopSnapshot] = useState<string | null>(null)
   /** 正文生成（chapter 路由）实际使用的 provider，供续写前显示/调整强度与模型。 */
   const [chapterProvider, setChapterProvider] = useState<ProviderSummary | null>(null)
   const [allProviders, setAllProviders] = useState<ProviderSummary[]>([])
@@ -1177,6 +1183,9 @@ export default function ChapterEditor({
     streamCompletedRef.current = false
     ++genRef.current
     setGenerating(false)
+    setGenerationStage(null)
+    setAutoDeslopResult(null)
+    setAutoDeslopSnapshot(null)
     setAdjusting(false)
     // 切章时关掉「按要求重写」对话框并作废进行中的建议生成
     ++adjustPlanRef.current
@@ -1899,6 +1908,9 @@ export default function ChapterEditor({
     setGenerating(false)
     setAdjusting(false)
     setAdjustPlanning(false)
+    setGenerationStage(null)
+    setAutoDeslopResult(null)
+    setAutoDeslopSnapshot(null)
     streamBusyRef.current = false
     streamCompletedRef.current = false
     preStreamDraftRef.current = null
@@ -1939,6 +1951,9 @@ export default function ChapterEditor({
     streamBusyRef.current = true
     streamCompletedRef.current = false
     setGenerating(true)
+    setGenerationStage('generating')
+    setAutoDeslopResult(null)
+    setAutoDeslopSnapshot(null)
     userAbortedRef.current = false
     const initialDraft = draft
     preStreamDraftRef.current = initialDraft
@@ -1979,6 +1994,7 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       streamBusyRef.current = false
       setGenerating(false)
+      setGenerationStage(null)
       if (requestId) untrackStreamRequest(requestId)
       preStreamDraftRef.current = null
     }
@@ -1989,30 +2005,16 @@ export default function ChapterEditor({
         requestedStyleProfileId,
         tempContextVal,
         initialDraft,
-        (token, done) => {
-          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+        (token) => {
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
           if (token) {
             finalDraft += token
-            // 终态后忽略迟到 token，避免冲掉 await 路径的格式化结果
-            if (!editorFinalized) {
-              setDraft(joinContinuation(initialDraft, finalDraft), { preserveCaret: false })
-            }
+            setDraft(joinContinuation(initialDraft, finalDraft), { preserveCaret: false })
           }
-          if (done) {
-            // done 可能晚于 / 早于 invoke resolve；只做轻量收尾，完整状态以 await 后为准
-            streamCompletedRef.current = true
-            releaseIfMine()
-            refreshUsage() // P10-A：续写完成更新今日用量
-            const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
-            if (receipt) {
-              // 仅在 await 尚未终态化时写草稿；终态由 await 统一 strip + 格式化
-              if (!editorFinalized) {
-                setDraft(joinContinuation(initialDraft, stripped), { preserveCaret: false })
-              }
-              // 模型自报“已回收”不是正文证据；交给下方统一写后记忆提取，
-              // 避免在审稿与正文同步之前凭回执直接修改全书伏笔状态。
-            }
-          }
+        },
+        (stage) => {
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
+          setGenerationStage(stage)
         }
       )
       requestId = stream.requestId
@@ -2025,6 +2027,7 @@ export default function ChapterEditor({
       }
       const result = await stream
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      editorFinalized = true
       if (!result.ok) {
         // 流式过程中可能已写入错误旁白（如 agent 流程说明），失败时回滚到续写前
         setDraft(initialDraft)
@@ -2037,18 +2040,21 @@ export default function ChapterEditor({
       // 关键：即使 done 事件尚未到达 / 丢失，也必须结束 generating，否则会永久停在「停止生成」
       streamCompletedRef.current = true
       releaseIfMine()
+      refreshUsage()
       // extend：本章仍是分轮续写的半成品，写后自检的完成度项据此降级（见 lastContinueMode）
       setLastContinueMode(result.continueMode ?? null)
-      // 标记终态：此后 stream 回调不得再 setDraft
-      editorFinalized = true
       // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
-        const { receipt, stripped } = parseForeshadowReceipt(finalDraft)
-        const fullContent = joinContinuation(initialDraft, receipt ? stripped : finalDraft)
+        // token 只作预览；最终回包含自动精修结果，必须以它交稿和同步记忆。
+        const finalContent = result.content ?? finalDraft
+        const { receipt, stripped } = parseForeshadowReceipt(finalContent)
+        const fullContent = joinContinuation(initialDraft, receipt ? stripped : finalContent)
         const formatted = formatDraftProse(fullContent, {
           silent: true,
           recordHistory: true
         })
+        setAutoDeslopResult(result.autoDeslop ?? null)
+        setAutoDeslopSnapshot(result.autoDeslop ? formatted : null)
         setDirty(true)
         // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
         // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
@@ -2264,6 +2270,9 @@ export default function ChapterEditor({
     setShowAdjustDialog(false)
     setAdjustPlanning(false)
     setAdjusting(true)
+    setGenerationStage('generating')
+    setAutoDeslopResult(null)
+    setAutoDeslopSnapshot(null)
     userAbortedRef.current = false
     setFlowPanelOpen(false)
     setAutoAudit(null)
@@ -2291,6 +2300,7 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       streamBusyRef.current = false
       setAdjusting(false)
+      setGenerationStage(null)
       if (requestId) untrackStreamRequest(requestId)
       preStreamDraftRef.current = null
     }
@@ -2301,21 +2311,18 @@ export default function ChapterEditor({
         sourceDraft,
         instruction,
         requestedStyleProfileId,
-        (token, done) => {
-          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+        (token) => {
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
           if (token) {
             revised += token
-            if (!editorFinalized) {
-              setDraft(revised, { preserveCaret: false })
-            }
-          }
-          if (done) {
-            streamCompletedRef.current = true
-            releaseIfMine()
-            refreshUsage()
+            setDraft(revised, { preserveCaret: false })
           }
         },
-        confirmedPlan || null
+        confirmedPlan || null,
+        (stage) => {
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
+          setGenerationStage(stage)
+        }
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -2326,6 +2333,7 @@ export default function ChapterEditor({
       }
       const result = await stream
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+      editorFinalized = true
       if (!result.ok) {
         setDraft(sourceDraft)
         releaseIfMine()
@@ -2337,13 +2345,16 @@ export default function ChapterEditor({
       // 与续写相同：invoke 回包到达即结束 adjusting，不依赖 done 事件顺序
       streamCompletedRef.current = true
       releaseIfMine()
-      editorFinalized = true
+      refreshUsage()
       // 重写完成后自动格式化（去空格/空行，保留换行），再压撤销栈 / 复检
-      const rawFinal = revised || ''
-      const finalText = formatChapterProse(rawFinal)
+      const rawFinal = result.content ?? revised
+      const finalText = finalizeChapterRewrite(rawFinal, (text) =>
+        setDraft(text, { preserveCaret: false })
+      )
+      setAutoDeslopResult(result.autoDeslop ?? null)
+      setAutoDeslopSnapshot(result.autoDeslop ? finalText : null)
       const didFormat = finalText !== rawFinal
       if (finalText && finalText !== sourceDraft) {
-        setDraft(finalText, { preserveCaret: false })
         pushRewrite(sourceDraft, finalText, ADJUST_REWRITE_KEY)
         setUndoToast({
           message: didFormat
@@ -2353,7 +2364,6 @@ export default function ChapterEditor({
         })
       } else if (didFormat) {
         // 与源稿等价但仅空白不同：仍写入紧凑稿
-        setDraft(finalText, { preserveCaret: false })
         setUndoToast({
           message: '重写完成并已格式化，正在自动复检…',
           type: 'info'
@@ -4700,7 +4710,7 @@ export default function ChapterEditor({
             onClick={cancelActiveStream}
             title="停止当前 AI 生成，并恢复开始前的正文"
           >
-            ⏹ 停止生成
+            {generationStage === 'deslop' ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
           <button
@@ -4771,6 +4781,24 @@ export default function ChapterEditor({
           ) : null}
         </div>
       </div>
+
+      {generationStage === 'deslop' && (generating || adjusting) ? (
+        <div className="meta" role="status" style={{ marginBottom: 8 }}>
+          正文已生成，正在自动去 AI 味…
+        </div>
+      ) : autoDeslopResult && autoDeslopSnapshot === draft ? (
+        <div
+          className="meta"
+          role="status"
+          style={{ marginBottom: 8, color: autoDeslopResult.status === 'failed' || autoDeslopResult.status === 'review_required' ? 'var(--warn)' : undefined }}
+        >
+          {autoDeslopResult.status === 'applied'
+            ? '自动去 AI 味已完成'
+            : autoDeslopResult.status === 'unchanged'
+              ? '自动去 AI 味已完成，无需修改'
+              : autoDeslopResult.message}
+        </div>
+      ) : null}
 
       {/* 番茄钟 + 写作进度 */}
       <div

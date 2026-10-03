@@ -68,6 +68,7 @@ import { formatChapterProse } from '../../shared/format-chapter-prose'
 import { CHAPTER_INDEX_NOT_PROSE } from '../../shared/strip-chapter-meta'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
 import { DeslopService, hasRealChange } from './deslop/deslop-service'
+import { autoDeslopProse } from './auto-deslop'
 import {
   resolveDeslopTextOverrides,
   resolveDeslopBannedWords
@@ -75,7 +76,9 @@ import {
 import type {
   AuditReport,
   AuditViolation,
+  AutoDeslopResult,
   BatchProgress,
+  ChapterGenerationStage,
   ChapterFlowResult,
   ChapterSummaryFact,
   ChapterSummaryView,
@@ -149,7 +152,7 @@ export interface BatchState {
   pendingPostProcessChapter?: number
 }
 
-interface ChapterFlowOptions extends GenerateOptions {
+interface ChapterFlowOptions extends ChapterGenerateOptions {
   /** 批量模式先保存正文，再运行会改变记忆/细纲的后处理。 */
   onContentGenerated?: (content: string) => Promise<void>
   /** 恢复已保存章节的后处理，不能再次生成或覆盖正文。 */
@@ -209,13 +212,22 @@ export function needsDownstreamOutlineAdjustment(diff: OutlineDiffItem): boolean
 /**
  * 章节正文生成选项。
  *
- * 比 LlmService 的 GenerateOptions 多一个 onPromptMeta：prompt 组装阶段才知道的信息
+ * 额外回调返回生成阶段、精修结论、恢复检查点和 prompt 组装阶段才知道的信息
  * （本次是不是续写、续写到哪一步、本次目标字数）要回传给调用方，而 generateChapterStream
  * 的返回值是正文字符串、被批量流程依赖，不能改成对象。
- * onPromptMeta 在下发给 LlmService 前会被剔除，不进 provider 层。
+ * 这些编排回调在下发给 LlmService 前被剔除，不进 provider 层。
  */
 export interface ChapterGenerateOptions extends GenerateOptions {
   onPromptMeta?: (meta: ChapterPromptMeta) => void
+  onGenerationStage?: (stage: ChapterGenerationStage) => void
+  onAutoDeslopResult?: (result: AutoDeslopResult) => void
+  /** 完整生成稿的恢复检查点；在自动润色前通知批量调用方。 */
+  onProseGenerated?: (content: string) => void
+}
+
+export interface BatchGenerateOptions extends GenerateOptions {
+  onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void
+  onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
 }
 
 /** prompt 组装阶段才知道的字数口径，回传给前端做「目标 / 实际 / 还差」提示 */
@@ -327,7 +339,7 @@ export class WriteService {
     private readonly chapterService: ChapterService = new ChapterService(projectService),
     private readonly settings?: SettingsRepository,
     private readonly benchmarkResolver?: import('./teardown/benchmark-resolver').BenchmarkResolver,
-    /** 去 AI 味服务（供 humanizeSegment 走 deslop pipeline）；缺省时按旧路径降级 */
+    /** 正文生成后自动轻度润色，与手动去 AI 味共用服务。 */
     private readonly deslopService?: DeslopService
   ) {}
 
@@ -558,6 +570,7 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    throwIfAborted(opts.signal)
     this.invalidateChapterMemorySync(projectId, chapterNumber)
     await this.memoryCoordinator.exclusive(projectId, async () => undefined)
     const prompt = await this.buildChapterPrompt(
@@ -570,7 +583,7 @@ export class WriteService {
     const targetWords = prompt.targetWords ?? TARGET_WORDS
     // 让调用方（IPC → 前端）知道本次是不是「还没写完的续写」：
     // extend 下整章是半成品，写后自检的完成度类项不该按整章判死。
-    const { onPromptMeta, ...llmOpts } = opts as ChapterGenerateOptions
+    const { onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, ...llmOpts } = opts as ChapterGenerateOptions
     onPromptMeta?.({
       continueMode: prompt.continueMode,
       targetWords,
@@ -579,6 +592,7 @@ export class WriteService {
       fromOutline: prompt.wordTarget.fromOutline,
       bound: prompt.wordTarget.bound
     })
+    onGenerationStage?.('generating')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
       systemPrompt: prompt.system,
@@ -587,12 +601,60 @@ export class WriteService {
     }, opts.existingText)
     // 批量/手机端拿返回值，编辑器拿流式token；两条路径都只保留正文。
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
+    await this.validateGeneratedProse(projectId, chapterNumber, prose, opts.existingText)
+    onProseGenerated?.(prose)
+    return this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
+      signal: opts.signal, existingText: opts.existingText,
+      isTail: prompt.continueMode !== 'extend', onGenerationStage, onAutoDeslopResult
+    })
+  }
+
+  private async validateGeneratedProse(projectId: string, chapterNumber: number, prose: string, existingText?: string): Promise<void> {
+    assertNovelProse(prose, existingText)
     const dir = await this.projectService.resolveDir(projectId)
     const previousPassages = await new ProseMemoryIndex(dir).searchBefore(chapterNumber,
       prose, { maxChars: 4800, maxResults: 8 })
-    // 高置信大段复用也检查跨章；短对白、必要呼应由守卫豁免。
     if (previousPassages.length) assertNovelProse(prose, previousPassages.map((p) => p.text).join('\n\n'))
-    return prose
+  }
+
+  private async autoDeslopGeneratedProse(
+    projectId: string, chapterNumber: number, prose: string, styleProfileId: string | null,
+    opts: Pick<ChapterGenerateOptions, 'signal' | 'existingText' | 'onGenerationStage' | 'onAutoDeslopResult'> & { isTail: boolean }
+  ): Promise<string> {
+    throwIfAborted(opts.signal)
+    if (!this.deslopService || !prose.trim()) {
+      opts.onAutoDeslopResult?.({ status: prose.trim() ? 'failed' : 'unchanged',
+        message: prose.trim() ? '自动去 AI 味服务未启用，已保留生成稿。' : '本次没有新增正文，无需润色。', remainingIssues: 0 })
+      return prose
+    }
+    opts.onGenerationStage?.('deslop')
+    let result: { content: string; report: AutoDeslopResult }
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+      const project = await this.projectService.getProjectData(projectId)
+      const style = await this.loadStyleProfile(dir, styleProfileId ?? project.defaultStyleProfileId ?? null)
+      const [rules, whitelist] = await Promise.all([
+        this.resolveDeslopRules(), this.resolveDeslopWhitelist(projectId)
+      ])
+      result = await autoDeslopProse(prose, {
+        service: this.deslopService, llm: this.llm, ...rules, whitelist,
+        signal: opts.signal, isTail: opts.isTail,
+        styleContext: { genre: project.genre ?? '通用', ...(style ? { style: {
+          identifiedStyle: style.identifiedStyle, tone: style.tone, sentencePatterns: style.sentencePatterns,
+          vocabularyPreferences: style.vocabularyPreferences, styleConstraints: style.styleConstraints, plotConstraints: style.plotConstraints
+        } } : {}) },
+        meta: { projectId, chapterNumber },
+        validateCandidate: (candidate) => this.validateGeneratedProse(projectId, chapterNumber, candidate, opts.existingText)
+      })
+    } catch (err) {
+      throwIfAborted(opts.signal)
+      if ((err as Error)?.message?.includes('LLM_ABORTED') || (err as Error)?.name === 'AbortError') throw err
+      result = { content: prose, report: { status: 'failed',
+        message: `自动去 AI 味未完成，已保留生成稿：${err instanceof Error ? err.message : String(err)}`, remainingIssues: 0 } }
+    }
+    throwIfAborted(opts.signal)
+    opts.onAutoDeslopResult?.(result.report)
+    return formatChapterProse(result.content)
   }
 
   /**
@@ -689,11 +751,12 @@ export class WriteService {
     chapterNumber: number,
     content: string,
     instruction: string,
-    styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {},
+    styleProfileIdOrOpts?: string | null | ChapterGenerateOptions,
+    maybeOpts: ChapterGenerateOptions = {},
     confirmedPlan?: string | null
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    throwIfAborted(opts.signal)
     this.invalidateChapterMemorySync(projectId, chapterNumber)
     await this.memoryCoordinator.exclusive(projectId, async () => undefined)
     const prompt = await this.buildAdjustChapterPrompt(
@@ -704,15 +767,22 @@ export class WriteService {
       styleProfileId,
       confirmedPlan
     )
+    const { onPromptMeta: _onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, ...llmOpts } = opts as ChapterGenerateOptions
+    onGenerationStage?.('generating')
     const full = await this.generateProseStream(prompt.user, {
-      ...opts,
+      ...llmOpts,
       systemPrompt: prompt.system,
       maxTokens:
         opts.maxTokens ??
         tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
       meta: { feature: 'chapter-adjust', projectId, chapterNumber }
     })
-    return full
+    const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
+    await this.validateGeneratedProse(projectId, chapterNumber, prose)
+    onProseGenerated?.(prose)
+    return this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
+      signal: opts.signal, isTail: true, onGenerationStage, onAutoDeslopResult
+    })
   }
 
   /**
@@ -2233,7 +2303,7 @@ export class WriteService {
   }
 
   /**
-   * 批量写章的单章流程：生成 → 质检 → 细纲对照 / 记忆提取 / 深度审稿（并行）→ 正文回写细纲 → 记忆同步。
+   * 批量写章的单章流程：生成 → 自动去 AI 味 → 质检 → 细纲对照 / 记忆提取 / 深度审稿（并行）→ 正文回写细纲 → 记忆同步。
    * 可通过 onContentGenerated 先保存正文；记忆按项目设置自动同步。节奏评估与图解不在此流程里跑
    * （批量不回写也不落盘），由单章流程面板按需触发。
    * onProgress 用于推送当前步骤，UI 可显示进度。
@@ -2262,7 +2332,18 @@ export class WriteService {
     const { onContentGenerated, contentOverride, proseFirst, ...generateOpts } = opts
     throwIfAborted(opts.signal)
     if (contentOverride === undefined) onProgress('generating')
-    const content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, generateOpts)
+    let autoDeslop: AutoDeslopResult | undefined
+    const content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
+      ...generateOpts,
+      onGenerationStage: (stage) => {
+        onProgress(stage)
+        opts.onGenerationStage?.(stage)
+      },
+      onAutoDeslopResult: (report) => {
+        autoDeslop = report
+        opts.onAutoDeslopResult?.(report)
+      }
+    })
     await onContentGenerated?.(content)
     // 批量正文已保存，必须绑定本次稿件，不能把保存后的另一窗口改稿误当成允许提交的基线。
     const savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
@@ -2370,6 +2451,7 @@ export class WriteService {
     return {
       chapterNumber,
       content,
+      autoDeslop,
       audit,
       outlineDiff,
       memory: sync?.extraction ?? memory,
@@ -2502,8 +2584,8 @@ export class WriteService {
     fromChapter: number,
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {},
+    styleProfileIdOrOpts?: string | null | BatchGenerateOptions,
+    maybeOpts: BatchGenerateOptions = {},
     batchState?: BatchState,
     runOptions?: BatchRunOptions,
     /**
@@ -2562,6 +2644,9 @@ export class WriteService {
           try {
             result = await this.runFullFlowForChapter(projectId, ch, () => {}, {
               ...opts, styleProfileId, strengthOverride,
+              onGenerationStage: (stage: ChapterGenerationStage) => (opts as BatchGenerateOptions).onGenerationStage?.(stage, ch),
+              onAutoDeslopResult: (report: AutoDeslopResult) => (opts as BatchGenerateOptions).onAutoDeslopResult?.(report, ch),
+              onProseGenerated: (prose: string) => { generatedContent = prose },
               ...(resumingPostProcess ? { contentOverride: before } : {}),
               ...(runOptions?.autoContinue ? { proseFirst: true } : {}),
               onContentGenerated: persistContent
@@ -2657,8 +2742,11 @@ export class WriteService {
             await fs.mkdir(recoveryDir, { recursive: true })
             const recoveryFile = join(recoveryDir, `chapter-${ch}-${Date.now()}.md`)
             await fs.writeFile(recoveryFile, generatedContent, 'utf-8')
-            return { ...state(ch), status: 'failed',
-              error: `第 ${ch} 章正文已生成，但保存失败：${error}。恢复稿已保存在：${recoveryFile}` }
+            const stopped = opts.signal?.aborted || error.includes('LLM_ABORTED')
+            return { ...state(ch), status: stopped ? 'paused' : 'failed',
+              ...(stopped
+                ? { pauseReason: `第 ${ch} 章已停止，生成稿已保存在：${recoveryFile}。本章尚未保存为正式正文，继续时会重新生成。` }
+                : { error: `第 ${ch} 章正文已生成，但保存失败：${error}。恢复稿已保存在：${recoveryFile}` }) }
           } catch (recoveryError) {
             console.warn('[generateChaptersBatch] Failed to preserve generated draft:', recoveryError)
           }
@@ -2882,8 +2970,8 @@ export class WriteService {
     fromChapter: number,
     toChapter: number,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    styleProfileIdOrOpts?: string | null | GenerateOptions,
-    maybeOpts: GenerateOptions = {},
+    styleProfileIdOrOpts?: string | null | BatchGenerateOptions,
+    maybeOpts: BatchGenerateOptions = {},
     batchState?: BatchState,
     runOptions?: BatchRunOptions,
     onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
@@ -2901,7 +2989,9 @@ export class WriteService {
           ? { pendingPostProcessChapter: batchState.pendingPostProcessChapter } : {})
       }
     }
-    const nextChapter = batchState?.pendingPostProcessChapter ?? fromChapter + 1
+    // 自动润色期间停止时，本章只有恢复稿、尚未列入 completed，继续仍从本章生成。
+    const nextChapter = batchState?.pendingPostProcessChapter ??
+      (batchState && !batchState.completed.includes(fromChapter) ? fromChapter : fromChapter + 1)
     if (nextChapter === toChapter + 1 && batchState &&
         getBatchRangeError(fromChapter, toChapter, batchState) === null &&
         batchState.completed.includes(toChapter)) {

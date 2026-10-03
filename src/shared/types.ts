@@ -452,18 +452,32 @@ export type StreamHandleOf<T> = Promise<T> & {
 }
 export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
+/** 正文生成与交稿前自动精修共用同一个可取消请求。 */
+export type ChapterGenerationStage = 'generating' | 'deslop'
+
+/** 自动精修结论；需复核或失败时保留生成原稿。 */
+export interface AutoDeslopResult {
+  status: 'applied' | 'unchanged' | 'review_required' | 'failed'
+  message: string
+  remainingIssues: number
+}
+
 /**
  * 章节正文流式生成的句柄。
  * 比通用 StreamHandle 多回一个 continueMode：本次是不是续写、续写到哪一步。
  * extend 表示这一章是**故意还没写完**的半成品，写后自检的完成度类项据此降级。
  */
-export type ChapterStreamHandle = StreamHandleOf<{
+export interface ChapterStreamResult {
   ok: boolean
   error?: string
+  /** 自动精修后的最终新生成片段，不含续写前已有正文。 */
+  content?: string
+  autoDeslop?: AutoDeslopResult
   continueMode?: 'extend' | 'finish'
   /** 本次实际下发的字数口径，供编辑器显示「本次目标 / 实际写了 / 整章还差」 */
   wordBudget?: ChapterWordBudget
-}>
+}
+export type ChapterStreamHandle = StreamHandleOf<ChapterStreamResult>
 
 /** 一次正文生成实际使用的字数口径（主进程按细纲算出，前端算不出） */
 export interface ChapterWordBudget {
@@ -749,7 +763,8 @@ export interface RendererApi {
     styleProfileId: string | null | undefined,
     tempContext: string | undefined,
     existingText: string | undefined,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage) => void
   ) => ChapterStreamHandle
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
@@ -768,8 +783,9 @@ export interface RendererApi {
     styleProfileId: string | null | undefined,
     onToken: (token: string, done: boolean) => void,
     /** 用户已确认的修改方案；有则落笔时严格按此执行 */
-    confirmedPlan?: string | null
-  ) => StreamHandle
+    confirmedPlan?: string | null,
+    onGenerationStage?: (stage: ChapterGenerationStage) => void
+  ) => ChapterStreamHandle
   getProjectsRoot: () => Promise<string>
   setProjectsRoot: (path: string) => Promise<string>
   getTheme: () => Promise<'light' | 'dark' | 'system'>
@@ -964,7 +980,9 @@ export interface RendererApi {
      */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
-    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
@@ -982,7 +1000,9 @@ export interface RendererApi {
     /** 按本章节奏自动调整生成强度（温度/思考强度），单次调用覆盖，不改保存的 provider 配置 */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
-    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void
+    onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
+    onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 列出还没完全落地的记忆候选（整章待核对 / 个别条目被挡下） */
   listMemoryCandidates: (projectId: string) => Promise<MemoryCandidateSummary[]>
@@ -2457,6 +2477,8 @@ export interface ChapterFlowResult {
   chapterNumber: number
   /** 生成的正文 */
   content: string
+  /** 本章自动去 AI 味的执行结果。 */
+  autoDeslop?: AutoDeslopResult
   /** 质检报告 */
   audit: AuditReport
   /** 细纲对照差异 */

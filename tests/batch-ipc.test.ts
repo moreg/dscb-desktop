@@ -93,6 +93,8 @@ describe('批量 IPC 的范围、并发和取消边界', () => {
     const chapterResult = { chapterNumber: 1, content: '正文' } as ChapterFlowResult
     mock.mockImplementation(async (_project, _from, _to, onChapter, _style, opts, _state, _run, onRetry) => {
       opts?.onToken?.('测试正文')
+      opts?.onGenerationStage?.('deslop', 1)
+      opts?.onAutoDeslopResult?.({ status: 'applied', message: '已精修', remainingIssues: 0 }, 1)
       onChapter(1, chapterResult)
       onRetry?.(2, 1, 3, 30_000)
       return progress
@@ -103,6 +105,8 @@ describe('批量 IPC 的范围、并发和取消边界', () => {
     expect(mock.mock.calls[0][7]).toEqual({ autoContinue: true, autoStrength: true })
     expect(send.mock.calls).toEqual([
       ['llm:token', { requestId: 'batch-1', token: '测试正文', done: false }],
+      ['write:batchGenerationStage', { requestId: 'batch-1', chapterNumber: 1, stage: 'deslop' }],
+      ['write:batchAutoDeslopResult', { requestId: 'batch-1', chapterNumber: 1, result: { status: 'applied', message: '已精修', remainingIssues: 0 } }],
       ['write:batchChapterComplete', { requestId: 'batch-1', chapter: 1, result: chapterResult }],
       ['write:batchRetryWait', { requestId: 'batch-1', chapter: 2, attempt: 1, maxAttempts: 3, waitMs: 30_000 }],
       ['llm:token', { requestId: 'batch-1', token: '', done: true }]

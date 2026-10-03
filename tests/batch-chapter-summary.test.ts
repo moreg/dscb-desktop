@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeAutoDeslopCell,
   describeMemoryCell,
   describeOutlineCell,
   describeSelfCheckCell,
@@ -148,6 +149,21 @@ describe('批量续写逐章小结', () => {
     )
     expect(s.p0).toBe(2)
     expect(describeOutlineCell(s)).toBe('细纲 P0 2 项')
+  })
+
+  it.each(['failed', 'review_required'] as const)('自动去 AI 味 %s 的章节明确列入待处理小结', (status) => {
+    const result = makeResult(5, '保留的生成原稿')
+    result.autoDeslop = { status, message: '自动去 AI 味未采用候选，已保留生成原稿', remainingIssues: 2 }
+    const summary = summarizeChapterResult(result)
+    expect(summary.autoDeslop).toEqual(result.autoDeslop)
+    expect(hasChapterIssue(summary)).toBe(true)
+    expect(describeAutoDeslopCell(summary)).toBe(result.autoDeslop.message)
+  })
+
+  it('恢复写后检查不把缺少本次润色报告判为未执行或失败', () => {
+    const summary = summarizeChapterResult(makeResult(5, '已精修正文'))
+    expect(describeAutoDeslopCell(summary)).toBe('本次未重新润色')
+    expect(hasChapterIssue(summary)).toBe(false)
   })
 
   it('error 或 P0 判为需返工，纯 warn 不算', () => {
