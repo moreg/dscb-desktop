@@ -8,6 +8,7 @@ import type {
   MemoryExtraction,
   SettingsApplyResult
 } from './types'
+import { normalizeForeshadowCheckContext, type ForeshadowCheckContext } from './foreshadowing-check-context'
 
 /** 一次可撤销的同步回执 */
 export interface SyncUndoReceipt {
@@ -39,6 +40,8 @@ export interface PendingSyncItem {
   attempts: number
   /** 展示用书名（可选，入队时尽力写入） */
   projectName?: string
+  /** Original check scope and author requirements, bound to this prose snapshot. */
+  foreshadowContext?: ForeshadowCheckContext
 }
 
 export interface StorageLike {
@@ -344,6 +347,7 @@ function normalizePendingItem(raw: unknown): PendingSyncItem | null {
       : [],
     at: typeof o.at === 'number' && o.at > 0 ? o.at : Date.now(),
     attempts: typeof o.attempts === 'number' && o.attempts >= 0 ? o.attempts : 0,
+    foreshadowContext: normalizeForeshadowCheckContext(o.foreshadowContext),
     projectName:
       typeof o.projectName === 'string' && o.projectName.trim()
         ? o.projectName.trim().slice(0, 80)
@@ -363,6 +367,7 @@ export function upsertPendingSync(
   )
   const next: PendingSyncItem = {
     ...item,
+    foreshadowContext: normalizeForeshadowCheckContext(item.foreshadowContext),
     id: item.id || makeSyncId('pend'),
     content: item.content.slice(0, PENDING_SYNC_MAX_CONTENT),
     at: item.at || Date.now()

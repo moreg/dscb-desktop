@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyForeshadowingInsertions, missingForeshadowings, repairMissingForeshadowings } from '../src/main/data/foreshadowing-repair'
+import { applyForeshadowingInsertions, missingForeshadowings, repairMissingForeshadowings as runRepairMissingForeshadowings } from '../src/main/data/foreshadowing-repair'
 import type { OutlineDiffReport } from '../src/shared/types'
 
 const prose = '林远把账册交给守门人。\n守门人翻开封皮，核对了印章。\n门内忽然传来父亲的声音。'
@@ -11,6 +11,10 @@ const report = (missing = true): OutlineDiffReport => ({
 })
 const patch = (text = addition): string => JSON.stringify({ insertions: [{ after: 1, text }] })
 const input = () => ({ chapterNumber: 1, content: prose, outline: '原始细纲', plans: [], report: report(), context: '人物只知道笔迹相同' })
+const repairMissingForeshadowings = (input: Parameters<typeof runRepairMissingForeshadowings>[0],
+  dependencies: Omit<Parameters<typeof runRepairMissingForeshadowings>[1], 'verify'> &
+    Partial<Pick<Parameters<typeof runRepairMissingForeshadowings>[1], 'verify'>>) =>
+  runRepairMissingForeshadowings(input, { verify: async () => {}, ...dependencies })
 
 describe('automatic foreshadowing repair', () => {
   it('inserts only new prose and keeps every existing paragraph and the original ending', () => {
@@ -72,7 +76,7 @@ describe('automatic foreshadowing repair', () => {
     const check = vi.fn().mockResolvedValue({ ...report(false), checked: false, error: '断网' })
     await expect(repairMissingForeshadowings(input(), { generate, check })).rejects.toThrow('复核未完成')
     check.mockResolvedValue(report())
-    generate.mockClear()
+    generate.mockReset().mockResolvedValueOnce(patch()).mockResolvedValueOnce(patch('林远把借条收进父亲留给他的信封。'))
     await expect(repairMissingForeshadowings(input(), { generate, check })).rejects.toThrow('两轮后仍未通过')
     expect(generate).toHaveBeenCalledTimes(2)
   })
@@ -81,8 +85,35 @@ describe('automatic foreshadowing repair', () => {
     const changed = report(false)
     changed.diffs = [{ type: 4, typeLabel: '核心事件改', priority: 'P1', outline: '父亲身份保密', actual: '直接揭晓', suggestion: '提前揭底' }]
     await expect(repairMissingForeshadowings(input(), {
-      generate: async () => patch(), check: async () => changed
+      generate: async () => patch(), check: async () => changed,
+      verify: async () => { throw new Error('伏笔补写引入新的剧情偏离：提前揭底') }
     })).rejects.toThrow('新的剧情偏离')
+  })
+
+  it('accepts paraphrased descriptions of an existing deviation after verifying only the additions', async () => {
+    const before = input()
+    const old = { type: 4 as const, typeLabel: '核心事件改' as const, priority: 'P1' as const,
+      outline: '林远留在院内', actual: '林远提前离开院子', suggestion: '校准细纲' }
+    before.report.diffs.push(old)
+    const checked = { ...report(false), diffs: [{ ...old, outline: '林远应留在院子里', actual: '林远已提前出了院子' }] }
+    const verify = vi.fn().mockResolvedValue(undefined)
+    const result = await repairMissingForeshadowings(before, { generate: async () => patch(), check: async () => checked, verify })
+    expect(result.content).toContain(addition)
+    expect(verify).toHaveBeenCalledWith(prose, result.content, [addition])
+  })
+
+  it('rejects identical short clues across rounds and across insertion positions', async () => {
+    const short = '信封角上有一道蓝色划痕。'
+    const first = applyForeshadowingInsertions(prose, patch(short))
+    expect(() => applyForeshadowingInsertions(first, patch('信封角上有一道蓝色划痕！'))).toThrow('重复段落')
+    expect(() => applyForeshadowingInsertions(prose, JSON.stringify({ insertions: [
+      { after: -1, text: short }, { after: 1, text: short }
+    ] }))).toThrow('重复段落')
+  })
+
+  it('blocks duplicate paragraphs within a multi-paragraph insertion without banning tiny replies', () => {
+    expect(() => applyForeshadowingInsertions(prose, patch(addition + '\n' + addition))).toThrow('重复段落')
+    expect(() => applyForeshadowingInsertions(prose, patch('“好。”\n“好。”'))).not.toThrow()
   })
 
   it('stops before further checks when cancellation occurs during the model call', async () => {

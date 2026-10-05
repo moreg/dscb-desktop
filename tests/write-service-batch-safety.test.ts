@@ -64,6 +64,7 @@ describe('batch safety and recovery', () => {
   afterEach(() => vi.restoreAllMocks())
 
   function stubPostProcess(): void {
+    vi.spyOn(flow, 'verifyForeshadowingRepair').mockResolvedValue(undefined)
     vi.spyOn(service, 'selfCheckChapter').mockResolvedValue(passedCheck)
     vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
     vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(resultFor(1).memory))
@@ -108,7 +109,9 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify(foreshadowDiff))
-    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(foreshadowPatch).mockResolvedValueOnce(JSON.stringify({ insertions: [
+      { after: -1, text: '林远把借条收进父亲留给他的信封。' }
+    ] }))
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
     expect(progress).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1, completed: [1] })
     expect(progress.pauseReason).toContain('两轮后仍未通过')
@@ -117,6 +120,37 @@ describe('batch safety and recovery', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(content)
     expect(await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')).toContain('原始事件1')
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('keeps the original saved draft and pauses before memory sync when insertion verification fails', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
+    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    vi.mocked(flow.verifyForeshadowingRepair).mockRejectedValue(new Error('伏笔补写引入新的剧情偏离：提前揭底'))
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1 })
+    expect(progress.pauseReason).toContain('提前揭底')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(generate).toHaveBeenCalledOnce()
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('invalidates an outline-check cache when author requirements change on retry', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.syncChapterAfterWrite).mockResolvedValueOnce({
+      memory: { ...emptyMemory(), errors: ['同步失败'] }, extraction: resultFor(1).memory,
+      settings: { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }
+    })
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null,
+      { tempContext: '暂不揭晓父亲身份' }, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null,
+      { tempContext: '本次允许揭晓父亲身份' }, first, { autoContinue: true })
+    expect(resumed.status).toBe('completed')
+    expect(vi.mocked(flow.checkOutlineStream).mock.calls.map((call) => call[3]?.tempContext))
+      .toEqual(['暂不揭晓父亲身份', '本次允许揭晓父亲身份'])
   })
 
   it('resumes failed repair from saved prose and does not regenerate the chapter', async () => {

@@ -162,6 +162,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   review: 'review',
   deepReview: 'review',
   batchDeepReview: 'review',
+  foreshadowRepairVerify: 'review',
   // 去AI味改写
   humanize: 'humanize',
   deslop: 'humanize',

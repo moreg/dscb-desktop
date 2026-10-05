@@ -169,6 +169,20 @@ describe('pending sync queue', () => {
     expect(loaded[0].errors).toEqual(['超时'])
   })
 
+  it.each([true, false])('preserves the original partialChapter=%s and temporary requirements across restart', (partialChapter) => {
+    const item: PendingSyncItem = { id: 'scope', projectId: 'p', chapterNumber: 1, content: '已生成正文',
+      errors: ['补写失败'], at: 99, attempts: 1,
+      foreshadowContext: { partialChapter, tempContext: '本章只埋线索，不揭晓父亲身份' } }
+    savePendingSyncQueue(storage, upsertPendingSync([], item))
+    expect(loadPendingSyncQueue(storage)[0].foreshadowContext).toEqual(item.foreshadowContext)
+  })
+
+  it('does not preserve invalid scope metadata or coerce a string into partialChapter', () => {
+    storage.setItem('ai-writer:pending-sync-queue', JSON.stringify([{ id: 'bad', projectId: 'p', chapterNumber: 1,
+      content: '正文', errors: [], at: 1, attempts: 0, foreshadowContext: { partialChapter: 'false', tempContext: [] } }]))
+    expect(loadPendingSyncQueue(storage)[0].foreshadowContext).toBeUndefined()
+  })
+
   it('remove by project+chapter and find', () => {
     let q = upsertPendingSync([], {
       id: '1',

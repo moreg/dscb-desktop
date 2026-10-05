@@ -647,7 +647,8 @@ export class WriteService {
       if (!outline.trim()) return result('skipped', '缺少本章细纲，未执行伏笔自动补写。')
       opts.onStart?.()
       const signal = opts.signal ?? new AbortController().signal
-      const checkOpts = { signal, partialChapter: opts.partialChapter, meta: { feature: 'outlineCheck', projectId, chapterNumber } }
+      const checkOpts = { signal, partialChapter: opts.partialChapter, tempContext: opts.tempContext,
+        meta: { feature: 'outlineCheck', projectId, chapterNumber } }
       const report = await this.checkOutlineWithRetry(chapterNumber, outline, content, checkOpts, signal)
       throwIfAborted(signal)
       if (report.checked === false) throw new Error(`伏笔核对未完成：${report.error || '细纲对照失败'}`)
@@ -665,7 +666,10 @@ export class WriteService {
           systemPrompt: '你是网文作者，只补齐指定的伏笔遗漏，保留所有已有正文和章末落点。',
           meta: { feature: 'chapterForeshadowRepair', projectId, chapterNumber }
         }),
-        check: (text) => this.checkOutlineWithRetry(chapterNumber, outline, text, checkOpts, signal)
+        check: (text) => this.checkOutlineWithRetry(chapterNumber, outline, text, checkOpts, signal),
+        verify: (original, candidate, inserted) => this.flow.verifyForeshadowingRepair({
+          original, candidate, inserted, outline, partialChapter: opts.partialChapter, tempContext: opts.tempContext
+        }, { signal, meta: { feature: 'foreshadowRepairVerify', projectId, chapterNumber } })
       })
       throwIfAborted(signal)
       return result('applied', '遗漏伏笔已自动补写，原细纲复核通过。', repaired.content)
@@ -2385,6 +2389,7 @@ export class WriteService {
      */
     const flowOpts = (feature: string): GenerateOptions => ({
       signal: memoryTicket.controller.signal,
+      ...(feature === 'batchOutline' ? { tempContext: opts.tempContext } : {}),
       meta: { feature, projectId, chapterNumber }
     })
 
@@ -2424,6 +2429,7 @@ export class WriteService {
 
     // 预加载对照/提取所需的支撑数据（只读磁盘一次）
     const outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
+    const outlineFingerprint = (text: string): string => hashProse(JSON.stringify([text, opts.tempContext ?? '']))
     let knownCharacters: string[] = []
     try {
       const list = await new CharacterRepo(dir).list()
@@ -2465,7 +2471,7 @@ export class WriteService {
     ])
     onProgress('postChecks')
     const [checkedOutline, postChecks] = await Promise.all([
-      cached.outline && cached.outline.outlineHash === hashProse(outlineText)
+      cached.outline && cached.outline.outlineHash === outlineFingerprint(outlineText)
         ? structuredClone(cached.outline.report)
         : this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal),
       runPostChecks()
@@ -2487,7 +2493,10 @@ export class WriteService {
             ...flowOpts('batchForeshadowRepair'), maxTokens: 8192,
             systemPrompt: '你是网文作者，只补齐指定的伏笔遗漏，保留所有已有正文和章末落点。'
           }),
-          check: (text) => this.checkOutlineWithRetry(chapterNumber, outlineText, text, flowOpts('batchOutline'), memoryTicket.controller.signal)
+          check: (text) => this.checkOutlineWithRetry(chapterNumber, outlineText, text, flowOpts('batchOutline'), memoryTicket.controller.signal),
+          verify: (original, candidate, inserted) => this.flow.verifyForeshadowingRepair({
+            original, candidate, inserted, outline: outlineText, tempContext: opts.tempContext
+          }, flowOpts('foreshadowRepairVerify'))
         })
         throwIfAborted(memoryTicket.controller.signal)
         // 保存同样使用正文版本检查；另一窗口改稿时不能覆盖。
@@ -2508,7 +2517,7 @@ export class WriteService {
         ;[memory, deepReview] = await runPostChecks()
       }
     }
-    if (outlineDiff.checked) cachePut({ outline: { outlineHash: hashProse(outlineText), report: structuredClone(outlineDiff) } })
+    if (outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
 
     // 以正文为准：先回写细纲，再用新细纲重跑自检，最后才同步记忆。顺序不能反——
     // 旧细纲下的自检失败会把记忆整章拦下，下一章又对着旧细纲/旧记忆写，问题逐章滚大。
@@ -2526,7 +2535,7 @@ export class WriteService {
       if (outlineDiff.checked !== false && outlineDiff.proseSynced !== undefined) {
         // 细纲已按正文改写，指纹换成改写后的细纲，重试时直接命中「已回写」。
         const syncedOutline = await this.loadChapterOutlineText(dir, chapterNumber)
-        cachePut({ outline: { outlineHash: hashProse(syncedOutline), report: structuredClone(outlineDiff) } })
+        cachePut({ outline: { outlineHash: outlineFingerprint(syncedOutline), report: structuredClone(outlineDiff) } })
       }
     }
     if (proseFirst && outlineDiff.proseSynced) {

@@ -38,6 +38,7 @@ describe('单章续写的交稿前伏笔补写', () => {
     generate = vi.fn().mockResolvedValue(patch)
     service = new WriteService(projects, { generateStream: generate } as unknown as LlmService)
     flow = (service as unknown as { flow: WriteFlowService }).flow
+    vi.spyOn(flow, 'verifyForeshadowingRepair').mockResolvedValue(undefined)
   })
 
   afterEach(async () => {
@@ -55,6 +56,10 @@ describe('单章续写的交稿前伏笔补写', () => {
     expect(result.content).toBe(prose.split('\n').slice(0, 2).join('\n') + '\n' + addition + '\n' + prose.split('\n')[2])
     expect(check.mock.calls[1][0]).toBe(check.mock.calls[0][0])
     expect(check.mock.calls[1][1]).toBe(result.content)
+    expect(check.mock.calls.every((call) => call[3]?.tempContext === '不揭晓父亲身份')).toBe(true)
+    expect(flow.verifyForeshadowingRepair).toHaveBeenCalledWith(expect.objectContaining({
+      original: prose, candidate: result.content, inserted: [addition], tempContext: '不揭晓父亲身份'
+    }), expect.anything())
     expect(generate.mock.calls[0][0]).toContain('不揭晓父亲身份')
     expect(generate.mock.calls[0][1].meta.feature).toBe('chapterForeshadowRepair')
     expect(await new ProseRepo(dir).read(1)).toBe('磁盘中尚未采用的旧正文。')
@@ -69,6 +74,14 @@ describe('单章续写的交稿前伏笔补写', () => {
     expect(generate).not.toHaveBeenCalled()
   })
 
+  it('专项核验失败时保留本轮正文，不将候选稿交给记忆同步', async () => {
+    vi.spyOn(flow, 'checkOutlineStream').mockResolvedValueOnce(missing).mockResolvedValue('[]')
+    vi.mocked(flow.verifyForeshadowingRepair).mockRejectedValue(new Error('伏笔补写专项核验缺少新增正文证据'))
+    const result = await service.repairChapterForeshadowings(projectId, 1, prose)
+    expect(result.content).toBe(prose)
+    expect(result.report.status).toBe('failed')
+  })
+
   it('分轮续写仍先检查，但只补已推进场景中的遗漏，复核使用相同范围', async () => {
     const check = vi.spyOn(flow, 'checkOutlineStream').mockResolvedValueOnce(missing).mockResolvedValue('[]')
     const result = await service.repairChapterForeshadowings(projectId, 1, prose, { partialChapter: true })
@@ -79,6 +92,7 @@ describe('单章续写的交稿前伏笔补写', () => {
 
   it('补写两轮仍未通过时保留本轮正文，并返回阻止记忆同步的失败结论', async () => {
     vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue(missing)
+    generate.mockResolvedValueOnce(patch).mockResolvedValueOnce(JSON.stringify({ insertions: [{ after: 1, text: '林远把借条收进父亲留给他的信封。' }] }))
     const result = await service.repairChapterForeshadowings(projectId, 1, prose)
     expect(result.content).toBe(prose)
     expect(result.report).toMatchObject({ status: 'failed' })
@@ -116,7 +130,10 @@ describe('单章续写的交稿前伏笔补写', () => {
 it('部分正文检查的提示不将后续场景当作遗漏，内部参数不传给provider', async () => {
   const generate = vi.fn().mockResolvedValue('[]')
   const flow = new WriteFlowService({ generateStream: generate } as unknown as LlmService)
-  await flow.checkOutlineStream('先交账册、最后揭晓身份', prose, 1, { partialChapter: true })
+  await flow.checkOutlineStream('先交账册、最后揭晓身份', prose, 1, { partialChapter: true, tempContext: '本轮禁止揭晓父亲身份' })
   expect(generate.mock.calls[0][0]).toContain('尚未写到的后续场景、回收和章末钩子不是遗漏')
   expect(generate.mock.calls[0][1]).not.toHaveProperty('partialChapter')
+  expect(generate.mock.calls[0][0]).toContain('本轮禁止揭晓父亲身份')
+  expect(generate.mock.calls[0][0]).toContain('明确暂缓、延期或限制揭示的内容不能误报为漏写')
+  expect(generate.mock.calls[0][1]).not.toHaveProperty('tempContext')
 })

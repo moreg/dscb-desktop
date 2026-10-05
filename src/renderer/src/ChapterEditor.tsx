@@ -1,5 +1,6 @@
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { finalizeChapterContinuation, finalizeChapterRewrite } from './chapter-generation-finalize'
+import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
   useLayoutEffect,
@@ -333,6 +334,7 @@ export default function ChapterEditor({
   const [draft, setDraftState] = useState('')
   /** 与 textarea DOM 同步的正文镜像；用户输入走非受控，避免 value 回写导致滚动乱跳。 */
   const draftRef = useRef('')
+  const foreshadowCheckContextRef = useRef<ChapterForeshadowContextSnapshot | null>(null)
   const selfCheckTrackerRef = useRef(createChapterCheckTracker({ projectId, chapterNumber, content: '' }))
   selfCheckTrackerRef.current.update({ projectId, chapterNumber, content: draftRef.current })
   const memorySyncPendingRef = useRef<symbol | null>(null)
@@ -1274,6 +1276,7 @@ export default function ChapterEditor({
     ++fixCharPositionRef.current
     setFixCharPositionLoading(false)
     setLastContinueMode(null)
+    foreshadowCheckContextRef.current = null
     setSkipMemoryOnAutoSyncAll(false)
     setFlowSyncTrigger(0)
     // 质检报告属于旧章正文，必须跟着切章作废。
@@ -1299,6 +1302,8 @@ export default function ChapterEditor({
         chapterNumber
       )
       if (pending?.content?.trim()) {
+        foreshadowCheckContextRef.current = { projectId, chapterNumber, content: pending.content,
+          foreshadowContext: pending.foreshadowContext }
         setPostWriteSync({
           phase: 'failed',
           message: `有未完成的记忆同步（${new Date(pending.at).toLocaleString()} 失败，已尝试 ${pending.attempts} 次）`,
@@ -2056,6 +2061,8 @@ export default function ChapterEditor({
           silent: true,
           recordHistory: true
         })
+        foreshadowCheckContextRef.current = { projectId: targetProjectId, chapterNumber: targetChapter, content: formatted,
+          foreshadowContext: { partialChapter: result.continueMode === 'extend', tempContext: tempContextVal } }
         setAutoDeslopResult(result.autoDeslop ?? null)
         setAutoDeslopSnapshot(result.autoDeslop ? formatted : null)
         setAutoForeshadowRepair(result.foreshadowRepair ? {
@@ -2278,6 +2285,7 @@ export default function ChapterEditor({
     setShowAdjustDialog(false)
     setAdjustPlanning(false)
     setAdjusting(true)
+    foreshadowCheckContextRef.current = null
     setGenerationStage('generating')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
@@ -2601,6 +2609,8 @@ export default function ChapterEditor({
     try {
       const storage = getLocalStorage()
       const q = loadPendingSyncQueue(storage)
+      const foreshadowContext = resolveForeshadowCheckContext({ projectId, chapterNumber, content: contentSnapshot },
+        foreshadowCheckContextRef.current, findPendingForChapter(q, projectId, chapterNumber))
       const next = upsertPendingSync(q, {
         id: makeSyncId('pend'),
         projectId,
@@ -2608,7 +2618,8 @@ export default function ChapterEditor({
         content: contentSnapshot,
         errors,
         at: Date.now(),
-        attempts
+        attempts,
+        foreshadowContext
       })
       savePendingSyncQueue(storage, next)
       // 异步补全书名，设置页列表更易读
@@ -3086,6 +3097,9 @@ export default function ChapterEditor({
       setUndoToast({ message: '正文已变化，请先核对当前稿再重新同步', type: 'warning' })
       return
     }
+    const checkContext = resolveForeshadowCheckContext({ projectId, chapterNumber, content: snapshot },
+      foreshadowCheckContextRef.current, findPendingForChapter(loadPendingSyncQueue(getLocalStorage()), projectId, chapterNumber))
+    foreshadowCheckContextRef.current = { projectId, chapterNumber, content: snapshot, foreshadowContext: checkContext }
     setFlowPanelOpen(true)
     setPostWriteSync((current) => current ? { ...current, phase: 'syncing', message: '正在核对并补写伏笔，完成后同步记忆…' } : current)
     let checkedContent: string
@@ -3099,7 +3113,7 @@ export default function ChapterEditor({
     }
     try {
       const repaired = await window.api.repairChapterForeshadowings(projectId, chapterNumber, snapshot,
-        { partialChapter: lastContinueMode !== 'finish' })
+        checkContext)
       if (!isCurrent()) return
       if (repaired.report.status === 'failed') {
         pauseMemoryForForeshadowRepair(snapshot, repaired.report.message)
@@ -3107,6 +3121,7 @@ export default function ChapterEditor({
       }
       checkedContent = repaired.report.status === 'applied'
         ? formatDraftProse(repaired.content, { silent: true, recordHistory: true }) : snapshot
+      foreshadowCheckContextRef.current = { projectId, chapterNumber, content: checkedContent, foreshadowContext: checkContext }
       setAutoForeshadowRepair({ report: repaired.report, content: checkedContent, projectId, chapterNumber })
       if (checkedContent !== snapshot) {
         setDirty(true)

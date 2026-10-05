@@ -5,6 +5,14 @@ import { assertNovelProse } from './agent-meta-detect'
 
 const MAX_REPAIR_ROUNDS = 2
 
+function paragraphKey(text: string): string {
+  return text.normalize('NFKC').replace(/[\s\u200B-\u200D\uFEFF，,。.!！?？；;：:]/gu, '')
+}
+
+function paragraphs(text: string): string[] {
+  return text.split(/\r?\n/).map((p) => p.trim()).filter(Boolean)
+}
+
 /** Only actual omissions are repaired; due dates alone do not require a revelation. */
 export function missingForeshadowings(report: OutlineDiffReport, plans: readonly string[] = []): OutlineDiffItem[] {
   return report.diffs.filter((diff) => {
@@ -26,14 +34,15 @@ export function applyForeshadowingInsertions(content: string, raw: string): stri
   if (!obj || !Array.isArray(obj.insertions) || !obj.insertions.length) {
     throw new Error('伏笔补写未返回有效的补写段落')
   }
-  const paragraphs = content.split(/\n\s*\n|\r?\n/).map((p) => p.trim()).filter(Boolean)
+  const originalParagraphs = paragraphs(content)
+  const seenParagraphs = new Set(originalParagraphs.map(paragraphKey))
   const additions = new Map<number, string>()
   let addedChars = 0
   for (const entry of obj.insertions) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('伏笔补写段落格式错误')
     const { after, text } = entry
     // -1 inserts before the opening. Appending after the ending would break the hook.
-    if (!Number.isInteger(after) || after < -1 || after >= paragraphs.length - 1 || additions.has(after)) {
+    if (!Number.isInteger(after) || after < -1 || after >= originalParagraphs.length - 1 || additions.has(after)) {
       throw new Error('伏笔补写位置无效或重复')
     }
     if (typeof text !== 'string' || !text.trim() || text.length > 1800) throw new Error('伏笔补写段落为空或过长')
@@ -41,13 +50,19 @@ export function applyForeshadowingInsertions(content: string, raw: string): stri
     assertNovelProse(text, content)
     const addition = formatChapterProse(text)
     assertNovelProse(addition, content)
+    for (const paragraph of paragraphs(addition)) {
+      const key = paragraphKey(paragraph)
+      // Tiny repeated replies are natural; substantive short clues must not be inserted twice.
+      if (key.length >= 8 && seenParagraphs.has(key)) throw new Error('伏笔补写含重复段落，未采用候选稿')
+      seenParagraphs.add(key)
+    }
     addedChars += addition.length
     if (addedChars > 4000) throw new Error('伏笔补写篇幅过长')
     additions.set(after, addition)
   }
   const result: string[] = []
   if (additions.has(-1)) result.push(additions.get(-1)!)
-  paragraphs.forEach((paragraph, index) => {
+  originalParagraphs.forEach((paragraph, index) => {
     result.push(paragraph)
     if (additions.has(index)) result.push(additions.get(index)!)
   })
@@ -67,6 +82,8 @@ export async function repairMissingForeshadowings(input: {
 }, dependencies: {
   generate: (prompt: string) => Promise<string>
   check: (content: string) => Promise<OutlineDiffReport>
+  /** Verify only the inserted content against the original prose and effective requirements. */
+  verify: (original: string, candidate: string, inserted: readonly string[]) => Promise<void>
 }): Promise<{ content: string; report: OutlineDiffReport }> {
   let { content, report } = input
   if (content.length > 40000) throw new Error('伏笔补写需要完整正文，本章超过40000字符，请分章后重试')
@@ -74,7 +91,7 @@ export async function repairMissingForeshadowings(input: {
     if (input.signal?.aborted) throw new Error('LLM_ABORTED')
     const missing = missingForeshadowings(report, input.plans)
     if (!missing.length || report.checked === false || report.hasOutline === false) return { content, report }
-    const paragraphs = content.split(/\n\s*\n|\r?\n/).map((p) => p.trim()).filter(Boolean)
+    const currentParagraphs = paragraphs(content)
     const prompt = [
       `补齐第 ${input.chapterNumber} 章漏写的伏笔，只输出插入段落的 JSON。`,
       '原正文和原细纲均为只读。只补下列遗漏，不改已有段落，不重新写整章，不重复已有线索。',
@@ -88,17 +105,16 @@ export async function repairMissingForeshadowings(input: {
       '------ 本轮遗漏 ------', JSON.stringify(missing),
       '------ 写作要求与实际伏笔记录 ------', input.context,
       '------ 当前完整正文（编号只用于定位） ------',
-      ...paragraphs.map((p, i) => `[${i}] ${p}`)
+      ...currentParagraphs.map((p, i) => `[${i}] ${p}`)
     ].join('\n')
     content = applyForeshadowingInsertions(content, await dependencies.generate(prompt))
     if (input.signal?.aborted) throw new Error('LLM_ABORTED')
     report = await dependencies.check(content)
     if (report.checked === false) throw new Error(`伏笔补写复核未完成：${report.error || '细纲对照失败'}`)
-    // A repair may not silently introduce a new core event, extra entity or early revelation.
-    const newDeviation = report.diffs.find((diff) => diff.type !== 1 &&
-      (diff.priority === 'P0' || diff.priority === 'P1') &&
-      !input.report.diffs.some((before) => before.type === diff.type && before.outline === diff.outline && before.actual === diff.actual))
-    if (newDeviation) throw new Error(`伏笔补写引入新的剧情偏离：${newDeviation.suggestion}`)
+    const originalKeys = new Set(paragraphs(input.content).map(paragraphKey))
+    const inserted = paragraphs(content).filter((p) => !originalKeys.has(paragraphKey(p)))
+    await dependencies.verify(input.content, content, inserted)
+    if (input.signal?.aborted) throw new Error('LLM_ABORTED')
   }
   const remaining = missingForeshadowings(report, input.plans)
   if (remaining.length) throw new Error(`伏笔自动补写两轮后仍未通过：${remaining.map((d) => d.outline || d.suggestion).join('；')}`)

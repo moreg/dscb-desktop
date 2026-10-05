@@ -21,6 +21,43 @@ export {
 export class WriteFlowService {
   constructor(private readonly llm: LlmService) {}
 
+  async verifyForeshadowingRepair(input: {
+    original: string; candidate: string; inserted: readonly string[]; outline: string;
+    partialChapter?: boolean; tempContext?: string
+  }, opts: GenerateOptions = {}): Promise<void> {
+    const prompt = [
+      '核验伏笔补写是否引入新问题。只评价下方明确列出的新增段落，不把原正文已有的问题当成本次补写造成的问题。',
+      '核对新增内容与原文的因果、人物认知、时间地点、设定是否一致，以及是否抢写后续情节、提前揭底。',
+      '作者临时要求优先于细纲；明确延期或限制揭示时服从该要求。',
+      ...(input.partialChapter ? ['本轮尚未收尾，只允许补已推进场景的遗漏，不要求实现后续场景、回收或章末任务。'] : []),
+      '严格JSON：{"passed":true,"issues":[]}；有新问题则passed=false，issues为[{"message":"具体问题","evidence":"新增段落中可定位的连续原文"}]。',
+      '必须引用实际新增文字作为证据；不以旧审稿报告的措辞变化判断新问题。',
+      '------ 作者要求 ------', input.tempContext ?? '（无临时要求）',
+      '------ 原细纲 ------', input.outline,
+      '------ 原正文（只读基线） ------', input.original,
+      '------ 全部新增段落 ------', JSON.stringify(input.inserted),
+      '------ 补写候选整章 ------', input.candidate
+    ].join('\n')
+    const raw = await this.llm.generateStream(prompt, { ...opts,
+      meta: { ...opts.meta, feature: 'foreshadowRepairVerify' } })
+    const obj = findJsonObject(raw)
+    if (!obj || typeof obj.passed !== 'boolean' || !Array.isArray(obj.issues) ||
+      (obj.passed && obj.issues.length) || (!obj.passed && !obj.issues.length)) {
+      throw new Error('伏笔补写专项核验未返回有效结论')
+    }
+    if (obj.passed) return
+    const messages: string[] = []
+    for (const issue of obj.issues) {
+      if (!issue || typeof issue.message !== 'string' || !issue.message.trim() ||
+        typeof issue.evidence !== 'string' || !issue.evidence.trim() || !input.candidate.includes(issue.evidence) ||
+        !input.inserted.some((addition) => addition.includes(issue.evidence) || issue.evidence.includes(addition))) {
+        throw new Error('伏笔补写专项核验缺少新增正文证据')
+      }
+      messages.push(issue.message)
+    }
+    throw new Error(`伏笔补写引入新的剧情偏离：${messages.join('；')}`)
+  }
+
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
     return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt, {
       ...opts, maxTokens: 4096, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
@@ -79,9 +116,13 @@ export class WriteFlowService {
     chapterNumber: number,
     opts: GenerateOptions & { partialChapter?: boolean } = {}
   ): Promise<string> {
-    const { partialChapter, ...llmOpts } = opts
+    const { partialChapter, tempContext, ...llmOpts } = opts
     const prompt = [
       `请对照下面的章节细纲，检查正文是否按细纲写作。按 5 种差异类型分类输出。`,
+      ...(tempContext?.trim() ? [
+        '本轮作者临时写作要求具有最高优先级；与细纲冲突时按作者要求核对。明确暂缓、延期或限制揭示的内容不能误报为漏写。',
+        '------ 本轮作者要求 ------', tempContext, '------ 以下为核对规则 ------'
+      ] : []),
       ...(partialChapter ? [
         '本轮是尚未收尾的分轮续写。只核对已经推进的场景和已发生情节点中本应出现的伏笔；尚未写到的后续场景、回收和章末钩子不是遗漏。',
         '不能为了完成整章计划把后续伏笔提前埋入或揭底；不确定任务是否已到本轮执行位置时不报漏写。'
