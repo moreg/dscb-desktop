@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -100,7 +101,7 @@ describe('自动写作去 AI 味', () => {
       new LibraryRepository(path.join(root, 'library.json')),
       settings
     )
-    projectId = (await projects.create({ name: '院门交接', genre: '玄幻' })).id
+    projectId = (await createWritingProject(projects, { name: '院门交接', genre: '玄幻' })).id
     dir = await projects.resolveDir(projectId)
     verifierReply = JSON.stringify({ unchanged: true, issues: [] })
     llm = {

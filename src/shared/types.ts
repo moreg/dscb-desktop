@@ -1,5 +1,7 @@
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
 import type { AppUpdateState } from './app-update'
+import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from './long-story-brainstorm'
+import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryCreateInput, ShortStoryDocument, ShortStoryGenerationInput, ShortStoryStorageSelectionResult, ShortStorySummary } from './short-story'
 
 export interface ProjectMeta {
   id: string
@@ -453,7 +455,13 @@ export type StreamHandleOf<T> = Promise<T> & {
 export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
-export type ChapterGenerationStage = 'generating' | 'deslop'
+export type ChapterGenerationStage = 'generating' | 'deslop' | 'foreshadowRepair'
+
+/** 单章交稿前的伏笔补写结论；失败时保留本轮生成稿。 */
+export interface AutoForeshadowRepairResult {
+  status: 'applied' | 'unchanged' | 'skipped' | 'failed'
+  message: string
+}
 
 /** 自动精修结论；需复核或失败时保留生成原稿。 */
 export interface AutoDeslopResult {
@@ -483,6 +491,9 @@ export interface ChapterStreamResult {
   error?: string
   /** 自动精修后的最终新生成片段，不含续写前已有正文。 */
   content?: string
+  /** 伏笔可能补入已有正文中段；有此字段时直接采用整章，不再拼接旧稿。 */
+  fullContent?: string
+  foreshadowRepair?: AutoForeshadowRepairResult
   autoDeslop?: AutoDeslopResult
   continueMode?: 'extend' | 'finish'
   /** 本次实际下发的字数口径，供编辑器显示「本次目标 / 实际写了 / 整章还差」 */
@@ -523,6 +534,18 @@ export interface RendererApi {
   downloadAppUpdate(): Promise<AppUpdateState>
   setAppUpdateAutoCheck(enabled: boolean): Promise<AppUpdateState>
   onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
+  listShortStories(): Promise<ShortStorySummary[]>
+  getShortStoryStorageLocation(): Promise<string>
+  chooseShortStoryStorageLocation(): Promise<ShortStoryStorageSelectionResult>
+  onShortStoryStorageLocationChanged(listener: (path: string) => void): () => void
+  createShortStory(input: ShortStoryCreateInput): Promise<ShortStoryDocument>
+  getShortStory(id: string): Promise<ShortStoryDocument>
+  saveShortStory(story: ShortStoryDocument): Promise<ShortStoryDocument>
+  generateShortStory(input: ShortStoryGenerationInput, onToken: (token: string, done: boolean) => void): StreamHandle
+  brainstormShortStory(input: ShortStoryBrainstormInput, onToken: (token: string, done: boolean) => void): StreamHandleOf<ShortStoryBrainstormResult>
+  brainstormLongStory(input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void): StreamHandleOf<LongStoryBrainstormResult>
+  exportShortStory(id: string): Promise<{ canceled: boolean; path?: string }>
+  openShortStoryDirectory(id: string): Promise<{ ok: boolean }>
   listProjects: (query?: ListProjectsQuery) => Promise<ProjectMeta[]>
   /** 归档/移回书案。归档不删文件，只从书案列表隐藏。 */
   setProjectArchived: (projectId: string, archived: boolean) => Promise<ProjectMeta>
@@ -859,6 +882,11 @@ export interface RendererApi {
     selfCheck?: ChapterSelfCheckReport | null
     deepReview?: AuditViolation[]
   } | null>
+  /** 补跑伏笔检查/补写，只返回候选正文，采用后再同步记忆。 */
+  repairChapterForeshadowings: (
+    projectId: string, chapterNumber: number, content: string,
+    opts?: { partialChapter?: boolean; tempContext?: string }
+  ) => Promise<{ content: string; report: AutoForeshadowRepairResult }>
   getChapterSummary: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterSummaryView | null>
   generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force?: boolean) => Promise<ChapterSummaryView>
   /** 单独跑写后自检（不写记忆） */

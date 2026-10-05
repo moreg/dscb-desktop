@@ -1,0 +1,2 @@
+/* 长篇脑洞沿用短篇脑洞的卡片、控件与主题样式。 */
+.ls-brainstorm .ss-brainstorm-idea dl > div + div { margin-top: 10px; }

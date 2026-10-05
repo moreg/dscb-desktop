@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { promises as fs } from 'fs'
@@ -24,7 +25,7 @@ describe('OutlineService', () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-ols-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
   })
 
   it('generateMain is not implemented in the current phase', async () => {
@@ -89,5 +90,29 @@ describe('OutlineService', () => {
     const fileContent = await fs.readFile(path.join(dir, '细纲', '第01卷.md'), 'utf-8')
     expect(fileContent).toContain('## 第 4 章：深山奇遇')
     expect(fileContent).toContain('## 第 5 章：初试身手')
+  })
+
+  it('作品信息里新保存的脑洞进入细纲提示词，正式设定与卷级事件仍保留', async () => {
+    const meta = await createWritingProject(ps, { name: '脑洞参考书', genre: '玄幻', description: '旧简介：寻找失散的师父' })
+    const dir = await ps.resolveDir(meta.id)
+    const coreSettings = '# 核心设定\n\n林远是药师，不能直接获得修仙功法。'
+    const volumeOutline = '# 《脑洞参考书》大纲\n\n## 主线剧情走向\n\n第四章在深山救下白衣老者，老者不会在本卷死亡。'
+    await fs.writeFile(path.join(dir, '设定', '核心设定.md'), coreSettings, 'utf-8')
+    await fs.writeFile(path.join(dir, '大纲', '大纲.md'), volumeOutline, 'utf-8')
+    const description = '新脑洞：每次救人都会听见患者尚未发生的遗言。'
+    await ps.updateProjectInfo(meta.id, { name: '脑洞参考书', description })
+
+    const llm = mockLlm(`=== 第4章 ===\n### 第 4 章：山中救人\n- **核心事件**：林远救下白衣老者，第一次听见遗言\n- **字数预估**：约 2500 字`)
+    await new OutlineService(ps, llm).generateDetailedRange(meta.id, 4, 1)
+
+    const prompt = vi.mocked(llm.generateStream).mock.calls[0][0]
+    expect(prompt).toContain(description)
+    expect(prompt).toContain(coreSettings)
+    expect(prompt).toContain(volumeOutline)
+    expect(prompt).toContain('最新作品简介（额外构思参考）')
+    expect(prompt).toContain('存在冲突时遵循正式规划')
+    const updatedDir = await ps.resolveDir(meta.id)
+    expect(await fs.readFile(path.join(updatedDir, '设定', '核心设定.md'), 'utf-8')).toBe(coreSettings)
+    expect(await fs.readFile(path.join(updatedDir, '大纲', '大纲.md'), 'utf-8')).toBe(volumeOutline)
   })
 })

@@ -77,10 +77,15 @@ export class WriteFlowService {
     outline: string,
     content: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    opts: GenerateOptions & { partialChapter?: boolean } = {}
   ): Promise<string> {
+    const { partialChapter, ...llmOpts } = opts
     const prompt = [
       `请对照下面的章节细纲，检查正文是否按细纲写作。按 5 种差异类型分类输出。`,
+      ...(partialChapter ? [
+        '本轮是尚未收尾的分轮续写。只核对已经推进的场景和已发生情节点中本应出现的伏笔；尚未写到的后续场景、回收和章末钩子不是遗漏。',
+        '不能为了完成整章计划把后续伏笔提前埋入或揭底；不确定任务是否已到本轮执行位置时不报漏写。'
+      ] : []),
       ``,
       `5 种差异类型：`,
       `- 类型 1 漏写：细纲有 + 正文无 + 必填项（核心事件/伏笔/钩子）缺失`,
@@ -88,6 +93,10 @@ export class WriteFlowService {
       `- 类型 3 细节调整：细纲 A + 正文 B，但核心要素（参与方/事件类型/结果）一致`,
       `- 类型 4 核心事件改：细纲事件 X + 正文事件 Y，任一核心要素变化`,
       `- 类型 5 结构性偏离：字数偏离 > 30% / 核心事件偏离 > 2 个 / 卷终决战提前延后`,
+      `伏笔必须逐条对照本章细纲：计划埋设、强化、部分揭示、完整回收分别核验，不能以关键词或道具出现代替任务完成。`,
+      `每条遗漏伏笔独立输出类型1，outline 写原任务的编号与完整要求，suggestion 明确标记「补写伏笔」；已完成项不报遗漏。`,
+      `预计回收日期不等于本章强制回收任务，细纲明确暂缓、延期或不揭底时尊重原安排。`,
+      `检查新增伏笔段落是否引入人物认知、时间地点或因果矛盾，是否超出本章揭示范围；提前揭底或矛盾按P1及以上报告。`,
       ``,
       `resolution（推荐处理方向）指引：`,
       `- 类型 1 → "updateContent"（应补写/改正文，不要给 outlinePatch）`,
@@ -122,7 +131,7 @@ export class WriteFlowService {
       content
     ].join('\n')
     return this.llm.generateStream(prompt, {
-      ...opts,
+      ...llmOpts,
       meta: { feature: 'outlineCheck', ...opts.meta }
     })
   }

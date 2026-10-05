@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -32,7 +33,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-bcp-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻修真' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻修真' })).id
   })
 
   it('returns { system, user } with system embedding skill rules', async () => {
@@ -52,7 +53,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(out1.system).toContain('玄幻/修仙')
 
     // 新建一个古风项目验证语感切换
-    const id2 = (await ps.create({ name: '剑无名', genre: '古风仙侠' })).id
+    const id2 = (await createWritingProject(ps, { name: '剑无名', genre: '古风仙侠' })).id
     const out2 = await new WriteService(ps, mockLlm('正文')).buildChapterPrompt(id2, 1)
     expect(out2.system).toContain('古风/仙侠')
     expect(out2.system).toContain('勾了勾唇')
@@ -61,7 +62,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
 
   it('user prompt assembles project name, synopsis, chapter detail', async () => {
     const dir = await ps.resolveDir(projectId)
-    // 写 大纲/大纲.md（新格式真相源，覆盖项目创建时的「（待生成）」默认）
+    // 写 大纲/大纲.md（新格式真相源，覆盖写作测试夹具的「（待生成）」占位）
     const fs = await import('fs/promises')
     await fs.writeFile(
       path.join(dir, '大纲', '大纲.md'),
@@ -264,7 +265,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-gcs-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
   })
 
   it('calls llm.generateStream with systemPrompt option', async () => {
@@ -316,7 +317,7 @@ describe('buildChapterPrompt with structured prev ending state (Phase 12 Task 1)
     root = await mkdtemp(path.join(tmpdir(), 'aw-p12t1-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻修真' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻修真' })).id
   })
 
   it('injects structured prev ending state into user prompt', async () => {
@@ -363,7 +364,7 @@ describe('buildChapterPrompt with new skill-format context (outline md / trackin
     root = await mkdtemp(path.join(tmpdir(), 'aw-sf-ctx-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '民国老六', genre: '历史' })).id
+    projectId = (await createWritingProject(ps, { name: '民国老六', genre: '历史' })).id
   })
 
   it('injects outline from 大纲/大纲.md (new OutlineMdRepo) when outlines/main.json absent', async () => {

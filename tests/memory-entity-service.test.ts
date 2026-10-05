@@ -6,6 +6,7 @@ import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { MemoryEntityService } from '../src/main/data/memory-entity-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
+import { createWritingProject } from './helpers/writing-project'
 
 const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
@@ -13,11 +14,12 @@ describe('MemoryEntityService', () => {
   let root: string
   let service: MemoryEntityService
   let projectId: string
+  let projectService: ProjectService
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-me-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
-    const projectService = new ProjectService(path.join(root, 'projects'), library, mockSettings)
+    projectService = new ProjectService(path.join(root, 'projects'), library, mockSettings)
     service = new MemoryEntityService(projectService)
     projectId = (await projectService.create({ name: 'X' })).id
   })
@@ -27,7 +29,8 @@ describe('MemoryEntityService', () => {
   })
 
   it('list worldview 从 设定/世界观/*.md 枚举（含 3 个骨架空文件）', async () => {
-    const wvs = await service.list(projectId, 'worldview')
+    const planned = await createWritingProject(projectService, { name: '已规划的小说' })
+    const wvs = await service.list(planned.id, 'worldview')
     expect(wvs.length).toBeGreaterThanOrEqual(3)
     expect(wvs.some((w) => w.name === '力量体系')).toBe(true)
   })

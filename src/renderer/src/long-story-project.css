@@ -1,0 +1,9 @@
+.project-info-brainstorm {
+  margin: 0 0 24px;
+}
+
+@media (max-width: 640px) {
+  .long-project-dialog > .row {
+    flex-wrap: wrap;
+  }
+}

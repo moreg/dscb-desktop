@@ -77,6 +77,7 @@ import type {
   AuditReport,
   AuditViolation,
   AutoDeslopResult,
+  AutoForeshadowRepairResult,
   SavedChapterPolishResult,
   BatchProgress,
   ChapterGenerationStage,
@@ -131,6 +132,7 @@ import {
 } from '../../shared/word-target'
 import { countWords } from './words'
 import { getBatchRangeError } from '../../shared/batch-range'
+import { missingForeshadowings, repairMissingForeshadowings } from './foreshadowing-repair'
 import {
   assertNovelProse,
   isEarlyAgentNarration,
@@ -229,6 +231,8 @@ export interface ChapterGenerateOptions extends GenerateOptions {
 export interface BatchGenerateOptions extends GenerateOptions {
   onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void
   onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+  /** 正文真正落盘后的恢复检查点；完成该回调后才允许写后同步。 */
+  onContentSaved?: (chapterNumber: number) => Promise<void>
 }
 
 /** prompt 组装阶段才知道的字数口径，回传给前端做「目标 / 实际 / 还差」提示 */
@@ -620,6 +624,56 @@ export class WriteService {
     const previousPassages = await new ProseMemoryIndex(dir).searchBefore(chapterNumber,
       prose, { maxChars: 4800, maxResults: 8 })
     if (previousPassages.length) assertNovelProse(prose, previousPassages.map((p) => p.text).join('\n\n'))
+  }
+
+  /**
+   * 单章续写交稿前核对伏笔。只返回候选整章，不保存或提交记忆；编辑器采用后走原有保存/同步。
+   * 分轮续写只补已推进场景中应出现的伏笔。普通失败保留本轮成稿，取消仍由同一个流式请求处理。
+   */
+  async repairChapterForeshadowings(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    opts: { signal?: AbortSignal; partialChapter?: boolean; tempContext?: string; onStart?: () => void } = {}
+  ): Promise<{ content: string; report: AutoForeshadowRepairResult }> {
+    const result = (status: AutoForeshadowRepairResult['status'], message: string, text = content) =>
+      ({ content: text, report: { status, message } })
+    throwIfAborted(opts.signal)
+    if (!content.trim()) return result('skipped', '正文为空，未执行伏笔补写。')
+    if (content.length > 40000) return result('failed', '正文超过40000字符，伏笔检查未完成，请分章后补跑。')
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+      const outline = await this.loadChapterOutlineText(dir, chapterNumber)
+      if (!outline.trim()) return result('skipped', '缺少本章细纲，未执行伏笔自动补写。')
+      opts.onStart?.()
+      const signal = opts.signal ?? new AbortController().signal
+      const checkOpts = { signal, partialChapter: opts.partialChapter, meta: { feature: 'outlineCheck', projectId, chapterNumber } }
+      const report = await this.checkOutlineWithRetry(chapterNumber, outline, content, checkOpts, signal)
+      throwIfAborted(signal)
+      if (report.checked === false) throw new Error(`伏笔核对未完成：${report.error || '细纲对照失败'}`)
+      const detail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
+      const plans = detail?.foreshadowings ?? []
+      if (!missingForeshadowings(report, plans).length) return result('unchanged', '本章伏笔核对完成，未发现漏写。')
+      const repaired = await repairMissingForeshadowings({
+        chapterNumber, content, outline, report, plans, signal,
+        context: [opts.partialChapter ? '本轮尚未收尾，只补已推进场景中的遗漏，禁止抢写尚未发生的后续情节点与伏笔。' : '',
+          opts.tempContext ?? '', detail?.writingRequirements ?? '',
+          JSON.stringify(foreshadowingsBeforeChapter(await new ForeshadowingMdRepo(dir).list(), chapterNumber))].join('\n')
+      }, {
+        generate: (prompt) => this.llm.generateStream(prompt, {
+          signal, maxTokens: 8192,
+          systemPrompt: '你是网文作者，只补齐指定的伏笔遗漏，保留所有已有正文和章末落点。',
+          meta: { feature: 'chapterForeshadowRepair', projectId, chapterNumber }
+        }),
+        check: (text) => this.checkOutlineWithRetry(chapterNumber, outline, text, checkOpts, signal)
+      })
+      throwIfAborted(signal)
+      return result('applied', '遗漏伏笔已自动补写，原细纲复核通过。', repaired.content)
+    } catch (err) {
+      throwIfAborted(opts.signal)
+      if ((err as Error).message?.includes('LLM_ABORTED') || (err as Error).name === 'AbortError') throw err
+      return result('failed', `伏笔自动补写未完成，已保留本轮正文：${(err as Error).message}`)
+    }
   }
 
   private async autoDeslopGeneratedProse(
@@ -2141,7 +2195,7 @@ export class WriteService {
     total: number
   }> {
     let extraction: MemoryExtraction
-    let chapterNum = 0
+    let chapterNum: number
     let candidateFile: string | null = null
     let candidate: StoredMemoryCandidate | null = null
     const dir = await this.projectService.resolveDir(projectId)
@@ -2309,7 +2363,7 @@ export class WriteService {
   }
 
   /**
-   * 批量写章的单章流程：生成 → 自动去 AI 味 → 质检 → 细纲对照 / 记忆提取 / 深度审稿（并行）→ 正文回写细纲 → 记忆同步。
+   * 批量写章的单章流程：生成 → 自动去 AI 味 → 质检 → 并行对照/提取/深审 → 伏笔自动补写并重跑检查 → 正文回写细纲 → 记忆同步。
    * 可通过 onContentGenerated 先保存正文；记忆按项目设置自动同步。节奏评估与图解不在此流程里跑
    * （批量不回写也不落盘），由单章流程面板按需触发。
    * onProgress 用于推送当前步骤，UI 可显示进度。
@@ -2339,7 +2393,7 @@ export class WriteService {
     throwIfAborted(opts.signal)
     if (contentOverride === undefined) onProgress('generating')
     let autoDeslop: AutoDeslopResult | undefined
-    const content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
+    let content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
       ...generateOpts,
       onGenerationStage: (stage) => {
         onProgress(stage)
@@ -2352,16 +2406,15 @@ export class WriteService {
     })
     await onContentGenerated?.(content)
     // 批量正文已保存，必须绑定本次稿件，不能把保存后的另一窗口改稿误当成允许提交的基线。
-    const savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
+    let savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
     const memoryTicket = this.memoryCoordinator.begin(projectId, chapterNumber)
     const cancelMemory = (): void => { memoryTicket.controller.abort() }
     opts.signal?.addEventListener('abort', cancelMemory, { once: true })
     if (opts.signal?.aborted) cancelMemory()
     try {
 
-    // 2. 质检 + 写后自检清单对照
     onProgress('audit')
-    const audit = await this.auditChapter(projectId, content)
+    let audit = await this.auditChapter(projectId, content)
     let selfCheck: ChapterSelfCheckReport | null = null
     try {
       selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
@@ -2382,8 +2435,8 @@ export class WriteService {
     }
 
     // 暂停后重试时复用本稿已成功的步骤（按正文与细纲指纹命中），只补跑失败的那步。
-    const cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
-    const cached = this.postProcessCache.get(cacheKey) ?? {}
+    let cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
+    let cached = this.postProcessCache.get(cacheKey) ?? {}
     const cachePut = (patch: PostProcessCacheEntry): void => {
       const entry = { ...this.postProcessCache.get(cacheKey), ...patch }
       this.postProcessCache.delete(cacheKey)
@@ -2393,17 +2446,8 @@ export class WriteService {
       }
     }
 
-    // 3-4. 细纲对照、记忆提取、深度审稿都只依赖正文，并行跑；记忆在深审完成后统一核对提交，
-    // 提取阶段不改变全书状态。
-    onProgress('postChecks')
-    const [checkedOutline, memory, deepReview] = await Promise.all([
-      cached.outline && cached.outline.outlineHash === hashProse(outlineText)
-        ? structuredClone(cached.outline.report)
-        : this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
-          .then((report) => {
-            if (report.checked) cachePut({ outline: { outlineHash: hashProse(outlineText), report: structuredClone(report) } })
-            return report
-          }),
+    // 原稿的只读检查仍并行。发现遗漏后丢弃旧稿结果，补写复核完成前不回写细纲、不提交记忆。
+    const runPostChecks = (): Promise<[MemoryExtraction, AuditViolation[]]> => Promise.all([
       cached.memory
         ? structuredClone(cached.memory)
         : this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters, flowOpts('batchMemory'), memoryTicket.controller.signal)
@@ -2419,7 +2463,52 @@ export class WriteService {
             return review
           })
     ])
+    onProgress('postChecks')
+    const [checkedOutline, postChecks] = await Promise.all([
+      cached.outline && cached.outline.outlineHash === hashProse(outlineText)
+        ? structuredClone(cached.outline.report)
+        : this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal),
+      runPostChecks()
+    ])
     let outlineDiff = checkedOutline
+    let [memory, deepReview] = postChecks
+    if (proseFirst && outlineDiff.checked !== false && outlineDiff.hasOutline !== false) {
+      const detail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
+      const plans = detail?.foreshadowings ?? []
+      if (missingForeshadowings(outlineDiff, plans).length) {
+        onProgress('foreshadowRepair')
+        const repaired = await repairMissingForeshadowings({
+          chapterNumber, content, outline: outlineText, report: outlineDiff, plans,
+          context: [opts.tempContext ?? '', detail?.writingRequirements ?? '',
+            JSON.stringify(foreshadowingsBeforeChapter(await new ForeshadowingMdRepo(dir).list(), chapterNumber))].join('\n'),
+          signal: memoryTicket.controller.signal
+        }, {
+          generate: (prompt) => this.llm.generateStream(prompt, {
+            ...flowOpts('batchForeshadowRepair'), maxTokens: 8192,
+            systemPrompt: '你是网文作者，只补齐指定的伏笔遗漏，保留所有已有正文和章末落点。'
+          }),
+          check: (text) => this.checkOutlineWithRetry(chapterNumber, outlineText, text, flowOpts('batchOutline'), memoryTicket.controller.signal)
+        })
+        throwIfAborted(memoryTicket.controller.signal)
+        // 保存同样使用正文版本检查；另一窗口改稿时不能覆盖。
+        const previousContent = content
+        await this.chapterService.updateContent(projectId, chapterNumber, repaired.content, savedBefore, {
+          source: 'ai', note: '自动补写遗漏伏笔'
+        })
+        content = repaired.content
+        outlineDiff = repaired.report
+        savedBefore = hashProse(content)
+        this.postProcessCache.delete(postProcessCacheKey(projectId, chapterNumber, previousContent))
+        cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
+        cached = this.postProcessCache.get(cacheKey) ?? {}
+        onProgress('audit')
+        audit = await this.auditChapter(projectId, content)
+        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+        onProgress('postChecks')
+        ;[memory, deepReview] = await runPostChecks()
+      }
+    }
+    if (outlineDiff.checked) cachePut({ outline: { outlineHash: hashProse(outlineText), report: structuredClone(outlineDiff) } })
 
     // 以正文为准：先回写细纲，再用新细纲重跑自检，最后才同步记忆。顺序不能反——
     // 旧细纲下的自检失败会把记忆整章拦下，下一章又对着旧细纲/旧记忆写，问题逐章滚大。
@@ -2495,7 +2584,7 @@ export class WriteService {
     chapterNumber: number,
     outlineText: string,
     content: string,
-    opts: GenerateOptions,
+    opts: GenerateOptions & { partialChapter?: boolean },
     signal: AbortSignal
   ): Promise<OutlineDiffReport> {
     let report: OutlineDiffReport = { chapterNumber, diffs: [], passed: true, hasOutline: Boolean(outlineText), checked: false }
@@ -2731,6 +2820,7 @@ export class WriteService {
             source: 'ai', note: resumingPostProcess ? '恢复批量章节检查' : '批量生成正文'
           })
           contentSaved = true
+          await (opts as BatchGenerateOptions).onContentSaved?.(ch)
         }
         let result: ChapterFlowResult
         for (let attempt = 0; ; attempt++) {
@@ -2854,7 +2944,7 @@ export class WriteService {
   /**
    * 连续写作的正文优先细纲回写：本章正文即定稿，细纲跟着正文走。
    *
-   * 所有差异都回写，包括 P0、卷级变化和类型 1（细纲写了、正文没写）：有 outlinePatch
+   * 伏笔漏写先补正文，不允许通过删细纲消除差异。其他差异回写，包括 P0、卷级变化和类型 1：有 outlinePatch
    * 的直接合并；没有补丁的（多为漏写）交给模型按正文重写本章相关字段。人物/伏笔/
    * 核心结构变化再向后校准同卷未写章节。任一步失败返回 checked=false，本章细纲
    * 保持原样，重试时能重新发现差异。
@@ -2874,6 +2964,9 @@ export class WriteService {
       const dir = await this.projectService.resolveDir(projectId)
       const current = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       if (!current) return { ...report, proseSynced: 0 }
+      if (missingForeshadowings(report, current.foreshadowings ?? []).length) {
+        throw new Error('本章仍有遗漏伏笔，须自动补写并复核后再更新细纲')
+      }
 
       const collected = collectOutlinePatchesFromDiffs(
         report.diffs.map((diff, index) => ({ diff, index })),

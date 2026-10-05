@@ -1,6 +1,11 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, lazy, Suspense, useEffect, useState } from 'react'
 import FanqieTagPanel from './FanqieTagPanel'
 import type { ProjectTitleCandidate } from '../../shared/types'
+import { longStoryIdeaBrief } from '../../shared/long-story-brainstorm'
+import type { LongStoryIdea } from '../../shared/long-story-brainstorm'
+import './long-story-project.css'
+
+const LongStoryBrainstorm = lazy(() => import('./LongStoryBrainstorm'))
 
 interface Props {
   projectId: string
@@ -10,6 +15,10 @@ interface Props {
 export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [genre, setGenre] = useState('')
+  const [targetChapters, setTargetChapters] = useState<number | undefined>()
+  const [showBrainstorm, setShowBrainstorm] = useState(false)
+  const [brainstormBusy, setBrainstormBusy] = useState(false)
   const [initialName, setInitialName] = useState('')
   const [initialDescription, setInitialDescription] = useState('')
   const [loading, setLoading] = useState(true)
@@ -22,6 +31,9 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setShowBrainstorm(false)
+    setBrainstormBusy(false)
+    setMessage('')
     setError('')
     void window.api
       .getProject(projectId)
@@ -31,6 +43,8 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
         const nextDescription = project.description ?? ''
         setName(nextName)
         setDescription(nextDescription)
+        setGenre(project.genre ?? '')
+        setTargetChapters(project.targetChapters)
         setInitialName(nextName)
         setInitialDescription(nextDescription)
         setCandidates(project.titleCandidates ?? [])
@@ -50,6 +64,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
 
   const save = async (event: FormEvent) => {
     event.preventDefault()
+    if (saving || brainstormBusy) return
     const nextName = name.trim()
     const nextDescription = description.trim()
     if (!nextName) {
@@ -88,6 +103,17 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
     setMessage('已填入候选，确认后点击“保存作品信息”生效')
   }
 
+  const adoptIdea = (idea: LongStoryIdea): boolean => {
+    if (saving || brainstormBusy) return false
+    const brief = longStoryIdeaBrief(idea)
+    if (description.trim() && description.trim() !== brief &&
+      !window.confirm('采用这个脑洞将替换当前作品简介。已有大纲和正文需自行核对，是否继续？')) return false
+    setDescription(brief)
+    setError('')
+    setMessage('脑洞已填入作品简介，点击“保存作品信息”后生效。')
+    return true
+  }
+
   const removeCandidate = async (candidate: ProjectTitleCandidate) => {
     setRemovingId(candidate.id)
     setError('')
@@ -108,9 +134,19 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
   return (
     <div className="project-info-page">
       <div className="page-head">
-        <h1>作品信息</h1>
-        <p className="desc">管理这本小说对外展示的名称与简介</p>
+        <div className="page-head-row">
+          <div><h1>作品信息</h1><p className="desc">管理这本小说对外展示的名称与简介</p></div>
+          <button className="btn" type="button" disabled={saving || brainstormBusy} aria-expanded={showBrainstorm} aria-controls="project-long-story-brainstorm" onClick={() => setShowBrainstorm(value => !value)}>
+            {showBrainstorm ? '收起脑洞生成' : '脑洞生成'}
+          </button>
+        </div>
       </div>
+
+      {showBrainstorm ? <div id="project-long-story-brainstorm" className="project-info-brainstorm">
+        <Suspense fallback={<p className="empty">正在加载脑洞生成…</p>}>
+          <LongStoryBrainstorm genre={genre} targetChapters={targetChapters} sourceBrief={description} recoveryKey={`project:${projectId}`} disabled={saving} onBusyChange={setBrainstormBusy} onAdopt={adoptIdea} />
+        </Suspense>
+      </div> : null}
 
       <div className="project-info-layout">
         <form className="card project-info-form" onSubmit={(event) => void save(event)}>
@@ -119,6 +155,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
             <input
               id="project-name"
               className="input project-info-name"
+              disabled={saving || brainstormBusy}
               value={name}
               onChange={(event) => {
                 setName(event.target.value)
@@ -136,6 +173,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
             <textarea
               id="project-description"
               className="textarea project-info-description"
+              disabled={saving || brainstormBusy}
               value={description}
               onChange={(event) => {
                 setDescription(event.target.value)
@@ -143,7 +181,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
               }}
               maxLength={5000}
               rows={12}
-              placeholder="可以手动填写，也可以在“灵感抽签”中生成后保存到项目"
+              placeholder="可以手动填写，也可以用“脑洞生成”构思故事，或在“灵感抽签”生成简介"
             />
             <div className="project-info-count">{description.length}/5000</div>
           </div>
@@ -153,7 +191,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
 
           <div className="project-info-actions">
             <span className="muted">灵感抽签保存后，再进入此页面即可查看和修改。</span>
-            <button className="btn btn-primary" type="submit" disabled={saving || !dirty}>
+            <button className="btn btn-primary" type="submit" disabled={saving || brainstormBusy || !dirty}>
               {saving ? '保存中…' : dirty ? '保存作品信息' : '已保存'}
             </button>
           </div>
@@ -194,7 +232,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
                       type="button"
                       className="btn btn-primary btn-sm"
                       onClick={() => applyCandidate(candidate)}
-                      disabled={isCurrent(candidate)}
+                      disabled={saving || brainstormBusy || isCurrent(candidate)}
                     >
                       {isCurrent(candidate) ? '当前使用' : '使用这个'}
                     </button>

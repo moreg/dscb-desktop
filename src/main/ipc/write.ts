@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
+import { activeBatchProjects } from '../data/write-batch-lock'
 import { safeHandle, safeSend } from './safe-handle'
 import type {
   AutoDeslopResult,
@@ -17,6 +18,7 @@ import {
   batchWriteInputSchema
 } from './validation'
 import { z } from 'zod'
+import { formatChapterProse, joinContinuation } from '../../shared/format-chapter-prose'
 
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
@@ -162,8 +164,21 @@ export function registerWriteIpc(service: WriteService): void {
                 })
             }
           )
+          const repaired = await service.repairChapterForeshadowings(
+            validated.projectId,
+            validated.chapterNumber,
+            formatChapterProse(joinContinuation(validated.existingText ?? '', content)),
+            {
+              signal, partialChapter: continueMode === 'extend', tempContext: validated.tempContext,
+              onStart: () => safeSend(win, 'write:generationStage', {
+                requestId: validated.requestId, stage: 'foreshadowRepair'
+              })
+            }
+          )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, content, autoDeslop, continueMode, wordBudget }
+          return { ok: true, content, autoDeslop, continueMode, wordBudget,
+            foreshadowRepair: repaired.report,
+            ...(repaired.report.status === 'applied' ? { fullContent: repaired.content } : {}) }
         } finally {
           endStream(validated.requestId)
         }
@@ -551,6 +566,15 @@ export function registerWriteIpc(service: WriteService): void {
     }
   )
 
+  safeHandle('write:repairChapterForeshadowings', async (_e, payload: {
+    projectId: string; chapterNumber: number; content: string; partialChapter?: boolean; tempContext?: string
+  }) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
+      content: chapterContentSchema, partialChapter: z.boolean().optional(), tempContext: z.string().max(10000).optional() }), payload)
+    return service.repairChapterForeshadowings(input.projectId, input.chapterNumber, input.content,
+      { partialChapter: input.partialChapter, tempContext: input.tempContext })
+  })
+
   safeHandle('write:getChapterSummary', async (_e, payload: { projectId: string; chapterNumber: number; content: string }) => {
     const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
       content: chapterContentSchema }), payload)
@@ -913,7 +937,6 @@ export function registerWriteIpc(service: WriteService): void {
   )
 
   // 写作与已有正文精修共用项目锁；暂停、失败和取消均在 finally 中释放。
-  const activeBatchProjects = new Set<string>()
   const activeBatchRequests = new Set<string>()
   ipcMain.handle('write:polishChaptersBatch', async (e, payload: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)

@@ -75,6 +75,97 @@ describe('batch safety and recovery', () => {
     }))
   }
 
+  const foreshadowDiff = [{ type: 1, typeLabel: '漏写', priority: 'P1',
+    outline: 'FB-001：账册夹着父亲留下的半张借条', actual: '没有伏笔线索', suggestion: '补写伏笔' }]
+  const foreshadowAddition = '账册封皮夹着半张借条，林远认出落款是父亲的笔迹。'
+  const foreshadowPatch = JSON.stringify({ insertions: [{ after: -1, text: foreshadowAddition }] })
+
+  it('automatically fills missing foreshadowing before syncing memory and generating the next chapter', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, ch) => {
+      if (ch === 2) expect(await new ProseRepo(dir).read(1)).toContain(foreshadowAddition)
+      return content
+    })
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
+    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    const completed = vi.fn()
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, completed, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(generate).toHaveBeenCalledTimes(2)
+    const repaired = completed.mock.calls[0][1].content as string
+    expect(repaired).toBe(foreshadowAddition + '\n' + content)
+    expect(await new ProseRepo(dir).read(1)).toBe(repaired)
+    expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(repaired)
+    expect(vi.mocked(service.generateChapterSummary).mock.calls[0][2]).toBe(repaired)
+    const extractedTexts = vi.mocked(flow.extractMemoryStream).mock.calls.map((call) => call[0])
+    expect(extractedTexts).toContain(repaired)
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(vi.mocked(llm.generateStream).mock.calls[0][1]?.meta?.feature).toBe('batchForeshadowRepair')
+    expect(await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')).toContain('原始事件1')
+  })
+
+  it('preserves the original prose and outline if two automatic repair rounds still miss the task', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify(foreshadowDiff))
+    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1, completed: [1] })
+    expect(progress.pauseReason).toContain('两轮后仍未通过')
+    expect(generate).toHaveBeenCalledOnce()
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')).toContain('原始事件1')
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('resumes failed repair from saved prose and does not regenerate the chapter', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff))
+    vi.mocked(llm.generateStream).mockRejectedValueOnce(new Error('补写断流')).mockResolvedValue(foreshadowPatch)
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
+    const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    expect(resumed.status).toBe('completed')
+    expect(generate).toHaveBeenCalledOnce()
+    expect(await new ProseRepo(dir).read(1)).toBe(foreshadowAddition + '\n' + content)
+  })
+
+  it('does not overwrite a manual edit made during automatic repair', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
+    vi.mocked(llm.generateStream).mockImplementation(async () => {
+      const chapters = (service as unknown as { chapterService: { updateContent: (pid: string, ch: number, text: string) => Promise<unknown> } }).chapterService
+      await chapters.updateContent(projectId, 1, '作者手改后的正文。')
+      return foreshadowPatch
+    })
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('paused')
+    expect(await new ProseRepo(dir).read(1)).toBe('作者手改后的正文。')
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('keeps successfully saved repair on retry without inserting it twice', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
+    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    vi.mocked(service.syncChapterAfterWrite).mockResolvedValueOnce({
+      memory: { ...emptyMemory(), errors: ['写入失败'] }, extraction: resultFor(1).memory,
+      settings: { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }
+    })
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    expect(resumed.status).toBe('completed')
+    expect(generate).toHaveBeenCalledOnce()
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(await new ProseRepo(dir).read(1)).toBe(foreshadowAddition + '\n' + content)
+  })
+
   it('persists prose before any memory commit', async () => {
     stubPostProcess()
     vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
@@ -86,6 +177,37 @@ describe('batch safety and recovery', () => {
     const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
     expect(service.syncChapterAfterWrite).toHaveBeenCalledOnce()
+  })
+
+  it('awaits the saved-content checkpoint before committing chapter memory', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    let checkpointComplete = false
+    const checkpoint = vi.fn(async (chapter: number) => {
+      expect(await new ProseRepo(dir).read(chapter)).toBe(content)
+      checkpointComplete = true
+    })
+    vi.mocked(service.syncChapterAfterWrite).mockImplementation(async (_pid, ch, _text, options) => {
+      expect(checkpointComplete).toBe(true)
+      return { memory: emptyMemory(), settings: { applied: 0, skipped: 0, errors: [], appliedDiffs: [] },
+        extraction: options?.extraction ?? resultFor(ch).memory }
+    })
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null,
+      { onContentSaved: checkpoint }, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(checkpoint).toHaveBeenCalledOnce()
+    expect(checkpoint).toHaveBeenCalledWith(1)
+  })
+
+  it('checkpoint failure preserves prose and pauses before any memory write', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null,
+      { onContentSaved: async () => { throw new Error('进度存储失败') } }, undefined, { autoContinue: true })
+    expect(progress).toMatchObject({ status: 'paused', completed: [1], pendingPostProcessChapter: 1 })
+    expect(progress.pauseReason).toContain('进度存储失败')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
   })
 
   it('does not commit memory or announce completion when saving fails', async () => {

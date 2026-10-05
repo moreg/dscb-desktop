@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { cp, mkdtemp, readFile, rename, stat } from 'fs/promises'
+import { cp, mkdtemp, readFile, readdir, rename, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
+import { createWritingProject } from './helpers/writing-project'
 
 const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
@@ -17,91 +18,54 @@ describe('ProjectService', () => {
     service = new ProjectService(path.join(root, 'projects'), library, mockSettings)
   })
 
-  it('create makes a project dir with 记忆/ 骨架 + project.json', async () => {
+  it('create 只建立项目目录和作品信息，不生成规划模板', async () => {
     const meta = await service.create({ name: '示范小说', genre: '玄幻' })
-    const dirStat = await stat(meta.path)
-    expect(dirStat.isDirectory()).toBe(true)
-    // v4 骨架：记忆/ 子目录
-    const memStat = await stat(path.join(meta.path, '记忆'))
-    expect(memStat.isDirectory()).toBe(true)
-    const charStat = await stat(path.join(meta.path, '记忆', '人物'))
-    expect(charStat.isDirectory()).toBe(true)
+    expect((await stat(meta.path)).isDirectory()).toBe(true)
+    expect(await readdir(meta.path)).toEqual(['project.json'])
     const pj = JSON.parse(await readFile(path.join(meta.path, 'project.json'), 'utf-8'))
-    expect(pj.name).toBe('示范小说')
-    expect(pj.genre).toBe('玄幻')
+    expect(pj).toMatchObject({ id: meta.id, name: '示范小说', genre: '玄幻' })
   })
 
-  it('create 不再创建 chapters/ 或 记忆系统/（v3 老目录）', async () => {
+  it('create 不创建大纲、细纲、设定、记忆、追踪或正文目录', async () => {
     const meta = await service.create({ name: 'X' })
-    await expect(stat(path.join(meta.path, 'chapters'))).rejects.toThrow()
-    await expect(stat(path.join(meta.path, '记忆系统'))).rejects.toThrow()
-  })
-
-  it('create 生成 记忆/索引.md', async () => {
-    const meta = await service.create({ name: 'X' })
-    const indexText = await readFile(path.join(meta.path, '记忆', '索引.md'), 'utf-8')
-    expect(indexText).toContain('# 记忆索引')
-    expect(indexText).toContain('## 人物（0）')
-  })
-
-  it('create 生成 追踪/索引.md', async () => {
-    const meta = await service.create({ name: 'X' })
-    const indexText = await readFile(path.join(meta.path, '追踪', '索引.md'), 'utf-8')
-    expect(indexText).toContain('# 追踪索引')
-    expect(indexText).toContain('伏笔.md')
-  })
-
-  it('create 生成 设定/核心设定.md（细纲生成依赖）', async () => {
-    const meta = await service.create({
-      name: '核心设定书',
-      genre: '都市',
-      targetChapters: 200,
-      chapterWordCount: 3000,
-      description: '测试简介'
-    })
-    const text = await readFile(path.join(meta.path, '设定', '核心设定.md'), 'utf-8')
-    expect(text).toContain('# 核心设定')
-    expect(text).toContain('核心设定书')
-    expect(text).toContain('都市')
-    expect(text).toContain('200')
-    expect(text).toContain('3000')
-    expect(text).toContain('测试简介')
-  })
-
-  it('create 追踪文件含可 append 的表头骨架', async () => {
-    const meta = await service.create({ name: '追踪骨架' })
-    const checks: Array<{ file: string; headers: string[] }> = [
-      {
-        file: '伏笔.md',
-        headers: ['伏笔编号', '伏笔内容', '伏笔类型', '埋设章节', '预计回收章节', '实际回收章节', '状态']
-      },
-      {
-        file: '时间线.md',
-        headers: ['章节', '事件名', '时间跨度', '涉及角色', '详细描述']
-      },
-      {
-        file: '角色状态.md',
-        headers: ['角色', '当前实力', '当前立场', '当前目标', '关键道具', '关系快照', '更新章节']
-      },
-      {
-        file: '上下文.md',
-        headers: ['日期', '章节', '进度摘要', '下一章目标', '阻塞点']
-      },
-      {
-        file: '问题记录.md',
-        headers: ['日期', '问题描述', '原因分析', '修正方案', '状态']
-      }
-    ]
-    for (const { file, headers } of checks) {
-      const text = await readFile(path.join(meta.path, '追踪', file), 'utf-8')
-      expect(text, file).toMatch(/\|/)
-      for (const h of headers) {
-        expect(text, `${file} missing ${h}`).toContain(h)
-      }
-      // 至少有表头 + 分隔行
-      const tableLines = text.split(/\r?\n/).filter((l) => l.trim().startsWith('|'))
-      expect(tableLines.length, file).toBeGreaterThanOrEqual(2)
+    for (const dir of ['大纲', '细纲', '设定', '记忆', '追踪', '正文', '图解', 'chapters', '记忆系统']) {
+      await expect(stat(path.join(meta.path, dir))).rejects.toThrow()
     }
+  })
+
+  it('没有大纲时仍能读取作品信息，读取不会补写规划模板', async () => {
+    const meta = await service.create({ name: '脑洞新书', description: '每次救人都听见患者未来的遗言' })
+    expect(await service.getProjectData(meta.id)).toMatchObject({
+      id: meta.id, name: '脑洞新书', description: '每次救人都听见患者未来的遗言'
+    })
+    expect(await readdir(meta.path)).toEqual(['project.json'])
+  })
+
+  it('重启后仍列出和读取只有作品信息的项目，不生成额外文件', async () => {
+    const meta = await service.create({ name: '尚未规划的故事', genre: '都市', description: '新脑洞' })
+    const restarted = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), mockSettings)
+    expect(await restarted.listProjects()).toEqual([expect.objectContaining({ id: meta.id, name: meta.name })])
+    expect(await restarted.getProjectData(meta.id)).toMatchObject({ id: meta.id, genre: '都市', description: '新脑洞' })
+    expect(await readdir(meta.path)).toEqual(['project.json'])
+  })
+
+  it('create 将题材、简介和篇幅目标保存到作品信息', async () => {
+    const meta = await service.create({
+      name: '脑洞参考书', genre: '都市', targetChapters: 200, chapterWordCount: 3000, description: '测试简介'
+    })
+    expect(await service.getProjectData(meta.id)).toMatchObject({
+      id: meta.id, name: '脑洞参考书', genre: '都市', targetChapters: 200, chapterWordCount: 3000, description: '测试简介'
+    })
+    expect(await readdir(meta.path)).toEqual(['project.json'])
+  })
+
+  it('保存书名和脑洞简介后仍只有作品信息，不创建规划目录', async () => {
+    const meta = await service.create({ name: '脑洞草稿', description: '原始方向' })
+    const updated = await service.updateProjectInfo(meta.id, { name: '遗言药师', description: '新脑洞：救人换来未来记忆' })
+    const dir = await service.resolveDir(meta.id)
+    expect(updated).toMatchObject({ id: meta.id, name: '遗言药师', description: '新脑洞：救人换来未来记忆' })
+    expect(await readdir(dir)).toEqual(['project.json'])
+    expect(await service.listProjects()).toEqual([expect.objectContaining({ id: meta.id, name: '遗言药师', path: dir })])
   })
 
   it('create registers the project in library', async () => {
@@ -128,7 +92,7 @@ describe('ProjectService', () => {
   })
 
   it('updates novel name and description in project data and library metadata', async () => {
-    const meta = await service.create({ name: '旧书名', description: '旧简介' })
+    const meta = await createWritingProject(service, { name: '旧书名', description: '旧简介' })
     const updated = await service.updateProjectInfo(meta.id, {
       name: '抽到的新书名',
       description: '抽到的新简介'
@@ -227,7 +191,7 @@ describe('ProjectService', () => {
   it('扫描时把改名后的文件夹名同步为书名', async () => {
     const oldName = '让你演财阀恶女，你怎么成全首尔的白月光了？'
     const folderName = '让你演财阀恶女，你怎么成白月光了'
-    const meta = await service.create({ name: oldName })
+    const meta = await createWritingProject(service, { name: oldName })
     const nextDir = path.join(path.dirname(meta.path), folderName)
     await rename(meta.path, nextDir)
     // 上一次扫描已经按大纲里的旧书名登记了新路径
@@ -247,7 +211,7 @@ describe('ProjectService', () => {
   })
 
   it('旧目录还在时，不把另一份大纲相同的书改成文件夹名', async () => {
-    const meta = await service.create({ name: '潮屿之主' })
+    const meta = await createWritingProject(service, { name: '潮屿之主' })
     const copy = path.join(path.dirname(meta.path), '师父的七个师姐')
     await cp(meta.path, copy, { recursive: true })
 
@@ -259,7 +223,7 @@ describe('ProjectService', () => {
   })
 
   it('纯数字文件夹名不当成新书名', async () => {
-    const meta = await service.create({ name: '穿成财阀恶女，我靠砸钱成了全校白月光' })
+    const meta = await createWritingProject(service, { name: '穿成财阀恶女，我靠砸钱成了全校白月光' })
     const nextDir = path.join(path.dirname(meta.path), '1')
     await rename(meta.path, nextDir)
 
@@ -287,4 +251,72 @@ describe('ProjectService', () => {
     expect((await service.listProjects()).map((p) => p.id)).toEqual([meta.id])
     expect((await service.listProjects())[0].archivedAt).toBeUndefined()
   })
+  it('扫描移走的作品信息项目时保留稳定 id、归档状态和读取路径', async () => {
+    const meta = await service.create({ name: '待搬家的脑洞', description: '保持长线设定' })
+    const archived = await service.setArchived(meta.id, true)
+    const nextDir = path.join(path.dirname(meta.path), '搬家后的脑洞')
+    await rename(meta.path, nextDir)
+
+    await service.scanProjects()
+    expect(await service.listProjects()).toEqual([])
+    const all = await service.listProjects({ includeArchived: true })
+    expect(all).toHaveLength(1)
+    expect(all[0]).toMatchObject({ id: meta.id, path: nextDir, archivedAt: archived.archivedAt })
+    expect(await service.resolveDir(meta.id)).toBe(nextDir)
+    expect(await service.getProjectData(meta.id)).toMatchObject({ id: meta.id, description: '保持长线设定' })
+    expect(await readdir(nextDir)).toEqual(['project.json'])
+  })
+
+  it('丢失书架索引后可从作品信息恢复同一个稳定 id', async () => {
+    const meta = await service.create({ name: '索引外的脑洞', description: '项目仍在磁盘上' })
+    await rm(path.join(root, 'library.json'))
+    const restarted = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), mockSettings)
+
+    expect(await restarted.listProjects()).toEqual([])
+    expect(await restarted.scanProjects()).toEqual([expect.objectContaining({
+      id: meta.id, name: meta.name, path: meta.path, description: '项目仍在磁盘上'
+    })])
+    expect(await restarted.getProjectData(meta.id)).toMatchObject({ id: meta.id, name: meta.name })
+    expect(await readdir(meta.path)).toEqual(['project.json'])
+    expect(await new LibraryRepository(path.join(root, 'another-library.json')).list()).toEqual([])
+  })
+
+  it('复制作品信息项目时给副本独立 id，原项目和副本的记录互不混用', async () => {
+    const meta = await service.create({ name: '原脑洞', description: '原设定' })
+    const copyDir = path.join(path.dirname(meta.path), '另存的脑洞')
+    await cp(meta.path, copyDir, { recursive: true })
+
+    const listed = await service.scanProjects()
+    expect(listed).toHaveLength(2)
+    expect(listed.find(item => item.id === meta.id)).toMatchObject({ name: '原脑洞', path: meta.path })
+    const copy = listed.find(item => item.path === copyDir)!
+    expect(copy).toBeDefined()
+    expect(copy.id).not.toBe(meta.id)
+    const originalData = JSON.parse(await readFile(path.join(meta.path, 'project.json'), 'utf-8'))
+    const copyData = JSON.parse(await readFile(path.join(copyDir, 'project.json'), 'utf-8'))
+    expect(originalData.id).toBe(meta.id)
+    expect(copyData.id).toBe(copy.id)
+    await service.addTitleCandidate(copy.id, { name: '副本候选', description: '只属于副本' })
+    expect((await service.getProjectData(meta.id)).titleCandidates ?? []).toEqual([])
+    expect((await service.getProjectData(copy.id)).titleCandidates).toEqual([
+      expect.objectContaining({ name: '副本候选', description: '只属于副本' })
+    ])
+    expect((await service.scanProjects()).find(item => item.path === copyDir)?.id).toBe(copy.id)
+  })
+
+  it('两个同书名的作品信息项目均有有效目录时，扫描不误判为改名', async () => {
+    const first = await service.create({ name: '同名脑洞' })
+    const second = await service.create({ name: '同名脑洞' })
+    const secondDir = path.join(path.dirname(second.path), '只是保存目录')
+    await rename(second.path, secondDir)
+    await service['library'].update(second.id, { path: secondDir })
+    const restarted = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), mockSettings)
+
+    const listed = await restarted.scanProjects()
+    expect(listed).toHaveLength(2)
+    expect(listed.find(item => item.id === first.id)).toMatchObject({ name: '同名脑洞', path: first.path })
+    expect(listed.find(item => item.id === second.id)).toMatchObject({ name: '同名脑洞', path: secondDir })
+    expect(JSON.parse(await readFile(path.join(secondDir, 'project.json'), 'utf-8')).name).toBe('同名脑洞')
+  })
+
 })

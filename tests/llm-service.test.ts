@@ -510,7 +510,7 @@ describe('LlmService', () => {
 })
 
 describe('LlmService feature routing', () => {
-  it('routes to provider configured for the feature category', async () => {
+  it.each(['chapter', 'batchForeshadowRepair', 'chapterForeshadowRepair'])('routes %s to the configured prose provider', async (feature) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
     await s.write({
@@ -526,7 +526,7 @@ describe('LlmService feature routing', () => {
       ok: true,
       body: sseBody(['data: [DONE]\n\n'])
     } as never)
-    await svc.generateStream('hi', { meta: { feature: 'chapter' } })
+    await svc.generateStream('hi', { meta: { feature } })
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://chapter.example.com/v1/chat/completions')
     const body = JSON.parse(init.body as string)

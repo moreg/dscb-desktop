@@ -49,9 +49,16 @@ import { ScanService } from './data/scan/scan-service'
 import { ChapterNameService } from './data/chapter-name-service'
 import { ProjectWindowRegistry } from './data/project-window-registry'
 import { MobileServer } from './mobile/mobile-server'
+import { MobileBrainstormService } from './mobile/mobile-brainstorm-service'
+import { MobileBatchService } from './mobile/mobile-batch-service'
 import { registerMobileIpc } from './ipc/mobile'
 import { MobileReferenceService } from './mobile/mobile-reference-service'
 import { registerAppUpdates } from './app-updates'
+import { ShortStoryStorage } from './data/short-story-storage'
+import { registerShortStoryIpc } from './ipc/short-story'
+import { registerShortStoryStorageIpc } from './ipc/short-story-storage'
+import { registerShortStoryBrainstormIpc } from './ipc/short-story-brainstorm'
+import { registerLongStoryBrainstormIpc } from './ipc/long-story-brainstorm'
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const projectWindows = new ProjectWindowRegistry<BrowserWindow>()
@@ -153,6 +160,14 @@ if (!hasSingleInstanceLock) {
   const secret = new SecretStore(secretFile)
   const llmService = new LlmService(secret, usageRepo)
   registerLlmIpc(secret, llmService)
+  const shortStoryStorage = new ShortStoryStorage(
+    await settings.getShortStoriesRoot(join(userData, 'short-stories')),
+    async path => { await settings.update({ shortStoriesRoot: path }) }
+  )
+  registerShortStoryIpc(shortStoryStorage, llmService)
+  registerShortStoryStorageIpc(shortStoryStorage)
+  registerShortStoryBrainstormIpc(llmService)
+  registerLongStoryBrainstormIpc(llmService)
 
   // 章名命名服务（依赖 LlmService，必须在 llmService 实例化后构造）
   const chapterNameService = new ChapterNameService(llmService)
@@ -190,11 +205,21 @@ if (!hasSingleInstanceLock) {
     deslopService
   )
   registerWriteIpc(writeService)
+  const mobileReferences = new MobileReferenceService(projectService)
+  const mobileBatch = new MobileBatchService(
+    projectService,
+    writeService,
+    chapterService,
+    mobileReferences,
+    join(userData, 'mobile-batches')
+  )
   mobileServer = new MobileServer(
     projectService,
     chapterService,
-    new MobileReferenceService(projectService),
-    writeService
+    mobileReferences,
+    writeService,
+    new MobileBrainstormService(llmService),
+    mobileBatch
   )
   registerMobileIpc(mobileServer)
   const diagnosticsService = new DiagnosticsService(projectService)
@@ -260,9 +285,23 @@ if (!hasSingleInstanceLock) {
   })
 }
 
-app.on('before-quit', () => {
-  disposeProjectWatchers?.()
-  void mobileServer?.stop()
+let mobileQuitReady = false
+let mobileQuitPending = false
+app.on('before-quit', (event) => {
+  if (mobileQuitReady || !mobileServer) {
+    disposeProjectWatchers?.()
+    return
+  }
+  event.preventDefault()
+  if (mobileQuitPending) return
+  mobileQuitPending = true
+  // 保存暂停检查点后再退出，重启电脑应用时可以继续手机批次。
+  void mobileServer.stop().catch((error: unknown) => {
+    console.error('[mobile-server] shutdown failed:', error)
+  }).finally(() => {
+    mobileQuitReady = true
+    app.quit()
+  })
 })
 
 app.on('will-quit', () => { disposeAppUpdates?.() })

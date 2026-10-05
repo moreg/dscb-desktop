@@ -154,6 +154,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 正文生成
   chapter: 'chapter',
   'chapter-adjust': 'chapter',
+  batchForeshadowRepair: 'chapter',
+  chapterForeshadowRepair: 'chapter',
   // 按要求重写 · 先出方案（与改写同属正文类）
   'chapter-adjust-plan': 'chapter',
   // 审稿质检

@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -28,7 +29,7 @@ describe('WriteService', () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-ws-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
   })
 
   it('buildChapterPrompt assembles project, outline, characters, prev chapter', async () => {

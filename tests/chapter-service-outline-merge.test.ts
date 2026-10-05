@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { mkdtemp, mkdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -32,7 +33,7 @@ describe('ChapterService outline merge', () => {
     root = await mkdtemp(path.join(tmpdir(), 'aw-merge-'))
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
-    projectId = (await ps.create({ name: '合并测试', genre: '玄幻' })).id
+    projectId = (await createWritingProject(ps, { name: '合并测试', genre: '玄幻' })).id
     dir = await ps.resolveDir(projectId)
 
     // 节奏图谱 html：chapter 1（旧标题/旧情绪）+ chapter 2

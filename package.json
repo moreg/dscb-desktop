@@ -1,6 +1,6 @@
 {
   "name": "ai-writer-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "大神持笔 桌面版（本地文件存储）",
   "main": "./out/main/index.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "icon": "node scripts/generate-icon.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:brainstorm-ui": "node scripts/brainstorm-ui-smoke.mjs",
     "style:baseline": "node scripts/style-baseline.mjs",
     "deslop:corpus": "vitest run tests/deslop-corpus.test.ts",
     "lint": "eslint src tests",

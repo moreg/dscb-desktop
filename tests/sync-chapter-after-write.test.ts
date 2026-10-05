@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mkdtemp, readFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -52,7 +53,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
       getProjectsRoot: async (fallback: string) => fallback
     } as unknown as SettingsRepository
     ps = new ProjectService(path.join(root, 'projects'), library, mockPsSettings)
-    projectId = (await ps.create({ name: '青云志', genre: '玄幻' })).id
+    projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
 
     // seed 角色卡，便于状态变化写入
     const dir = await ps.resolveDir(projectId)

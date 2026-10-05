@@ -2,6 +2,7 @@ import { CHAPTER_RULE_SECTIONS, buildContinueModeRules } from './chapter-rules'
 import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
+import { DESLOP_PLAIN_WRITING_RULES } from './deslop/anti-ai-methods'
 
 export { FORBIDDEN_WORD_CATEGORIES, flattenForbiddenWords } from './forbidden-words'
 export { GENRE_VOICES, resolveGenreVoice } from './genre-voice'
@@ -153,6 +154,7 @@ export function buildHumanizerPrompt(
 
   sections.push('---')
   sections.push('## 2. 改写原则')
+  sections.push(DESLOP_PLAIN_WRITING_RULES)
   sections.push(
     [
       '1. 不改变原意与事实',
@@ -161,12 +163,12 @@ export function buildHumanizerPrompt(
       '4. 保持自然语言节奏',
       '5. 不新增未提供的信息，不凭空补入动机、道具、时间、事件或结论；只以原创表达整理原文事实，不借用其他作品的桥段或独特台词',
       '6. 替换语感必须匹配题材',
-      '7. 优先用动作、停顿、可见反应代替抽象解释',
+      '7. 必要的想法与情绪可以直白表达，动作有必要才写；对白已清楚时直接接续，不用动作、停顿或身体反应机械替换抽象解释',
       // 原文是「长短句交替，不要整段同节奏」。没有量纲的定性指令会被模型往极端执行：
       // 实测产出句子平均 11 字，而番茄在榜作品是 17.8 字。改成带区间的表述。
       // 数据见 tests/fixtures/deslop-corpus/FINDINGS.md
       '8. 句长有起伏，但重心落在 15–22 字；短句是重音不是常态，连续动作可在句内自然连接，有重音时可断句分段；正文叙述段严格单句成段，段落之间用空行分隔，严禁同一段落拼凑多个句号，严禁机械双联报表句，不为合并句子增加冗词或事实',
-      '9. 不能只删词，必须整体改写这段话'
+      '9. 只修改确有问题的表达，允许直接删去无用动作、修饰或重复解释；无需为了显得改过而整体重写，输出完整修订片段，不新增描写占位'
     ].join('\n')
   )
 

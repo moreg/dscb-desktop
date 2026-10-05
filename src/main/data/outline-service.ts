@@ -312,7 +312,7 @@ export class OutlineService {
     const { buildChapterOutlinePrompt } = await import('./skill-prompts/opening/chapter-outline')
     const { OPENING_SYSTEM_PROMPT } = await import('./skill-prompts/opening/topic-routing')
     const isGolden = fromChapter <= 3
-    const prompt = buildChapterOutlinePrompt(
+    let prompt = buildChapterOutlinePrompt(
       coreSettings,
       volumeOutline,
       fromChapter,
@@ -320,6 +320,10 @@ export class OutlineService {
       chapterWordCount,
       isGolden
     )
+    const description = meta.description?.trim()
+    if (description) {
+      prompt += `\n\n### 最新作品简介（额外构思参考）\n${description}\n\n作品简介可能包含新采用的脑洞，仅用于补充创意和卖点。具体人物事实、世界观规则和卷级事件仍以以上正式核心设定与大纲为准；存在冲突时遵循正式规划，不擅自改写既有设定或已安排的剧情。`
+    }
 
     // 5. 调用大语言模型生成细纲
     const md = await this.llm.generateStream(prompt, {

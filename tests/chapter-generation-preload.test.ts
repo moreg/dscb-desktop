@@ -72,4 +72,20 @@ describe('正文 preload 阶段事件与最终内容', () => {
     expect(listeners.get('llm:token')?.size).toBe(0)
     expect(listeners.get('write:generationStage')?.size).toBe(0)
   })
+
+  it('转发伏笔补写阶段和最终整章结果，并支持补跑伏笔检查', async () => {
+    const fullContent = '原段落。\n补入的伏笔。\n结尾。'
+    const result = { ok: true, content: '结尾。', fullContent, foreshadowRepair: { status: 'applied', message: '已补写' } }
+    invoke.mockResolvedValueOnce(result)
+    const stage = vi.fn()
+    const stream = api.generateChapterStream('project-1', 1, null, undefined, '原段落。', vi.fn(), stage)
+    emit('write:generationStage', { requestId: stream.requestId, stage: 'foreshadowRepair' })
+    expect(await stream).toEqual(result)
+    expect(stage).toHaveBeenCalledWith('foreshadowRepair')
+    invoke.mockResolvedValueOnce({ content: fullContent, report: result.foreshadowRepair })
+    await api.repairChapterForeshadowings('project-1', 1, fullContent, { partialChapter: true })
+    expect(invoke.mock.calls[1]).toEqual(['write:repairChapterForeshadowings', {
+      projectId: 'project-1', chapterNumber: 1, content: fullContent, partialChapter: true
+    }])
+  })
 })

@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -104,7 +105,7 @@ describe('伏笔提取与旧回执的事实边界', () => {
     root = await mkdtemp(join(tmpdir(), 'foreshadowing-boundary-'))
     const settings = new SettingsRepository(join(root, 'settings.json'))
     const projects = new ProjectService(join(root, 'projects'), new LibraryRepository(join(root, 'library.json')), settings)
-    projectId = (await projects.create({ name: '伏笔事实边界', genre: '悬疑' })).id
+    projectId = (await createWritingProject(projects, { name: '伏笔事实边界', genre: '悬疑' })).id
     dir = await projects.resolveDir(projectId)
     generateStream = vi.fn().mockResolvedValue('{}')
     service = new WriteService(projects, { generateStream } as unknown as LlmService)

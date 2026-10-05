@@ -1,3 +1,4 @@
+import { createWritingProject } from './helpers/writing-project'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -20,7 +21,7 @@ describe('续写质量与长篇记忆集成', () => {
     root = await mkdtemp(join(tmpdir(), 'continuation-memory-'))
     const settings = { getProjectsRoot: async (fallback: string) => fallback } as SettingsRepository
     const projects = new ProjectService(join(root, 'projects'), new LibraryRepository(join(root, 'library.json')), settings)
-    id = (await projects.create({ name: '长篇证据', genre: '玄幻' })).id
+    id = (await createWritingProject(projects, { name: '长篇证据', genre: '玄幻' })).id
     dir = await projects.resolveDir(id)
     generateStream = vi.fn().mockResolvedValue('{}')
     const llm = { generateStream } as unknown as LlmService

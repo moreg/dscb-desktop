@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AppUpdateState } from '../shared/app-update'
+import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from '../shared/long-story-brainstorm'
+import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryCreateInput, ShortStoryDocument, ShortStoryGenerationInput, ShortStoryStorageSelectionResult, ShortStorySummary } from '../shared/short-story'
 import type {
   AutoDeslopResult,
   SavedChapterPolishResult,
@@ -85,6 +87,51 @@ function makeStreamHandle<T>(
 }
 
 const api = {
+  brainstormLongStory: (input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
+    const requestId = crypto.randomUUID()
+    const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('longStory:brainstormToken', handler)
+    const result = ipcRenderer.invoke('longStory:brainstorm', { ...input, requestId })
+      .finally(() => ipcRenderer.removeListener('longStory:brainstormToken', handler)) as Promise<LongStoryBrainstormResult>
+    return makeStreamHandle(result, requestId)
+  },
+  brainstormShortStory: (input: ShortStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
+    const requestId = crypto.randomUUID()
+    const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('shortStory:brainstormToken', handler)
+    const result = ipcRenderer.invoke('shortStory:brainstorm', { ...input, requestId })
+      .finally(() => ipcRenderer.removeListener('shortStory:brainstormToken', handler)) as Promise<ShortStoryBrainstormResult>
+    return makeStreamHandle(result, requestId)
+  },
+  listShortStories: () => ipcRenderer.invoke('shortStory:list') as Promise<ShortStorySummary[]>,
+  getShortStoryStorageLocation: () => ipcRenderer.invoke('shortStory:getStorageLocation') as Promise<string>,
+  chooseShortStoryStorageLocation: () => ipcRenderer.invoke('shortStory:chooseStorageLocation') as Promise<ShortStoryStorageSelectionResult>,
+  onShortStoryStorageLocationChanged: (listener: (path: string) => void) => {
+    const handler = (_event: unknown, path: unknown) => {
+      if (typeof path === 'string') listener(path)
+    }
+    ipcRenderer.on('shortStory:storageLocationChanged', handler)
+    return () => ipcRenderer.removeListener('shortStory:storageLocationChanged', handler)
+  },
+  createShortStory: (input: ShortStoryCreateInput) => ipcRenderer.invoke('shortStory:create', input) as Promise<ShortStoryDocument>,
+  getShortStory: (id: string) => ipcRenderer.invoke('shortStory:get', id) as Promise<ShortStoryDocument>,
+  saveShortStory: (story: ShortStoryDocument) => ipcRenderer.invoke('shortStory:save', story) as Promise<ShortStoryDocument>,
+  exportShortStory: (id: string) => ipcRenderer.invoke('shortStory:export', id) as Promise<{ canceled: boolean; path?: string }>,
+  openShortStoryDirectory: (id: string) => ipcRenderer.invoke('shortStory:openDirectory', id) as Promise<{ ok: boolean }>,
+  generateShortStory: (input: ShortStoryGenerationInput, onToken: (token: string, done: boolean) => void) => {
+    const requestId = crypto.randomUUID()
+    const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('shortStory:token', handler)
+    const result = ipcRenderer.invoke('shortStory:generate', { ...input, requestId })
+      .finally(() => ipcRenderer.removeListener('shortStory:token', handler)) as Promise<{ ok: boolean; error?: string }>
+    return makeStreamHandle(result, requestId)
+  },
   getAppUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<AppUpdateState>,
   checkAppUpdate: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateState>,
   downloadAppUpdate: () => ipcRenderer.invoke('updates:download') as Promise<AppUpdateState>,
@@ -568,6 +615,9 @@ const api = {
     ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
   invalidateChapterMemorySync: (projectId: string, chapterNumber: number) =>
     ipcRenderer.invoke('write:invalidateChapterMemorySync', { projectId, chapterNumber }),
+  repairChapterForeshadowings: (projectId: string, chapterNumber: number, content: string,
+    opts?: { partialChapter?: boolean; tempContext?: string }) =>
+    ipcRenderer.invoke('write:repairChapterForeshadowings', { projectId, chapterNumber, content, ...opts }),
   syncChapterAfterWrite: (
     projectId: string,
     chapterNumber: number,

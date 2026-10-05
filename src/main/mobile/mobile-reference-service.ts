@@ -83,8 +83,7 @@ export class MobileReferenceService implements MobileReferenceReader {
 
   async getChapterDetail(projectId: string, chapterNumber: number): Promise<ChapterDetail | null> {
     const dir = await this.projects.resolveDir(projectId)
-    const details = await new DetailedOutlineMdRepo(dir).listAll()
-    return details.find((item) => item.chapterNumber === chapterNumber) ?? null
+    return new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
   }
 
   async search(projectId: string, query: string): Promise<MobileSearchResult[]> {
@@ -98,16 +97,21 @@ export class MobileReferenceService implements MobileReferenceReader {
       new DetailedOutlineMdRepo(dir).listAll(),
       new RhythmHtmlRepo(dir).read()
     ])
+    const chapterRhythm = rhythm?.length
+      ? rhythm
+      : (await new OutlineMdRepo(dir).read())?.rhythmFallback ?? []
     const titles = new Map<number, string>()
-    for (const entry of rhythm ?? []) titles.set(entry.chapter, entry.title)
+    for (const entry of chapterRhythm) titles.set(entry.chapter, entry.title)
     for (const detail of details) {
       if (detail.title) titles.set(detail.chapterNumber, detail.title)
     }
 
     const results: MobileSearchResult[] = []
-    for (const chapterNumber of numbers.sort((a, b) => a - b)) {
+    const writtenChapters = new Set(numbers)
+    const chapterNumbers = [...new Set([...numbers, ...titles.keys()])].sort((a, b) => a - b)
+    for (const chapterNumber of chapterNumbers) {
       const title = titles.get(chapterNumber) || `第${chapterNumber}章`
-      const content = await prose.read(chapterNumber)
+      const content = writtenChapters.has(chapterNumber) ? await prose.read(chapterNumber) : ''
       const titleIndex = title.toLocaleLowerCase('zh-CN').indexOf(needle)
       const lowered = content.toLocaleLowerCase('zh-CN')
       const contentIndex = lowered.indexOf(needle)

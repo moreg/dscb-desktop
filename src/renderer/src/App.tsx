@@ -38,11 +38,15 @@ const BookTestPage = lazy(() => import('./BookTestPage'))
 const ScanPage = lazy(() => import('./ScanPage'))
 const ProjectInspirationPage = lazy(() => import('./ProjectInspirationPage'))
 const ProjectInfoPage = lazy(() => import('./ProjectInfoPage'))
+const ShortStoryPage = lazy(() => import('./ShortStoryPage'))
+const BrainstormPage = lazy(() => import('./BrainstormPage'))
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
 type View =
   | { kind: 'projects' }
+  | { kind: 'shortStories' }
+  | { kind: 'brainstorm' }
   | { kind: 'teardown' }
   | { kind: 'scan' }
   | { kind: 'inspiration'; projectId: string }
@@ -319,7 +323,7 @@ export default function App() {
   }
 
   const mainInnerClass = `main-inner ${
-    view.kind === 'projects'
+    view.kind === 'projects' || view.kind === 'shortStories' || view.kind === 'brainstorm'
       ? 'projects-wide'
       : view.kind === 'editor'
       ? 'editor-wide'
@@ -357,6 +361,20 @@ export default function App() {
           >
             <span className="icon">📚</span>
             我的项目
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'shortStories' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'shortStories' })}
+          >
+            <span className="icon">📄</span>
+            中短篇
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'brainstorm' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'brainstorm' })}
+          >
+            <span className="icon" aria-hidden>💡</span>
+            脑洞
           </button>
           <button
             className={`nav-item ${view.kind === 'teardown' ? 'active' : ''}`}
@@ -623,9 +641,18 @@ export default function App() {
           {view.kind === 'projects' ? (
             <ErrorBoundary>
               <ProjectListPage
+                onOpenBrainstorm={() => setView({ kind: 'brainstorm' })}
                 onOpenProject={(id) => void openProjectHere(id)}
                 onOpenProjectWindow={(id) => void window.api.openProjectWindow(id)}
               />
+            </ErrorBoundary>
+          ) : view.kind === 'brainstorm' ? (
+            <ErrorBoundary>
+              <BrainstormPage onOpenProjects={() => setView({ kind: 'projects' })} />
+            </ErrorBoundary>
+          ) : view.kind === 'shortStories' ? (
+            <ErrorBoundary>
+              <ShortStoryPage />
             </ErrorBoundary>
           ) : view.kind === 'settings' ? (
             <ErrorBoundary>

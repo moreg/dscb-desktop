@@ -1,21 +1,25 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
+import NewProjectDialog from './NewProjectDialog'
+import './long-story-project.css'
 
 interface Props {
   onOpenProject: (projectId: string) => void
   onOpenProjectWindow: (projectId: string) => void
+  onOpenBrainstorm: () => void
 }
 
 type Shelf = 'active' | 'archived'
 
-export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: Props) {
+export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, onOpenBrainstorm }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({})
   const [wordCounts, setWordCounts] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [showNew, setShowNew] = useState(false)
+  const [creationNotice, setCreationNotice] = useState('')
   const [keyword, setKeyword] = useState('')
   const [shelf, setShelf] = useState<Shelf>('active')
   const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
@@ -43,7 +47,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
     }
   }
 
-  /** 扫描 projectsRoot，自动发现含 大纲/大纲.md 的 v3.2 项目 */
+  /** 扫描 projectsRoot，发现含 project.json 或 大纲/大纲.md 的项目 */
   const scan = async () => {
     setScanning(true)
     try {
@@ -129,14 +133,17 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
                 : '静待落笔处，万卷由此生'}
             </p>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               className="btn btn-ghost"
               onClick={scan}
               disabled={scanning}
-              title="扫描保存位置，自动发现技能 v3.2 格式的项目"
+              title="扫描保存位置，发现含 project.json 或 大纲/大纲.md 的项目"
             >
               {scanning ? '扫描中…' : '↻ 扫描项目'}
+            </button>
+            <button className="btn" onClick={onOpenBrainstorm}>
+              长篇脑洞
             </button>
             <button className="btn btn-primary" onClick={() => setShowNew(true)}>
               + 落笔开篇
@@ -144,6 +151,8 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
           </div>
         </div>
       </div>
+
+      {creationNotice ? <p className="meta" role="status">{creationNotice}</p> : null}
 
       <div className="toolbar">
         <div className="filters">
@@ -306,134 +315,14 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow }: 
       {showNew ? (
         <NewProjectDialog
           onClose={() => setShowNew(false)}
-          onCreated={() => {
+          onCreated={(_project, notice) => {
+            setCreationNotice(notice)
             setShowNew(false)
             setShelf('active')
             void loadProjects(false)
           }}
         />
       ) : null}
-    </div>
-  )
-}
-
-function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [name, setName] = useState('')
-  const [genre, setGenre] = useState('')
-  const [description, setDescription] = useState('')
-  const [targetChapters, setTargetChapters] = useState('')
-  const [customPath, setCustomPath] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [selecting, setSelecting] = useState(false)
-
-  const selectPath = async () => {
-    setSelecting(true)
-    try {
-      const selected = await window.api.selectDirectory()
-      if (selected) setCustomPath(selected)
-    } finally {
-      setSelecting(false)
-    }
-  }
-
-  const submit = async () => {
-    if (!name.trim()) return
-    setSaving(true)
-    try {
-      await window.api.createProject({
-        name: name.trim(),
-        genre: genre.trim() || undefined,
-        description: description.trim() || undefined,
-        targetChapters: targetChapters ? Number(targetChapters) : undefined,
-        customPath: customPath.trim() || undefined
-      })
-      onCreated()
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>新建项目</h3>
-        <div className="field">
-          <label>名称 *</label>
-          <input
-            className="input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="《九霄剑尊》"
-            autoFocus
-          />
-        </div>
-        <div className="row" style={{ gap: 12 }}>
-          <div className="field" style={{ flex: 1 }}>
-            <label>题材</label>
-            <input
-              className="input"
-              value={genre}
-              onChange={(e) => setGenre(e.target.value)}
-              placeholder="玄幻 / 都市 / 科幻…"
-            />
-          </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label>预计章数</label>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              value={targetChapters}
-              onChange={(e) => setTargetChapters(e.target.value)}
-              placeholder="如 200"
-            />
-          </div>
-        </div>
-        <div className="field">
-          <label>简介</label>
-          <textarea
-            className="textarea"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={3}
-            placeholder="一句话概括故事 / 卖点"
-          />
-        </div>
-        <div className="field">
-          <label>保存位置（可选）</label>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              className="input"
-              value={customPath}
-              onChange={(e) => setCustomPath(e.target.value)}
-              placeholder="默认位置"
-              style={{ flex: 1 }}
-              readOnly
-            />
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={selectPath}
-              disabled={selecting}
-              style={{ whiteSpace: 'nowrap' }}
-            >
-              {selecting ? '…' : '选择'}
-            </button>
-          </div>
-          {customPath ? (
-            <p className="meta" style={{ marginTop: 4 }}>
-              将保存到：{customPath}
-            </p>
-          ) : null}
-        </div>
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button className="btn btn-ghost" onClick={onClose}>
-            取消
-          </button>
-          <button className="btn btn-primary" onClick={submit} disabled={saving || !name.trim()}>
-            {saving ? '创建中…' : '创建'}
-          </button>
-        </div>
-      </div>
     </div>
   )
 }

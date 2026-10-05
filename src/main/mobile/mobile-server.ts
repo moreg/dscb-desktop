@@ -6,6 +6,8 @@ import type { ChapterContent, ChapterMeta, MobileServerStatus, ProjectMeta } fro
 import { contentRevision, isChapterRevisionConflict } from '../data/chapter-revision'
 import { MOBILE_PAGE, MOBILE_PAIRING_ERROR_PAGE } from './mobile-page'
 import type { MobileReferenceReader } from './mobile-reference-service'
+import { mobileBrainstormInputSchema, type MobileBrainstormGenerator } from './mobile-brainstorm-service'
+import { MobileBatchError, mobileBatchInputSchema, type MobileBatchRunner } from './mobile-batch-service'
 import { CHAPTER_NAME_MAX_LEN } from '../../shared/parsers'
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024
@@ -58,13 +60,16 @@ export class MobileServer {
   private pairToken = ''
   private pairingAvailable = false
   private readonly sessions = new Map<string, SessionRecord>()
+  private readonly brainstorms = new Map<string, AbortController>()
   private lifecycleTail: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly projects: MobileProjectReader,
     private readonly chapters: MobileChapterReaderWriter,
     private readonly references?: MobileReferenceReader,
-    private readonly ai?: MobileAiWriter
+    private readonly ai?: MobileAiWriter,
+    private readonly brainstorm?: MobileBrainstormGenerator,
+    private readonly batch?: MobileBatchRunner
   ) {}
 
   start(): Promise<MobileServerStatus> {
@@ -77,8 +82,12 @@ export class MobileServer {
     this.pairingAvailable = true
     const server = createServer((request, response) => {
       void this.handleRequest(request, response).catch((error: unknown) => {
+        if (error instanceof MobileBatchError) {
+          this.sendJson(response, error.status, { error: error.message })
+          return
+        }
         if (isChapterRevisionConflict(error)) {
-          this.sendJson(response, 409, { error: '电脑端内容已发生变化，请重新打开章节' })
+          this.sendJson(response, 409, { error: '章节内容已在其他设备上更新，请重新打开章节' })
           return
         }
         if (error instanceof MobileHttpError) {
@@ -126,8 +135,18 @@ export class MobileServer {
     this.pairToken = ''
     this.pairingAvailable = false
     this.sessions.clear()
-    if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+    for (const controller of this.brainstorms.values()) controller.abort()
+    this.brainstorms.clear()
+    server?.closeAllConnections()
+    try {
+      await this.batch?.shutdown()
+    } finally {
+      if (server) {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve())
+          server.closeAllConnections()
+        })
+      }
     }
     return this.getStatus()
   }
@@ -220,8 +239,60 @@ export class MobileServer {
       return
     }
 
+    if (url.pathname.startsWith('/api/') && !isSameOriginRequest(request)) {
+      this.sendJson(response, 403, { error: '请从已配对的手机页面操作' })
+      return
+    }
+
     if (method === 'GET' && url.pathname === '/') {
       this.sendHtml(response, 200, MOBILE_PAGE)
+      return
+    }
+    if (method === 'POST' && url.pathname === '/api/brainstorm') {
+      if (!this.brainstorm) {
+        this.sendJson(response, 501, { ok: false, error: '脑洞生成服务暂不可用' })
+        return
+      }
+      let body: Record<string, unknown>
+      try {
+        body = await readJsonBody(request)
+      } catch (error) {
+        if (!(error instanceof MobileHttpError)) throw error
+        this.sendJson(response, error.status, { ok: false, error: error.publicMessage })
+        return
+      }
+      const input = mobileBrainstormInputSchema.safeParse(body)
+      if (!input.success) {
+        this.sendJson(response, 400, { ok: false, error: '脑洞参数无效，请检查题材、方向和篇幅要求' })
+        return
+      }
+      const sessionId = parseCookies(request.headers.cookie || '').get(SESSION_COOKIE)!
+      if (this.brainstorms.has(sessionId)) {
+        this.sendJson(response, 409, { ok: false, error: '当前手机已有脑洞正在生成，请先停止或等待完成' })
+        return
+      }
+      if (response.destroyed || request.aborted || !this.sessions.has(sessionId)) return
+      const controller = new AbortController()
+      const cancelOnDisconnect = () => {
+        if (!response.writableEnded) controller.abort()
+      }
+      const cancelOnAbort = () => controller.abort()
+      this.brainstorms.set(sessionId, controller)
+      response.once('close', cancelOnDisconnect)
+      request.once('aborted', cancelOnAbort)
+      try {
+        const result = await this.brainstorm.generate(input.data, controller.signal)
+        if (!controller.signal.aborted) this.sendJson(response, 200, result)
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error('[mobile-server] brainstorm failed:', error)
+          this.sendJson(response, 500, { ok: false, error: '脑洞生成失败，请重试' })
+        }
+      } finally {
+        response.off('close', cancelOnDisconnect)
+        request.off('aborted', cancelOnAbort)
+        if (this.brainstorms.get(sessionId) === controller) this.brainstorms.delete(sessionId)
+      }
       return
     }
     if (method === 'GET' && url.pathname === '/api/projects') {
@@ -233,6 +304,48 @@ export class MobileServer {
       }))
       this.sendJson(response, 200, { projects })
       return
+    }
+
+    const batchMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/batch(?:\/(resume|stop|clear))?$/)
+    if (batchMatch) {
+      if (!this.batch) {
+        this.sendJson(response, 501, { error: '批量写作服务暂不可用' })
+        return
+      }
+      const projectId = decodePathPart(batchMatch[1])
+      const action = batchMatch[2]
+      if (method === 'GET' && !action) {
+        this.sendJson(response, 200, { job: await this.batch.get(projectId) })
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(request)
+        if (!this.server) {
+          this.sendJson(response, 503, { error: '手机服务正在停止，请重新连接后操作' })
+          return
+        }
+        if (!action) {
+          const input = mobileBatchInputSchema.safeParse(body)
+          if (!input.success) {
+            this.sendJson(response, 400, { error: '批量参数无效，章号应为正整数，单批最多 100 章' })
+            return
+          }
+          this.sendJson(response, 202, { job: await this.batch.start(projectId, input.data) })
+        } else {
+          const jobId = body.jobId
+          if (typeof jobId !== 'string' || !jobId.trim() || jobId.length > 255) {
+            this.sendJson(response, 400, { error: '批次标识无效，请刷新进度后重试' })
+            return
+          }
+          const job = action === 'resume'
+            ? await this.batch.resume(projectId, jobId)
+            : action === 'stop'
+              ? await this.batch.stop(projectId, jobId)
+              : await this.batch.clear(projectId, jobId)
+          this.sendJson(response, action === 'resume' ? 202 : 200, { job })
+        }
+        return
+      }
     }
 
     const chapterListMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/chapters$/)
@@ -284,13 +397,21 @@ export class MobileServer {
       }
       if (method === 'GET') {
         const chapter = await this.chapters.getChapter(projectId, chapterNumber)
-        const detail = this.references
-          ? await this.references.getChapterDetail(projectId, chapterNumber)
-          : null
+        let detail = null
+        let detailError: string | undefined
+        if (this.references) {
+          try {
+            detail = await this.references.getChapterDetail(projectId, chapterNumber)
+          } catch (error) {
+            console.warn('[mobile-server] chapter detail failed:', error)
+            detailError = '细纲暂时无法读取，正文仍可编辑'
+          }
+        }
         this.sendJson(response, 200, {
           chapter: { meta: publicChapterMeta(chapter.meta), content: chapter.content },
           revision: contentRevision(chapter.content),
-          detail
+          detail,
+          ...(detailError ? { detailError } : {})
         })
         return
       }
@@ -306,12 +427,16 @@ export class MobileServer {
           this.sendJson(response, 413, { error: '正文内容过大' })
           return
         }
-        const meta = await this.chapters.updateContent(
-          projectId,
-          chapterNumber,
-          content,
-          baseRevision
-        )
+        let meta: ChapterMeta
+        try {
+          meta = await this.chapters.updateContent(projectId, chapterNumber, content, baseRevision)
+        } catch (error) {
+          if (!isChapterRevisionConflict(error)) throw error
+          // A lost response can cause the phone to retry an already committed save.
+          const current = await this.chapters.getChapter(projectId, chapterNumber)
+          if (current.content !== content) throw error
+          meta = current.meta
+        }
         this.sendJson(response, 200, { meta: publicChapterMeta(meta), revision: contentRevision(content) })
         return
       }
@@ -418,15 +543,26 @@ export class MobileServer {
   }
 
   private sendJson(response: ServerResponse, status: number, body: unknown): void {
-    if (response.headersSent) return
+    if (response.headersSent || response.destroyed || response.writableEnded) return
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify(body))
   }
 
   private sendHtml(response: ServerResponse, status: number, body: string): void {
-    if (response.headersSent) return
+    if (response.headersSent || response.destroyed || response.writableEnded) return
     response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' })
     response.end(body)
+  }
+}
+
+function isSameOriginRequest(request: IncomingMessage): boolean {
+  if (request.headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = request.headers.origin
+  if (!origin) return true
+  try {
+    return new URL(origin).origin === new URL(`http://${request.headers.host}`).origin
+  } catch {
+    return false
   }
 }
 

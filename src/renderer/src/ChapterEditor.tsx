@@ -1,5 +1,5 @@
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { finalizeChapterRewrite } from './chapter-generation-finalize'
+import { finalizeChapterContinuation, finalizeChapterRewrite } from './chapter-generation-finalize'
 import {
   useEffect,
   useLayoutEffect,
@@ -14,6 +14,7 @@ import {
 import type {
   AdjustPlanComplianceResult,
   AutoDeslopResult,
+  AutoForeshadowRepairResult,
   AuditReport,
   ChapterContent,
   ChapterGenerationStage,
@@ -77,7 +78,6 @@ import { useStreamAborter } from './hooks/useStreamAborter'
 import WeeklyWritingStats, { reportSaveDelta } from './WeeklyWritingStats'
 import { getOutlineDetailRows } from './outlineDetailFields'
 import { FullOutlineDialog } from './FullOutlineDialog'
-import { parseForeshadowReceipt } from '../../shared/parsers'
 import { resolveChapterTargetWords } from '../../shared/word-target'
 import {
   parseAdjustPlanItems,
@@ -467,6 +467,9 @@ export default function ChapterEditor({
   const [generationStage, setGenerationStage] = useState<ChapterGenerationStage | null>(null)
   const [autoDeslopResult, setAutoDeslopResult] = useState<AutoDeslopResult | null>(null)
   const [autoDeslopSnapshot, setAutoDeslopSnapshot] = useState<string | null>(null)
+  const [autoForeshadowRepair, setAutoForeshadowRepair] = useState<{
+    report: AutoForeshadowRepairResult; content: string; projectId: string; chapterNumber: number
+  } | null>(null)
   /** 正文生成（chapter 路由）实际使用的 provider，供续写前显示/调整强度与模型。 */
   const [chapterProvider, setChapterProvider] = useState<ProviderSummary | null>(null)
   const [allProviders, setAllProviders] = useState<ProviderSummary[]>([])
@@ -1186,6 +1189,7 @@ export default function ChapterEditor({
     setGenerationStage(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
+    setAutoForeshadowRepair(null)
     setAdjusting(false)
     // 切章时关掉「按要求重写」对话框并作废进行中的建议生成
     ++adjustPlanRef.current
@@ -1954,6 +1958,7 @@ export default function ChapterEditor({
     setGenerationStage('generating')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
+    setAutoForeshadowRepair(null)
     userAbortedRef.current = false
     const initialDraft = draft
     preStreamDraftRef.current = initialDraft
@@ -2046,15 +2051,16 @@ export default function ChapterEditor({
       // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
         // token 只作预览；最终回包含自动精修结果，必须以它交稿和同步记忆。
-        const finalContent = result.content ?? finalDraft
-        const { receipt, stripped } = parseForeshadowReceipt(finalContent)
-        const fullContent = joinContinuation(initialDraft, receipt ? stripped : finalContent)
-        const formatted = formatDraftProse(fullContent, {
+        const finalized = finalizeChapterContinuation(initialDraft, finalDraft, result)
+        const formatted = formatDraftProse(finalized.content, {
           silent: true,
           recordHistory: true
         })
         setAutoDeslopResult(result.autoDeslop ?? null)
         setAutoDeslopSnapshot(result.autoDeslop ? formatted : null)
+        setAutoForeshadowRepair(result.foreshadowRepair ? {
+          report: result.foreshadowRepair, content: formatted, projectId: targetProjectId, chapterNumber: targetChapter
+        } : null)
         setDirty(true)
         // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
         // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
@@ -2063,9 +2069,11 @@ export default function ChapterEditor({
         // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
         void runPostGenerateAudit(myGen, formatted)
         // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
-        void runPostGenerateMemorySync(myGen, formatted, {
-          previousSelfCheck
-        })
+        if (finalized.canSyncMemory) {
+          void runPostGenerateMemorySync(myGen, formatted, { previousSelfCheck })
+        } else {
+          pauseMemoryForForeshadowRepair(formatted, result.foreshadowRepair!.message)
+        }
       }
     } catch {
       if (genRef.current === myGen && sessionEpochRef.current === myEpoch) {
@@ -2273,6 +2281,7 @@ export default function ChapterEditor({
     setGenerationStage('generating')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
+    setAutoForeshadowRepair(null)
     userAbortedRef.current = false
     setFlowPanelOpen(false)
     setAutoAudit(null)
@@ -3055,7 +3064,15 @@ export default function ChapterEditor({
     }
   }
 
-  const retryPostWriteSync = () => {
+  const pauseMemoryForForeshadowRepair = (content: string, message: string) => {
+    persistFailedSync(content, [message], 1)
+    setPostWriteSync({ phase: 'failed', message: `${message}；自动记忆同步已暂停，可点「补跑同步」先重试补写。`,
+      errors: [message], contentForRetry: content, at: Date.now(), fromPendingQueue: true,
+      canUndo: syncHistoryRef.current.length > 0, undoDepth: syncHistoryRef.current.length,
+      receipt: peekSyncHistory(syncHistoryRef.current)?.receipt ?? null })
+  }
+
+  const retryPostWriteSync = async () => {
     const snapshot = postWriteSync?.contentForRetry?.trim()
       ? postWriteSync.contentForRetry
       : draft
@@ -3064,8 +3081,43 @@ export default function ChapterEditor({
       return
     }
     const myGen = genRef.current
+    const myEpoch = sessionEpochRef.current
+    if (draftRef.current !== snapshot) {
+      setUndoToast({ message: '正文已变化，请先核对当前稿再重新同步', type: 'warning' })
+      return
+    }
     setFlowPanelOpen(true)
-    void runPostGenerateMemorySync(myGen, snapshot, {
+    setPostWriteSync((current) => current ? { ...current, phase: 'syncing', message: '正在核对并补写伏笔，完成后同步记忆…' } : current)
+    let checkedContent: string
+    const isCurrent = () => {
+      if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return false
+      if (draftRef.current === snapshot) return true
+      setPostWriteSync((current) => current?.phase === 'syncing' && current.contentForRetry === snapshot
+        ? { ...current, phase: 'failed', contentForRetry: draftRef.current,
+            message: '正文已变化，本次补写结果已作废，请用当前稿补跑同步。' } : current)
+      return false
+    }
+    try {
+      const repaired = await window.api.repairChapterForeshadowings(projectId, chapterNumber, snapshot,
+        { partialChapter: lastContinueMode !== 'finish' })
+      if (!isCurrent()) return
+      if (repaired.report.status === 'failed') {
+        pauseMemoryForForeshadowRepair(snapshot, repaired.report.message)
+        return
+      }
+      checkedContent = repaired.report.status === 'applied'
+        ? formatDraftProse(repaired.content, { silent: true, recordHistory: true }) : snapshot
+      setAutoForeshadowRepair({ report: repaired.report, content: checkedContent, projectId, chapterNumber })
+      if (checkedContent !== snapshot) {
+        setDirty(true)
+        void runPostGenerateAudit(myGen, checkedContent)
+      }
+    } catch (err) {
+      if (!isCurrent()) return
+      pauseMemoryForForeshadowRepair(snapshot, `伏笔补写重试失败：${(err as Error).message}`)
+      return
+    }
+    void runPostGenerateMemorySync(myGen, checkedContent, {
       force: true,
       attempt: 0,
       autoRetry: true
@@ -4710,7 +4762,7 @@ export default function ChapterEditor({
             onClick={cancelActiveStream}
             title="停止当前 AI 生成，并恢复开始前的正文"
           >
-            {generationStage === 'deslop' ? '⏹ 停止自动润色' : '⏹ 停止生成'}
+            {generationStage === 'foreshadowRepair' ? '⏹ 停止伏笔补写' : generationStage === 'deslop' ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
           <button
@@ -4797,6 +4849,16 @@ export default function ChapterEditor({
             : autoDeslopResult.status === 'unchanged'
               ? '自动去 AI 味已完成，无需修改'
               : autoDeslopResult.message}
+        </div>
+      ) : null}
+
+      {generationStage === 'foreshadowRepair' && generating ? (
+        <div className="meta" role="status" style={{ marginBottom: 8 }}>正在核对并补写伏笔，完成后同步记忆…</div>
+      ) : autoForeshadowRepair && autoForeshadowRepair.projectId === projectId &&
+          autoForeshadowRepair.chapterNumber === chapterNumber && autoForeshadowRepair.content === draft ? (
+        <div className="meta" role="status" style={{ marginBottom: 8,
+          color: autoForeshadowRepair.report.status === 'failed' ? 'var(--warn)' : undefined }}>
+          {autoForeshadowRepair.report.message}
         </div>
       ) : null}
 

@@ -1,4 +1,6 @@
 import { readJson, writeJsonAtomic } from './atomic'
+import { resolve } from 'path'
+import { withFileLock } from './file-lock'
 import type {
   WriteAuditConfig,
   WriteAuditMode,
@@ -55,6 +57,8 @@ export interface PricingConfig {
 
 export interface AppSettings {
   projectsRoot?: string
+  /** 中短篇作品目录；未配置时使用 userData/short-stories。 */
+  shortStoriesRoot?: string
   /** 本地封面学习库目录；未配置时使用 userData/cover-learning-library。 */
   coverLearningLibraryDir?: string
   theme?: ThemeMode
@@ -411,6 +415,36 @@ function sanitizeWritingRequirementTemplates(
     : cloneWritingRequirementTemplates(DEFAULT_WRITING_REQUIREMENT_TEMPLATES)
 }
 
+function normalizeAppSettings(stored: AppSettings): AppSettings {
+  // 合并默认值（嵌套字段也要兜底），读取与提交返回使用同一规则。
+  const se = stored.settingsEvolution
+  const settingsEvolution =
+    se === 'off' || se === 'confirm_all' || se === 'auto_high' ? se : DEFAULTS.settingsEvolution
+  const autoPostWritePipeline = normalizeAutoPostWritePipeline(
+    stored.autoPostWritePipeline,
+    typeof stored.autoMemorySync === 'boolean' ? stored.autoMemorySync : undefined
+  )
+  const autoMemorySync = autoPostWritePipeline !== 'off'
+  return {
+    ...DEFAULTS,
+    ...stored,
+    pricing: { ...DEFAULT_PRICING, ...(stored.pricing ?? {}) },
+    writeAudit: { ...DEFAULT_WRITE_AUDIT, ...(stored.writeAudit ?? {}) },
+    costAlert: { ...DEFAULT_COST_ALERT, ...(stored.costAlert ?? {}) },
+    aiHighFreq: {
+      enabled: DEFAULT_AI_HIGH_FREQ.enabled,
+      words: Array.isArray(stored.aiHighFreq?.words) ? stored.aiHighFreq!.words! : []
+    },
+    writingRequirementTemplates: sanitizeWritingRequirementTemplates(stored.writingRequirementTemplates),
+    chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides),
+    reviewRules: sanitizeReviewRules(stored.reviewRules),
+    deslopRules: sanitizeDeslopRules(stored.deslopRules),
+    settingsEvolution,
+    autoPostWritePipeline,
+    autoMemorySync
+  }
+}
+
 export class SettingsRepository {
   constructor(private readonly settingsFile: string) {}
 
@@ -419,37 +453,7 @@ export class SettingsRepository {
   }
 
   async get(): Promise<AppSettings> {
-    const stored = await readJson<AppSettings>(this.settingsFile, {})
-    // 合并默认值（嵌套字段也要兜底）
-    const se = stored.settingsEvolution
-    const settingsEvolution =
-      se === 'off' || se === 'confirm_all' || se === 'auto_high' ? se : DEFAULTS.settingsEvolution
-    const autoPostWritePipeline = normalizeAutoPostWritePipeline(
-      stored.autoPostWritePipeline,
-      typeof stored.autoMemorySync === 'boolean' ? stored.autoMemorySync : undefined
-    )
-    // 与 pipeline 保持一致，供旧 IPC/调用方读取
-    const autoMemorySync = autoPostWritePipeline !== 'off'
-    return {
-      ...DEFAULTS,
-      ...stored,
-      pricing: { ...DEFAULT_PRICING, ...(stored.pricing ?? {}) },
-      writeAudit: { ...DEFAULT_WRITE_AUDIT, ...(stored.writeAudit ?? {}) },
-      costAlert: { ...DEFAULT_COST_ALERT, ...(stored.costAlert ?? {}) },
-      aiHighFreq: {
-        enabled: DEFAULT_AI_HIGH_FREQ.enabled,
-        words: Array.isArray(stored.aiHighFreq?.words) ? stored.aiHighFreq!.words! : []
-      },
-      writingRequirementTemplates: sanitizeWritingRequirementTemplates(
-        stored.writingRequirementTemplates
-      ),
-      chapterRuleOverrides: sanitizeChapterRuleOverrides(stored.chapterRuleOverrides),
-      reviewRules: sanitizeReviewRules(stored.reviewRules),
-      deslopRules: sanitizeDeslopRules(stored.deslopRules),
-      settingsEvolution,
-      autoPostWritePipeline,
-      autoMemorySync
-    }
+    return normalizeAppSettings(await readJson<AppSettings>(this.settingsFile, {}))
   }
 
   async update(
@@ -462,54 +466,62 @@ export class SettingsRepository {
       deslopRules?: DeslopRulesConfig
     }
   ): Promise<AppSettings> {
-    const current = await this.get()
-    const next: AppSettings = {
-      ...current,
-      ...patch,
-      pricing: patch.pricing
-        ? { ...current.pricing, ...patch.pricing }
-        : current.pricing,
-      writeAudit: patch.writeAudit
-        ? { ...current.writeAudit, ...patch.writeAudit }
-        : current.writeAudit,
-      costAlert: patch.costAlert
-        ? { ...current.costAlert, ...patch.costAlert }
-        : current.costAlert,
-      aiHighFreq: patch.aiHighFreq
-        ? { ...current.aiHighFreq, ...patch.aiHighFreq }
-        : current.aiHighFreq,
-      writingRequirementTemplates:
-        patch.writingRequirementTemplates !== undefined
-          ? sanitizeWritingRequirementTemplates(patch.writingRequirementTemplates)
-          : current.writingRequirementTemplates,
-      chapterRuleOverrides:
-        patch.chapterRuleOverrides !== undefined
-          ? sanitizeChapterRuleOverrides(patch.chapterRuleOverrides)
-          : current.chapterRuleOverrides,
-      reviewRules:
-        patch.reviewRules !== undefined ? sanitizeReviewRules(patch.reviewRules) : current.reviewRules,
-      deslopRules:
-        patch.deslopRules !== undefined ? sanitizeDeslopRules(patch.deslopRules) : current.deslopRules
-    }
-
-    // 保持 autoPostWritePipeline 与 autoMemorySync 双向一致
-    if (patch.autoPostWritePipeline !== undefined) {
-      const p = normalizeAutoPostWritePipeline(patch.autoPostWritePipeline)
-      next.autoPostWritePipeline = p
-      next.autoMemorySync = p !== 'off'
-    } else if (patch.autoMemorySync !== undefined) {
-      next.autoMemorySync = patch.autoMemorySync
-      if (!patch.autoMemorySync) {
-        next.autoPostWritePipeline = 'off'
-      } else if (current.autoPostWritePipeline === 'off' || !current.autoPostWritePipeline) {
-        next.autoPostWritePipeline = 'memory_only'
-      } else {
-        next.autoPostWritePipeline = current.autoPostWritePipeline
+    const incoming = structuredClone(patch)
+    const resolvedFile = resolve(this.settingsFile)
+    const lockKey = process.platform === 'win32' ? resolvedFile.toLowerCase() : resolvedFile
+    return withFileLock(lockKey, async () => {
+      const current = await this.get()
+      const next: AppSettings = {
+        ...current,
+        ...incoming,
+        pricing: incoming.pricing
+          ? { ...current.pricing, ...incoming.pricing }
+          : current.pricing,
+        writeAudit: incoming.writeAudit
+          ? { ...current.writeAudit, ...incoming.writeAudit }
+          : current.writeAudit,
+        costAlert: incoming.costAlert
+          ? { ...current.costAlert, ...incoming.costAlert }
+          : current.costAlert,
+        aiHighFreq: incoming.aiHighFreq
+          ? { ...current.aiHighFreq, ...incoming.aiHighFreq }
+          : current.aiHighFreq,
+        writingRequirementTemplates:
+          incoming.writingRequirementTemplates !== undefined
+            ? sanitizeWritingRequirementTemplates(incoming.writingRequirementTemplates)
+            : current.writingRequirementTemplates,
+        chapterRuleOverrides:
+          incoming.chapterRuleOverrides !== undefined
+            ? sanitizeChapterRuleOverrides(incoming.chapterRuleOverrides)
+            : current.chapterRuleOverrides,
+        reviewRules:
+          incoming.reviewRules !== undefined ? sanitizeReviewRules(incoming.reviewRules) : current.reviewRules,
+        deslopRules:
+          incoming.deslopRules !== undefined ? sanitizeDeslopRules(incoming.deslopRules) : current.deslopRules
       }
-    }
 
-    await writeJsonAtomic(this.settingsFile, next)
-    return this.get()
+      // 保持 autoPostWritePipeline 与 autoMemorySync 双向一致。
+      if (incoming.autoPostWritePipeline !== undefined) {
+        const p = normalizeAutoPostWritePipeline(incoming.autoPostWritePipeline)
+        next.autoPostWritePipeline = p
+        next.autoMemorySync = p !== 'off'
+      } else if (incoming.autoMemorySync !== undefined) {
+        next.autoMemorySync = incoming.autoMemorySync
+        if (!incoming.autoMemorySync) {
+          next.autoPostWritePipeline = 'off'
+        } else if (current.autoPostWritePipeline === 'off' || !current.autoPostWritePipeline) {
+          next.autoPostWritePipeline = 'memory_only'
+        } else {
+          next.autoPostWritePipeline = current.autoPostWritePipeline
+        }
+      }
+
+      // 与落盘 JSON 的表示一致（例如省略 undefined）；提交后不再读取磁盘。
+      const committed = JSON.parse(JSON.stringify(next)) as AppSettings
+      const normalized = normalizeAppSettings(committed)
+      await writeJsonAtomic(this.settingsFile, committed)
+      return normalized
+    })
   }
 
   async getWritingRequirementTemplates(): Promise<WritingRequirementTemplate[]> {
@@ -632,6 +644,11 @@ export class SettingsRepository {
   async getProjectsRoot(fallback: string): Promise<string> {
     const settings = await this.get()
     return settings.projectsRoot ?? fallback
+  }
+
+  async getShortStoriesRoot(fallback: string): Promise<string> {
+    const settings = await this.get()
+    return settings.shortStoriesRoot?.trim() || fallback
   }
 
   async getCoverLearningLibraryDir(fallback: string): Promise<string> {

@@ -1,0 +1,39 @@
+.ss-brainstorm { margin-top: 20px; padding: 18px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.ss-brainstorm-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; margin-bottom: 12px; }
+.ss-brainstorm-head h2 { margin: 0 0 4px; font-size: 17px; font-family: var(--font-display); }
+.ss-brainstorm-head p { margin: 0; color: var(--ink-2); font-size: 12px; }
+.ss-brainstorm-status { padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-2); white-space: nowrap; font-size: 11px; }
+.ss-brainstorm-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.ss-brainstorm-actions > span, .ss-brainstorm-help { font-size: 12px; }
+.ss-brainstorm-notice { margin: 12px 0 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--warning-soft); color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.ss-brainstorm-error { background: var(--danger-soft); color: var(--danger); }
+.ss-brainstorm-success { background: var(--success-soft); color: var(--success); }
+.ss-brainstorm-ideas { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; margin-top: 16px; }
+.ss-brainstorm-idea { display: flex; flex-direction: column; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.ss-brainstorm-idea-head { display: flex; align-items: baseline; gap: 8px; }
+.ss-brainstorm-idea-head > span { color: var(--accent); font-family: var(--font-serif); font-size: 17px; }
+.ss-brainstorm-idea h3 { margin: 0; font-family: var(--font-display); font-size: 16px; overflow-wrap: anywhere; }
+.ss-brainstorm-idea dl { margin: 12px 0 16px; flex: 1; }
+.ss-brainstorm-idea dl > div + div { margin-top: 12px; }
+.ss-brainstorm-idea dt { margin: 0 0 3px; color: var(--ink-3); font-size: 11px; }
+.ss-brainstorm-idea dd { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ss-brainstorm-idea > .btn { align-self: flex-start; }
+.ss-brainstorm-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ss-brainstorm-favorited { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.ss-brainstorm-library-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.ss-brainstorm-tab-active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.ss-brainstorm-batch-picker { margin-top: 14px; max-width: 520px; }
+.ss-brainstorm-library-empty { margin: 18px 0; padding: 15px 0; font-size: 12px; }
+.ss-brainstorm-rewrite { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line-strong); }
+.ss-brainstorm-rewrite h3 { margin: 0 0 4px; font-family: var(--font-display); font-size: 17px; overflow-wrap: anywhere; }
+.ss-brainstorm-rewrite-controls { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 14px; }
+.ss-brainstorm-rewrite-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px; margin-top: 16px; align-items: start; }
+.ss-brainstorm-rewrite-comparison > div { min-width: 0; }
+.ss-brainstorm-rewrite-comparison h4 { margin: 0 0 8px; color: var(--ink-2); font-size: 13px; font-weight: 500; }
+.ss-brainstorm-raw { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ss-brainstorm-raw summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+.ss-brainstorm-raw-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.ss-brainstorm-raw-head p { flex: 1; margin: 0; font-size: 12px; }
+.ss-brainstorm-raw textarea { max-height: 340px; min-height: 160px; font-family: var(--font-mono); font-size: 12px; }
+.ss-brainstorm-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (max-width: 600px) { .ss-brainstorm { padding: 14px; } .ss-brainstorm-head { flex-wrap: wrap; } .ss-brainstorm-raw-head { align-items: flex-start; } .ss-brainstorm-rewrite-controls { grid-template-columns: minmax(0, 1fr); gap: 0; } }
