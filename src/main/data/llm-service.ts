@@ -163,6 +163,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   deepReview: 'review',
   batchDeepReview: 'review',
   foreshadowRepairVerify: 'review',
+  foreshadowPlantEvidence: 'review',
   // 去AI味改写
   humanize: 'humanize',
   deslop: 'humanize',

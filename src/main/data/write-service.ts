@@ -133,6 +133,7 @@ import {
 import { countWords } from './words'
 import { getBatchRangeError } from '../../shared/batch-range'
 import { missingForeshadowings, repairMissingForeshadowings } from './foreshadowing-repair'
+import { findSavedPlantEvidence } from './foreshadowing-plant-backfill'
 import {
   assertNovelProse,
   isEarlyAgentNarration,
@@ -1818,6 +1819,17 @@ export class WriteService {
       }
       const { chapterIssues, itemIssues, verified } = partition
       if (!selfCheck) chapterIssues.push('写后自检未完成，记忆暂不自动生效')
+      const unplantedCollections = chapterIssues.length ? [] : verified.collectedForeshadowings
+        .map((item) => foreshadowings.find((known) => known.id === item.foreshadowingId))
+        .filter((item): item is Foreshadowing => Boolean(item && !item.plantChapter && item.status === 'pending'))
+      const plantEvidence = await findSavedPlantEvidence({
+        repo: new ProseRepo(dir), chapterNumber, collections: unplantedCollections,
+        signal: ticket.controller.signal,
+        generate: (prompt) => this.llm.generateStream(prompt, {
+          signal: ticket.controller.signal,
+          meta: { feature: 'foreshadowPlantEvidence', projectId, chapterNumber }
+        })
+      })
       const issues = [...chapterIssues, ...itemIssues]
       return await this.memoryCoordinator.exclusive(projectId, async () => {
       const stillCurrent = async (): Promise<boolean> => {
@@ -1860,6 +1872,10 @@ export class WriteService {
 
       let memory: MemoryApplyResult
       try {
+        const ledger = new ForeshadowingMdRepo(dir)
+        for (const proof of plantEvidence) {
+          await ledger.plantFromSavedEvidence(proof.foreshadowingId, proof.chapter, proof.evidence)
+        }
         // 只写通过校验的条目；被挡下的条目原样留在 candidate 文件里等复核
         memory = await this.applyMemory(projectId, verified, content)
         if (opts?.proseFirst) {

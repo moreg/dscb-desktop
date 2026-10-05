@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'crypto'
 import { readText } from './md-parser'
 import { writeTextAtomic } from '../atomic'
 import { withFileLock } from '../file-lock'
+import { ProseRepo } from './prose-repo'
 import type { Foreshadowing, ForeshadowingStatus, CreateForeshadowingInput, UpdateForeshadowingInput } from '../../../shared/types'
 
 const HEADERS = ['伏笔编号', '伏笔内容', '伏笔类型', '埋设章节', '预计回收章节', '实际回收章节', '状态', '备注', '强化章节', '部分回收章节']
@@ -88,6 +89,26 @@ export class ForeshadowingMdRepo {
       const next = { ...existing, status: 'planted' as ForeshadowingStatus, plantChapter: chapter, actualCollect: undefined }
       validateItem(next)
       return next
+    })
+  }
+  /** Register an existing planned clue only when its exact setup survives in saved prose. */
+  async plantFromSavedEvidence(id: string, chapter: number, evidence: string): Promise<boolean> {
+    validChapter(chapter)
+    if (evidence.trim().length < 10) throw new Error('伏笔埋设缺少足够的正文证据')
+    return withFileLock(this.path, async () => {
+      const source = await new ProseRepo(this.projectDir).read(chapter)
+      if (!source.includes(evidence)) throw new Error('伏笔埋设证据已不在保存正文中')
+      const text = await readText(this.path)
+      const entry = uniqueEntry(parseEntries(text), id)
+      if (!entry || entry.table.planned) throw new Error(`伏笔 ${id} 没有唯一的实际追踪记录`)
+      if (entry.item.plantChapter) return false
+      if (entry.item.status !== 'pending') throw new Error(`伏笔 ${id} 当前状态不允许自动登记埋设`)
+      const next: Foreshadowing = { ...entry.item, status: 'planted', plantChapter: chapter }
+      validateItem(next)
+      const lines = text.split(/\r?\n/)
+      lines[entry.line] = renderRow(next, entry.table, entry.cells)
+      await writeTextAtomic(this.path, lines.join('\n'))
+      return true
     })
   }
   async collect(id: string, chapter: number): Promise<void> {

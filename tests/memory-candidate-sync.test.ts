@@ -28,14 +28,14 @@ function deferred<T>() {
 
 describe('记忆候选提交与过期任务', () => {
   let root: string, dir: string, id: string
-  let service: WriteService, flow: WriteFlowService, settings: SettingsRepository
+  let service: WriteService, flow: WriteFlowService, settings: SettingsRepository, llm: LlmService
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'memory-candidate-'))
     settings = new SettingsRepository(join(root, 'settings.json'))
     const projects = new ProjectService(join(root, 'projects'), new LibraryRepository(join(root, 'library.json')), settings)
     id = (await projects.create({ name: '记忆候选', genre: '玄幻' })).id
     dir = await projects.resolveDir(id)
-    const llm = { generateStream: vi.fn().mockResolvedValue('{}') } as unknown as LlmService
+    llm = { generateStream: vi.fn().mockResolvedValue('{}') } as unknown as LlmService
     flow = new WriteFlowService(llm)
     service = new WriteService(projects, llm, flow, undefined, undefined, settings)
     vi.spyOn(service, 'selfCheckChapter').mockResolvedValue({ schemaVersion: 1, chapterNumber: 1,
@@ -119,6 +119,33 @@ describe('记忆候选提交与过期任务', () => {
     const actual = (await repo.list()).find((f) => f.id === item.id)
     expect(actual?.status).toBe('planted')
     expect(actual?.actualCollect).toBeUndefined()
+  })
+
+  it('第 5 章回收前从第 4 章保存稿补登记已有伏笔的埋设章', async () => {
+    const setup = '马宁伏低身体，看见踏板下有一段外露的机械杆，旁边固定着几块带黑纹的阵件。'
+    const payoff = '司机的右手在座椅下猛拽了一下，底梁上的黑纹亮起来，亮线顺着车底窜向后厢。'
+    const prose = new ProseRepo(dir)
+    await prose.write(4, setup)
+    await prose.write(5, payoff)
+    const repo = new ForeshadowingMdRepo(dir)
+    const clue = await repo.create({ content: '机械杆与阵件的功能及启动后果尚未揭明。' })
+    const extraction: MemoryExtraction = {
+      chapterNumber: 5, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [],
+      newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [{
+        foreshadowingId: clue.id, content: clue.content, chapter: 5, evidence: payoff
+      }]
+    }
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+    vi.mocked(llm.generateStream).mockResolvedValue(JSON.stringify({
+      plantings: [{ foreshadowingId: clue.id, chapter: 4, evidence: setup }]
+    }))
+    const result = await service.syncChapterAfterWrite(id, 5, payoff)
+    expect(result?.memory.errors).toEqual([])
+    expect(result?.memory.applied.collected).toBe(1)
+    expect((await repo.list()).find((item) => item.id === clue.id)).toMatchObject({
+      plantChapter: 4, actualCollect: 5, status: 'collected'
+    })
+    expect(vi.mocked(llm.generateStream).mock.calls.some((call) => call[1]?.meta?.feature === 'foreshadowPlantEvidence')).toBe(true)
   })
 
   it('应用旧提取时证据已从正文删除，应保留待核对而非写回过期结果', async () => {
