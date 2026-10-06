@@ -798,7 +798,9 @@ export interface RendererApi {
     tempContext: string | undefined,
     existingText: string | undefined,
     onToken: (token: string, done: boolean) => void,
-    onGenerationStage?: (stage: ChapterGenerationStage) => void
+    onGenerationStage?: (stage: ChapterGenerationStage) => void,
+    /** 按本章节奏临时调整本次续写的生成强度。 */
+    autoStrength?: boolean
   ) => ChapterStreamHandle
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
@@ -1015,7 +1017,7 @@ export interface RendererApi {
     /**
      * 按本章节奏（细纲情绪/爽点）自动调整生成强度（温度/思考强度）。
      * 单次调用覆盖，不会像编辑器「采用建议」那样永久改写 provider 配置；
-     * 只对 openai/anthropic/openai-responses/claude 协议生效。
+     * 只对 openai/anthropic/openai-responses/claude/codex 协议生效。
      */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */

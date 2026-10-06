@@ -264,6 +264,31 @@ describe('WriteService', () => {
     expect(llm.generateStream).toHaveBeenCalled()
   })
 
+  it('单章续写开启自动强度时按本章节奏覆盖本次生成', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const { writeFile, mkdir } = await import('fs/promises')
+    await mkdir(path.join(dir, '图解'), { recursive: true })
+    await writeFile(path.join(dir, '图解', '节奏图谱.html'), [
+      '<script>',
+      'const rhythmData = [',
+      '  { chapter: 1, title: "大高潮", emotion: 9, climax: 3, volume: 1, actualized: false }',
+      '];',
+      '</script>'
+    ].join('\n'), 'utf-8')
+    const llm = mockLlm('生成的正文')
+    const service = new WriteService(ps, llm)
+    await service.generateChapterStream(projectId, 1, { autoStrength: true })
+    expect(llm.generateStream).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      strengthOverride: { temperature: 1.0, reasoningEffort: 'high' }
+    }))
+
+    vi.mocked(llm.generateStream).mockClear()
+    await service.generateChapterStream(projectId, 1)
+    expect(llm.generateStream).toHaveBeenCalledWith(expect.any(String), expect.not.objectContaining({
+      strengthOverride: expect.anything()
+    }))
+  })
+
   it('adjustChapterStream revises existing prose from a follow-up instruction', async () => {
     const llm = mockLlm('修订后的完整正文')
     const service = new WriteService(ps, llm)

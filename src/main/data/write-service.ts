@@ -180,7 +180,7 @@ export interface BatchRunOptions {
    * 编辑器里「采用建议」按钮是永久改写 provider 配置；批量续写不能用那条路——
    * 跑完 10 章会把 provider 永久停在最后一章的建议值上。这里用 GenerateOptions.
    * strengthOverride 做单次调用覆盖，每章用完即弃，不影响你保存的默认设置。
-   * 只对 openai/anthropic/openai-responses/claude 协议生效，见 llm-service 里的说明。
+   * 只对 openai/anthropic/openai-responses/claude/codex 协议生效，见 llm-service 里的说明。
    */
   autoStrength?: boolean
 }
@@ -222,6 +222,8 @@ export function needsDownstreamOutlineAdjustment(diff: OutlineDiffItem): boolean
  * 这些编排回调在下发给 LlmService 前被剔除，不进 provider 层。
  */
 export interface ChapterGenerateOptions extends GenerateOptions {
+  /** 单章续写时按本章节奏临时调整生成强度，不改 provider 默认值。 */
+  autoStrength?: boolean
   onPromptMeta?: (meta: ChapterPromptMeta) => void
   onGenerationStage?: (stage: ChapterGenerationStage) => void
   onAutoDeslopResult?: (result: AutoDeslopResult) => void
@@ -593,7 +595,12 @@ export class WriteService {
     const targetWords = prompt.targetWords ?? TARGET_WORDS
     // 让调用方（IPC → 前端）知道本次是不是「还没写完的续写」：
     // extend 下整章是半成品，写后自检的完成度类项不该按整章判死。
-    const { onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, ...llmOpts } = opts as ChapterGenerateOptions
+    const { autoStrength, onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, ...llmOpts } = opts as ChapterGenerateOptions
+    if (autoStrength) {
+      const meta = (await this.chapterService.getChapter(projectId, chapterNumber)).meta
+      const suggestion = suggestChapterStrength(meta)
+      llmOpts.strengthOverride = { temperature: suggestion.temperature, reasoningEffort: suggestion.effort }
+    }
     onPromptMeta?.({
       continueMode: prompt.continueMode,
       targetWords,

@@ -27,6 +27,12 @@ function emit(channel: string, payload: unknown): void {
 describe('正文 preload 阶段事件与最终内容', () => {
   beforeEach(() => { listeners.clear(); invoke.mockReset() })
 
+  it('单章续写自动强度选项传入 IPC', async () => {
+    invoke.mockResolvedValue({ ok: true, content: '正文' })
+    await api.generateChapterStream('project-1', 1, null, undefined, undefined, vi.fn(), undefined, true)
+    expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({ autoStrength: true }))
+  })
+
   it.each(['generateChapterStream', 'adjustChapterStream'] as const)('%s 原稿 done 不结束最终回包等待，阶段只通知本次请求', async (method) => {
     let finish!: (value: unknown) => void
     invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))

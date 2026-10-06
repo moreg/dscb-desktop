@@ -1415,13 +1415,16 @@ function BatchWriteDialog({
   const [running, setRunning] = useState(false)
   // 连续模式：每章写完不停，一口气写到结束章号
   const [autoContinue, setAutoContinue] = useState(restoredSession?.autoContinue ?? preset?.autoContinue ?? false)
-  /**
-   * 按节奏自动调整生成强度：默认关闭——这会让每章实际用的温度/思考强度不一样，
-   * 是个会改变生成结果的行为开关，应该是你主动选的，不该悄悄替你打开。
-   * 只在这次调用里生效（GenerateOptions.strengthOverride），不碰你保存的 provider 默认值。
-   */
-  const [autoStrength, setAutoStrength] = useState(restoredSession?.autoStrength ?? false)
+  const isOneClickTen = preset?.count === 10 && preset.autoContinue
+  const strengthPreferenceKey = isOneClickTen
+    ? 'ai-writer:auto-strength:one-click-ten'
+    : 'ai-writer:auto-strength:batch'
+  /** 按节奏自动调整生成强度默认开启；关闭后记住各入口自己的选择。 */
+  const [autoStrength, setAutoStrength] = useState(
+    restoredSession?.autoStrength ?? (localStorage.getItem(strengthPreferenceKey) !== 'false')
+  )
   const [providerProtocol, setProviderProtocol] = useState<string | null>(null)
+  const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
   useEffect(() => {
     window.api?.listProviders?.().then((cfg) => {
       const routing = cfg.featureRouting?.chapter
@@ -1853,7 +1856,7 @@ function BatchWriteDialog({
         style={{ width: 760, maxWidth: '92vw', maxHeight: '86vh', overflow: 'auto' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>批量续写</h3>
+        <h3>{isOneClickTen ? '一键写章节' : '批量续写'}</h3>
         {restoredSession ? (
           <p className="meta">
             {recovering ? '正在核对上次批次的正文保存情况…' : '已恢复上次未结束的批次；已保存的正文会保留。'}
@@ -2001,16 +2004,19 @@ function BatchWriteDialog({
           <input
             type="checkbox"
             checked={autoStrength}
-            onChange={(e) => setAutoStrength(e.target.checked)}
+            onChange={(e) => {
+              setAutoStrength(e.target.checked)
+              localStorage.setItem(strengthPreferenceKey, String(e.target.checked))
+            }}
             disabled={running}
             style={{ marginTop: 3 }}
           />
           <span>
-            按节奏自动调整生成强度
+            {isOneClickTen ? '一键写作按节奏自动调强度' : '批量续写按节奏自动调强度'}
             <span className="meta" style={{ display: 'block', fontSize: 12 }}>
-              大高潮/高情绪的章自动拉高温度放开写，平淡过渡章自动调低求稳，逐章不同。
+              大高潮/高情绪的章自动提高生成强度，平淡过渡章自动调低，逐章不同。
               只在生成这一章时临时生效，不会像编辑器里「采用建议」那样改掉你保存的默认设置；
-              仅对 OpenAI / Anthropic / Claude Code 协议生效，Codex / Gemini / Grok 按你当前配置生成，不受影响。
+              Codex / OpenAI Responses / Claude Code 调整思考强度，OpenAI / Anthropic 调整温度；Gemini / Grok 按当前配置生成。
             </span>
           </span>
         </label>
@@ -2027,20 +2033,20 @@ function BatchWriteDialog({
               lineHeight: 1.5
             }}
           >
-            {providerProtocol && ['codex', 'antigravity', 'grok'].includes(providerProtocol) ? (
+            {providerProtocol && ['antigravity', 'grok'].includes(providerProtocol) ? (
               <span className="meta">
-                ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）协议不支持单次动态调温，本批将保持你当前的配置稳步生成。
+                ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）不支持单次调整生成强度，本批将使用当前配置。
               </span>
             ) : rhythmStats && rhythmStats.withRhythm === 0 ? (
               <span style={{ color: '#d97706' }}>
-                ⚠️ 所选范围（第 {fromChapter}~{toChapter} 章）暂无细纲/节奏标注，每章将使用默认稳态生成（温度 0.8）。
+                ⚠️ 所选范围（第 {fromChapter}~{toChapter} 章）暂无细纲/节奏标注，每章将使用默认稳态生成（{usesReasoningStrength ? '思考强度 medium' : '温度 0.8'}）。
               </span>
             ) : rhythmStats ? (
               <span className="meta">
                 💡 节奏预检：所选 {rhythmStats.total} 章中有 {rhythmStats.withRhythm} 章具备节奏数据
-                {rhythmStats.climaxCount > 0 ? `（${rhythmStats.climaxCount} 章大高潮拉高温度 1.0` : ''}
-                {rhythmStats.transitionCount > 0 ? `，${rhythmStats.transitionCount} 章过渡章调低至 0.6` : ''}
-                {rhythmStats.climaxCount > 0 || rhythmStats.transitionCount > 0 ? '）' : ''}，其余常规推进（0.8）。
+                {rhythmStats.climaxCount > 0 ? `（${rhythmStats.climaxCount} 章大高潮${usesReasoningStrength ? '调至 high' : '拉高温度 1.0'}` : ''}
+                {rhythmStats.transitionCount > 0 ? `，${rhythmStats.transitionCount} 章过渡章${usesReasoningStrength ? '调至 low' : '调低至 0.6'}` : ''}
+                {rhythmStats.climaxCount > 0 || rhythmStats.transitionCount > 0 ? '）' : ''}，其余常规推进（{usesReasoningStrength ? 'medium' : '0.8'}）。
               </span>
             ) : null}
           </div>
@@ -2074,7 +2080,9 @@ function BatchWriteDialog({
                   const isHigh = suggestion.effort === 'high'
                   const isLow = suggestion.effort === 'low'
                   const badgeIcon = isHigh ? '🔥' : isLow ? '🌱' : '⚖️'
-                  const badgeName = isHigh ? '大高潮 · 温度 1.0' : isLow ? '过渡章 · 温度 0.6' : '常规推进 · 温度 0.8'
+                  const badgeName = usesReasoningStrength
+                    ? isHigh ? '大高潮 · 思考 high' : isLow ? '过渡章 · 思考 low' : '常规推进 · 思考 medium'
+                    : isHigh ? '大高潮 · 温度 1.0' : isLow ? '过渡章 · 温度 0.6' : '常规推进 · 温度 0.8'
                   return (
                     <div
                       style={{
@@ -2288,9 +2296,11 @@ function BatchWriteDialog({
                             color: isHigh ? '#ef4444' : isLow ? '#3b82f6' : 'var(--ink-2)',
                             borderColor: isHigh ? 'rgba(239, 68, 68, 0.25)' : isLow ? 'rgba(59, 130, 246, 0.25)' : 'rgba(156, 163, 175, 0.25)'
                           }}
-                          title={`生成强度：${suggestion.reason}（温度 ${suggestion.temperature} / 思考 ${suggestion.effort}）`}
+                          title={`生成强度：${suggestion.reason}（${usesReasoningStrength ? `思考 ${suggestion.effort}` : `温度 ${suggestion.temperature}`}）`}
                         >
-                          {isHigh ? '🔥 1.0 高潮' : isLow ? '🌱 0.6 过渡' : '⚖️ 0.8 常规'}
+                          {usesReasoningStrength
+                            ? isHigh ? '🔥 high 高潮' : isLow ? '🌱 low 过渡' : '⚖️ medium 常规'
+                            : isHigh ? '🔥 1.0 高潮' : isLow ? '🌱 0.6 过渡' : '⚖️ 0.8 常规'}
                         </span>
                       ) : null}
                     </span>

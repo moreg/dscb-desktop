@@ -107,6 +107,7 @@ export function registerWriteIpc(service: WriteService): void {
         styleProfileId?: string | null
         tempContext?: string
         existingText?: string
+        autoStrength?: boolean
         requestId: string
       }
     ) => {
@@ -119,6 +120,7 @@ export function registerWriteIpc(service: WriteService): void {
             styleProfileId: styleProfileIdSchema,
             tempContext: z.string().optional(),
             existingText: z.string().optional(),
+            autoStrength: z.boolean().optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -139,6 +141,7 @@ export function registerWriteIpc(service: WriteService): void {
             {
               tempContext: validated.tempContext,
               existingText: validated.existingText,
+              autoStrength: validated.autoStrength === true,
               signal,
               onGenerationStage: (stage) =>
                 safeSend(win, 'write:generationStage', {

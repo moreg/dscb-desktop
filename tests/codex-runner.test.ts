@@ -416,6 +416,28 @@ describe('runCodex (app-server)', () => {
     expect(threadStartParams!.model).toBeUndefined()
   })
 
+  it('单次思考强度只传给 turn/start，不写入全局配置', async () => {
+    let threadStartParams: Record<string, unknown> | null = null
+    let turnStartParams: Record<string, unknown> | null = null
+    fakeChildFactory = () => {
+      const child = createAutoAppServerChild({ deltas: ['好'] })
+      const origWrite = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          const msg = JSON.parse(line)
+          if (msg.method === 'thread/start') threadStartParams = msg.params
+          if (msg.method === 'turn/start') turnStartParams = msg.params
+        }
+        return origWrite(raw)
+      })
+      return child
+    }
+
+    await runCodex('测试', { reasoningEffort: 'high' })
+    expect(threadStartParams!.effort).toBeUndefined()
+    expect(turnStartParams!.effort).toBe('high')
+  })
+
   it('onToken 按 item/agentMessage/delta 真流式喂回', async () => {
     fakeChildFactory = () =>
       createAutoAppServerChild({

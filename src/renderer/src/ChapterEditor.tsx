@@ -477,6 +477,9 @@ export default function ChapterEditor({
   const [allProviders, setAllProviders] = useState<ProviderSummary[]>([])
   const [availableModelsByProvider, setAvailableModelsByProvider] = useState<Record<string, string[]>>({})
   const [chapterStrengthSaving, setChapterStrengthSaving] = useState(false)
+  const [autoContinueStrength, setAutoContinueStrength] = useState(
+    () => localStorage.getItem('ai-writer:auto-continue-strength') !== 'false'
+  )
   const [codexGlobalEffort, setCodexGlobalEffort] = useState<ReasoningEffort>('medium')
   const [chapterAgyModels, setChapterAgyModels] = useState<string[]>([])
   const [showCustomModelDialog, setShowCustomModelDialog] = useState(false)
@@ -2025,7 +2028,8 @@ export default function ChapterEditor({
         (stage) => {
           if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
           setGenerationStage(stage)
-        }
+        },
+        autoContinueStrength
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -4795,6 +4799,15 @@ export default function ChapterEditor({
             ✦ 续写
           </button>
         )}
+        {!generating && !adjusting && !adjustPlanning ? (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => { setTempContextInput(''); setShowContinueDialog(true) }}
+            title="打开续写设置，可单独开启或关闭自动调整强度"
+          >
+            ⚙ 续写设置
+          </button>
+        ) : null}
         <button
           className={`btn btn-sm${flowPanelOpen ? ' btn-primary' : ''}`}
           onClick={() => setFlowPanelOpen((open) => !open)}
@@ -6739,6 +6752,21 @@ export default function ChapterEditor({
                 onChange={(e) => setTempContextInput(e.target.value)}
                 style={{ width: '100%', minHeight: 80, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
               />
+              {chapterProvider && ['codex', 'openai-responses', 'claude', 'openai', 'anthropic'].includes(chapterProvider.protocol ?? 'openai') ? (
+                <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, fontSize: 12, color: 'var(--ink-2)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={autoContinueStrength}
+                    onChange={(e) => {
+                      setAutoContinueStrength(e.target.checked)
+                      localStorage.setItem('ai-writer:auto-continue-strength', String(e.target.checked))
+                    }}
+                  />
+                  单章续写自动调强度
+                  {autoContinueStrength ? `（本章${strengthSuggestion.reason}，${chapterProvider.protocol === 'openai' || chapterProvider.protocol === 'anthropic' || !chapterProvider.protocol
+                    ? `温度 ${strengthSuggestion.temperature}` : `思考 ${strengthSuggestion.effort}`}）` : ''}
+                </label>
+              ) : null}
               <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, fontSize: 11.5, color: 'var(--ink-3)', cursor: 'pointer' }}>
                 <input
                   type="checkbox"

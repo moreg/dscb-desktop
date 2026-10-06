@@ -64,6 +64,18 @@ describe('cover vision model inputs', () => {
     expect(runCodex.mock.calls[0][0]).not.toContain(image)
   })
 
+  it('passes chapter strength to Codex for this call only', async () => {
+    runCodex.mockResolvedValue({ full: '正文', usage: null })
+    const svc = service('codex')
+    await svc.generateStream('写正文', {
+      meta: { feature: 'coverLearn' }, strengthOverride: { reasoningEffort: 'high' }
+    })
+    expect(runCodex.mock.calls[0][1].reasoningEffort).toBe('high')
+
+    await svc.generateStream('写下一章', { meta: { feature: 'coverLearn' } })
+    expect(runCodex.mock.calls[1][1].reasoningEffort).toBeUndefined()
+  })
+
   it.each(['grok', 'claude', 'antigravity'] as const)('%s reports unsupported vision instead of silently ignoring images', async (protocol) => {
     const fetch = vi.spyOn(globalThis, 'fetch')
     await expect(service(protocol).generateStream('看封面', { images: [image], meta: { feature: 'coverLearn' } })).rejects.toThrow('LLM_VISION_UNSUPPORTED')

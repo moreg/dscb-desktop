@@ -57,10 +57,10 @@ export interface GenerateOptions {
    * 窗口同时在编辑别的章节，用的都是被批量流程顺手改掉的值。这个字段只在
    * resolveProvider() 返回后临时合并进当次请求，用完即弃。
    *
-   * 只对 openai/anthropic（温度）与 openai-responses/claude（思考强度）协议生效。
-   * codex 的思考强度是 CLI 全局配置，没有单次调用覆盖的接口；antigravity 的档位
+   * 对 openai/anthropic（温度）与 openai-responses/claude/codex（思考强度）协议生效。
+   * codex 通过 app-server 的 turn/start.effort 单次覆盖，不修改 CLI 全局配置；antigravity 的档位
    * 对应的是切换到另一个具体模型名，贸然按档位猜测容易打到账号里没有的型号，
-   * 这两个协议下 strengthOverride 会被忽略，仍按 provider 当前配置生成。
+   * antigravity/grok 下 strengthOverride 会被忽略，仍按 provider 当前配置生成。
    */
   strengthOverride?: { temperature?: number; reasoningEffort?: ReasoningEffort }
 }
@@ -472,9 +472,8 @@ export class LlmService {
     if (!resolved) throw new Error('LLM_NOT_CONFIGURED')
     /**
      * strengthOverride 只在这次调用里生效，合并出一份临时对象，不写回 resolveProvider
-     * 读到的配置、也不持久化。codex/antigravity/grok 的生成函数根本不读 p.temperature/
-     * p.reasoningEffort（只用 p.model），所以这里不需要按协议分支，覆盖字段对它们
-     * 天然是死数据，只有 openai/anthropic/openai-responses/claude 分支会真的用到。
+     * 读到的配置、也不持久化。codex 只取当次 opts.strengthOverride.reasoningEffort，
+     * 避免误用 provider 中可能残留的旧值；antigravity/grok 不读取覆盖值。
      */
     const p: ProviderConfig = opts.strengthOverride
       ? {
@@ -652,6 +651,7 @@ export class LlmService {
     const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runCodex(merged, {
       model: p.model && p.model !== 'default' ? p.model : undefined,
+      reasoningEffort: opts.strengthOverride?.reasoningEffort,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
       signal: opts.signal,

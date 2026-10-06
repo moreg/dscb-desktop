@@ -58,6 +58,14 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
       expect.objectContaining({ partialChapter: true }))
   })
 
+  it('单章续写自动强度选项传给生成服务', async () => {
+    generate.mockResolvedValue('正文')
+    await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, requestId: 'auto-strength', autoStrength: true
+    })
+    expect(generate.mock.calls[0][3]).toMatchObject({ autoStrength: true })
+  })
+
   it('完整伏笔检查和补写结束后才交稿，返回整章而不是重复拼接的增量', async () => {
     const events: string[] = []
     let finish!: () => void

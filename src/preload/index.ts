@@ -363,7 +363,8 @@ const api = {
     tempContext: string | undefined,
     existingText: string | undefined,
     onToken: (token: string, done: boolean) => void,
-    onGenerationStage?: (stage: ChapterGenerationStage) => void
+    onGenerationStage?: (stage: ChapterGenerationStage) => void,
+    autoStrength?: boolean
   ) => {
     const requestId = crypto.randomUUID()
     const handler = (
@@ -387,6 +388,7 @@ const api = {
         styleProfileId,
         tempContext,
         existingText,
+        autoStrength,
         requestId
       })
       .finally(() => {

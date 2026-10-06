@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { UsageInfo } from './llm-service'
+import type { ReasoningEffort } from '../../shared/types'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
 import { killProcessTree } from './kill-process-tree'
 
@@ -23,6 +24,8 @@ import { killProcessTree } from './kill-process-tree'
 export interface CodexOptions {
   /** 模型名（如 "gpt-5.5"）；空则走 config.toml 默认 */
   model?: string
+  /** 本轮推理强度；不修改 Codex 全局配置。 */
+  reasoningEffort?: ReasoningEffort
   /** 超时（秒），默认 300 */
   timeoutSec?: number
   /** 流式 token 回调（按 item/agentMessage/delta 真流式喂回） */
@@ -482,6 +485,9 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
         }
         if (opts.model && opts.model.trim()) {
           turnParams.model = opts.model.trim()
+        }
+        if (opts.reasoningEffort) {
+          turnParams.effort = opts.reasoningEffort
         }
 
         const turnRes = (await request('turn/start', turnParams)) as {
