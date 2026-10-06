@@ -133,7 +133,7 @@ import {
   joinContinuation,
   needsChapterProseFormat
 } from '../../shared/format-chapter-prose'
-import { antigravityTierVariants } from '../../shared/antigravity-model-tiers'
+import { antigravityModelTier, antigravityTierVariants } from '../../shared/antigravity-model-tiers'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
 
 const DESLOP_LEVEL_NAMES: Record<DeslopLevel, string> = {
@@ -6752,7 +6752,7 @@ export default function ChapterEditor({
                 onChange={(e) => setTempContextInput(e.target.value)}
                 style={{ width: '100%', minHeight: 80, marginTop: 8, fontSize: 12.5, padding: 8, borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--ink)', resize: 'vertical' }}
               />
-              {chapterProvider && ['codex', 'openai-responses', 'claude', 'openai', 'anthropic'].includes(chapterProvider.protocol ?? 'openai') ? (
+              {chapterProvider && ['codex', 'openai-responses', 'claude', 'openai', 'anthropic', 'antigravity'].includes(chapterProvider.protocol ?? 'openai') ? (
                 <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, fontSize: 12, color: 'var(--ink-2)', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
@@ -6764,8 +6764,16 @@ export default function ChapterEditor({
                   />
                   单章续写自动调强度
                   {autoContinueStrength ? `（本章${strengthSuggestion.reason}，${chapterProvider.protocol === 'openai' || chapterProvider.protocol === 'anthropic' || !chapterProvider.protocol
-                    ? `温度 ${strengthSuggestion.temperature}` : `思考 ${strengthSuggestion.effort}`}）` : ''}
+                    ? `温度 ${strengthSuggestion.temperature}`
+                    : chapterProvider.protocol === 'antigravity' ? `AGY ${strengthSuggestion.tier} 档` : `思考 ${strengthSuggestion.effort}`}）` : ''}
                 </label>
+              ) : null}
+              {autoContinueStrength && chapterProvider?.protocol === 'antigravity' ? (
+                <p className="meta" style={{ margin: '4px 0 0', fontSize: 11.5 }}>
+                  {antigravityModelTier(chapterProvider.model)
+                    ? 'AGY 只切换到本机实时可用的同系列档位；缺少目标档位时保持当前模型。'
+                    : '当前 AGY 模型没有 Low/Medium/High 档位，续写时保持当前模型。'}
+                </p>
               ) : null}
               <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, fontSize: 11.5, color: 'var(--ink-3)', cursor: 'pointer' }}>
                 <input

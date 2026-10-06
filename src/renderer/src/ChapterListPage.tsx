@@ -1425,6 +1425,7 @@ function BatchWriteDialog({
   )
   const [providerProtocol, setProviderProtocol] = useState<string | null>(null)
   const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
+  const usesAgyTier = providerProtocol === 'antigravity'
   useEffect(() => {
     window.api?.listProviders?.().then((cfg) => {
       const routing = cfg.featureRouting?.chapter
@@ -2016,7 +2017,7 @@ function BatchWriteDialog({
             <span className="meta" style={{ display: 'block', fontSize: 12 }}>
               大高潮/高情绪的章自动提高生成强度，平淡过渡章自动调低，逐章不同。
               只在生成这一章时临时生效，不会像编辑器里「采用建议」那样改掉你保存的默认设置；
-              Codex / OpenAI Responses / Claude Code 调整思考强度，OpenAI / Anthropic 调整温度；Gemini / Grok 按当前配置生成。
+              Codex / OpenAI Responses / Claude Code 调整思考强度，AGY 切换本机可用的同系列模型档位，OpenAI / Anthropic 调整温度；Grok 按当前配置生成。
             </span>
           </span>
         </label>
@@ -2033,20 +2034,20 @@ function BatchWriteDialog({
               lineHeight: 1.5
             }}
           >
-            {providerProtocol && ['antigravity', 'grok'].includes(providerProtocol) ? (
+            {providerProtocol === 'grok' ? (
               <span className="meta">
                 ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）不支持单次调整生成强度，本批将使用当前配置。
               </span>
             ) : rhythmStats && rhythmStats.withRhythm === 0 ? (
               <span style={{ color: '#d97706' }}>
-                ⚠️ 所选范围（第 {fromChapter}~{toChapter} 章）暂无细纲/节奏标注，每章将使用默认稳态生成（{usesReasoningStrength ? '思考强度 medium' : '温度 0.8'}）。
+                ⚠️ 所选范围（第 {fromChapter}~{toChapter} 章）暂无细纲/节奏标注，每章将使用默认稳态生成（{usesAgyTier ? '建议 AGY Medium 档，缺档保持当前模型' : usesReasoningStrength ? '思考强度 medium' : '温度 0.8'}）。
               </span>
             ) : rhythmStats ? (
               <span className="meta">
                 💡 节奏预检：所选 {rhythmStats.total} 章中有 {rhythmStats.withRhythm} 章具备节奏数据
-                {rhythmStats.climaxCount > 0 ? `（${rhythmStats.climaxCount} 章大高潮${usesReasoningStrength ? '调至 high' : '拉高温度 1.0'}` : ''}
-                {rhythmStats.transitionCount > 0 ? `，${rhythmStats.transitionCount} 章过渡章${usesReasoningStrength ? '调至 low' : '调低至 0.6'}` : ''}
-                {rhythmStats.climaxCount > 0 || rhythmStats.transitionCount > 0 ? '）' : ''}，其余常规推进（{usesReasoningStrength ? 'medium' : '0.8'}）。
+                {rhythmStats.climaxCount > 0 ? `（${rhythmStats.climaxCount} 章大高潮${usesAgyTier ? '建议 AGY High 档' : usesReasoningStrength ? '调至 high' : '拉高温度 1.0'}` : ''}
+                {rhythmStats.transitionCount > 0 ? `，${rhythmStats.transitionCount} 章过渡章${usesAgyTier ? '建议 AGY Low 档' : usesReasoningStrength ? '调至 low' : '调低至 0.6'}` : ''}
+                {rhythmStats.climaxCount > 0 || rhythmStats.transitionCount > 0 ? '）' : ''}，其余常规推进（{usesAgyTier ? '建议 Medium 档，缺档保持当前模型' : usesReasoningStrength ? 'medium' : '0.8'}）。
               </span>
             ) : null}
           </div>
@@ -2080,7 +2081,9 @@ function BatchWriteDialog({
                   const isHigh = suggestion.effort === 'high'
                   const isLow = suggestion.effort === 'low'
                   const badgeIcon = isHigh ? '🔥' : isLow ? '🌱' : '⚖️'
-                  const badgeName = usesReasoningStrength
+                  const badgeName = usesAgyTier
+                    ? isHigh ? '大高潮 · AGY High' : isLow ? '过渡章 · AGY Low' : '常规推进 · AGY Medium'
+                    : usesReasoningStrength
                     ? isHigh ? '大高潮 · 思考 high' : isLow ? '过渡章 · 思考 low' : '常规推进 · 思考 medium'
                     : isHigh ? '大高潮 · 温度 1.0' : isLow ? '过渡章 · 温度 0.6' : '常规推进 · 温度 0.8'
                   return (
@@ -2296,9 +2299,11 @@ function BatchWriteDialog({
                             color: isHigh ? '#ef4444' : isLow ? '#3b82f6' : 'var(--ink-2)',
                             borderColor: isHigh ? 'rgba(239, 68, 68, 0.25)' : isLow ? 'rgba(59, 130, 246, 0.25)' : 'rgba(156, 163, 175, 0.25)'
                           }}
-                          title={`生成强度：${suggestion.reason}（${usesReasoningStrength ? `思考 ${suggestion.effort}` : `温度 ${suggestion.temperature}`}）`}
+                          title={`生成强度：${suggestion.reason}（${usesAgyTier ? `AGY ${suggestion.tier} 档，缺档保持当前模型` : usesReasoningStrength ? `思考 ${suggestion.effort}` : `温度 ${suggestion.temperature}`}）`}
                         >
-                          {usesReasoningStrength
+                          {usesAgyTier
+                            ? isHigh ? '🔥 High 高潮' : isLow ? '🌱 Low 过渡' : '⚖️ Medium 常规'
+                            : usesReasoningStrength
                             ? isHigh ? '🔥 high 高潮' : isLow ? '🌱 low 过渡' : '⚖️ medium 常规'
                             : isHigh ? '🔥 1.0 高潮' : isLow ? '🌱 0.6 过渡' : '⚖️ 0.8 常规'}
                         </span>

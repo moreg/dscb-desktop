@@ -180,7 +180,7 @@ export interface BatchRunOptions {
    * 编辑器里「采用建议」按钮是永久改写 provider 配置；批量续写不能用那条路——
    * 跑完 10 章会把 provider 永久停在最后一章的建议值上。这里用 GenerateOptions.
    * strengthOverride 做单次调用覆盖，每章用完即弃，不影响你保存的默认设置。
-   * 只对 openai/anthropic/openai-responses/claude/codex 协议生效，见 llm-service 里的说明。
+   * 对 openai/anthropic/openai-responses/claude/codex/antigravity 协议生效，见 llm-service 里的说明。
    */
   autoStrength?: boolean
 }

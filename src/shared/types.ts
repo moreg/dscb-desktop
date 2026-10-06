@@ -1017,7 +1017,7 @@ export interface RendererApi {
     /**
      * 按本章节奏（细纲情绪/爽点）自动调整生成强度（温度/思考强度）。
      * 单次调用覆盖，不会像编辑器「采用建议」那样永久改写 provider 配置；
-     * 只对 openai/anthropic/openai-responses/claude/codex 协议生效。
+     * 对 openai/anthropic/openai-responses/claude/codex/antigravity 协议生效。
      */
     autoStrength?: boolean,
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */

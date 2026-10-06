@@ -1,8 +1,9 @@
 import type { SecretStore } from './secret-store'
 import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
-import { runAntigravity, probeAntigravity } from './antigravity-runner'
+import { runAntigravity, probeAntigravity, listAntigravityModelsLive } from './antigravity-runner'
 import { buildAntigravityPrompt } from './antigravity-prompt'
+import { antigravityModelForEffort, antigravityModelTier } from '../../shared/antigravity-model-tiers'
 import { runCodex, probeCodex } from './codex-runner'
 import { runGrok, probeGrok } from './grok-runner'
 import { runClaude, probeClaude } from './claude-runner'
@@ -57,10 +58,9 @@ export interface GenerateOptions {
    * 窗口同时在编辑别的章节，用的都是被批量流程顺手改掉的值。这个字段只在
    * resolveProvider() 返回后临时合并进当次请求，用完即弃。
    *
-   * 对 openai/anthropic（温度）与 openai-responses/claude/codex（思考强度）协议生效。
-   * codex 通过 app-server 的 turn/start.effort 单次覆盖，不修改 CLI 全局配置；antigravity 的档位
-   * 对应的是切换到另一个具体模型名，贸然按档位猜测容易打到账号里没有的型号，
-   * antigravity/grok 下 strengthOverride 会被忽略，仍按 provider 当前配置生成。
+   * 对 openai/anthropic（温度）、openai-responses/claude/codex（思考强度）生效。
+   * antigravity 仅在实时模型列表里切换同系列 Low/Medium/High 档位模型；缺档保持当前模型。
+   * grok 忽略覆盖值。所有覆盖都不修改持久化的 provider 配置。
    */
   strengthOverride?: { temperature?: number; reasoningEffort?: ReasoningEffort }
 }
@@ -322,6 +322,9 @@ function isAbortError(err: unknown): boolean {
 }
 
 export class LlmService {
+  private agyModelsCache: { models: string[]; expiresAt: number } | null = null
+  private agyModelsQuery: Promise<string[]> | null = null
+
   constructor(
     private readonly secret: SecretStore,
     private readonly usage?: UsageRepository
@@ -473,7 +476,7 @@ export class LlmService {
     /**
      * strengthOverride 只在这次调用里生效，合并出一份临时对象，不写回 resolveProvider
      * 读到的配置、也不持久化。codex 只取当次 opts.strengthOverride.reasoningEffort，
-     * 避免误用 provider 中可能残留的旧值；antigravity/grok 不读取覆盖值。
+     * 避免误用 provider 中可能残留的旧值；antigravity 根据本次覆盖选择模型档位，grok 不读取覆盖值。
      */
     const p: ProviderConfig = opts.strengthOverride
       ? {
@@ -603,6 +606,14 @@ export class LlmService {
     prompt: string,
     opts: GenerateOptions
   ): Promise<string> {
+    let effectiveProvider = p
+    const effort = opts.strengthOverride?.reasoningEffort
+    if (effort && antigravityModelTier(p.model)) {
+      const models = await this.getLiveAgyModels()
+      if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+      const model = antigravityModelForEffort(p.model, effort, models)
+      if (model !== p.model) effectiveProvider = { ...p, model }
+    }
     // 合并 system + user：agy -p 单轮，把 system 作为前置指令
     const merged = buildAntigravityPrompt(prompt, opts.systemPrompt, CLI_PROSE_ONLY_PREAMBLE)
 
@@ -610,7 +621,7 @@ export class LlmService {
     // 仅传用户 signal；超时由 runner 的 timeoutSec / agy --print-timeout 负责，
     // 以便区分 LLM_ABORTED 与 LLM_TIMEOUT
     const { full, usage } = await runAntigravity(merged, {
-      model: p.model && p.model !== 'default' ? p.model : undefined,
+      model: effectiveProvider.model && effectiveProvider.model !== 'default' ? effectiveProvider.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,
       signal: opts.signal
@@ -619,7 +630,7 @@ export class LlmService {
     if (this.usage && usage) {
       try {
         await this.usage.add({
-          ...usageRecordBase(p, opts),
+          ...usageRecordBase(effectiveProvider, opts),
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           totalTokens: usage.totalTokens
@@ -629,6 +640,17 @@ export class LlmService {
       }
     }
     return full
+  }
+
+  /** 批量写作中复用实时 AGY 模型列表，避免每章都调用较慢的 `agy models`。 */
+  private async getLiveAgyModels(): Promise<string[]> {
+    if (this.agyModelsCache && Date.now() < this.agyModelsCache.expiresAt) return this.agyModelsCache.models
+    if (this.agyModelsQuery) return this.agyModelsQuery
+    this.agyModelsQuery = listAntigravityModelsLive().catch(() => []).then((models) => {
+      this.agyModelsCache = { models, expiresAt: Date.now() + (models.length ? 5 * 60_000 : 30_000) }
+      return models
+    }).finally(() => { this.agyModelsQuery = null })
+    return this.agyModelsQuery
   }
 
   /**

@@ -13,3 +13,14 @@ export function antigravityTierVariants(currentModel: string, availableModels: s
   if (!family) return []
   return availableModels.filter((model) => model.match(TIER_RE)?.[1] === family)
 }
+
+/** 只切换到实时模型列表中、与当前模型同系列的目标档位。缺档时保持原模型。 */
+export function antigravityModelForEffort(
+  currentModel: string,
+  effort: string | undefined,
+  availableModels: string[]
+): string {
+  const tier = effort === 'low' ? 'Low' : effort === 'medium' ? 'Medium' : effort === 'high' ? 'High' : null
+  if (!tier) return currentModel
+  return antigravityTierVariants(currentModel, availableModels).find((model) => antigravityModelTier(model) === tier) ?? currentModel
+}
