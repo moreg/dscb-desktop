@@ -4,13 +4,14 @@ export const MOBILE_BRAINSTORM_CLIENT = String.raw`
   const savedBrainKind = readStored('writer-mobile-brainstorm-kind');
   const brain = {kind:typeof savedBrainKind === 'string' && Object.prototype.hasOwnProperty.call(brainKinds,savedBrainKind) ? savedBrainKind : 'long', records:{}, tab:'current', generating:false, controller:null, requestId:0, error:'', notice:'', storageWarning:'', copyPreview:''};
   const brainKey = (kind) => 'writer-mobile-brainstorm:' + kind;
-  const brainFields = (kind) => kind === 'long' ? [['premise','故事设定'],['hook','开篇钩子'],['mainLine','长期主线'],['progression','成长与多卷推进'],['twist','关键反转与伏笔'],['ending','终局']] : [['premise','故事设定'],['hook','开篇钩子'],['twist','关键反转'],['ending','结局']];
+  const brainFields = (kind) => [...[['tags','内容标签'],['coreSetting','核心设定与卖点'],['worldView','世界观与规则'],['characters','人物设定与关系'],['goldenFinger','金手指或独特资源'],['premise','故事设定'],['hook','开篇钩子']],...(kind === 'long' ? [['mainLine','长期主线'],['progression','成长与多卷推进'],['twist','关键反转与伏笔'],['ending','终局']] : [['twist','关键反转'],['ending','结局']])];
   const brainIdeaKey = (idea) => JSON.stringify([idea.title,idea.premise].map((text) => text.normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[\s\p{P}\p{S}]/gu,'')));
   const newBrainId = () => Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10);
   function validBrainIdea(idea,kind) {
     if (!idea || typeof idea !== 'object' || Array.isArray(idea)) return false;
     const limits = kind === 'long' ? {title:120,premise:800,hook:600,mainLine:800,progression:800,twist:600,ending:600} : {title:120,premise:3000,hook:1500,twist:1500,ending:1500};
-    return Object.keys(limits).every((key) => typeof idea[key] === 'string' && !!idea[key].trim() && idea[key].length <= limits[key]);
+    const extras = {tags:120,coreSetting:400,worldView:500,characters:500,goldenFinger:400};
+    return Object.keys(limits).every((key) => typeof idea[key] === 'string' && !!idea[key].trim() && idea[key].length <= limits[key]) && Object.keys(extras).every((key) => idea[key] === undefined || typeof idea[key] === 'string' && !!idea[key].trim() && idea[key].length <= extras[key]);
   }
   function brainForm(value,kind) {
     const source = value && typeof value === 'object' ? value : {};
@@ -73,7 +74,7 @@ export const MOBILE_BRAINSTORM_CLIENT = String.raw`
   }
   function renderBrainIdea(idea,key) {
     const saved = brainRecord().favorites.some((entry) => brainIdeaKey(entry.idea) === brainIdeaKey(idea));
-    return '<article class="card brain-card"><h3>' + esc(idea.title) + '</h3>' + brainFields(brain.kind).map((pair) => '<div class="field"><b>' + pair[1] + '</b>' + nl(idea[pair[0]]) + '</div>').join('') + '<div class="notice-actions"><button data-brain-favorite="' + key + '" aria-pressed="' + saved + '">' + (saved ? '取消收藏' : '收藏') + '</button><button data-brain-copy="' + key + '">复制</button><button data-brain-download="' + key + '">下载</button></div></article>';
+    return '<article class="card brain-card"><h3>' + esc(idea.title) + '</h3>' + brainFields(brain.kind).filter((pair) => typeof idea[pair[0]] === 'string' && idea[pair[0]].trim()).map((pair) => '<div class="field"><b>' + pair[1] + '</b>' + nl(idea[pair[0]]) + '</div>').join('') + '<div class="notice-actions"><button data-brain-favorite="' + key + '" aria-pressed="' + saved + '">' + (saved ? '取消收藏' : '收藏') + '</button><button data-brain-copy="' + key + '">复制</button><button data-brain-download="' + key + '">下载</button></div></article>';
   }
   function renderBrainResults() {
     const record = brainRecord();
@@ -141,7 +142,7 @@ export const MOBILE_BRAINSTORM_CLIENT = String.raw`
     persistBrainstorm();
   }
   function brainIdeaText(entry) {
-    return '# ' + entry.idea.title + '\n\n' + brainSource(entry.source) + '\n\n' + brainFields(brain.kind).map((pair) => pair[1] + '：\n' + entry.idea[pair[0]]).join('\n\n');
+    return '# ' + entry.idea.title + '\n\n' + brainSource(entry.source) + '\n\n' + brainFields(brain.kind).filter((pair) => typeof entry.idea[pair[0]] === 'string' && entry.idea[pair[0]].trim()).map((pair) => pair[1] + '：\n' + entry.idea[pair[0]]).join('\n\n');
   }
   function downloadBrainText(text,filename) {
     const url = URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));

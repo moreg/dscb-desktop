@@ -4,7 +4,7 @@
  * - 去掉空行（连续换行压成单个换行）
  * - **保留**段落换行
  * - 对话动作排版归一：严禁同一人台词中间夹动作打断（“话1”动作，“话2”），自动将动作前置独立成行并合并台词
- * - 完整台词内部的中文句号改为逗号，保留末尾句号与问号、叹号
+ * - 保留人物台词内部按语气使用的句号、问号与叹号
  *
  * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
@@ -17,7 +17,7 @@ const LATIN_SPACE_NEIGHBOR = /[\p{Script=Latin}\p{M}0-9.,!?;:'"“”‘’–�
  * “不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒……”
  * 转换为：
  * 朴博士把图像放大。
- * “不是今晚才沾上的，旧切片里就有主毒……”
+ * “不是今晚才沾上的。旧切片里就有主毒……”
  */
 export function separateDialogueInterruption(text: string): string {
   if (!text) return text
@@ -35,10 +35,7 @@ export function separateDialogueInterruption(text: string): string {
       let action = m[4].trim().replace(/^[，,：:\s]+|[，,：:\s]+$/g, '')
       if (action && !/[。！？…~～]$/.test(action)) action += '。'
 
-      let sep = '，'
-      if (/[？！?!~～…]+$/.test(rawQ1)) {
-        sep = rawQ1.match(/[？！?!~～…]+$/)![0]
-      }
+      const sep = rawQ1.match(/[。？！?!~～…]+$/)?.[0] ?? '，'
       const q1Clean = rawQ1.replace(/[。！？，；、…!?~～]+$/, '')
       const q2 = m[6]
 
@@ -72,10 +69,7 @@ export function formatChapterProse(text: string): string {
     .replace(/^\n+/, '')
     .replace(/\n+$/, '')
 
-  const proseWithDialogue = separateDialogueInterruption(normalized).replace(
-    /“[^“”\n]*”|「[^「」\n]*」|"[^"\n]*"/g,
-    (dialogue) => dialogue.replace(/。(?!\s*[”」"]$)/g, '，')
-  )
+  const proseWithDialogue = separateDialogueInterruption(normalized)
   // 空白收干净之后再认章号：「第 9 章」会先变成「第9章」。
   return stripPublishedChapterRefs(proseWithDialogue)
 }

@@ -41,7 +41,7 @@ export function registerLongStoryBrainstormIpc(llm: LlmService): void {
       if (!text.trim()) throw new Error('模型未返回脑洞内容，请重试')
       // 先交付原始返回，再解析；格式错误时用户仍可保存已推送的素材。
       if (!received) safeSend(win, 'longStory:brainstormToken', { requestId: input.requestId, token: text, done: false })
-      const parsed = parseLongStoryBrainstormResult(text, { allowPartial: true, previousIdeas: input.previousIdeas })
+      const parsed = parseLongStoryBrainstormResult(text, { allowPartial: true, requireDetails: true, previousIdeas: input.previousIdeas })
       return { ok: true, ideas: parsed.ideas, ...(parsed.warning ? { warning: parsed.warning } : {}) }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

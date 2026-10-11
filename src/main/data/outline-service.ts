@@ -1,5 +1,6 @@
 import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
+import { buildAdoptedOpeningDirections } from '../../shared/fanqie-project'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { DetailedOutlineWriter, type DetailedOutlinePatch } from './skill-format/detailed-outline-writer'
@@ -321,6 +322,7 @@ export class OutlineService {
       isGolden
     )
     const description = meta.description?.trim()
+    prompt += buildAdoptedOpeningDirections(meta.openingChapters, fromChapter, count)
     if (description) {
       prompt += `\n\n### 最新作品简介（额外构思参考）\n${description}\n\n作品简介可能包含新采用的脑洞，仅用于补充创意和卖点。具体人物事实、世界观规则和卷级事件仍以以上正式核心设定与大纲为准；存在冲突时遵循正式规划，不擅自改写既有设定或已安排的剧情。`
     }

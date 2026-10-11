@@ -23,7 +23,7 @@ export interface NormalizeResult {
     ellipsis: number
     /** 单省略号 … 改为句号 */
     singleEllipsis: number
-    /** 台词说话中间的句号改为逗号 */
+    /** 闭合引号前的悬空逗号修正数 */
     dialoguePeriod?: number
   }
 }
@@ -101,19 +101,6 @@ export function normalizePunctuation(input: string): NormalizeResult {
           })
     )
     .join('\n')
-
-  // 引号内台词说话中间的句号 → 逗号（说话中间不落句号，保持口语连贯）
-  text = text.replace(/([“"「])([^”"」\n]+?)([”"」])/g, (_match, open, content, close) => {
-    let subChanged = 0
-    const replaced = content.replace(/。(?!\s*$)/g, () => {
-      subChanged += 1
-      return '，'
-    })
-    if (subChanged > 0) {
-      changes.dialoguePeriod = (changes.dialoguePeriod ?? 0) + subChanged
-    }
-    return open + replaced + close
-  })
 
   // 清理闭合引号前的非法悬空逗号（台词闭合前严禁以逗号收尾，如被打断台词误转成的 "你，" 统一校正为 "你。"）
   text = text.replace(/，(?=[”"」』’'])/g, () => {

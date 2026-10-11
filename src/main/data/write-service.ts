@@ -15,6 +15,7 @@ import { CharacterRepo } from './memory/character-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { StyleProfileRepository } from './style-profile-repository'
 import { buildSystemPrompt, buildHumanizerPrompt } from './skill-prompts'
+import { readWritingPlatformConfig } from './writing-platform'
 import { recallBenchmark, mergeRecalls } from './teardown/benchmark-recall'
 import type { SettingsRepository } from './settings-repository'
 import { auditChapter as runAudit, type AuditOptions } from './chapter-audit'
@@ -527,7 +528,8 @@ export class WriteService {
       style,
       overrides,
       benchmarkRecall,
-      continueMode
+      continueMode,
+      await readWritingPlatformConfig(dir)
     )
 
     const recalledProse = await this.recallChapterEvidence(dir, chapterNumber, ctx, existingText, tempContext)
@@ -754,7 +756,7 @@ export class WriteService {
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
-    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall, undefined, await readWritingPlatformConfig(dir))
     const user = renderAdjustUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -796,7 +798,7 @@ export class WriteService {
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
-    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall, undefined, await readWritingPlatformConfig(dir))
     const user = renderAdjustPlanUserPrompt({
       projectName: project.name,
       genre: project.genre,
@@ -1885,17 +1887,16 @@ export class WriteService {
         }
         // 只写通过校验的条目；被挡下的条目原样留在 candidate 文件里等复核
         memory = await this.applyMemory(projectId, verified, content)
-        if (opts?.proseFirst) {
-          const entityResult = await this.applyAllNewEntities(projectId, verified)
-          memory = {
-            ...memory,
-            applied: {
-              ...memory.applied,
-              characters: entityResult.characters,
-              locations: entityResult.locations,
-              items: entityResult.items,
-              foreshadowings: entityResult.foreshadowings
-            }
+        const entityResult = await this.applyAllNewEntities(projectId, verified)
+        memory = {
+          ...memory,
+          entitiesReviewed: true,
+          applied: {
+            ...memory.applied,
+            characters: entityResult.characters,
+            locations: entityResult.locations,
+            items: entityResult.items,
+            foreshadowings: entityResult.foreshadowings
           }
         }
         if (itemIssues.length) memory = { ...memory, heldBack: itemIssues }
@@ -1932,7 +1933,7 @@ export class WriteService {
       // itemIssues 也算 partial：有条目没落地，候选文件要留着等复核，不能标成 applied
       await writeJsonAtomic(candidateFile, {
         ...candidate,
-        appliedEntities: opts?.proseFirst ? {
+        appliedEntities: memory.entitiesReviewed ? {
           characters: memory.applied.characters,
           locations: memory.applied.locations,
           items: memory.applied.items,
@@ -2160,7 +2161,7 @@ export class WriteService {
     return 'auto_high'
   }
 
-  /** 用户确认后：应用新增角色 */
+  /** 写后自动入库或手动补录新增角色 */
   async applyNewCharacters(
     projectId: string,
     chars: MemoryExtraction['newCharacters']
@@ -2169,7 +2170,7 @@ export class WriteService {
     return new MemoryWriter(dir).applyNewCharacters(chars)
   }
 
-  /** 用户确认后：应用新增地点；world 级在设定进化开启时双写地理（尊重 off 开关） */
+  /** 写后自动入库或手动补录新增地点；world 级在设定进化开启时双写地理（尊重 off 开关） */
   async applyNewLocations(
     projectId: string,
     locs: MemoryExtraction['newLocations'],
@@ -2198,7 +2199,7 @@ export class WriteService {
     return new MemoryWriter(dir).applyNewItems(items)
   }
 
-  /** 用户确认后：应用新增伏笔 */
+  /** 写后自动入库或手动补录新增伏笔 */
   async applyNewForeshadowings(
     projectId: string,
     fs: MemoryExtraction['newForeshadowings']
@@ -3113,12 +3114,12 @@ export class WriteService {
     const prompt = [
       `你是网络小说细纲联动校准器。第 ${chapterNumber} 章正文已定稿，当前章细纲将按正文回写。`,
       `请检查同卷后续最多 10 章，只调整真正受影响的细纲。`,
-      `若属于核心事件/结构变化，至少校准紧随其后的 ${minimumChapter} 章；人物、关系或伏笔变化则只改实际受影响章。`,
+      `若属于核心事件/结构变化，必须为紧随其后的 ${minimumChapter} 章逐章生成有效补丁，修正与当前章正文的承接；人物、关系或伏笔变化则只改实际受影响章。`,
       `类型 1 表示细纲写了但正文没写：后续章若依赖这件事，要改为承接正文的实际结果，或把它顺延安排进后续章。`,
       `硬性禁止：不得修改章号、标题、情绪值、爽点等级、所属卷；不得新增与变化无关的剧情。`,
       `可写字段仅限：plotSummary, coolPoint, hook, charactersAppearing, foreshadowings, wordEstimate, goldenLine。`,
       `plotSummary 必须写完整核心事件，保留原章目标，只修正承接、人物状态、伏笔与因果。`,
-      `输出严格 JSON 数组：[{"chapterNumber":数字,"reason":"原因","patch":{可写字段}}]。不需要改的章不输出。`,
+      `输出严格 JSON 数组：[{"chapterNumber":数字,"reason":"原因","patch":{可写字段}}]。不需要改的其他章不输出。`,
       ``,
       `------ 已接受的当前章变化 ------`,
       JSON.stringify(changes.map((diff) => ({
@@ -3145,29 +3146,57 @@ export class WriteService {
       })))
     ].join('\n')
 
-    const raw = await this.llm.generateStream(prompt, {
-      maxTokens: 8192,
-      signal,
-      meta: { feature: 'downstreamOutlineSync', projectId, chapterNumber }
-    })
-    const parsed = findJsonArray(raw)
-    if (!parsed) throw new Error('模型未返回有效的后续细纲补丁')
-
     const allowed = new Set(candidates.map((item) => item.chapterNumber))
+    const required = candidates.slice(0, minimumChapter).map((item) => item.chapterNumber)
     const patches = new Map<number, OutlineDiffPatch>()
-    for (const item of parsed) {
-      if (!item || typeof item !== 'object') continue
-      const obj = item as Record<string, unknown>
-      const target = Number(obj.chapterNumber)
-      if (!Number.isInteger(target) || !allowed.has(target)) continue
-      const clean = sanitizeOutlinePatch(obj.patch)
-      // sanitizeOutlinePatch 也服务于人工回写，允许 title；自动联动必须额外剔除。
-      if (clean) delete clean.title
-      if (!clean || Object.keys(clean).length === 0) continue
-      patches.set(target, { ...patches.get(target), ...clean })
+    const requestPatches = async (requestPrompt: string, onlyChapter?: number): Promise<boolean> => {
+      throwIfAborted(signal)
+      const raw = await this.llm.generateStream(requestPrompt, {
+        maxTokens: 8192,
+        signal,
+        meta: { feature: 'downstreamOutlineSync', projectId, chapterNumber }
+      })
+      const parsed = findJsonArray(raw)
+      if (!parsed) return false
+      for (const item of parsed) {
+        if (!item || typeof item !== 'object') continue
+        const obj = item as Record<string, unknown>
+        const target = Number(obj.chapterNumber)
+        if (!Number.isInteger(target) || !allowed.has(target) || !obj.patch || typeof obj.patch !== 'object' || Array.isArray(obj.patch)) continue
+        if (onlyChapter !== undefined && target !== onlyChapter) continue
+        const clean = sanitizeOutlinePatch(obj.patch)
+        // sanitizeOutlinePatch 也服务于人工回写，允许 title；自动联动必须额外剔除。
+        if (clean) delete clean.title
+        if (clean && Object.keys(clean).length > 0 && (!required.includes(target) || clean.plotSummary)) {
+          patches.set(target, { ...patches.get(target), ...clean })
+        }
+      }
+      return true
     }
-    if (hasCoreChange && candidates.slice(0, minimumChapter).some((item) => !patches.has(item.chapterNumber))) {
-      throw new Error(`核心变化需要校准紧随其后的 ${minimumChapter} 章，模型返回的章号不完整`)
+
+    if (!await requestPatches(prompt) && required.length === 0) {
+      throw new Error('模型未返回有效的后续细纲补丁')
+    }
+    for (const target of required) {
+      if (patches.has(target)) continue
+      const candidate = candidates.find((item) => item.chapterNumber === target)!
+      const focusedPrompt = [
+        `你是网络小说细纲联动校准器。第 ${chapterNumber} 章正文已定稿。`,
+        `上一轮遗漏了第 ${target} 章。请只为这一章生成有效的细纲补丁，修正它与已定稿正文的承接。`,
+        `不得修改章号、标题、情绪值、爽点等级、所属卷；不得新增与变化无关的剧情。`,
+        `可写字段仅限：plotSummary, coolPoint, hook, charactersAppearing, foreshadowings, wordEstimate, goldenLine。`,
+        `plotSummary 必须写完整核心事件，保留原章目标，只修正承接、人物状态、伏笔与因果。`,
+        `输出严格 JSON 数组：[ {"chapterNumber":${target},"reason":"原因","patch":{"plotSummary":"完整核心事件"}} ]。patch 不能为空。`,
+        `------ 已接受的当前章变化 ------`,
+        JSON.stringify(changes.map((diff) => ({ type: diff.type, outline: diff.outline, actual: diff.actual, suggestion: diff.suggestion, patch: diff.outlinePatch }))),
+        `------ 第 ${target} 章原细纲 ------`,
+        JSON.stringify(candidate)
+      ].join('\n')
+      await requestPatches(focusedPrompt, target)
+    }
+    const missing = required.filter((target) => !patches.has(target))
+    if (missing.length > 0) {
+      throw new Error(`核心变化需要校准紧随其后的 ${minimumChapter} 章，自动补丁仍缺少第 ${missing.join('、')} 章`)
     }
 
     const writer = new DetailedOutlineWriter(dir)
@@ -3326,7 +3355,7 @@ export class WriteService {
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
     const benchmarkRecall = await this.loadBenchmarkRecall(dir, project.benchmarkBooks)
-    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall)
+    const system = buildSystemPrompt(project.genre, style, overrides, benchmarkRecall, undefined, await readWritingPlatformConfig(dir))
     const user = renderAskQuestionPrompt({
       projectName: project.name,
       genre: project.genre,

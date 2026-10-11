@@ -728,7 +728,7 @@ export interface BatchChapterSummary {
   }
 }
 
-/** 自动同步真正会写的三类；新增实体走 countMemoryPending */
+/** 状态、剧情点、伏笔回收的写入计数；新增实体单独计数。 */
 function countMemoryCandidates(m: ChapterFlowResult['memory']): number {
   return m.newPlotPoints.length + m.characterStateChanges.length + m.collectedForeshadowings.length
 }
@@ -743,8 +743,10 @@ function countMemoryApplied(applied: MemoryApplyResult['applied']): number {
  */
 function countMemoryPending(
   m: ChapterFlowResult['memory'],
-  applied?: MemoryApplyResult['applied']
+  applied?: MemoryApplyResult['applied'],
+  entitiesReviewed?: boolean
 ): number {
+  if (entitiesReviewed) return 0
   const p = countPendingConfirms(m)
   const extracted = p.characters + p.locations + p.items + p.foreshadowings
   const confirmed = applied
@@ -792,7 +794,7 @@ export function summarizeChapterResult(
     memory: {
       candidates: countMemoryCandidates(result.memory),
       applied: apply ? countMemoryApplied(apply.applied) : 0,
-      pending: countMemoryPending(result.memory, apply?.applied),
+      pending: countMemoryPending(result.memory, apply?.applied, apply?.entitiesReviewed),
       appliedEntities: apply
         ? apply.applied.characters + apply.applied.locations + apply.applied.items + apply.applied.foreshadowings
         : 0,

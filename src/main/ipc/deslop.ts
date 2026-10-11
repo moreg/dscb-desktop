@@ -26,7 +26,7 @@ export function registerDeslopIpc(
   styleProfileService: StyleProfileService,
   settings: SettingsRepository
 ): void {
-  /* 扫描正文（确定性，不调 LLM）—— 用户配置的禁用词表优先 */
+  /* 主动扫描同时检查本地规则与场景表达，场景失败保留本地报告。 */
   safeHandle(
     'deslop:scan',
     async (_e, payload: { projectId: string; text: string }) => {
@@ -37,7 +37,9 @@ export function registerDeslopIpc(
       const whitelist = await resolveWhitelist(projectService, validated.projectId)
       const deslopRules = await settings.getDeslopRules()
       const bannedWords = resolveDeslopBannedWords(deslopRules.bannedWords)
-      return deslopService.scan(validated.text, { whitelist, bannedWords })
+      return deslopService.scanWithNarrative(validated.text, {
+        whitelist, bannedWords, meta: { projectId: validated.projectId }
+      })
     }
   )
 
@@ -86,6 +88,8 @@ export function registerDeslopIpc(
         try {
           result = await deslopService.deslop(validated.text, {
             levelOverride: validated.levelOverride,
+            polishNarrative: true,
+            polishDialogue: true,
             onToken: send,
             whitelist,
             bannedWords,

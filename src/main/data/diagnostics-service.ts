@@ -98,8 +98,8 @@ async function listDir(dir: string): Promise<string[]> {
 async function writtenChapters(dir: string): Promise<Set<number>> {
   const repo = new ProseRepo(dir)
   const chapters = await repo.listChapterNumbers()
-  const contents = await Promise.all(chapters.map(async (chapter) => ({ chapter, text: await repo.read(chapter) })))
-  return new Set(contents.filter(({ text }) => text.trim().length > 0).map(({ chapter }) => chapter))
+  const contents = await repo.readMany(chapters)
+  return new Set(chapters.filter((chapter) => contents.get(chapter)!.content.trim().length > 0))
 }
 
 /**

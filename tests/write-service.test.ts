@@ -59,6 +59,24 @@ describe('WriteService', () => {
     expect(system).toContain('禁用高频词')
   })
 
+  it('loads project platform for chapter writing and rewriting, with Tomato fallback', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const { mkdir, writeFile } = await import('fs/promises')
+    const service = new WriteService(ps, mockLlm('正文'))
+    expect((await service.buildChapterPrompt(projectId, 1)).system).toContain('你是番茄小说风格')
+    await mkdir(path.join(dir, '设定'), { recursive: true })
+    const file = path.join(dir, '设定', '平台配置.md')
+    await writeFile(file, '# 平台配置\n\n- 目标平台：7猫\n- 章名策略：具体清楚\n\n番茄项目的策略不适用本书', 'utf-8')
+    const prompt = await service.buildChapterPrompt(projectId, 1)
+    expect(prompt.system).toContain('你是七猫小说')
+    expect(prompt.system).toContain('章名策略：具体清楚')
+    expect(prompt.system).not.toContain('你是番茄小说风格')
+    const adjusted = await service.buildAdjustChapterPrompt(projectId, 1, '原有正文', '补充动作')
+    expect(adjusted.system).toContain('你是七猫小说')
+    await writeFile(file, '目标平台：番茄小说', 'utf-8')
+    expect((await service.buildChapterPrompt(projectId, 1)).system).toContain('你是番茄小说风格')
+  })
+
   it('buildChapterPrompt injects recent plot summaries as mid-range memory', async () => {
     const dir = await ps.resolveDir(projectId)
     const { mkdir, writeFile } = await import('fs/promises')

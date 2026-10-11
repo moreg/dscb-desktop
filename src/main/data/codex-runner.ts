@@ -81,8 +81,28 @@ const CODEX_SHELL = CODEX_BIN.endsWith('.cmd')
 /** 默认超时 5 分钟 */
 const DEFAULT_TIMEOUT_SEC = 300
 
-/** 认证失败后重试前的等待时间（让 codex 刷新登录态） */
+/** 认证失败或未输出正文的意外退出后，重试前的等待时间。 */
 const AUTH_RETRY_DELAY_MS = 1500
+
+/** 仅未输出正文的意外退出可以重试，避免重复推送正文。 */
+class CodexEarlyExitError extends Error {}
+
+function exitDiagnostic(stderr: string): string {
+  const lines = stderr.trim().split(/\r?\n/).filter(Boolean)
+  let lastError = ''
+  let lastPlain = ''
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line)
+      if (entry.level === 'ERROR' && typeof entry.fields?.message === 'string') {
+        lastError = entry.fields.message
+      }
+    } catch {
+      lastPlain = line
+    }
+  }
+  return (lastError || lastPlain).replace(/\s+/g, ' ').slice(0, 200)
+}
 
 /** app-server 客户端标识（OpenAI compliance / 日志） */
 const CLIENT_INFO = {
@@ -108,9 +128,9 @@ export function runCodex(prompt: string, opts: CodexOptions = {}): Promise<Codex
   let retried = false
   const exec = (): Promise<CodexResult> =>
     runCodexOnce(prompt, opts).catch((err) => {
-      // 认证失败多为登录态的暂时性失效，等一下再跑一次，避免直接把错误抛给用户。
-      // 认证失败时通常不会输出 agent_message，不会产生重复 token。
-      if (!retried && err && /CODEX_AUTH_EXPIRED/.test(String((err as Error).message))) {
+      // 登录态暂时失效或进程无输出退出时，稍后重试一次。
+      if (!retried && !opts.signal?.aborted && err &&
+        (err instanceof CodexEarlyExitError || /CODEX_AUTH_EXPIRED/.test(String((err as Error).message)))) {
         retried = true
         return new Promise((resolve) => setTimeout(resolve, AUTH_RETRY_DELAY_MS)).then(() =>
           runCodexOnce(prompt, opts)
@@ -122,6 +142,7 @@ export function runCodex(prompt: string, opts: CodexOptions = {}): Promise<Codex
 }
 
 async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexResult> {
+  if (opts.signal?.aborted) throw new Error(LLM_ABORTED_ERROR)
   const timeoutSec = opts.timeoutSec ?? DEFAULT_TIMEOUT_SEC
 
   return new Promise<CodexResult>((resolve, reject) => {
@@ -140,6 +161,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
     }
 
     let stderrBuf = ''
+    let stdinError = ''
     let lineBuf = ''
     let settled = false
     let timedOut = false
@@ -414,7 +436,12 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
     })
 
     child.stderr.on('data', (chunk: Buffer) => {
-      stderrBuf += chunk.toString('utf8')
+      stderrBuf = (stderrBuf + chunk.toString('utf8')).slice(-16_384)
+    })
+
+    // 退出时 stdin 可能先报 EPIPE；等 close 收齐 stderr 和退出码再报告。
+    child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+      stdinError = `${err.code ?? 'stdin'}: ${err.message}`
     })
 
     child.on('error', (err) => {
@@ -427,7 +454,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
       }
     })
 
-    child.on('close', () => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       if (lineBuf.trim()) processLine(lineBuf)
       if (settled) return
       if (timedOut) {
@@ -442,7 +469,15 @@ async function runCodexOnce(prompt: string, opts: CodexOptions): Promise<CodexRe
         console.warn('[codex] stderr:', stderrBuf.trim().slice(0, 200))
       }
       // 进程意外退出且未完成 turn
-      fail(new Error(full ? 'LLM_OUTPUT_TRUNCATED' : 'CODEX_ERROR: app-server exited early'))
+      if (full) {
+        fail(new Error('LLM_OUTPUT_TRUNCATED'))
+        return
+      }
+      const detail = exitDiagnostic(stderrBuf) || stdinError
+      const status = signal ? `signal=${signal}` : `exit=${code ?? 'unknown'}`
+      fail(new CodexEarlyExitError(
+        `CODEX_ERROR: ${detail || 'app-server exited early'} (${status})`
+      ))
     })
 
     // 握手 + 开 thread + 开 turn

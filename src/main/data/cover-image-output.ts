@@ -1,4 +1,3 @@
-import { Canvas, loadImage } from 'skia-canvas'
 import type { CoverCropOptions } from '../../shared/types'
 
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024
@@ -20,6 +19,7 @@ export async function decodeCoverImage(base64: string): Promise<DecodedCoverImag
   const bytes = Buffer.from(base64, 'base64')
   if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error('COVER_INVALID_IMAGE: 图片数据大小无效')
   try {
+    const { Canvas, loadImage } = await import('skia-canvas')
     const image = await loadImage(bytes)
     if (image.width < 3 || image.height < 4 || image.width * image.height > MAX_IMAGE_PIXELS) {
       throw new Error('图片尺寸过小或超过处理上限')
@@ -55,6 +55,7 @@ export async function renderCoverImage(
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
     throw new Error('COVER_INVALID_CROP: 成品尺寸无效')
   }
+  const { Canvas, loadImage } = await import('skia-canvas')
   const image = await loadImage(png)
   const scale = options.fit === 'contain'
     ? Math.min(width / image.width, height / image.height)

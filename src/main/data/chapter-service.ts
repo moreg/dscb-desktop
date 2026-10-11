@@ -120,18 +120,22 @@ export class ChapterService {
     projectId: string
   ): Promise<{ metas: ChapterMeta[]; content: Map<number, string> }> {
     const dir = await this.projectService.resolveDir(projectId)
-    const rhythm = await this.readRhythm(dir)
     const prose = new ProseRepo(dir)
-    const detailedMap = await this.readDetailedMap(dir)
-    const nameToId = await this.readCharacterNameToIdMap(dir)
+    const [rhythm, detailedMap, nameToId] = await Promise.all([
+      this.readRhythm(dir),
+      this.readDetailedMap(dir),
+      this.readCharacterNameToIdMap(dir)
+    ])
+    const bodies = await prose.readMany(rhythm.map((entry) => entry.chapter))
     const now = new Date().toISOString()
     const metas: ChapterMeta[] = []
     const content = new Map<number, string>()
     for (const e of rhythm) {
-      const has = await prose.exists(e.chapter)
+      const body = bodies.get(e.chapter)!
+      const has = body.exists
       const det = detailedMap.get(e.chapter)
       // wordCount：正文实时统计（v4 删除了 记忆系统/章节进度.md，不再有外部字数表）
-      const chapterContent = has ? await prose.read(e.chapter) : ''
+      const chapterContent = body.content
       const wordCount = chapterContent ? countWords(chapterContent) : 0
       content.set(e.chapter, chapterContent)
       metas.push({
@@ -156,12 +160,13 @@ export class ChapterService {
 
   async getChapter(projectId: string, n: number): Promise<ChapterContent> {
     const dir = await this.projectService.resolveDir(projectId)
-    const rhythm = await this.readRhythm(dir)
+    const [rhythm, content, det, nameToId] = await Promise.all([
+      this.readRhythm(dir),
+      new ProseRepo(dir).read(n),
+      new DetailedOutlineMdRepo(dir).readChapter(n),
+      this.readCharacterNameToIdMap(dir)
+    ])
     const entry = rhythm.find((e) => e.chapter === n)
-    const content = await new ProseRepo(dir).read(n)
-    const detailedMap = await this.readDetailedMap(dir)
-    const nameToId = await this.readCharacterNameToIdMap(dir)
-    const det = detailedMap.get(n)
     const meta: ChapterMeta = {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),

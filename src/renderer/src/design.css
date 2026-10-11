@@ -375,7 +375,8 @@ a:hover { color: var(--vermilion); }
 }
 .main-inner.relationship-wide,
 .main-inner.rhythm-wide,
-.main-inner.foreshadowing-wide {
+.main-inner.foreshadowing-wide,
+.main-inner.fanqie-wide {
   max-width: min(1680px, calc(100vw - 72px));
   padding-bottom: 48px;
 }

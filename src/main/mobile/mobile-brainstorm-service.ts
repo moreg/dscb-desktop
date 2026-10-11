@@ -66,8 +66,8 @@ export class MobileBrainstormService implements MobileBrainstormGenerator {
           excludedIdeas: data.previousIdeas?.map((idea) => `${idea.title}：${idea.premise}`.slice(0, 1_500))
         })
     const parse = (text: string) => data.kind === 'long'
-      ? parseLongStoryBrainstormResult(text, { allowPartial: true, previousIdeas: data.previousIdeas })
-      : parseShortStoryBrainstormResult(text, { allowPartial: true, previousIdeas: data.previousIdeas })
+      ? parseLongStoryBrainstormResult(text, { allowPartial: true, requireDetails: true, previousIdeas: data.previousIdeas })
+      : parseShortStoryBrainstormResult(text, { allowPartial: true, requireDetails: true, previousIdeas: data.previousIdeas })
     let receivedText = ''
     let rawText: string
     let finished = false

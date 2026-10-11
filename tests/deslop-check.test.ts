@@ -450,14 +450,12 @@ describe('scanAiPatterns 省略号检测', () => {
   })
 })
 
-describe('scanAiPatterns & normalizePunctuation: 台词中间禁句号', () => {
-  const badDialogue = '“先生既然肯留下，委任今天就能签。名头先挂顾问，不领实职。军需那边管吃住，出门用车也方便。”'
+describe('scanAiPatterns & normalizePunctuation: 台词自然断句', () => {
+  const dialogue = '“先生既然肯留下，委任今天就能签。名头先挂顾问，不领实职。军需那边管吃住，出门用车也方便。”'
 
-  it('scanAiPatterns 检测台词中间出现的句号（Gate E，报出2处）', () => {
-    const findings = scanAiPatterns(badDialogue)
-    const hits = findings.filter((f) => f.type === 'dialogue-internal-period')
-    expect(hits).toHaveLength(2)
-    expect(hits.every((h) => h.gate === 'E' && h.severity === 'advisory')).toBe(true)
+  it('台词内部的完整句子不作为 AI 味问题', () => {
+    const findings = scanAiPatterns(dialogue)
+    expect(findings.filter((f) => f.type === 'dialogue-internal-period')).toHaveLength(0)
   })
 
   it('台词末尾的句号不误报', () => {
@@ -466,10 +464,10 @@ describe('scanAiPatterns & normalizePunctuation: 台词中间禁句号', () => {
     expect(findings.filter((f) => f.type === 'dialogue-internal-period')).toHaveLength(0)
   })
 
-  it('normalizePunctuation 自动将台词中间的句号转为逗号，保留末尾句号', () => {
-    const r = normalizePunctuation(badDialogue)
-    expect(r.text).toBe('“先生既然肯留下，委任今天就能签，名头先挂顾问，不领实职，军需那边管吃住，出门用车也方便。”')
-    expect(r.changes.dialoguePeriod).toBe(2)
+  it('标点兜底保留台词内部句号', () => {
+    const r = normalizePunctuation(dialogue)
+    expect(r.text).toBe(dialogue)
+    expect(r.changes.dialoguePeriod).toBe(0)
   })
 
   it('台词被打断以破折号收尾或闭合引号前有逗号时，规范化为句号，绝不留逗号', () => {

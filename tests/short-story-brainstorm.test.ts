@@ -31,10 +31,20 @@ describe('短篇脑洞提示词', () => {
     }
     expect(prompt.system).toContain('真正不同')
     expect(prompt.system).toContain('反转必须公平')
+    expect(prompt.system).toContain('线索、证据与正式结论要分清')
+    expect(prompt.system).toContain('短篇预算内')
     expect(prompt.system).toContain('主冲突留到下一部')
     expect(prompt.system).toContain('不要生成小说正文、完整大纲')
     expect(prompt.feature).toBe('outline-generate')
     expect(prompt.maxTokens).toBe(8192)
+    for (const field of ['tags', 'coreSetting', 'worldView', 'characters', 'goldenFinger']) expect(prompt.system).toContain(field)
+  })
+
+  it('新生成结果要求完整设定卡，旧方案仍可解析', () => {
+    const old = ideas()
+    expect(() => parseShortStoryIdeas(JSON.stringify({ ideas: old }), { requireDetails: true })).toThrow('格式不完整')
+    const enriched = old.map(idea => ({ ...idea, tags: '悬疑、亲情、选择', coreSetting: '一封信改变人物选择', worldView: '当代小城，信件可追查', characters: '邮递员寻找寄件人，收件人隐瞒', goldenFinger: '无超自然金手指；主角熟悉邮路' }))
+    expect(parseShortStoryIdeas(JSON.stringify({ ideas: enriched }), { requireDetails: true })).toEqual(enriched)
   })
 
   it('可在没有方向时自由构思，保留作者素材中的转义字符', () => {

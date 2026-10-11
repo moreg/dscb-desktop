@@ -49,6 +49,15 @@ describe('长篇脑洞提示词与边界', () => {
     expect(prompt.system).not.toContain('每个方案围绕一个核心冲突')
     expect(prompt.feature).toBe('outline-generate')
     expect(prompt.maxTokens).toBe(8192)
+    for (const field of ['tags', 'coreSetting', 'worldView', 'characters', 'goldenFinger']) expect(prompt.system).toContain(field)
+  })
+
+  it('新生成结果要求完整设定卡，旧方案仍可解析', () => {
+    const old = ideas()
+    expect(() => parseLongStoryIdeas(JSON.stringify({ ideas: old }), { requireDetails: true })).toThrow('格式不完整')
+    const enriched = old.map(idea => ({ ...idea, tags: '玄幻、成长、悬疑', coreSetting: '以修复失物追查旧案', worldView: '旧城受记忆交易规则约束', characters: '主角寻找亲人，对手隐瞒旧案', goldenFinger: '能修复失物，每次使用消耗记忆' }))
+    expect(parseLongStoryIdeas(JSON.stringify({ ideas: enriched }), { requireDetails: true })).toEqual(enriched)
+    expect(longStoryIdeaBrief(enriched[0])).toContain('世界观与规则：旧城受记忆交易规则约束')
   })
 
   it('允许未指定章数的自由构思，保留作者素材中的换行和引号', () => {

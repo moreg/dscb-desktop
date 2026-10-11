@@ -57,6 +57,8 @@ export interface PricingConfig {
 
 export interface AppSettings {
   projectsRoot?: string
+  /** 榜单抓取封面保存目录；未配置时使用 userData/covers。 */
+  chartCoversRoot?: string
   /** 中短篇作品目录；未配置时使用 userData/short-stories。 */
   shortStoriesRoot?: string
   /** 本地封面学习库目录；未配置时使用 userData/cover-learning-library。 */

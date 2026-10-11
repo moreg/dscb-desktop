@@ -43,6 +43,7 @@ export function registerShortStoryBrainstormIpc(llm: LlmService): void {
       if (!received) safeSend(win, 'shortStory:brainstormToken', { requestId: input.requestId, token: text, done: false })
       const parsed = parseShortStoryBrainstormResult(text, {
         allowPartial: !input.rewrite,
+        requireDetails: true,
         expectedCount: input.rewrite ? 1 : 3,
         previousIdeas: input.rewrite ? undefined : input.previousIdeas
       })

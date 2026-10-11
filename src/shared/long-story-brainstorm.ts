@@ -1,6 +1,11 @@
 export interface LongStoryIdea {
   title: string
   premise: string
+  tags?: string
+  coreSetting?: string
+  worldView?: string
+  characters?: string
+  goldenFinger?: string
   hook: string
   mainLine: string
   progression: string
@@ -31,15 +36,19 @@ export interface LongStoryBrainstormResult {
 }
 
 export const LONG_STORY_IDEA_FIELDS = ['title', 'premise', 'hook', 'mainLine', 'progression', 'twist', 'ending'] as const
+export const LONG_STORY_IDEA_EXTRA_FIELDS = ['tags', 'coreSetting', 'worldView', 'characters', 'goldenFinger'] as const
 export const LONG_STORY_IDEA_LIMITS = {
-  title: 120, premise: 800, hook: 600, mainLine: 800, progression: 800, twist: 600, ending: 600
+  title: 120, premise: 800, hook: 600, mainLine: 800, progression: 800, twist: 600, ending: 600,
+  tags: 120, coreSetting: 400, worldView: 500, characters: 500, goldenFinger: 400
 } as const
 
 export function isLongStoryIdea(value: unknown): value is LongStoryIdea {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const idea = value as Record<string, unknown>
   return LONG_STORY_IDEA_FIELDS.every(field => typeof idea[field] === 'string' &&
-    !!idea[field].trim() && idea[field].length <= LONG_STORY_IDEA_LIMITS[field])
+    !!idea[field].trim() && idea[field].length <= LONG_STORY_IDEA_LIMITS[field]) &&
+    LONG_STORY_IDEA_EXTRA_FIELDS.every(field => idea[field] === undefined ||
+      typeof idea[field] === 'string' && !!idea[field].trim() && idea[field].length <= LONG_STORY_IDEA_LIMITS[field])
 }
 
 function normalizedText(text: string): string {
@@ -47,16 +56,18 @@ function normalizedText(text: string): string {
 }
 
 export function longStoryIdeaKey(idea: LongStoryIdea): string {
-  return JSON.stringify(LONG_STORY_IDEA_FIELDS.map(field => normalizedText(idea[field])))
+  return JSON.stringify([...LONG_STORY_IDEA_FIELDS, ...LONG_STORY_IDEA_EXTRA_FIELDS].map(field => normalizedText(idea[field] || '')))
 }
 
 /** 各字段独立限长，采用时保留主线、升级路径和结局，符合项目简介 5000 字符上限。 */
 export function longStoryIdeaBrief(idea: LongStoryIdea): string {
   const labels = {
+    tags: '内容标签', coreSetting: '核心设定与卖点', worldView: '世界观与规则', characters: '人物设定与关系', goldenFinger: '金手指或独特资源',
     premise: '故事设定', hook: '开篇钩子', mainLine: '长期主线', progression: '成长与多卷推进', twist: '关键反转与伏笔', ending: '终局'
   } as const
   return (Object.keys(labels) as (keyof typeof labels)[])
-    .map(field => `${labels[field]}：${idea[field].trim().slice(0, LONG_STORY_IDEA_LIMITS[field])}`)
+    .filter(field => !!idea[field]?.trim())
+    .map(field => `${labels[field]}：${idea[field]!.trim().slice(0, LONG_STORY_IDEA_LIMITS[field])}`)
     .join('\n\n').slice(0, 5000)
 }
 

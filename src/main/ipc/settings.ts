@@ -1,4 +1,6 @@
-import { dialog, type IpcMainInvokeEvent } from 'electron'
+import { app, dialog, type IpcMainInvokeEvent } from 'electron'
+import { isAbsolute, join, resolve } from 'path'
+import { promises as fs, constants } from 'fs'
 import { safeHandle } from './safe-handle'
 import { SettingsRepository } from '../data/settings-repository'
 import type { ThemeMode, PricingConfig } from '../data/settings-repository'
@@ -18,6 +20,19 @@ export function registerSettingsIpc(
   repo: SettingsRepository,
   defaultProjectsRoot: string
 ): void {
+  const defaultChartCoversRoot = join(app.getPath('userData'), 'covers')
+  safeHandle('settings:getChartCoversRoot', async () => {
+    return (await repo.get()).chartCoversRoot || defaultChartCoversRoot
+  })
+  safeHandle('settings:setChartCoversRoot', async (_event, input: unknown) => {
+    const selected = validateInput(z.string().max(1000), input).trim()
+    if (selected && !isAbsolute(selected)) throw new Error('请选择完整的封面保存目录')
+    const directory = selected ? resolve(selected) : defaultChartCoversRoot
+    await fs.mkdir(directory, { recursive: true })
+    await fs.access(directory, constants.W_OK)
+    await repo.update({ chartCoversRoot: selected ? directory : '' })
+    return directory
+  })
   safeHandle('settings:getProjectsRoot', async (): Promise<string> => {
     return repo.getProjectsRoot(defaultProjectsRoot)
   })
@@ -173,7 +188,7 @@ export function registerSettingsIpc(
   safeHandle('dialog:selectDirectory', async (): Promise<string | null> => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
-      title: '选择书籍保存位置'
+      title: '选择保存位置'
     })
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]

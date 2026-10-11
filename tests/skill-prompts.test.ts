@@ -82,11 +82,10 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('同一人台词中间禁止插入动作打断')
   })
 
-  it.each([undefined, 'extend', 'finish'] as const)('约束 %s 模式的台词内部句号', (mode) => {
+  it.each([undefined, 'extend', 'finish'] as const)('%s 模式允许台词按语气断句', (mode) => {
     const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(prompt).toContain('台词中间严禁使用句号')
-    expect(prompt).toContain('句号只保留在整段台词最末尾')
-    expect(prompt).toContain('不要把台词拆成多个引号来规避此规则')
+    expect(prompt).toContain('台词按语气断句')
+    expect(prompt).not.toContain('台词中间严禁使用句号')
   })
 
   it('embeds negative constraints', () => {

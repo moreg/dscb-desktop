@@ -9,6 +9,7 @@ import { WriteService } from '../src/main/data/write-service'
 import { WriteFlowService } from '../src/main/data/write-flow-service'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
+import { CharacterRepo } from '../src/main/data/memory/character-repo'
 import { validateMemoryCandidate } from '../src/main/data/memory-evidence-validator'
 import { parseMemoryExtractionJson } from '../src/shared/parsers'
 import { summarizePostWriteSync } from '../src/shared/post-write-sync'
@@ -54,6 +55,21 @@ describe('记忆候选提交与过期任务', () => {
     const saved = JSON.parse(await readFile(join(dir, '.cache', 'memory-candidates', 'chapter-1.json'), 'utf8'))
     expect(saved.extraction.newPlotPoints[0].evidence).toBe('林远推开木门走进院子')
     expect(saved.status).not.toBe('pending')
+  })
+
+  it('正文同步完成后自动采纳新增实体，重复同步不产生重名卡片', async () => {
+    const prose = '林远推开木门走进院子，遇见守门人赵乾。'
+    const extraction = memory('林远推开木门走进院子')
+    extraction.newCharacters = [{ name: '赵乾', role: '配角', identity: '守门人', personality: '谨慎' }]
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+
+    const first = await service.syncChapterAfterWrite(id, 1, prose)
+    expect(first?.memory.entitiesReviewed).toBe(true)
+    expect(first?.memory.applied.characters).toBe(1)
+    expect((await new CharacterRepo(dir).list()).filter((c) => c.name === '赵乾')).toHaveLength(1)
+
+    await service.syncChapterAfterWrite(id, 1, prose)
+    expect((await new CharacterRepo(dir).list()).filter((c) => c.name === '赵乾')).toHaveLength(1)
   })
 
   it('自动补找缺失引文后重新校验，并保存修复证据', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { cp, mkdtemp, readFile, readdir, rename, rm, stat } from 'fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -20,10 +20,69 @@ describe('ProjectService', () => {
 
   it('create 只建立项目目录和作品信息，不生成规划模板', async () => {
     const meta = await service.create({ name: '示范小说', genre: '玄幻' })
+    expect(path.basename(meta.path)).toBe('示范小说')
     expect((await stat(meta.path)).isDirectory()).toBe(true)
     expect(await readdir(meta.path)).toEqual(['project.json'])
     const pj = JSON.parse(await readFile(path.join(meta.path, 'project.json'), 'utf-8'))
     expect(pj).toMatchObject({ id: meta.id, name: '示范小说', genre: '玄幻' })
+  })
+
+  it('自定义保存位置也使用书名，并同步非法符号转换后的名称', async () => {
+    const customPath = path.join(root, 'custom')
+    const meta = await service.create({ name: '  小说:书名?  ', customPath })
+    expect(meta.path).toBe(path.join(customPath, '小说：书名？'))
+    expect(meta.name).toBe('小说：书名？')
+    expect((await service.getProjectData(meta.id)).name).toBe(meta.name)
+  })
+
+  it('新建同名小说不覆盖已有项目', async () => {
+    const first = await service.create({ name: '同名小说', description: '原简介' })
+    const original = await readFile(path.join(first.path, 'project.json'), 'utf-8')
+    await expect(service.create({ name: '同名小说', description: '新简介' })).rejects.toThrow(/同名文件夹/)
+    expect(await readFile(path.join(first.path, 'project.json'), 'utf-8')).toBe(original)
+    expect(await service.listProjects()).toHaveLength(1)
+  })
+
+  it('已有空目录或普通文件也不能被新建项目复用', async () => {
+    const parent = path.join(root, 'projects')
+    await mkdir(path.join(parent, '空目录'), { recursive: true })
+    await writeFile(path.join(parent, '普通文件'), '原内容')
+    await expect(service.create({ name: '空目录' })).rejects.toThrow(/同名文件夹/)
+    await expect(service.create({ name: '普通文件' })).rejects.toThrow(/同名文件夹/)
+    expect(await readdir(path.join(parent, '空目录'))).toEqual([])
+    expect(await readFile(path.join(parent, '普通文件'), 'utf-8')).toBe('原内容')
+    expect(await service.listProjects()).toEqual([])
+  })
+
+  it('并发新建同名小说只有一个成功，磁盘与索引身份一致', async () => {
+    const results = await Promise.allSettled([
+      service.create({ name: '并发小说' }), service.create({ name: '并发小说' })
+    ])
+    expect(results.filter(item => item.status === 'fulfilled')).toHaveLength(1)
+    const [project] = await service.listProjects()
+    expect((await service.getProjectData(project.id)).id).toBe(project.id)
+    expect(await service.listProjects()).toHaveLength(1)
+  })
+
+  it('不能作为目录的书名在新建时拒绝，且不留下项目', async () => {
+    for (const name of ['CON', 'NUL.txt', '..', '   ']) {
+      await expect(service.create({ name })).rejects.toThrow(/不能用作文件夹名/)
+    }
+    expect(await service.listProjects()).toEqual([])
+  })
+
+  it('旧 UUID 目录原样保存作品信息即可同步书名，重启后仍可读取', async () => {
+    const meta = await service.create({ name: '旧小说', description: '原简介' })
+    const legacyDir = path.join(path.dirname(meta.path), meta.id)
+    await rename(meta.path, legacyDir)
+    await service['library'].update(meta.id, { path: legacyDir })
+    const restarted = new ProjectService(path.join(root, 'projects'), service['library'], mockSettings)
+    await restarted.updateProjectInfo(meta.id, { name: meta.name, description: meta.description })
+    expect(await restarted.resolveDir(meta.id)).toBe(meta.path)
+    await expect(stat(legacyDir)).rejects.toThrow()
+    const reopened = new ProjectService(path.join(root, 'projects'), service['library'], mockSettings)
+    expect(await reopened.resolveDir(meta.id)).toBe(meta.path)
+    expect(await reopened.getProjectData(meta.id)).toMatchObject({ id: meta.id, name: meta.name, description: meta.description })
   })
 
   it('create 不创建大纲、细纲、设定、记忆、追踪或正文目录', async () => {
@@ -306,10 +365,12 @@ describe('ProjectService', () => {
 
   it('两个同书名的作品信息项目均有有效目录时，扫描不误判为改名', async () => {
     const first = await service.create({ name: '同名脑洞' })
-    const second = await service.create({ name: '同名脑洞' })
+    // 模拟旧版本允许同书名、不同目录的历史项目。
+    const second = await service.create({ name: '另一保存目录' })
+    await service.updateProjectData(second.id, { name: '同名脑洞' })
     const secondDir = path.join(path.dirname(second.path), '只是保存目录')
     await rename(second.path, secondDir)
-    await service['library'].update(second.id, { path: secondDir })
+    await service['library'].update(second.id, { name: '同名脑洞', path: secondDir })
     const restarted = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), mockSettings)
 
     const listed = await restarted.scanProjects()

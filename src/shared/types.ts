@@ -2,6 +2,19 @@ import type { WritingRequirementTemplate } from './writing-requirement-templates
 import type { AppUpdateState } from './app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from './long-story-brainstorm'
 import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryCreateInput, ShortStoryDocument, ShortStoryGenerationInput, ShortStoryStorageSelectionResult, ShortStorySummary } from './short-story'
+import type {
+  FanqieBatchFetchProgress,
+  FanqieBookDetail,
+  FanqieChapterContent,
+  FanqieChartBook,
+  FanqieChartIdeasInput,
+  FanqieChartProgress,
+  FanqieChartRecord,
+  FanqieExportTxtResult,
+  FanqieMultiBookItem,
+  FanqieMultiBookProgress,
+  FanqieIdeaOpeningChapter
+} from './fanqie-chart'
 
 export interface ProjectMeta {
   id: string
@@ -156,6 +169,7 @@ export interface ProjectData {
   genre?: string
   defaultStyleProfileId?: string
   description?: string
+  openingChapters?: FanqieIdeaOpeningChapter[]
   targetChapters?: number
   chapterWordCount?: number
   status?: string
@@ -207,6 +221,7 @@ export interface CreateProjectDataInput {
   name: string
   genre?: string
   description?: string
+  openingChapters?: FanqieIdeaOpeningChapter[]
   targetChapters?: number
   chapterWordCount?: number
   customPath?: string
@@ -823,6 +838,9 @@ export interface RendererApi {
     onGenerationStage?: (stage: ChapterGenerationStage) => void
   ) => ChapterStreamHandle
   getProjectsRoot: () => Promise<string>
+  getChartCoversRoot: () => Promise<string>
+  /** 空字符串恢复默认目录。 */
+  setChartCoversRoot: (path: string) => Promise<string>
   setProjectsRoot: (path: string) => Promise<string>
   getTheme: () => Promise<'light' | 'dark' | 'system'>
   setTheme: (mode: 'light' | 'dark' | 'system') => Promise<'light' | 'dark' | 'system'>
@@ -1268,6 +1286,59 @@ export interface RendererApi {
   ) => StreamHandle
   /** 删除扫榜报告 */
   deleteScanReport: (fileName: string) => Promise<void>
+  /* ---- 番茄分类榜单 ---- */
+  /** 读本地已缓存的分类榜 */
+  listFanqieCharts: () => Promise<FanqieChartRecord[]>
+  /** 抓取一个分类。同一天已有可读缓存时直接返回，force 为 true 时重抓 */
+  fetchFanqieChart: (chartType: string, force?: boolean) => Promise<FanqieChartRecord>
+  deleteFanqieChart: (chartType: string) => Promise<void>
+  /** 抓取或分析过程中的短进度，例如“正在建立汉字点阵” */
+  onFanqieChartProgress: (cb: (progress: FanqieChartProgress) => void) => () => void
+  /** 用这期榜单做市场分析，可取消 */
+  analyzeFanqieChart: (
+    chartType: string,
+    force: boolean,
+    onToken: (token: string, done: boolean) => void
+  ) => StreamHandleOf<FanqieChartRecord>
+  /** 按这期样本生成脑洞，流式回传原文，结束时给出解析后的榜单 */
+  generateFanqieChartIdeas: (
+    input: FanqieChartIdeasInput,
+    onToken: (token: string, done: boolean) => void
+  ) => StreamHandleOf<FanqieChartRecord>
+  /* ---- 番茄正文与章节抓取 ---- */
+  /** 获取书籍目录和详情 */
+  getFanqieBookDetail: (
+    bookId: string,
+    knownBook?: Partial<FanqieChartBook>,
+    force?: boolean
+  ) => Promise<FanqieBookDetail>
+  /** 获取单个章节正文（含字体解密） */
+  getFanqieChapterContent: (
+    bookId: string,
+    chapterId: string,
+    knownChapterTitle?: string,
+    knownBookTitle?: string,
+    force?: boolean
+  ) => Promise<FanqieChapterContent>
+  /** 批量抓取章节正文，流式报告进度，可取消 */
+  fetchFanqieChaptersBatch: (
+    bookId: string,
+    limit?: number,
+    chapterIds?: string[],
+    onProgress?: (progress: FanqieBatchFetchProgress) => void
+  ) => StreamHandleOf<FanqieChapterContent[]>
+  /** 导出当前书籍已下载章节为 TXT */
+  exportFanqieBookTxt: (bookId: string) => Promise<FanqieExportTxtResult>
+  /** 清除书籍所有本地章节缓存 */
+  deleteFanqieBookCache: (bookId: string) => Promise<void>
+  /** 列出所有已下载书籍的章节缓存统计（bookId -> 缓存章节数） */
+  listFanqieCachedBooksSummary: () => Promise<Record<string, number>>
+  /** 批量抓取多本书的前 N 章（默认 3 章），流式报告进度，可取消 */
+  fetchFanqieMultiBooksBatch: (
+    books: FanqieMultiBookItem[],
+    chapterLimit?: number,
+    onProgress?: (progress: FanqieMultiBookProgress) => void
+  ) => StreamHandleOf<Record<string, number>>
 }
 
 export interface Character {
@@ -2366,6 +2437,8 @@ export interface MemoryApplyResult {
   heldBack?: string[]
   /** 正文或任务版本已变化，本次未写入。 */
   superseded?: boolean
+  /** 新增实体已完成自动入库检查；同名或重复实体也不再需要人工采纳。 */
+  entitiesReviewed?: boolean
   applied: {
     characters: number
     locations: number
@@ -2716,7 +2789,7 @@ export type DeslopSeverity = 'blocking' | 'advisory'
 /** 去 AI 味检测项的 gate 归属（A-G 七道关卡） */
 export type DeslopGate = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G'
 
-/** 单条去 AI 味检测结果（确定性脚本产出，不调 LLM） */
+/** 单条去 AI 味检测结果；自动场景诊断也复用此结构，需带逐字引文。 */
 export interface DeslopFinding {
   /** 1-based 行号 */
   line: number
@@ -2738,6 +2811,8 @@ export interface DeslopFinding {
 
 /** 去 AI 味扫描报告（Phase 1 产出） */
 export interface DeslopScanReport {
+  /** 缺省表示只做了本地词句扫描，不能视为场景检查通过。 */
+  narrative?: { status: 'completed' | 'failed'; checkedChunks: number; totalChunks: number; error?: string }
   findings: DeslopFinding[]
   /** 各 severity 计数 */
   counts: { blocking: number; advisory: number }

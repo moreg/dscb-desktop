@@ -18,6 +18,8 @@ const requestId = '7b186965-dacb-4e52-9bf4-476cc87a6502'
 const input: LongStoryBrainstormInput = { genre: '玄幻', direction: '一个没有灵根的土地神', requirements: '', targetChapters: 300 }
 const ideas: LongStoryIdea[] = [1, 2, 3].map(index => ({
   title: `神庙的第${index}份账本`, premise: `第${index}份账本引出不同村落的百年旧债。`, hook: '债主要求主角偿还一场雨。',
+  tags: '玄幻、乡土、契约', coreSetting: '神力依居民承诺生效，账本不断引出旧债。', worldView: '流域村落依赖神庙水利，宗门把持契约。',
+  characters: '会计出身的土地神求清债，宗门债主阻挠。', goldenFinger: '承诺可化为神力，须取得村民信任。',
   mainLine: '重建村落自治，打破宗门对神力契约的垄断。', progression: '从一村水渠到多村互助，再到整个流域，神力增长依赖居民信任。',
   twist: '最早的无息账目证明旧债其实是互助金，宗门伪造了历史。', ending: '主角归还神权并失去神位，乡民取得管理水利的权利。'
 }))

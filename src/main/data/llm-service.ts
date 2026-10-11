@@ -189,6 +189,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   batchFigure: 'auxiliary',
   teardown: 'auxiliary',
   scan: 'auxiliary',
+  // 番茄分类榜的市场分析和榜单脑洞
+  fanqieChart: 'auxiliary',
   // 封面提示词提炼：读大纲/人物卡/正文，属分析类，与其它辅助提取同一 provider
   coverPrompt: 'auxiliary',
   // 番茄书测起书名：读大纲/简介出多套测试书名，不出图
@@ -247,7 +249,8 @@ const LONG_TIMEOUT_FEATURES = new Set([
   'humanize',
   'deslop',
   // 封面提炼会塞进大纲 + 人物卡 + 一段正文，走 CLI provider 时常超 2 分钟
-  'coverPrompt'
+  'coverPrompt',
+  'fanqieChart'
 ])
 
 /**

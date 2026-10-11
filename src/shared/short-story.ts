@@ -60,6 +60,11 @@ export interface ShortStoryGenerationInput {
 export interface ShortStoryIdea {
   title: string
   premise: string
+  tags?: string
+  coreSetting?: string
+  worldView?: string
+  characters?: string
+  goldenFinger?: string
   hook: string
   twist: string
   ending: string
@@ -101,7 +106,12 @@ export interface ShortStoryBrainstormResult {
 }
 
 export function shortStoryIdeaBrief(idea: ShortStoryIdea): string {
-  return `${idea.premise}\n\n开篇钩子：${idea.hook}\n关键反转：${idea.twist}\n结局：${idea.ending}`
+  return [
+    ['内容标签', idea.tags], ['核心设定与卖点', idea.coreSetting], ['世界观与规则', idea.worldView],
+    ['人物设定与关系', idea.characters], ['金手指或独特资源', idea.goldenFinger],
+    ['故事设定', idea.premise], ['开篇钩子', idea.hook], ['关键反转', idea.twist], ['结局', idea.ending]
+  ].filter((entry): entry is [string, string] => !!entry[1]?.trim())
+    .map(([label, value]) => `${label}：${value}`).join('\n\n')
 }
 
 export const SHORT_STORY_PRESETS = {

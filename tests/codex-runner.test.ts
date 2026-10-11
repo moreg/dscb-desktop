@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'events'
 
 interface FakeChild extends EventEmitter {
-  stdin: {
+  stdin: EventEmitter & {
     write: ReturnType<typeof vi.fn>
     end: ReturnType<typeof vi.fn>
     writable: boolean
@@ -31,11 +31,11 @@ vi.mock('fs/promises', () => ({
 
 function createFakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild
-  child.stdin = {
+  child.stdin = Object.assign(new EventEmitter(), {
     write: vi.fn(),
     end: vi.fn(),
     writable: true
-  }
+  })
   child.stdout = new EventEmitter()
   child.stderr = new EventEmitter()
   child.killed = false
@@ -332,6 +332,66 @@ beforeEach(() => {
 })
 
 describe('runCodex (app-server)', () => {
+  it('未输出正文的意外退出重试一次', async () => {
+    let attempts = 0
+    fakeChildFactory = () => {
+      if (++attempts > 1) return createAutoAppServerChild()
+      const child = createFakeChild()
+      setImmediate(() => child.emit('close', 1, null))
+      return child
+    }
+    expect((await runCodex('测试')).full).toBe('你好')
+    expect(attempts).toBe(2)
+  })
+
+  it('再次退出显示真正的 stderr 错误和退出码，并接住 EPIPE', async () => {
+    let attempts = 0
+    fakeChildFactory = () => {
+      attempts++
+      const child = createFakeChild()
+      setImmediate(() => {
+        child.stderr.emit('data', Buffer.from(JSON.stringify({ level: 'ERROR', fields: { message: 'failed to load config: invalid TOML' } }) + '\n'))
+        child.stderr.emit('data', Buffer.from(JSON.stringify({ level: 'WARN', fields: { message: 'unrelated warning' } }) + '\n'))
+        child.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+        child.emit('close', 1, null)
+      })
+      return child
+    }
+    await expect(runCodex('测试')).rejects.toThrow('CODEX_ERROR: failed to load config: invalid TOML (exit=1)')
+    expect(attempts).toBe(2)
+  })
+
+  it('已有部分正文后退出不能重试', async () => {
+    let attempts = 0
+    fakeChildFactory = () => {
+      attempts++
+      const child = createFakeChild()
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ method: 'item/agentMessage/delta', params: { delta: '正文' } }) + '\n'))
+        child.emit('close', 1, null)
+      })
+      return child
+    }
+    await expect(runCodex('测试')).rejects.toThrow('LLM_OUTPUT_TRUNCATED')
+    expect(attempts).toBe(1)
+  })
+
+  it('重试等待期间取消，不再启动进程', async () => {
+    const controller = new AbortController()
+    let attempts = 0
+    fakeChildFactory = () => {
+      attempts++
+      const child = createFakeChild()
+      setImmediate(() => {
+        child.emit('close', 1, null)
+        setImmediate(() => controller.abort())
+      })
+      return child
+    }
+    await expect(runCodex('测试', { signal: controller.signal })).rejects.toThrow('LLM_ABORTED')
+    expect(attempts).toBe(1)
+  })
+
   it('turn/start preserves text and supplies native image inputs', async () => {
     let turnInput: unknown
     fakeChildFactory = () => {

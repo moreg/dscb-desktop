@@ -31,6 +31,23 @@ function makeMockLlm(responses: string[]): LlmService {
 }
 
 describe('DeslopService.deslop 二次清理循环', () => {
+  it('自动对白润色在普通扫描无命中时也检查台词，普通去 AI 味不额外改动', async () => {
+    const source = '“这件事我已经了解了，请你向我说明一下具体的情况。”\n“目前我们需要确认这份名单。”'
+    const prompts: string[] = []
+    const llm = { generateStream: async (prompt: string): Promise<string> => {
+      prompts.push(prompt)
+      return `【改写后】\n${source}\n\n【改动说明】\n无需修改`
+    } } as unknown as LlmService
+    const service = new DeslopService(llm)
+    await service.deslop(source, { isTail: false })
+    expect(prompts).toHaveLength(0)
+
+    await service.deslop(source, { isTail: false, levelOverride: 'mild', polishDialogue: true })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('Gate E：对话去腔调')
+    expect(prompts[0]).toContain('逐句判断台词是否像这个人物在此刻会说的话')
+  })
+
   it('复扫无 blocking 时跳过二次清理', async () => {
     // 第一次改写直接清干净（无 blocking 残留）
     const cleanNoBlocking = '绝望先一步泄了出来。\n力气像被抽干，他一屁股坐下。'

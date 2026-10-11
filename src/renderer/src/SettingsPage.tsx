@@ -242,6 +242,8 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [projectsRoot, setProjectsRoot] = useState('')
   const [changingPath, setChangingPath] = useState(false)
+  const [chartCoversRoot, setChartCoversRoot] = useState('')
+  const [changingCoversPath, setChangingCoversPath] = useState(false)
   const [pinging, setPinging] = useState(false)
   const [pingResult, setPingResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [theme, setTheme] = useState<ThemeMode>('system')
@@ -556,6 +558,9 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
   useEffect(() => {
     refreshProviders()
     refreshRoot()
+    void window.api.getChartCoversRoot().then(setChartCoversRoot).catch((err) => {
+      setMsg({ kind: 'err', text: `封面保存位置读取失败：${err instanceof Error ? err.message : String(err)}` })
+    })
     refreshUsage()
     refreshCostAlert()
     refreshSettingsEvolution()
@@ -630,6 +635,21 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
       }
     } finally {
       setChangingPath(false)
+    }
+  }
+
+  const changeChartCoversPath = async (reset = false) => {
+    setChangingCoversPath(true)
+    try {
+      const selected = reset ? '' : await window.api.selectDirectory()
+      if (selected === null) return
+      const directory = await window.api.setChartCoversRoot(selected)
+      setChartCoversRoot(directory)
+      setMsg({ kind: 'ok', text: '榜单封面保存位置已更新，下次抓取生效' })
+    } catch (err) {
+      setMsg({ kind: 'err', text: `保存位置更新失败：${err instanceof Error ? err.message : String(err)}` })
+    } finally {
+      setChangingCoversPath(false)
     }
   }
 
@@ -718,6 +738,21 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
               </button>
               <p className="meta" style={{ marginTop: 10 }}>
                 新建项目将保存到此位置。已有项目不受影响。
+              </p>
+              <h3 className="sub" style={{ marginTop: 24 }}>榜单封面保存位置</h3>
+              <p className="muted" style={{ wordBreak: 'break-all', marginBottom: 10, fontSize: 13 }}>
+                {chartCoversRoot || '加载中…'}
+              </p>
+              <div className="row">
+                <button className="btn btn-ghost" onClick={() => void changeChartCoversPath()} disabled={changingCoversPath}>
+                  {changingCoversPath ? '更新中…' : '更改封面保存位置'}
+                </button>
+                <button className="btn btn-ghost" onClick={() => void changeChartCoversPath(true)} disabled={changingCoversPath}>
+                  恢复默认位置
+                </button>
+              </div>
+              <p className="meta" style={{ marginTop: 10 }}>
+                番茄榜单抓取的封面会按榜单和分类保存到此目录。修改后下次抓取生效，已有封面保留在原目录。
               </p>
             </div>
           )}

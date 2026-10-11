@@ -35,7 +35,8 @@ export async function autoDeslopProse(
     content: original,
     report: report('review_required', `${message}已保留生成稿。${issues.length ? `原因：${issues.slice(0, 3).join('；')}` : ''}`, remainingIssues, issues)
   })
-  const polishOptions = { ...options, onToken: undefined, levelOverride: 'mild' as const }
+  const polishOptions = { ...options, onToken: undefined, levelOverride: 'mild' as const,
+    polishDialogue: true, polishNarrative: true }
   const prepareResult = (result: DeslopResult): DeslopResult => ({
     ...result, rewritten: formatCandidate ? formatCandidate(result.rewritten) : result.rewritten
   })

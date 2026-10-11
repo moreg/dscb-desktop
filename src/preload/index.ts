@@ -69,6 +69,18 @@ import type {
   MobileServerStatus,
   StreamHandleOf
 } from '../shared/types'
+import type {
+  FanqieBatchFetchProgress,
+  FanqieBookDetail,
+  FanqieChapterContent,
+  FanqieChartBook,
+  FanqieChartIdeasInput,
+  FanqieChartProgress,
+  FanqieChartRecord,
+  FanqieExportTxtResult,
+  FanqieMultiBookItem,
+  FanqieMultiBookProgress
+} from '../shared/fanqie-chart'
 
 function makeStreamHandle<T>(
   promise: Promise<T>,
@@ -470,6 +482,8 @@ const api = {
     return makeStreamHandle(result, requestId)
   },
   getProjectsRoot: () => ipcRenderer.invoke('settings:getProjectsRoot'),
+  getChartCoversRoot: () => ipcRenderer.invoke('settings:getChartCoversRoot'),
+  setChartCoversRoot: (path: string) => ipcRenderer.invoke('settings:setChartCoversRoot', path),
   setProjectsRoot: (path: string) => ipcRenderer.invoke('settings:setProjectsRoot', path),
   getTheme: () => ipcRenderer.invoke('settings:getTheme'),
   setTheme: (mode: 'light' | 'dark' | 'system') =>
@@ -1140,6 +1154,118 @@ const api = {
       ok: boolean
       error?: string
     }>
+    return makeStreamHandle(result, requestId)
+  },
+
+  /* ---- 番茄分类榜单 ---- */
+  listFanqieCharts: () =>
+    ipcRenderer.invoke('fanqieChart:list') as Promise<FanqieChartRecord[]>,
+  fetchFanqieChart: (chartType: string, force?: boolean) =>
+    ipcRenderer.invoke('fanqieChart:fetch', { chartType, force: force === true }) as Promise<FanqieChartRecord>,
+  deleteFanqieChart: (chartType: string) =>
+    ipcRenderer.invoke('fanqieChart:delete', chartType) as Promise<void>,
+  onFanqieChartProgress: (listener: (progress: FanqieChartProgress) => void) => {
+    const handler = (_event: unknown, progress: FanqieChartProgress) => {
+      if (progress && typeof progress.chartType === 'string') listener(progress)
+    }
+    ipcRenderer.on('fanqieChart:progress', handler as never)
+    return () => ipcRenderer.removeListener('fanqieChart:progress', handler as never)
+  },
+  analyzeFanqieChart: (
+    chartType: string,
+    force: boolean,
+    _onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const result = ipcRenderer.invoke('fanqieChart:analyze', {
+      chartType,
+      force,
+      requestId
+    }) as Promise<FanqieChartRecord>
+    return makeStreamHandle(result, requestId)
+  },
+  generateFanqieChartIdeas: (
+    input: FanqieChartIdeasInput,
+    onToken: (token: string, done: boolean) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _event: unknown,
+      payload: { requestId: string; token: string; done: boolean }
+    ) => {
+      if (payload.requestId === requestId) onToken(payload.token, payload.done)
+    }
+    ipcRenderer.on('fanqieChart:token', handler as never)
+    const result = ipcRenderer
+      .invoke('fanqieChart:ideas', { ...input, requestId })
+      .finally(() => ipcRenderer.removeListener('fanqieChart:token', handler as never)) as Promise<FanqieChartRecord>
+    return makeStreamHandle(result, requestId)
+  },
+
+  /* ---- 番茄正文与章节抓取 ---- */
+  getFanqieBookDetail: (bookId: string, knownBook?: Partial<FanqieChartBook>, force?: boolean) =>
+    ipcRenderer.invoke('fanqieNovel:getBookDetail', {
+      bookId,
+      knownBook,
+      force: force === true
+    }) as Promise<FanqieBookDetail>,
+  getFanqieChapterContent: (
+    bookId: string,
+    chapterId: string,
+    knownChapterTitle?: string,
+    knownBookTitle?: string,
+    force?: boolean
+  ) =>
+    ipcRenderer.invoke('fanqieNovel:getChapterContent', {
+      bookId,
+      chapterId,
+      knownChapterTitle,
+      knownBookTitle,
+      force: force === true
+    }) as Promise<FanqieChapterContent>,
+  fetchFanqieChaptersBatch: (
+    bookId: string,
+    limit?: number,
+    chapterIds?: string[],
+    onProgress?: (progress: FanqieBatchFetchProgress) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _event: unknown,
+      payload: { requestId: string; progress: FanqieBatchFetchProgress }
+    ) => {
+      if (payload.requestId === requestId) onProgress?.(payload.progress)
+    }
+    ipcRenderer.on('fanqieNovel:batchProgress', handler as never)
+    const result = ipcRenderer
+      .invoke('fanqieNovel:fetchChaptersBatch', { bookId, limit, chapterIds, requestId })
+      .finally(() => ipcRenderer.removeListener('fanqieNovel:batchProgress', handler as never)) as Promise<FanqieChapterContent[]>
+    return makeStreamHandle(result, requestId)
+  },
+  exportFanqieBookTxt: (bookId: string) =>
+    ipcRenderer.invoke('fanqieNovel:exportTxt', { bookId }) as Promise<FanqieExportTxtResult>,
+  deleteFanqieBookCache: (bookId: string) =>
+    ipcRenderer.invoke('fanqieNovel:deleteBookCache', bookId) as Promise<void>,
+  listFanqieCachedBooksSummary: () =>
+    ipcRenderer.invoke('fanqieNovel:listCachedSummary') as Promise<Record<string, number>>,
+  fetchFanqieMultiBooksBatch: (
+    books: FanqieMultiBookItem[],
+    chapterLimit = 3,
+    onProgress?: (progress: FanqieMultiBookProgress) => void
+  ) => {
+    const requestId = crypto.randomUUID()
+    const handler = (
+      _event: unknown,
+      payload: { requestId: string; progress: FanqieMultiBookProgress }
+    ) => {
+      if (payload.requestId === requestId) onProgress?.(payload.progress)
+    }
+    ipcRenderer.on('fanqieNovel:multiBatchProgress', handler as never)
+    const result = ipcRenderer
+      .invoke('fanqieNovel:fetchMultiBooksBatch', { books, chapterLimit, requestId })
+      .finally(() =>
+        ipcRenderer.removeListener('fanqieNovel:multiBatchProgress', handler as never)
+      ) as Promise<Record<string, number>>
     return makeStreamHandle(result, requestId)
   },
 

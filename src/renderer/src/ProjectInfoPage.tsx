@@ -19,8 +19,6 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
   const [targetChapters, setTargetChapters] = useState<number | undefined>()
   const [showBrainstorm, setShowBrainstorm] = useState(false)
   const [brainstormBusy, setBrainstormBusy] = useState(false)
-  const [initialName, setInitialName] = useState('')
-  const [initialDescription, setInitialDescription] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
@@ -45,8 +43,6 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
         setDescription(nextDescription)
         setGenre(project.genre ?? '')
         setTargetChapters(project.targetChapters)
-        setInitialName(nextName)
-        setInitialDescription(nextDescription)
         setCandidates(project.titleCandidates ?? [])
       })
       .catch((err) => {
@@ -59,8 +55,6 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
       cancelled = true
     }
   }, [projectId])
-
-  const dirty = name.trim() !== initialName || description.trim() !== initialDescription
 
   const save = async (event: FormEvent) => {
     event.preventDefault()
@@ -81,8 +75,6 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
       })
       setName(updated.name)
       setDescription(updated.description ?? '')
-      setInitialName(updated.name)
-      setInitialDescription(updated.description ?? '')
       setMessage(
         updated.name === nextName
           ? '已保存。书架和本地文件夹都会使用这个名称'
@@ -191,8 +183,8 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
 
           <div className="project-info-actions">
             <span className="muted">灵感抽签保存后，再进入此页面即可查看和修改。</span>
-            <button className="btn btn-primary" type="submit" disabled={saving || brainstormBusy || !dirty}>
-              {saving ? '保存中…' : dirty ? '保存作品信息' : '已保存'}
+            <button className="btn btn-primary" type="submit" disabled={saving || brainstormBusy}>
+              {saving ? '保存中…' : '保存作品信息'}
             </button>
           </div>
         </form>

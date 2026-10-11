@@ -6,14 +6,14 @@ import {
 } from '../src/shared/format-chapter-prose'
 
 describe('formatChapterProse', () => {
-  it('修复完整台词内部句号，保留台词末尾与叙述标点', () => {
-    const bad = '大家都等着看预告，结果制片助理连素材都没交齐。明川，先签字，别让全组陪你耗。'
+  it('保留完整台词内部按语气断开的句号', () => {
+    const dialogue = '大家都等着看预告，结果制片助理连素材都没交齐。明川，先签字，别让全组陪你耗。'
     for (const [open, close] of [['“', '”'], ['「', '」'], ['"', '"']]) {
-      expect(formatChapterProse(`他把笔递过来。\n${open}${bad}${close}`)).toBe(
-        `他把笔递过来。\n${open}${bad.replace('交齐。', '交齐，')}${close}`
+      expect(formatChapterProse(`他把笔递过来。\n${open}${dialogue}${close}`)).toBe(
+        `他把笔递过来。\n${open}${dialogue}${close}`
       )
     }
-    expect(formatChapterProse('“先签字。还等什么？”\n“我不签！”')).toBe('“先签字，还等什么？”\n“我不签！”')
+    expect(formatChapterProse('“先签字。还等什么？”\n“我不签！”')).toBe('“先签字。还等什么？”\n“我不签！”')
     expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。他把笔递过来。\n“先签字。')
     expect(formatChapterProse('“Hello. World.”')).toBe('“Hello. World.”')
   })
@@ -69,7 +69,7 @@ describe('formatChapterProse', () => {
   it('重构单行内同一人台词被动作打断的结构为规范排版', () => {
     const raw = '“不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
     expect(formatChapterProse(raw)).toBe(
-      '朴博士把图像放大。\n“不是今晚才沾上的，旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
+      '朴博士把图像放大。\n“不是今晚才沾上的。旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
     )
 
     const questionCase = '“你敢反抗我？”赵执事拔出佩剑，“今日休想走出大殿！”'

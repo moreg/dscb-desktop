@@ -550,6 +550,45 @@ describe('batch safety and recovery', () => {
     }
   })
 
+  it('automatically repairs a downstream chapter returned with an empty patch', async () => {
+    mockCoreChange()
+    vi.mocked(llm.generateStream)
+      .mockResolvedValueOnce(JSON.stringify([
+        { chapterNumber: 2, reason: '承接需要调整', patch: { plotSummary: '承接新事件2' } },
+        { chapterNumber: 3, reason: '无需修改', patch: {} },
+        { chapterNumber: 4, reason: '承接需要调整', patch: { plotSummary: '承接新事件4' } }
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { chapterNumber: 3, reason: '补齐承接', patch: { plotSummary: '承接新事件3' } }
+      ]))
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(await readFile(path.join(dir, '细纲', '细纲_第003章_交接3.md'), 'utf-8')).toContain('承接新事件3')
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('generates a focused patch for each missing downstream chapter before pausing', async () => {
+    mockCoreChange()
+    vi.mocked(llm.generateStream)
+      .mockResolvedValueOnce(JSON.stringify([
+        { chapterNumber: 2, reason: '承接需要调整', patch: { plotSummary: '承接新事件2' } }
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { chapterNumber: 3, reason: '承接需要调整', patch: { plotSummary: '承接新事件3' } }
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { chapterNumber: 4, reason: '承接需要调整', patch: { plotSummary: '承接新事件4' } }
+      ]))
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(llm.generateStream).mock.calls[1][0]).toContain('遗漏了第 3 章')
+    expect(vi.mocked(llm.generateStream).mock.calls[2][0]).toContain('遗漏了第 4 章')
+    expect(await readFile(path.join(dir, '细纲', '细纲_第002章_交接2.md'), 'utf-8')).toContain('承接新事件2')
+    expect(await readFile(path.join(dir, '细纲', '细纲_第003章_交接3.md'), 'utf-8')).toContain('承接新事件3')
+    expect(await readFile(path.join(dir, '细纲', '细纲_第004章_交接4.md'), 'utf-8')).toContain('承接新事件4')
+  })
+
   it('cancels downstream calibration without consuming the original outline differences', async () => {
     mockCoreChange()
     const controller = new AbortController()

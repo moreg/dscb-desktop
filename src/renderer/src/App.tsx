@@ -5,7 +5,7 @@ import MobileConnectPanel from './MobileConnectPanel'
 import AppUpdatePanel from './AppUpdatePanel'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
-import type { Diagnostic, DiagnosticFixKind, MemoryEntityType, ProjectMeta } from '../../shared/types'
+import type { Diagnostic, DiagnosticFixKind, MemoryEntityType } from '../../shared/types'
 import {
   loadPendingSyncQueue,
   countPendingSyncQueue,
@@ -36,6 +36,7 @@ const TeardownPage = lazy(() => import('./TeardownPage'))
 const CoverPage = lazy(() => import('./CoverPage'))
 const BookTestPage = lazy(() => import('./BookTestPage'))
 const ScanPage = lazy(() => import('./ScanPage'))
+const FanqieChartPage = lazy(() => import('./FanqieChartPage'))
 const ProjectInspirationPage = lazy(() => import('./ProjectInspirationPage'))
 const ProjectInfoPage = lazy(() => import('./ProjectInfoPage'))
 const ShortStoryPage = lazy(() => import('./ShortStoryPage'))
@@ -49,6 +50,7 @@ type View =
   | { kind: 'brainstorm' }
   | { kind: 'teardown' }
   | { kind: 'scan' }
+  | { kind: 'fanqieChart' }
   | { kind: 'inspiration'; projectId: string }
   | { kind: 'projectInfo'; projectId: string }
   | { kind: 'chapters'; projectId: string }
@@ -219,6 +221,7 @@ export default function App() {
   const currentProjectId = projectIdOf(view)
   useEffect(() => {
     let cancelled = false
+    let diagnosticTimer: number | undefined
     if (!currentProjectId) {
       replaceProjectInUrl(null)
       document.title = '大神持笔'
@@ -249,21 +252,25 @@ export default function App() {
         if (cancelled || !watching) return
 
         void window.api
-          .listProjects({ includeArchived: true })
-          .then((list: ProjectMeta[]) => {
+          .getProject(currentProjectId)
+          .then((project) => {
             if (cancelled) return
-            const project = list.find((item) => item.id === currentProjectId)
             setProjectName(project?.name ?? '')
             document.title = project?.name ? `${project.name} — 大神持笔` : '大神持笔'
           })
-          .catch((err) => console.error('[App] Failed to list projects:', err))
+          .catch((err) => console.error('[App] Failed to get project:', err))
         setDiagDismissed(false)
-        void window.api
-          .getDiagnostics(currentProjectId)
-          .then((nextDiagnostics) => {
-            if (!cancelled) setDiagnostics(nextDiagnostics)
-          })
-          .catch((err) => console.error('[App] Failed to get diagnostics:', err))
+        setDiagnostics([])
+        setDiagFixResults({})
+        diagnosticTimer = window.setTimeout(() => {
+          if (cancelled) return
+          void window.api
+            .getDiagnostics(currentProjectId)
+            .then((nextDiagnostics) => {
+              if (!cancelled) setDiagnostics(nextDiagnostics)
+            })
+            .catch((err) => console.error('[App] Failed to get diagnostics:', err))
+        }, 1500)
       } catch (err) {
         console.error('[App] activate project failed:', err)
         if (!cancelled) setView({ kind: 'projects' })
@@ -272,6 +279,7 @@ export default function App() {
     void activateProject()
     return () => {
       cancelled = true
+      window.clearTimeout(diagnosticTimer)
     }
   }, [currentProjectId])
 
@@ -339,6 +347,8 @@ export default function App() {
                 ? 'inspiration-wide'
                 : view.kind === 'covers'
                   ? 'cover-wide'
+                  : view.kind === 'fanqieChart'
+                    ? 'fanqie-wide'
               : ''
   }`
 
@@ -389,6 +399,13 @@ export default function App() {
           >
             <span className="icon">📈</span>
             扫榜
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'fanqieChart' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'fanqieChart' })}
+          >
+            <span className="icon">🍅</span>
+            番茄榜单
           </button>
           <button
             className={`nav-item ${view.kind === 'styles' ? 'active' : ''}`}
@@ -670,6 +687,10 @@ export default function App() {
           ) : view.kind === 'scan' ? (
             <ErrorBoundary>
               <ScanPage />
+            </ErrorBoundary>
+          ) : view.kind === 'fanqieChart' ? (
+            <ErrorBoundary>
+              <FanqieChartPage />
             </ErrorBoundary>
           ) : view.kind === 'inspiration' ? (
             <ErrorBoundary>

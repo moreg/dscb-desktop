@@ -1,13 +1,19 @@
 import type { ShortStoryIdea, ShortStoryIdeaFingerprint } from './short-story'
 
 export const SHORT_STORY_IDEA_FIELDS = ['title', 'premise', 'hook', 'twist', 'ending'] as const
-export const SHORT_STORY_IDEA_LIMITS = { title: 120, premise: 3000, hook: 1500, twist: 1500, ending: 1500 } as const
+export const SHORT_STORY_IDEA_EXTRA_FIELDS = ['tags', 'coreSetting', 'worldView', 'characters', 'goldenFinger'] as const
+export const SHORT_STORY_IDEA_LIMITS = {
+  title: 120, premise: 3000, hook: 1500, twist: 1500, ending: 1500,
+  tags: 120, coreSetting: 400, worldView: 500, characters: 500, goldenFinger: 400
+} as const
 
 export function isShortStoryIdea(value: unknown): value is ShortStoryIdea {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const idea = value as Record<string, unknown>
   return SHORT_STORY_IDEA_FIELDS.every(field => typeof idea[field] === 'string' &&
-    !!idea[field].trim() && idea[field].length <= SHORT_STORY_IDEA_LIMITS[field])
+    !!idea[field].trim() && idea[field].length <= SHORT_STORY_IDEA_LIMITS[field]) &&
+    SHORT_STORY_IDEA_EXTRA_FIELDS.every(field => idea[field] === undefined ||
+      typeof idea[field] === 'string' && !!idea[field].trim() && idea[field].length <= SHORT_STORY_IDEA_LIMITS[field])
 }
 
 export function normalizeShortStoryIdeaText(text: string): string {
@@ -16,7 +22,7 @@ export function normalizeShortStoryIdeaText(text: string): string {
 
 /** 全内容用于区分改写版本；历史排除则只比较标题与核心设定。 */
 export function shortStoryIdeaKey(idea: ShortStoryIdea): string {
-  return JSON.stringify(SHORT_STORY_IDEA_FIELDS.map(field => normalizeShortStoryIdeaText(idea[field])))
+  return JSON.stringify([...SHORT_STORY_IDEA_FIELDS, ...SHORT_STORY_IDEA_EXTRA_FIELDS].map(field => normalizeShortStoryIdeaText(idea[field] || '')))
 }
 
 export function shortStoryIdeaFingerprint(idea: ShortStoryIdea): ShortStoryIdeaFingerprint {

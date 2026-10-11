@@ -69,6 +69,13 @@ function setup({
 }
 
 describe('自动去 AI 味事实修复和核验重试', () => {
+  it('自动精修共用对白与场景级诊断', async () => {
+    const context = setup()
+    await context.run()
+    expect(context.deslop).toHaveBeenCalledWith(ORIGINAL,
+      expect.objectContaining({ levelOverride: 'mild', polishDialogue: true, polishNarrative: true }))
+  })
+
   it('排版将动作移到台词前时必须核验实际排版稿，事实未通过则原稿原样保留', async () => {
     const original = ORIGINAL + '\n“我先开门。”林远缓缓走到东屋前，“你别跟来。”'
     const candidate = original.replaceAll('缓缓', '')
@@ -80,7 +87,7 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     const output = await context.run({ formatCandidate: formatChapterProse })
 
     expect(formatted).not.toBe(candidate)
-    expect(formatted).toContain('林远走到东屋前。\n“我先开门，你别跟来。”')
+    expect(formatted).toContain('林远走到东屋前。\n“我先开门。你别跟来。”')
     expect(context.calls('deslop:verify')[0][0]).toContain(formatted)
     expect(context.calls('deslop:verify')[0][0]).toContain(original)
     expect(output.content).toBe(original)

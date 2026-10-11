@@ -44,6 +44,8 @@ import { registerCoverIpc } from './ipc/cover'
 import { BookTestService } from './data/book-test-service'
 import { registerBookTestIpc } from './ipc/book-test'
 import { registerScanIpc } from './ipc/scan'
+import { registerFanqieChartIpc } from './ipc/fanqie-chart'
+import { FanqieChartService } from './data/fanqie-chart/service'
 import { registerWindowsIpc, type ProjectWindowResult } from './ipc/windows'
 import { ScanService } from './data/scan/scan-service'
 import { ChapterNameService } from './data/chapter-name-service'
@@ -262,6 +264,10 @@ if (!hasSingleInstanceLock) {
   // 扫榜（story-long-scan / story-short-scan）—— 采集 + 选题决策
   const scanService = new ScanService(userData, llmService)
   registerScanIpc(scanService)
+  const fanqieChartService = new FanqieChartService(userData, llmService, async () => {
+    return (await settings.get()).chartCoversRoot || join(userData, 'covers')
+  })
+  registerFanqieChartIpc(fanqieChartService)
 
   if (!process.env['ELECTRON_RENDERER_URL']) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -269,7 +275,7 @@ if (!hasSingleInstanceLock) {
         responseHeaders: {
           ...details.responseHeaders,
           'Content-Security-Policy': [
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:"
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:"
           ]
         }
       })

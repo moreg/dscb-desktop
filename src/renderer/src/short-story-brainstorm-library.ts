@@ -1,5 +1,5 @@
 import type { ShortStoryIdea, ShortStoryIdeaFingerprint, ShortStoryRewriteFocus } from '../../shared/short-story'
-import { isShortStoryIdea, normalizeShortStoryIdeaText, shortStoryIdeaExclusion, shortStoryIdeaFingerprint, shortStoryIdeaKey } from '../../shared/short-story-idea-utils'
+import { isShortStoryIdea, normalizeShortStoryIdeaText, SHORT_STORY_IDEA_EXTRA_FIELDS, shortStoryIdeaExclusion, shortStoryIdeaFingerprint, shortStoryIdeaKey } from '../../shared/short-story-idea-utils'
 
 export const SHORT_STORY_BRAINSTORM_PREFIX = 'ai-writer:short-story:brainstorm:'
 export const BRAINSTORM_BATCH_LIMIT = 5
@@ -216,7 +216,8 @@ export function isValidShortStoryRewrite(original: ShortStoryIdea, candidate: Sh
   const locked = focus === 'twist' ? ['title', 'premise', 'hook', 'ending'] as const
     : focus === 'ending' ? ['title', 'premise', 'hook', 'twist'] as const
       : focus === 'emotion' ? ['title', 'premise', 'hook'] as const : ['title', 'premise'] as const
-  return locked.every(field => original[field].trim() === candidate[field].trim())
+  return locked.every(field => original[field].trim() === candidate[field].trim()) &&
+    SHORT_STORY_IDEA_EXTRA_FIELDS.every(field => (original[field] || '').trim() === (candidate[field] || '').trim())
 }
 
 export function shortStoryBrainstormSourceMatches(source: string, current: string, adoptedBrief: string): boolean {

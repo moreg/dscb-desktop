@@ -3256,31 +3256,39 @@ export default function ChapterEditor({
     }
   }, [deslopResult, deslopBefore, draft])
 
-  /** 去 AI 味：扫描（确定性，不调 LLM）→ 弹报告 */
+  /** 去 AI 味：本地规则 + 模型场景诊断 → 弹报告 */
   const startDeslopScan = async (): Promise<void> => {
     if (!draft.trim()) {
       setAlertInfo({ message: '正文为空，无法扫描' })
       return
     }
     setDeslopScanning(true)
+    const scanEpoch = sessionEpochRef.current
     setDeslopResult(null)
     setDeslopLog('')
     // 新一次扫描 = 新的自动判定，上一次的手动档位不该跟着走
     setDeslopLevel('auto')
     try {
       const report = await window.api.deslopScan(projectId, draft)
+      if (sessionEpochRef.current !== scanEpoch) return
       setDeslopScanReport(report)
       // 体检结果按行号定位，正文重扫说明内容可能变了，旧清单的行号不再可信
       setDeslopStructure(null)
     } catch (err) {
+      if (sessionEpochRef.current !== scanEpoch) return
       setAlertInfo({ message: `扫描失败：${friendlyLlmError((err as Error).message)}` })
     } finally {
-      setDeslopScanning(false)
+      if (sessionEpochRef.current === scanEpoch) setDeslopScanning(false)
     }
   }
 
   /** 去 AI 味：润色（流式），完成后存结果供 diff 预览 */
   const runDeslop = async (levelOverride?: 'mild' | 'moderate' | 'severe'): Promise<void> => {
+    if (deslopRunning || deslopJudging) return
+    if (!draft.trim()) {
+      setAlertInfo({ message: '正文为空，无法润色' })
+      return
+    }
     if (!(await window.api.hasLlmKey())) {
       setAlertInfo({ message: '请先在「⚙ 设置 → 模型服务」中配置 provider' })
       return
@@ -4773,7 +4781,7 @@ export default function ChapterEditor({
           }
           title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
         >
-          {deslopScanning ? '扫描中…' : '🧹 去 AI 味'}
+          {deslopScanning ? '词句与场景检查中…' : '🧹 去 AI 味'}
         </button>
         {generating || adjusting || adjustPlanning ? (
           <button
@@ -5812,6 +5820,13 @@ export default function ChapterEditor({
             {/* 扫描报告 */}
             {deslopScanReport && !deslopResult ? (
               <div>
+                <p className="meta">
+                  词句扫描：已完成，{deslopScanReport.findings.filter((item) => !item.type.startsWith('narrative-')).length} 项。
+                  {' '}场景诊断：{!deslopScanReport.narrative ? '尚未检查' :
+                    deslopScanReport.narrative.status === 'failed'
+                      ? `未完成（已检查 ${deslopScanReport.narrative.checkedChunks}/${deslopScanReport.narrative.totalChunks} 段），请重新扫描。${friendlyLlmError(deslopScanReport.narrative.error ?? '诊断失败')}`
+                      : `已完成，${deslopScanReport.findings.filter((item) => item.type.startsWith('narrative-')).length} 项。`}
+                </p>
                 <div className="row" style={{ gap: 12, marginBottom: 12 }}>
                   <span className="filter-chip">blocking {deslopScanReport.counts.blocking}</span>
                   <span className="filter-chip">advisory {deslopScanReport.counts.advisory}</span>
@@ -5840,13 +5855,13 @@ export default function ChapterEditor({
                 </div>
                 {deslopScanReport.findings.length === 0 ? (
                   <p className="empty" style={{ lineHeight: 1.7 }}>
-                    没有命中规则。
+                    {deslopScanReport.narrative?.status === 'completed'
+                      ? '本次词句和场景检查未发现问题，仍可继续润色。'
+                      : '词句扫描未发现问题，场景诊断尚未完成，不能据此判断全文无问题。'}
                     <br />
                     <span style={{ color: 'var(--ink-2, #666)', fontSize: 12 }}>
-                      注意：这不等于「读起来不像 AI」。本项目写作 prompt 里的负向限制和这里的检测规则
-                      是同一套，所以本 app 生成的正文本来就很少命中——语料实测检出率接近 0。
-                      扫描对<b>外部粘贴进来的文本</b>（别处写的、旧稿、他人稿）才真正有判别力。
-                      详见 tests/fixtures/deslop-corpus/FINDINGS.md。
+                      点击「开始润色」，AI 会进一步检查重复问答、配角轮流表态、重复烘托和对白衔接。
+                      润色后可查看修改对照，再决定是否应用；没有需要修改的内容会保留原文。
                     </span>
                   </p>
                 ) : (
@@ -6020,7 +6035,7 @@ export default function ChapterEditor({
                   <button
                     className="btn btn-primary"
                     onClick={() => void runDeslop(deslopLevel === 'auto' ? undefined : deslopLevel)}
-                    disabled={deslopRunning || deslopScanReport.findings.length === 0}
+                    disabled={deslopRunning || deslopJudging || !draft.trim()}
                   >
                     {deslopRunning ? '润色中…' : '开始润色'}
                   </button>

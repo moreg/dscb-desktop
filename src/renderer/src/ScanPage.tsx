@@ -274,8 +274,9 @@ export default function ScanPage(): React.ReactElement {
           <div className="field" style={{ marginTop: 14, marginBottom: 0 }}>
             <label style={{ fontSize: 13, fontWeight: 600 }}>用户数据（可选）</label>
             <p className="desc" style={{ marginTop: 4, marginBottom: 8, fontSize: 12 }}>
-              {PLATFORM_OPTIONS.find((p) => p.value === platform)?.label} 需登录态/有反爬。
-              粘贴榜单数据（书名/作者/题材）走用户模式；留空则用内置题材趋势降级分析。
+              {platform === 'fanqie'
+                ? '分类榜、市场分析和榜单脑洞在侧栏「番茄榜单」。这里仍可粘贴一份榜单文本做选题。'
+                : `${PLATFORM_OPTIONS.find((p) => p.value === platform)?.label ?? ''} 需登录态/有反爬。粘贴榜单数据（书名/作者/题材）走用户模式；留空则用内置题材趋势降级分析。`}
             </p>
             <textarea
               className="textarea"

@@ -16,6 +16,16 @@ const emptyApplied = {
 }
 
 describe('summarizePostWriteSync', () => {
+  it('does not request manual adoption after entities were automatically reviewed', () => {
+    const result = summarizePostWriteSync({
+      memory: { applied: { ...emptyApplied, characters: 1 }, entitiesReviewed: true, errors: [] },
+      settings: { applied: 0, errors: [] },
+      extraction: { newCharacters: [{ name: '赵乾' }] }
+    })
+    expect(result.pending.characters).toBe(0)
+    expect(result.hasPendingConfirms).toBe(false)
+  })
+
   it('重写撤回旧回收属于实际写入，但不计为新回收', () => {
     const result = summarizePostWriteSync({
       memory: { applied: emptyApplied, errors: [], appliedDiffs: [{ applicable: true, collectionAction: 'uncollect' }] },

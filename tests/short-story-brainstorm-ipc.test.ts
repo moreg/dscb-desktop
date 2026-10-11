@@ -19,6 +19,8 @@ const requestId = '7b186965-dacb-4e52-9bf4-476cc87a6502'
 const input: ShortStoryBrainstormInput = { genre: '悬疑', direction: '寻找失踪的账本', requirements: '', targetWords: 8000 }
 const ideas: ShortStoryIdea[] = [1, 2, 3].map(index => ({
   title: `账本的第${index}页`, premise: `第${index}页指向不同人物的秘密。`, hook: '收到一个没有封面的账本。',
+  tags: '悬疑、账本、误会', coreSetting: '调换账本导致债务真相被掩盖。', worldView: '当代小城，账目可查。',
+  characters: '主角追索账本，对手试图保住秘密。', goldenFinger: '无超自然金手指；主角善于核对账目。',
   twist: '页码的字迹提前暗示有人调换了账本。', ending: '找回原账本并偿还欠债，误会得到解决。'
 }))
 const output = JSON.stringify({ ideas })

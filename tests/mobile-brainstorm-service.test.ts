@@ -13,6 +13,8 @@ import type { ShortStoryIdea } from '../src/shared/short-story'
 const base = { genre: '悬疑', direction: '雨夜收到陌生来信', requirements: '' }
 const shortIdeas: ShortStoryIdea[] = [1, 2, 3].map((number) => ({
   title: `第${number}封来信`, premise: `第${number}位寄信人藏着不同的秘密。`,
+  tags: '悬疑、亲情、选择', coreSetting: '雨夜来信牵出隐瞒多年的选择。', worldView: '当代小城，邮局记录可查。',
+  characters: '邮递员想找寄信人，收信人有意隐瞒。', goldenFinger: '无超自然金手指；主角熟悉旧邮路。',
   hook: '主角收到一封寄给自己的信。', twist: '信纸上的水印留下了公平线索。', ending: '主角找到寄信人，作出自己的选择。'
 }))
 const longIdeas: LongStoryIdea[] = shortIdeas.map((idea, index) => ({

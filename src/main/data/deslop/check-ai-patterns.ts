@@ -79,10 +79,7 @@ export function scanAiPatterns(input: string, opts: ScanOptions = {}): DeslopFin
   // 8. Gate E 对话标签单一化
   findings.push(...scanDialogueTags(proseLines))
 
-  // 9. Gate E 台词中间禁句号（说话中间不落句号，改用逗号保持口语连贯）
-  findings.push(...scanDialogueInternalPeriods(proseLines))
-
-  // 10. Gate D 微动作/动量短语密度检测（X了X / X了一下 / X了两下）
+  // 9. Gate D 微动作/动量短语密度检测（X了X / X了一下 / X了两下）
   findings.push(...scanMicroActionDensity(proseLines))
 
   findings.sort((a, b) => a.line - b.line || a.column - b.column)
@@ -624,37 +621,6 @@ function scanDialogueTags(proseLines: ProseLine[]): DeslopFinding[] {
     }
   }
   flush()
-  return findings
-}
-
-/**
- * 扫描台词中间出现的句号：说话中间不要用句号断句，改用逗号连接，保持口语语流连贯。
- */
-function scanDialogueInternalPeriods(proseLines: ProseLine[]): DeslopFinding[] {
-  const findings: DeslopFinding[] = []
-  for (const { text, lineNo } of proseLines) {
-    const quoteRegex = /([“"「])([^”"」\n]+?)([”"」])/g
-    let qm: RegExpExecArray | null
-    while ((qm = quoteRegex.exec(text)) !== null) {
-      const quoteStart = qm.index
-      const content = qm[2]
-      const periodRegex = /。(?!\s*$)/g
-      let pm: RegExpExecArray | null
-      while ((pm = periodRegex.exec(content)) !== null) {
-        const charIndex = quoteStart + 1 + pm.index
-        findings.push({
-          line: lineNo,
-          column: charIndex + 1,
-          type: 'dialogue-internal-period',
-          severity: 'advisory',
-          gate: 'E',
-          message: '台词中间出现句号：同一段话说话中间不要用句号断句，改用逗号连接，保持口语连贯；整段话仅在末尾保留一个句号。',
-          excerpt: compact(text.slice(Math.max(0, charIndex - 6), Math.min(text.length, charIndex + 8))),
-          word: '。'
-        })
-      }
-    }
-  }
   return findings
 }
 

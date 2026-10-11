@@ -3,6 +3,7 @@ import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
 import { DESLOP_PLAIN_WRITING_RULES } from './deslop/anti-ai-methods'
+import { renderWritingPlatformConfig, type WritingPlatformConfig } from '../../../shared/writing-platform'
 
 export { FORBIDDEN_WORD_CATEGORIES, flattenForbiddenWords } from './forbidden-words'
 export { GENRE_VOICES, resolveGenreVoice } from './genre-voice'
@@ -42,13 +43,19 @@ export function buildSystemPrompt(
   style?: StyleProfile | null,
   overrides?: Record<string, string>,
   benchmarkRecall?: BenchmarkRecallPrompt | null,
-  continueMode?: 'extend' | 'finish'
+  continueMode?: 'extend' | 'finish',
+  platformConfig?: WritingPlatformConfig | null
 ): string {
   const voice = resolveGenreVoice(genre)
   const sections: string[] = []
+  const author = !platformConfig || platformConfig.platform === 'fanqie'
+    ? '番茄小说风格的资深中文网文作者'
+    : platformConfig.platform === 'qimao'
+      ? '七猫小说的资深中文网文作者'
+      : '资深中文网文作者'
 
   sections.push(
-    '你是番茄小说风格的资深中文网文作者，正在依据用户提供的章节细纲写作正文。请稳定遵守下面的写作守则。'
+    `你是${author}，正在依据用户提供的章节细纲写作正文。请稳定遵守下面的写作守则。`
   )
 
   sections.push('---')
@@ -85,6 +92,10 @@ export function buildSystemPrompt(
   sections.push(`## ${n}. 禁用高频词`)
   sections.push(renderForbiddenWordsMarkdown())
   n++
+
+  if (platformConfig) {
+    sections.push('---', renderWritingPlatformConfig(platformConfig))
+  }
 
   // 续写覆盖声明放最后：位置最靠后、措辞最具体，冲突时压过上面的通用守则
   if (continueMode) {
@@ -167,7 +178,7 @@ export function buildHumanizerPrompt(
       // 原文是「长短句交替，不要整段同节奏」。没有量纲的定性指令会被模型往极端执行：
       // 实测产出句子平均 11 字，而番茄在榜作品是 17.8 字。改成带区间的表述。
       // 数据见 tests/fixtures/deslop-corpus/FINDINGS.md
-      '8. 句长有起伏，但重心落在 15–22 字；短句是重音不是常态，连续动作可在句内自然连接，有重音时可断句分段；正文叙述段严格单句成段，段落之间用空行分隔，严禁同一段落拼凑多个句号，严禁机械双联报表句，不为合并句子增加冗词或事实',
+      '8. 句长和段落服从内容，同一行动及直接反馈可放在一段，目标或阻力改变时再断段；避免机械双联报表句，不为合并句子增加冗词或事实',
       '9. 只修改确有问题的表达，允许直接删去无用动作、修饰或重复解释；无需为了显得改过而整体重写，输出完整修订片段，不新增描写占位'
     ].join('\n')
   )

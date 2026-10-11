@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
@@ -25,25 +25,20 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [archiveError, setArchiveError] = useState('')
+  const loadSequence = useRef(0)
 
   const loadProjects = async (withSpinner: boolean) => {
+    const sequence = ++loadSequence.current
     if (withSpinner) setLoading(true)
     try {
       const list = await window.api.listProjects({ includeArchived: true })
+      if (sequence !== loadSequence.current) return
       setProjects(list)
-      const cc: Record<string, number> = {}
-      const wc: Record<string, number> = {}
-      await Promise.all(
-        list.map(async (p) => {
-          const chapters = (await window.api.listChapters(p.id)) as ChapterMeta[]
-          cc[p.id] = chapters.length
-          wc[p.id] = chapters.reduce((sum, c) => sum + (c.wordCount ?? 0), 0)
-        })
-      )
-      setChapterCounts(cc)
-      setWordCounts(wc)
+    } catch (error) {
+      console.error('[ProjectListPage] Failed to load projects:', error)
+      if (sequence === loadSequence.current) setArchiveError('书架加载失败，请重新扫描。')
     } finally {
-      setLoading(false)
+      if (sequence === loadSequence.current) setLoading(false)
     }
   }
 
@@ -60,7 +55,38 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
 
   useEffect(() => {
     void loadProjects(true)
+    // 这是请求序号而非 DOM ref；卸载时递增可使尚未完成的请求失效。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { ++loadSequence.current }
   }, [])
+
+  // 书架先显示；仅统计当前书架，限制并发，避免多本书一起抢占磁盘。
+  useEffect(() => {
+    let cancelled = false
+    let cursor = 0
+    const visible = projects.filter((project) => isProjectArchived(project) === (shelf === 'archived'))
+    const worker = async () => {
+      while (!cancelled && cursor < visible.length) {
+        const project = visible[cursor++]
+        try {
+          const chapters = (await window.api.listChapters(project.id)) as ChapterMeta[]
+          if (cancelled) return
+          setChapterCounts((current) => ({ ...current, [project.id]: chapters.length }))
+          setWordCounts((current) => ({
+            ...current,
+            [project.id]: chapters.reduce((sum, chapter) => sum + (chapter.wordCount ?? 0), 0)
+          }))
+        } catch (error) {
+          console.error('[ProjectListPage] Failed to load project statistics:', error)
+        }
+      }
+    }
+    // 给首屏绘制留出时间；切换书架或离开页面时停止后续统计。
+    const timer = window.setTimeout(() => {
+      void Promise.all(Array.from({ length: Math.min(2, visible.length) }, worker))
+    }, 100)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [projects, shelf])
 
   const activeProjects = useMemo(
     () => projects.filter((p) => !isProjectArchived(p)),
@@ -213,8 +239,8 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
       ) : (
         <div className="project-grid">
           {filtered.map((p) => {
-            const ch = chapterCounts[p.id] ?? 0
-            const wc = wordCounts[p.id] ?? 0
+            const ch = chapterCounts[p.id]
+            const wc = wordCounts[p.id]
             const initial = p.name.trim().charAt(0) || '卷'
             return (
               <article
@@ -232,11 +258,11 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 {p.description ? <div className="pc-desc">{p.description}</div> : null}
                 <div className="pc-stats">
                   <div className="pc-stat">
-                    <span className="num">{ch}</span>
+                    <span className="num">{ch ?? '…'}</span>
                     <span className="lbl">章节</span>
                   </div>
                   <div className="pc-stat">
-                    <span className="num">{(wc / 10000).toFixed(1)}</span>
+                    <span className="num">{wc === undefined ? '…' : (wc / 10000).toFixed(1)}</span>
                     <span className="lbl">万字</span>
                   </div>
                 </div>

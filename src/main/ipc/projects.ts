@@ -15,7 +15,16 @@ const createProjectSchema = z.object({
   description: z.string().max(5000).optional(),
   targetChapters: z.number().int().min(1).max(100_000).optional(),
   chapterWordCount: z.number().int().min(100).max(100_000).optional(),
-  customPath: z.string().max(1000).optional()
+  customPath: z.string().max(1000).optional(),
+  openingChapters: z.array(z.object({
+    chapter: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    openingEvent: z.string().trim().min(1).max(10000),
+    protagonistAction: z.string().trim().min(1).max(10000),
+    conflict: z.string().trim().min(1).max(10000),
+    payoff: z.string().trim().min(1).max(10000),
+    endHook: z.string().trim().min(1).max(10000),
+    summaryApplication: z.string().trim().min(1).max(10000)
+  })).length(3).refine(items => new Set(items.map(item => item.chapter)).size === 3, '前三章方向必须分别包含第1、2、3章').optional()
 })
 
 const updateProjectInfoSchema = z.object({

@@ -69,7 +69,8 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
   style_match: {
     checkId: 'style_match',
     instruction: `评估「文风匹配度」：语言风格/叙事节奏/对话腔调是否匹配本作题材（见下方题材定位）。
-列出明显偏离题材风格的段落（如爽文写得像散文、搞笑文突然正经）。`
+列出明显偏离题材风格的段落（如爽文写得像散文、搞笑文突然正经）。
+特别检查人物对白是否像轮流汇报信息、整齐背稿或所有角色共用一种口吻；只有确实机械时才指出原句，建议符合人物身份和当下情绪的具体措辞。保留说话人的立场、信息和剧情结果，不为鲜活凭空补情节。`
   },
   cool_point: {
     checkId: 'cool_point',

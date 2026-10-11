@@ -119,7 +119,9 @@ function stream() {
 async function settled(): Promise<void> { for (let index = 0; index < 5; index++) await Promise.resolve() }
 function idea(number: number): LongStoryIdea {
   return { title: `脑洞${number}`, premise: `杂役${number}能修复废弃功法`, hook: '修好功法得到第一笔报酬', mainLine: '建立独立山门',
-    progression: '积累功法与弟子，守住山门', twist: '残篇可以组合', ending: '保有山门和能力' }
+    progression: '积累功法与弟子，守住山门', twist: '残篇可以组合', ending: '保有山门和能力',
+    tags: '玄幻、成长、修复', coreSetting: '修复废功法赚取资源', worldView: '宗门以功法定地位',
+    characters: '杂役求自立，长老阻挠', goldenFinger: '可修复残篇，须取得原本' }
 }
 function seedIdeas(recoveryKey = key): void {
   const recovery = { ...appendLongStoryBrainstormBatch(emptyLongStoryBrainstormRecovery(), [idea(1), idea(2), idea(3)], '', '', 'old-batch'), status: 'completed' as const }
@@ -183,6 +185,7 @@ describe('长篇脑洞真实组件事件', () => {
     pending.resolve({ ok: true, ideas: [idea(1), idea(2), idea(3)] }); await settled()
     expect(content(brain())).toContain('生成完成')
     expect(readLongStoryBrainstormRecovery(key, storage).recovery.raw).toBe('继续收到')
+    expect(readLongStoryBrainstormRecovery(key, storage).recovery.ideas[0].worldView).toBe('宗门以功法定地位')
   })
 
   it('卸载后恢复中断文本，旧组件迟到回包不会污染重新挂载的工作区', async () => {

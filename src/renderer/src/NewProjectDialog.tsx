@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ProjectMeta } from '../../shared/types'
+import type { FanqieIdeaOpeningChapter } from '../../shared/fanqie-chart'
 import { copyLongStoryBrainstormRecovery } from './long-story-brainstorm-library'
 import './long-story-project.css'
 
@@ -8,6 +9,7 @@ export interface NewProjectDraft {
   genre: string
   description: string
   targetChapters?: number
+  openingChapters?: FanqieIdeaOpeningChapter[]
 }
 interface Props {
   initialDraft?: NewProjectDraft
@@ -71,7 +73,8 @@ export default function NewProjectDialog({ initialDraft, brainstormRecoveryKey, 
         genre: genre.trim() || undefined,
         description: description.trim() || undefined,
         targetChapters: chapterCount,
-        customPath: customPath.trim() || undefined
+        customPath: customPath.trim() || undefined,
+        openingChapters: initialDraft?.openingChapters
       })
       const copied = !brainstormRecoveryKey || copyLongStoryBrainstormRecovery(brainstormRecoveryKey, `project:${project.id}`)
       if (mountedRef.current) onCreated(project, copied ? '' : '项目已创建。脑洞记录仍保留在脑洞栏目中。')
@@ -88,6 +91,13 @@ export default function NewProjectDialog({ initialDraft, brainstormRecoveryKey, 
       <div className="dialog long-project-dialog" role="dialog" aria-modal="true" aria-labelledby="long-project-dialog-title" onClick={(e) => e.stopPropagation()}>
         <h3 id="long-project-dialog-title">新建项目</h3>
         <p className="meta">先保存项目信息和脑洞简介，开始写作时再添加大纲与设定。</p>
+        {initialDraft?.openingChapters?.length ? (
+          <details>
+            <summary>将一起保存的前三章写作方向</summary>
+            {initialDraft.openingChapters.map(chapter => <p key={chapter.chapter} className="meta">第{chapter.chapter}章：{chapter.openingEvent} · {chapter.protagonistAction} · {chapter.payoff} · 章末：{chapter.endHook}</p>)}
+            <p className="meta">补充正式设定和大纲后，生成前三章细纲时会自动使用这些方向。</p>
+          </details>
+        ) : null}
         <div className="field">
           <label>名称 *</label>
           <input

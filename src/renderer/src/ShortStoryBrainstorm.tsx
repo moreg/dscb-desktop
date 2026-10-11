@@ -148,7 +148,7 @@ export default function ShortStoryBrainstorm({
         setError(`生成失败，原有方案与收到的文本仍保留：${typeof result?.error === 'string' ? result.error : rewriteSnapshot ? '改写结果未按指定范围修改，请重试。' : '没有收到完整的脑洞方案，请重试。'}`)
         return
       }
-      const ideas = result.ideas.map(idea => ({ title: idea.title, premise: idea.premise, hook: idea.hook, twist: idea.twist, ending: idea.ending }))
+      const ideas = result.ideas.map(idea => ({ ...idea }))
       const responseWarning = typeof result.warning === 'string' ? result.warning : ''
       const createdAt = new Date().toISOString()
       if (rewriteSnapshot && rewriteWorkspace) {
@@ -219,7 +219,7 @@ export default function ShortStoryBrainstorm({
     const isFavorite = state.favorites.some(item => shortStoryIdeaKey(item.idea) === shortStoryIdeaKey(idea))
     return <article className="ss-brainstorm-idea" key={`${index}-${shortStoryIdeaKey(idea)}`}>
       <div className="ss-brainstorm-idea-head"><span>{index + 1}</span><h3>{idea.title}</h3></div>
-      <dl><div><dt>故事设定</dt><dd>{idea.premise}</dd></div><div><dt>开篇钩子</dt><dd>{idea.hook}</dd></div><div><dt>关键反转</dt><dd>{idea.twist}</dd></div><div><dt>结局</dt><dd>{idea.ending}</dd></div></dl>
+      <dl>{idea.tags && <div><dt>内容标签</dt><dd>{idea.tags}</dd></div>}{idea.coreSetting && <div><dt>核心设定与卖点</dt><dd>{idea.coreSetting}</dd></div>}{idea.worldView && <div><dt>世界观与规则</dt><dd>{idea.worldView}</dd></div>}{idea.characters && <div><dt>人物设定与关系</dt><dd>{idea.characters}</dd></div>}{idea.goldenFinger && <div><dt>金手指或独特资源</dt><dd>{idea.goldenFinger}</dd></div>}<div><dt>故事设定</dt><dd>{idea.premise}</dd></div><div><dt>开篇钩子</dt><dd>{idea.hook}</dd></div><div><dt>关键反转</dt><dd>{idea.twist}</dd></div><div><dt>结局</dt><dd>{idea.ending}</dd></div></dl>
       <div className="ss-brainstorm-card-actions"><button className="btn" type="button" disabled={locked} onClick={() => adopt(idea)}>采用这个脑洞</button><button className={`btn btn-sm ${isFavorite ? 'ss-brainstorm-favorited' : ''}`} type="button" disabled={locked} aria-pressed={isFavorite} onClick={() => favorite(idea, source)}>{isFavorite ? '取消收藏' : '收藏'}</button>{canRewrite && <button className="btn btn-ghost btn-sm" type="button" disabled={locked} onClick={() => chooseRewrite(idea, source)}>定向改写</button>}</div>
     </article>
   }

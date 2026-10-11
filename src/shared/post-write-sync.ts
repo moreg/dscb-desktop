@@ -44,6 +44,7 @@ export interface PostWriteSyncInput {
     /** 部分条目被挡下（其余已写入），与 reviewRequired 不同，不算整章未生效 */
     heldBack?: string[]
     superseded?: boolean
+    entitiesReviewed?: boolean
     applied: {
       stateChanges: number
       plotPoints: number
@@ -136,6 +137,12 @@ export function summarizePostWriteSync(input: PostWriteSyncInput): PostWriteSync
     ...(uncollected ? { uncollected } : {})
   }
   const pending = countPendingConfirms(input.extraction)
+  if (input.memory.entitiesReviewed) {
+    pending.characters = 0
+    pending.locations = 0
+    pending.items = 0
+    pending.foreshadowings = 0
+  }
   const errors = [
     ...(input.memory.errors ?? []),
     ...(input.settings.errors ?? [])

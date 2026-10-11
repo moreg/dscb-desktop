@@ -82,6 +82,14 @@ describe('parseFindingsJson', () => {
 })
 
 describe('ReviewFlowService.runDeepReview', () => {
+  it('checks mechanical character dialogue during style review', async () => {
+    const llm = mockLlm('{"findings":[]}')
+    await new ReviewFlowService(llm).runDeepReview('“好的，我明白了。”', {
+      chapterNumber: 1, enabledChecks: ['style_match']
+    })
+    expect(vi.mocked(llm.generateStream).mock.calls[0][0]).toContain('所有角色共用一种口吻')
+  })
+
   it('runs only enabled LLM checks and returns llm_review violations', async () => {
     const svc = new ReviewFlowService(
       mockLlmByCheck({

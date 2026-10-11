@@ -33,30 +33,45 @@ export class ProjectService {
   private readonly dirCache = new Map<string, string>()
 
   async create(input: CreateProjectDataInput): Promise<ProjectMeta> {
+    const folderName = toFolderName(input.name)
+    if (!folderName) throw new Error('这个名称不能用作文件夹名')
     const id = randomUUID()
     const projectsRoot = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
-    const dir = input.customPath ? join(input.customPath, id) : join(projectsRoot, id)
+    const parent = input.customPath || projectsRoot
+    const dir = join(parent, folderName)
+    await fs.mkdir(parent, { recursive: true })
+    // 独占创建目录；同名目录（包括空目录）不能复用，并发创建也不能覆盖。
+    try {
+      await fs.mkdir(dir)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`已经有同名文件夹：${folderName}，请修改小说名称或选择其他保存位置`, { cause: err })
+      }
+      throw err
+    }
     const now = new Date().toISOString()
     // 先保存作品信息与脑洞，正式设定、规划和写作文件由后续操作按需添加。
     await new ProjectRepository(dir).write({
       schemaVersion: 1,
       updatedAt: now,
       id,
-      name: input.name,
+      name: folderName,
       genre: input.genre,
       description: input.description,
+      openingChapters: input.openingChapters,
       targetChapters: input.targetChapters,
       chapterWordCount: input.chapterWordCount,
       createdAt: now
     })
-    this.dirCache.set(id, dir)
-    return this.library.create({
+    const project = await this.library.create({
       id,
-      name: input.name,
+      name: folderName,
       description: input.description,
       path: dir,
       genre: input.genre
     })
+    this.dirCache.set(id, dir)
+    return project
   }
 
   async resolveDir(projectId: string): Promise<string> {

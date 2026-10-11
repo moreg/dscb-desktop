@@ -348,6 +348,16 @@ describe('批量续写逐章小结', () => {
         expect(describeMemoryCell(s)).toBe('记忆写入 1/1 条，已自动入库 2 项新实体')
       })
 
+      it('自动入库检查完成后，重复实体不再显示为待确认', () => {
+        const s = summarizeChapterResult(
+          makeResult(25, '正文', {
+            newCharacters: 2,
+            memoryApply: { applied: applied(0, 1), entitiesReviewed: true, errors: [] }
+          })
+        )
+        expect(s.memory.pending).toBe(0)
+      })
+
       it('开启 autoStrength 时保留传入的 strengthSuggestion', () => {
         const suggestion = {
           effort: 'high' as const,

@@ -53,6 +53,54 @@ export class ProseRepo {
     }
   }
 
+  /** 一次枚举正文目录，批量读取；索引仅用于本次调用，外部修改下次立即可见。 */
+  async readMany(numbers: readonly number[]): Promise<Map<number, { exists: boolean; content: string }>> {
+    const dir = join(this.projectDir, '正文')
+    let files: string[]
+    try {
+      files = await fs.readdir(dir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      files = []
+    }
+    const byPrefix = new Map<string, string[]>()
+    const fileSet = new Set(files)
+    for (const file of files) {
+      const match = file.match(/^(第\d+章).*\.md$/)
+      if (!match) continue
+      const candidates = byPrefix.get(match[1]) ?? []
+      candidates.push(file)
+      byPrefix.set(match[1], candidates)
+    }
+    const result = new Map<number, { exists: boolean; content: string }>()
+    let cursor = 0
+    await Promise.all(Array.from({ length: Math.min(8, numbers.length) }, async () => {
+      while (cursor < numbers.length) {
+        const n = numbers[cursor++]
+        const prefix = this.chapterPrefix(n)
+        const candidates = byPrefix.get(prefix) ?? []
+        const skill = candidates.find((file) => file.charAt(prefix.length) === ' ')
+          ?? candidates.find((file) => file.charAt(prefix.length) === '_')
+          ?? candidates[0]
+        const legacy = `${String(n).padStart(PAD, '0')}.md`
+        let content = ''
+        let exists = false
+        for (const file of skill ? [skill, legacy] : [legacy]) {
+          if (!fileSet.has(file)) continue
+          try {
+            content = await fs.readFile(join(dir, file), 'utf-8')
+            exists = true
+            break
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        result.set(n, { exists, content })
+      }
+    }))
+    return result
+  }
+
   /**
    * 写入正文。标题提供时使用技能格式（`第NNN章 标题.md`）；
    * 标题缺失时回退旧格式（`NNN.md`）。

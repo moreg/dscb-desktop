@@ -1,10 +1,10 @@
 {
   "name": "ai-writer-desktop",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "大神持笔 桌面版（本地文件存储）",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "electron-vite dev -w",
     "build": "electron-vite build",
     "package": "electron-vite build && electron-builder --publish never",
     "icon": "node scripts/generate-icon.mjs",
