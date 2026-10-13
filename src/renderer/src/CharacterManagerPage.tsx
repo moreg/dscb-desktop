@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import MarkdownView, { rawFieldsToMarkdown } from './MarkdownView'
 import type { Character, ChapterMeta, CreateCharacterInput } from '../../shared/types'
 
@@ -43,26 +43,31 @@ export default function CharacterManagerPage({ projectId, onOpenChapter }: Props
   const [filter, setFilter] = useState<string>('all')
   const [keyword, setKeyword] = useState('')
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     setLoading(true)
     void window.api.listCharacters(projectId).then((list) => {
       setCharacters(list)
       setLoading(false)
     })
-  }
+  }, [projectId])
 
-  const refreshChapters = () => {
+  const refreshChapters = useCallback(() => {
     void window.api.listChapters(projectId).then(setChapters)
-  }
+  }, [projectId])
 
   useEffect(() => {
     refresh()
     refreshChapters()
     const onFocus = () => refreshChapters()
     window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 系函数每次渲染都是新引用
-  }, [projectId])
+    const unsubscribe = window.api.onProjectFilesChanged(event => {
+      if (event.projectId === projectId && event.kind === 'characters') refresh()
+    })
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      unsubscribe()
+    }
+  }, [projectId, refresh, refreshChapters])
 
   const startEdit = (c: Character) =>
     setEditing({

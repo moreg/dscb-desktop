@@ -1,6 +1,7 @@
+import { cachedMemoryList, readMemoryDocuments, readMemoryText as readText } from './repository-cache'
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, parseTable } from '../skill-format/md-parser'
+import { parseDoc, parseTable } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
 import { charId, sanitizeForFileName, hashName } from './entity-helpers'
 import type { Character } from '../../../shared/types'
@@ -17,6 +18,10 @@ export class RelationshipRepo {
   ) {}
 
   async list(): Promise<Relationship[]> {
+    return cachedMemoryList(this.projectDir, 'relationship', () => this.load())
+  }
+
+  private async load(): Promise<Relationship[]> {
     const seen = new Map<string, Relationship>()
     const now = new Date().toISOString()
 
@@ -28,9 +33,7 @@ export class RelationshipRepo {
     } catch {
       files = []
     }
-    for (const f of files.sort()) {
-      if (!f.endsWith('.md')) continue
-      const text = await readText(join(dir, f))
+    for (const { path: f, text } of await readMemoryDocuments(dir, files.filter(file => file.endsWith('.md')).sort())) {
       if (!text) continue
       const rel = this.parseMainFile(f, text, now)
       if (!rel) continue

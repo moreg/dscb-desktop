@@ -1,6 +1,7 @@
 import { join } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { readText } from './md-parser'
+import { cachedMemoryList, readMemoryText } from '../memory/repository-cache'
 import { writeTextAtomic } from '../atomic'
 import { withFileLock } from '../file-lock'
 import { ProseRepo } from './prose-repo'
@@ -19,7 +20,9 @@ export interface AutomaticForeshadowCollection { foreshadowingId: string; eviden
 export class ForeshadowingMdRepo {
   constructor(private readonly projectDir: string) {}
   private get path(): string { return join(this.projectDir, '追踪', '伏笔.md') }
-  async list(): Promise<Foreshadowing[]> { return parseForeshadowingMarkdown(await readText(this.path)) }
+  async list(): Promise<Foreshadowing[]> {
+    return cachedMemoryList(this.projectDir, 'foreshadowing', async () => parseForeshadowingMarkdown(await readMemoryText(this.path)))
+  }
 
   async create(input: CreateForeshadowingInput): Promise<Foreshadowing> {
     const content = input.content.trim()

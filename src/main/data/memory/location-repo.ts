@@ -1,6 +1,7 @@
+import { cachedMemoryList, findMemoryEntity, readMemoryDocuments, readMemoryText as readText, memorySourcePath } from './repository-cache'
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, parseBoldFields, stripNumberPrefix, fieldToStr } from '../skill-format/md-parser'
+import { parseDoc, parseBoldFields, stripNumberPrefix, fieldToStr } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
 import { listMdFilesDeep, safeFileName, extractEntityNameFromDoc, sanitizeForFileName, hashName } from './entity-helpers'
 import type { MemoryEntity, CreateMemoryEntityInput, UpdateMemoryEntityInput } from '../../../shared/types'
@@ -12,13 +13,20 @@ export class LocationRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<MemoryEntity[]> {
+    return cachedMemoryList(this.projectDir, 'location', () => this.load())
+  }
+
+  async get(id: string): Promise<MemoryEntity | null> {
+    return findMemoryEntity(this.projectDir, 'location', () => this.load(), id)
+  }
+
+  private async load(): Promise<MemoryEntity[]> {
     const seen = new Map<string, MemoryEntity>()
     const now = new Date().toISOString()
 
-    for (const relPath of await listMdFilesDeep(join(this.projectDir, '记忆', '地点'))) {
-      const text = await readText(join(this.projectDir, '记忆', '地点', relPath))
+    const root = join(this.projectDir, '记忆', '地点')
+    for (const { path: relPath, text, doc } of await readMemoryDocuments(root, await listMdFilesDeep(root))) {
       if (!text) continue
-      const doc = parseDoc(text)
       const name = extractEntityNameFromDoc(doc, relPath)
       if (!name || seen.has(name)) continue
       seen.set(name, this.shapeEntity(doc, name, `记忆/地点/${relPath}`, now))
@@ -50,13 +58,12 @@ export class LocationRepo {
   }
 
   async update(id: string, patch: UpdateMemoryEntityInput): Promise<MemoryEntity | null> {
-    const all = await this.list()
-    const existing = all.find((e) => e.id === id)
+    const existing = await this.get(id)
     if (!existing) return null
     const dir = join(this.projectDir, '记忆', '地点')
     const displayName = patch.name ?? existing.name
-    const oldPath = join(dir, `${sanitizeForFileName(existing.name)}.md`)
-    const newPath = join(dir, `${sanitizeForFileName(displayName)}.md`)
+    const oldPath = memorySourcePath(this.projectDir, '地点', existing.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(existing.name)}.md`)
+    const newPath = displayName === existing.name ? oldPath : join(dir, `${sanitizeForFileName(displayName)}.md`)
     const merged: MemoryEntity = {
       ...existing,
       ...patch,
@@ -75,11 +82,10 @@ export class LocationRepo {
   }
 
   async delete(id: string): Promise<void> {
-    const all = await this.list()
-    const target = all.find((e) => e.id === id)
+    const target = await this.get(id)
     if (!target) return
     const dir = join(this.projectDir, '记忆', '地点')
-    try { await fs.unlink(join(dir, `${sanitizeForFileName(target.name)}.md`)) } catch { /* ignore */ }
+    try { await fs.unlink(memorySourcePath(this.projectDir, '地点', target.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(target.name)}.md`)) } catch { /* ignore */ }
     if (target.name !== sanitizeForFileName(target.name)) {
       try { await fs.unlink(join(dir, `${target.name}.md`)) } catch { /* ignore */ }
     }

@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs'
+import { readMemoryText as readText } from './repository-cache'
 import { join, relative, resolve } from 'path'
 import {
-  readText,
   parseDoc,
   parseTable,
   parseBoldFields,
@@ -60,6 +60,7 @@ function assertWithinMemory(absTgt: string, projectDir: string): void {
 /** 原子写入 + 路径校验：先校验落在 记忆/ 内，再用 writeTextAtomic 落盘（防半截文件）。 */
 async function safeWrite(absTgt: string, content: string, projectDir: string): Promise<void> {
   assertWithinMemory(absTgt, projectDir)
+  if (await readText(absTgt) === content) return
   await writeTextAtomic(absTgt, content)
 }
 
@@ -493,7 +494,11 @@ export class MemorySyncService {
       `- ${report.finishedAt || new Date().toISOString()}：新增 ${report.added}，更新 ${report.updated}，删除 ${report.removed}，冲突 ${report.conflicts}`,
       ''
     ]
-    await safeWrite(join(this.projectDir, '记忆', '索引.md'), lines.join('\n'), this.projectDir)
+    const file = join(this.projectDir, '记忆', '索引.md')
+    const content = lines.join('\n')
+    if (!report.added && !report.updated && !report.removed && !report.conflicts &&
+        (await readText(file)).split('## 最近同步')[0] === content.split('## 最近同步')[0]) return
+    await safeWrite(file, content, this.projectDir)
   }
 
   private async countEntities(): Promise<{
@@ -514,16 +519,10 @@ export class MemorySyncService {
         return 0
       }
     }
-    return {
-      characters: await cnt('人物'),
-      locations: await cnt('地点'),
-      worldview: await cnt('世界观'),
-      timeline: await cnt('时间线'),
-      plotPoints: await cnt('剧情点'),
-      relationships: await cnt('关系'),
-      foreshadowings: await cnt('伏笔'),
-      items: await cnt('道具')
-    }
+    const [characters, locations, worldview, timeline, plotPoints, relationships, foreshadowings, items] = await Promise.all(
+      ['人物', '地点', '世界观', '时间线', '剧情点', '关系', '伏笔', '道具'].map(cnt)
+    )
+    return { characters, locations, worldview, timeline, plotPoints, relationships, foreshadowings, items }
   }
 
   // ===== helpers =====

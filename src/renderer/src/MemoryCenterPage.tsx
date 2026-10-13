@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import type { MemoryEntityType, Character, Foreshadowing, Relationship } from '../../shared/types'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { MemoryEntityType } from '../../shared/types'
 
 interface Props {
   projectId: string
@@ -45,26 +45,36 @@ export default function MemoryCenterPage({
     | { kind: 'error'; message: string }
   >({ kind: 'idle' })
 
-  const refresh = () => {
-    void window.api.listCharacters(projectId).then((c: Character[]) => setCharacterCount(c.length))
-    void window.api.listForeshadowings(projectId).then((f: Foreshadowing[]) => {
-      setForeshadowingCount(f.length)
-      setPendingForeshadowing(f.filter((x) => x.status !== 'collected' && x.status !== 'missed').length)
-    })
-    void window.api.listRelationships(projectId).then((r: Relationship[]) => setRelationshipCount(r.length))
-    void Promise.all(
-      ENTITIES.map((e) =>
-        window.api.listMemoryEntities(projectId, e.type).then((list) => [e.type, list.length] as const)
-      )
-    ).then((entries) => {
-      setCounts(Object.fromEntries(entries))
-    })
-  }
+  const refreshSequence = useRef({ value: 0 })
+  const refresh = useCallback(async () => {
+    const tracker = refreshSequence.current
+    const sequence = ++tracker.value
+    try {
+      const statistics = await window.api.getMemoryStatistics(projectId)
+      if (sequence !== tracker.value) return
+      setCharacterCount(statistics.counts.character)
+      setForeshadowingCount(statistics.counts.foreshadowing)
+      setPendingForeshadowing(statistics.pendingForeshadowing)
+      setRelationshipCount(statistics.counts.relationship)
+      setCounts(statistics.counts)
+    } catch (error) {
+      if (sequence === tracker.value) {
+        setSyncStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }, [projectId])
 
   useEffect(() => {
-    refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId 触发；refresh 每次渲染都是新引用
-  }, [projectId])
+    const tracker = refreshSequence.current
+    void refresh()
+    const unsubscribe = window.api.onProjectFilesChanged(event => {
+      if (event.projectId === projectId && ['memory', 'characters', 'outline'].includes(event.kind)) void refresh()
+    })
+    return () => {
+      tracker.value++
+      unsubscribe()
+    }
+  }, [projectId, refresh])
 
   const onSync = async () => {
     setSyncStatus({ kind: 'running' })

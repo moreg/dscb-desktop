@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   forceSimulation,
@@ -183,7 +183,7 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
   const transformRef = useRef({ x: 0, y: 0, k: 1 })
   const [zoomTick, setZoomTick] = useState(0)
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     setLoading(true)
     void Promise.all([
       window.api.listRelationships(projectId),
@@ -195,9 +195,14 @@ export default function RelationshipPage({ projectId, onOpenChapter, onOpenChara
       setChapters(chs)
       setLoading(false)
     })
-  }
+  }, [projectId])
 
-  useEffect(refresh, [projectId])
+  useEffect(() => {
+    refresh()
+    return window.api.onProjectFilesChanged(event => {
+      if (event.projectId === projectId && ['memory', 'characters'].includes(event.kind)) refresh()
+    })
+  }, [projectId, refresh])
 
   const factionOf = (c: Character): string => {
     const bucket = c.role

@@ -1,6 +1,7 @@
+import { cachedMemoryList, findMemoryEntity, readMemoryDocuments, readMemoryText as readText, memorySourcePath } from './repository-cache'
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc } from '../skill-format/md-parser'
+import { parseDoc } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
 import { listMdFilesDeep, extractEntityNameFromDoc, sanitizeForFileName, hashName } from './entity-helpers'
 import type { MemoryEntity, CreateMemoryEntityInput, UpdateMemoryEntityInput } from '../../../shared/types'
@@ -12,13 +13,20 @@ export class WorldviewRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<MemoryEntity[]> {
+    return cachedMemoryList(this.projectDir, 'worldview', () => this.load())
+  }
+
+  async get(id: string): Promise<MemoryEntity | null> {
+    return findMemoryEntity(this.projectDir, 'worldview', () => this.load(), id)
+  }
+
+  private async load(): Promise<MemoryEntity[]> {
     const seen = new Map<string, MemoryEntity>()
     const now = new Date().toISOString()
 
-    for (const relPath of await listMdFilesDeep(join(this.projectDir, '记忆', '世界观'))) {
-      const text = await readText(join(this.projectDir, '记忆', '世界观', relPath))
+    const root = join(this.projectDir, '记忆', '世界观')
+    for (const { path: relPath, text, doc } of await readMemoryDocuments(root, await listMdFilesDeep(root))) {
       if (!text) continue
-      const doc = parseDoc(text)
       const name = extractEntityNameFromDoc(doc, relPath)
       if (!name || seen.has(name)) continue
       seen.set(name, this.shapeEntity(doc, name, `记忆/世界观/${relPath}`, now))
@@ -32,11 +40,8 @@ export class WorldviewRepo {
     } catch {
       files = []
     }
-    for (const f of files.sort()) {
-      if (!f.endsWith('.md')) continue
-      const text = await readText(join(dir, f))
+    for (const { path: f, text, doc } of await readMemoryDocuments(dir, files.filter(file => file.endsWith('.md')).sort())) {
       if (!text) continue
-      const doc = parseDoc(text)
       const name = extractEntityNameFromDoc(doc, f)
       if (!name || seen.has(name)) continue
       seen.set(name, this.shapeEntity(doc, name, `设定/世界观/${f}`, now))
@@ -82,11 +87,11 @@ export class WorldviewRepo {
   }
 
   async update(id: string, patch: UpdateMemoryEntityInput): Promise<MemoryEntity | null> {
-    const all = await this.list()
-    const existing = all.find((e) => e.id === id)
+    const existing = await this.get(id)
     if (!existing) return null
     const dir = join(this.projectDir, '记忆', '世界观')
     const oldName = existing.name
+    const oldPath = memorySourcePath(this.projectDir, '世界观', existing.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(oldName)}.md`)
     const newName = patch.name ? sanitizeForFileName(patch.name) : existing.name
     const merged: MemoryEntity = {
       ...existing,
@@ -95,18 +100,18 @@ export class WorldviewRepo {
       type: 'worldview',
       updatedAt: new Date().toISOString()
     }
-    await writeTextAtomic(join(dir, `${newName}.md`), this.serializeEntity(merged, merged.updatedAt))
+    const newPath = newName === oldName ? oldPath : join(dir, `${sanitizeForFileName(newName)}.md`)
+    await writeTextAtomic(newPath, this.serializeEntity(merged, merged.updatedAt))
     if (newName !== oldName) {
-      try { await fs.unlink(join(dir, `${oldName}.md`)) } catch { /* ignore */ }
+      try { await fs.unlink(oldPath) } catch { /* ignore */ }
     }
     return merged
   }
 
   async delete(id: string): Promise<void> {
-    const all = await this.list()
-    const target = all.find((e) => e.id === id)
+    const target = await this.get(id)
     if (!target) return
-    try { await fs.unlink(join(this.projectDir, '记忆', '世界观', `${target.name}.md`)) } catch { /* ignore */ }
+    try { await fs.unlink(memorySourcePath(this.projectDir, '世界观', target.sources?.[0]?.path) ?? join(this.projectDir, '记忆', '世界观', `${sanitizeForFileName(target.name)}.md`)) } catch { /* ignore */ }
   }
 
   // ===== helpers =====

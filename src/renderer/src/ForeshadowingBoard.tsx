@@ -63,6 +63,10 @@ export default function ForeshadowingBoard({ projectId, onOpenChapter }: Props) 
     return abandonRefresh
   }, [refresh, abandonRefresh])
 
+  useEffect(() => window.api.onProjectFilesChanged(event => {
+    if (event.projectId === projectId && ['memory', 'prose'].includes(event.kind)) void refresh()
+  }), [projectId, refresh])
+
   const maxChapter = latestWrittenChapter(chapters)
 
   const remove = async (f: Foreshadowing) => {

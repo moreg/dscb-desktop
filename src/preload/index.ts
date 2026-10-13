@@ -14,6 +14,7 @@ import type {
   UpdateCharacterInput,
   CreateChapterVersionInput,
   MemoryEntityType,
+  MemoryStatistics,
   CreateMemoryEntityInput,
   UpdateMemoryEntityInput,
   CreateForeshadowingInput,
@@ -255,6 +256,8 @@ const api = {
     ipcRenderer.invoke('chapters:rollback', id, n, vn),
   listMemoryEntities: (id: string, type: MemoryEntityType) =>
     ipcRenderer.invoke('memory:entity:list', id, type),
+  getMemoryStatistics: (id: string) =>
+    ipcRenderer.invoke('memory:statistics', id) as Promise<MemoryStatistics>,
   createMemoryEntity: (id: string, type: MemoryEntityType, input: CreateMemoryEntityInput) =>
     ipcRenderer.invoke('memory:entity:create', id, type, input),
   updateMemoryEntity: (

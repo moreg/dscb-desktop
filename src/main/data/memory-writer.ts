@@ -510,6 +510,7 @@ export class MemoryWriter {
       else delete ledger.chapters[String(chapter)]
       const ordered = Object.entries(ledger.chapters).sort(([a], [b]) => Number(a) - Number(b))
       const accepted = new Set<string>()
+      const updates: Array<{ id: string; patch: UpdateCharacterInput }> = []
       for (const char of chars) {
         const patch: UpdateCharacterInput = { customFields: {} }
         let dirty = false
@@ -538,8 +539,9 @@ export class MemoryWriter {
             dirty = true
           }
         }
-        if (dirty) await repo.update(char.id, patch)
+        if (dirty) updates.push({ id: char.id, patch })
       }
+      if (updates.length) await repo.updateMany(updates, chars)
       await writeTextAtomic(file, JSON.stringify(ledger, null, 2) + '\n')
       return {
         count: nextChanges.filter((c) => accepted.has(`${c.characterId}:${c.key}`)).length,

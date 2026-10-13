@@ -139,6 +139,9 @@ export default function MemoryEntityPage({ projectId, type, label, onOpenChapter
   useEffect(() => {
     refresh()
     refreshChapters()
+    return window.api.onProjectFilesChanged(event => {
+      if (event.projectId === projectId && ['memory', 'characters', 'outline'].includes(event.kind)) refresh()
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只随 projectId/type 触发；refresh 系函数每次渲染都是新引用
   }, [projectId, type])
 

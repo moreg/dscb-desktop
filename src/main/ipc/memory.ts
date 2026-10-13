@@ -4,6 +4,7 @@ import { shell } from 'electron'
 import { MemoryService } from '../data/memory-service'
 import { MemoryEntityService } from '../data/memory-entity-service'
 import { MemorySyncService } from '../data/memory/sync-service'
+import { memorySourcePath, readMemoryText } from '../data/memory/repository-cache'
 import { listMemoryCandidates } from '../data/memory/candidate-repository'
 import { migrateProjectV3ToV4 } from '../data/memory/migration-v3-to-v4'
 import { safeHandle } from './safe-handle'
@@ -26,6 +27,7 @@ export function registerMemoryIpc(
   entityService: MemoryEntityService,
   projectService: ProjectService
 ): void {
+  safeHandle('memory:statistics', (_e, pid: string) => service.getStatistics(pid))
   registerCollectionIpc<CreateCharacterInput, UpdateCharacterInput>('memory:character', {
     list: (pid) => service.listCharacters(pid),
     get: (pid, id) => service.getCharacter(pid, id),
@@ -111,6 +113,20 @@ export function registerMemoryIpc(
       const root = join(dir, '记忆', subDir)
       const relPrefix = `记忆/${subDir}/`
 
+      const entity = type === 'character'
+        ? await service.getCharacter(pid, id)
+        : type === 'relationship'
+          ? (await service.listRelationships(pid)).find(item => item.id === id)
+          : ['location', 'worldview', 'item', 'timeline', 'plot_point'].includes(type)
+            ? (await entityService.list(pid, type as MemoryEntityType)).find(item => item.id === id)
+            : undefined
+      const source = entity?.sources?.[0]?.path
+      const indexedPath = memorySourcePath(dir, subDir, source)
+      if (indexedPath) {
+        const markdown = await readMemoryText(indexedPath)
+        if (markdown) return { markdown, sources: [{ path: source }] }
+      }
+
       // 快速路径：优先按文件名匹配（FB-NNN.md / rel-xxx.md 等），无需读文件内容
       const directFile = `${id}.md`
       try {
@@ -131,7 +147,7 @@ export function registerMemoryIpc(
       for (const f of files) {
         if (!f.endsWith('.md') || f === directFile) continue
         const absPath = join(root, f)
-        const text = await readCached(absPath)
+        const text = await readMemoryText(absPath)
         // 匹配规则：front-matter 整行 `id: <id>`，或文件名恰好为 `<id>.md`
         if (idLineRe.test(text) || f === `${id}.md`) {
           return { markdown: text, sources: [{ path: relPrefix + f }] }
@@ -189,33 +205,4 @@ function subDirForType(type: string): string | null {
     default:
       return null
   }
-}
-
-/**
- * 进程级文件内容缓存：key=绝对路径，value={ mtimeMs, text }。
- * mtime 未变则复用缓存的文本，避免 getDetail 每次枚举目录都重读所有 .md。
- * 用户在 app 内或外部编辑文件后 mtime 推进，下次自动重读。
- * LRU 上限：缓存条目超过 MAX_CACHE_ENTRIES 时按插入顺序淘汰最旧条目，防长期运行内存泄漏。
- */
-const detailCache = new Map<string, { mtimeMs: number; text: string }>()
-const MAX_CACHE_ENTRIES = 500
-
-async function readCached(absPath: string): Promise<string> {
-  let stat
-  try {
-    stat = await fs.stat(absPath)
-  } catch {
-    detailCache.delete(absPath)
-    return ''
-  }
-  const cached = detailCache.get(absPath)
-  if (cached && cached.mtimeMs === stat.mtimeMs) return cached.text
-  const text = await fs.readFile(absPath, 'utf-8')
-  // LRU 淘汰：Map 保持插入顺序，超限时删除最早条目
-  detailCache.set(absPath, { mtimeMs: stat.mtimeMs, text })
-  if (detailCache.size > MAX_CACHE_ENTRIES) {
-    const oldest = detailCache.keys().next().value
-    if (oldest !== undefined) detailCache.delete(oldest)
-  }
-  return text
 }

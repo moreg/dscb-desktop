@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import path from 'path'
 import { randomBytes } from 'crypto'
+import { invalidateMemoryFile } from './memory/repository-cache'
 
 export async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {
@@ -23,6 +24,7 @@ export async function writeJsonAtomic(file: string, data: unknown): Promise<void
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8')
   await fs.rename(tmp, file)
+  invalidateMemoryFile(file)
 }
 
 /**
@@ -35,4 +37,5 @@ export async function writeTextAtomic(file: string, text: string): Promise<void>
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   await fs.writeFile(tmp, text, 'utf-8')
   await fs.rename(tmp, file)
+  invalidateMemoryFile(file)
 }

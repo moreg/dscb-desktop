@@ -1,7 +1,7 @@
+import { cachedMemoryList, readMemoryDocuments, readMemoryText as readText } from './repository-cache'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import {
-  readText,
   parseDoc,
   parseBoldFields,
   fieldToStr
@@ -153,14 +153,16 @@ export class PlotPointRepo {
   static invalidateCache(_projectDir?: string): void { /* Compatibility: summaries now read source evidence every time. */ }
 
   async list(): Promise<MemoryEntity[]> {
+    return cachedMemoryList(this.projectDir, 'plot_point', () => this.load())
+  }
+
+  private async load(): Promise<MemoryEntity[]> {
     const seen = new Map<number, MemoryEntity>()
     const now = new Date().toISOString()
 
     const plotDir = join(this.projectDir, '记忆', '剧情点')
-    for (const name of await listPlotFileNames(plotDir)) {
-      const text = await readText(join(plotDir, name))
+    for (const { path: name, text, doc } of await readMemoryDocuments(plotDir, await listPlotFileNames(plotDir))) {
       if (!text) continue
-      const doc = parseDoc(text)
       const entityName = extractEntityNameFromDoc(doc, name)
       const num =
         extractChapterNumFromName(entityName) ?? extractChapterNumFromName(name)

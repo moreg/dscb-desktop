@@ -1,5 +1,6 @@
+import { cachedMemoryList, readMemoryText as readText } from './repository-cache'
 import { join } from 'path'
-import { readText, parseDoc, parseTable } from '../skill-format/md-parser'
+import { parseDoc, parseTable } from '../skill-format/md-parser'
 import { hashName } from './entity-helpers'
 import type { MemoryEntity } from '../../../shared/types'
 
@@ -48,6 +49,10 @@ export class TimelineRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<MemoryEntity[]> {
+    return cachedMemoryList(this.projectDir, 'timeline', () => this.load())
+  }
+
+  private async load(): Promise<MemoryEntity[]> {
     const text = await readText(join(this.projectDir, '追踪', '时间线.md'))
     if (!text) return []
     const { headers, rows } = parseTimelineTable(text)

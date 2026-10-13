@@ -457,7 +457,7 @@ export interface ReviewRulesBundle {
   config: ReviewRulesConfig
 }
 
-export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose'
+export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' | 'memory'
 
 /**
  * 可取消的流式 IPC 句柄：可 await 完成结果，也可用 requestId / abort 中途打断。
@@ -672,6 +672,7 @@ export interface RendererApi {
   deleteChapterVersion: (projectId: string, n: number, vn: number) => Promise<void>
   rollbackChapter: (projectId: string, n: number, vn: number) => Promise<ChapterMeta>
   listMemoryEntities: (projectId: string, type: MemoryEntityType) => Promise<MemoryEntity[]>
+  getMemoryStatistics: (projectId: string) => Promise<MemoryStatistics>
   createMemoryEntity: (
     projectId: string,
     type: MemoryEntityType,
@@ -1413,6 +1414,11 @@ export interface CreateChapterVersionInput {
 }
 
 export type MemoryEntityType = 'location' | 'worldview' | 'timeline' | 'plot_point' | 'item'
+
+export interface MemoryStatistics {
+  counts: Record<MemoryEntityType | 'character' | 'relationship' | 'foreshadowing', number>
+  pendingForeshadowing: number
+}
 
 /**
  * 追踪视图（来自 `追踪/` 目录的聚合展示数据）。

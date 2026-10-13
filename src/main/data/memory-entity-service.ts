@@ -65,21 +65,21 @@ export class MemoryEntityService {
     const dir = await this.projectService.resolveDir(projectId)
     if (type === 'location') {
       const repo = new LocationRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (!existing) throw new Error(`地点不存在：${id}`)
-      return (await repo.update(id, patch)) ?? existing
+      const updated = await repo.update(id, patch)
+      if (!updated) throw new Error(`地点不存在：${id}`)
+      return updated
     }
     if (type === 'worldview') {
       const repo = new WorldviewRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (!existing) throw new Error(`世界观条目不存在：${id}`)
-      return (await repo.update(id, patch)) ?? existing
+      const updated = await repo.update(id, patch)
+      if (!updated) throw new Error(`世界观条目不存在：${id}`)
+      return updated
     }
     if (type === 'item') {
       const repo = new ItemRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (!existing) throw new Error(`道具不存在：${id}`)
-      return (await repo.update(id, patch)) ?? existing
+      const updated = await repo.update(id, patch)
+      if (!updated) throw new Error(`道具不存在：${id}`)
+      return updated
     }
     throw new Error(NOT_IMPLEMENTED)
   }
@@ -88,20 +88,17 @@ export class MemoryEntityService {
     const dir = await this.projectService.resolveDir(projectId)
     if (type === 'location') {
       const repo = new LocationRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (existing) await repo.delete(id)
+      await repo.delete(id)
       return
     }
     if (type === 'worldview') {
       const repo = new WorldviewRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (existing) await repo.delete(id)
+      await repo.delete(id)
       return
     }
     if (type === 'item') {
       const repo = new ItemRepo(dir)
-      const existing = (await repo.list()).find((e) => e.id === id)
-      if (existing) await repo.delete(id)
+      await repo.delete(id)
       return
     }
     throw new Error(NOT_IMPLEMENTED)

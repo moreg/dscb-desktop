@@ -1,7 +1,9 @@
-import { join } from 'path'
+import { cachedMemoryList, findMemoryEntity, readMemoryDocuments, readMemoryText as readText, memoryFileFingerprint, memorySnapshot, memorySourcePath } from './repository-cache'
+import { join, resolve, relative } from 'path'
 import { promises as fs } from 'fs'
-import { readText, parseDoc, parseBoldFields, parseSubsections, fieldToStr } from '../skill-format/md-parser'
+import { parseDoc, parseBoldFields, parseSubsections, fieldToStr } from '../skill-format/md-parser'
 import { writeTextAtomic } from '../atomic'
+import { withFileLock } from '../file-lock'
 import {
   charId,
   listMdFilesDeep,
@@ -19,14 +21,21 @@ export class CharacterRepo {
   constructor(private readonly projectDir: string) {}
 
   async list(): Promise<Character[]> {
+    return cachedMemoryList(this.projectDir, 'character', () => this.load())
+  }
+
+  async get(id: string): Promise<Character | null> {
+    return findMemoryEntity(this.projectDir, 'character', () => this.load(), id)
+  }
+
+  private async load(): Promise<Character[]> {
     const seen = new Map<string, Character>()
     const now = new Date().toISOString()
 
     // 主源：记忆/人物/*.md
-    for (const relPath of await listMdFilesDeep(join(this.projectDir, '记忆', '人物'))) {
-      const text = await readText(join(this.projectDir, '记忆', '人物', relPath))
+    const root = join(this.projectDir, '记忆', '人物')
+    for (const { path: relPath, text, doc } of await readMemoryDocuments(root, await listMdFilesDeep(root))) {
       if (!text) continue
-      const doc = parseDoc(text)
       const name = extractEntityNameFromDoc(doc, relPath)
       if (!name || seen.has(name)) continue
       seen.set(name, { ...this.parseFromDoc(doc, name, `记忆/人物/${relPath}`), createdAt: now, updatedAt: now })
@@ -40,11 +49,8 @@ export class CharacterRepo {
     } catch {
       files = []
     }
-    for (const f of files.sort()) {
-      if (!f.endsWith('.md')) continue
-      const text = await readText(join(rolesDir, f))
+    for (const { path: f, text, doc } of await readMemoryDocuments(rolesDir, files.filter(file => file.endsWith('.md')).sort())) {
       if (!text) continue
-      const doc = parseDoc(text)
       const name = extractEntityNameFromDoc(doc, f)
       if (!name || seen.has(name)) continue
       seen.set(name, { ...this.parseFromDoc(doc, name, `设定/角色/${f}`), createdAt: now, updatedAt: now })
@@ -60,12 +66,11 @@ export class CharacterRepo {
     return Array.from(seen.values())
   }
 
-  async get(id: string): Promise<Character | null> {
-    const all = await this.list()
-    return all.find((c) => c.id === id) ?? null
+  async create(input: CreateCharacterInput): Promise<Character> {
+    return withFileLock(join(this.projectDir, '记忆', '人物'), () => this.writeCreated(input))
   }
 
-  async create(input: CreateCharacterInput): Promise<Character> {
+  private async writeCreated(input: CreateCharacterInput): Promise<Character> {
     const dir = join(this.projectDir, '记忆', '人物')
     await fs.mkdir(dir, { recursive: true })
     const body = this.serialize(input)
@@ -75,14 +80,52 @@ export class CharacterRepo {
   }
 
   async update(id: string, patch: UpdateCharacterInput): Promise<Character | null> {
-    const all = await this.list()
-    const existing = all.find((c) => c.id === id)
-    if (!existing) return null
+    return withFileLock(join(this.projectDir, '记忆', '人物'), async () => {
+      const existing = await this.get(id)
+      return existing ? this.writeUpdated(existing, patch) : null
+    })
+  }
+
+  async updateMany(updates: Array<{ id: string; patch: UpdateCharacterInput }>, expected?: Character[]): Promise<Character[]> {
+    return withFileLock(join(this.projectDir, '记忆', '人物'), async () => {
+      const { entities: characters, fingerprints: sourceFingerprints } = await memorySnapshot(this.projectDir, 'character', () => this.load())
+      const byId = new Map(characters.map(character => [character.id, character]))
+      const expectedById = new Map(expected?.map(character => [character.id, character]))
+      const fingerprints = new Map(characters.map(character => {
+        const file = character.sources?.[0]?.path
+        const absolute = file ? resolve(this.projectDir, file) : ''
+        return [character.id, { file: absolute, fingerprint: sourceFingerprints.get(absolute) }]
+      }))
+      const results: Character[] = []
+      for (const { id, patch } of updates) {
+        const existing = byId.get(id)
+        if (!existing) continue
+        const previous = expectedById.get(id)
+        if (previous && this.serialize(previous) !== this.serialize(existing)) {
+          throw new Error('人物卡已被修改，请重新读取后重试')
+        }
+        const baseline = fingerprints.get(id)!
+        if (!baseline.fingerprint || await memoryFileFingerprint(baseline.file) !== baseline.fingerprint) {
+          throw new Error('人物卡已被修改，请重新读取后重试')
+        }
+        const updated = await this.writeUpdated(existing, patch)
+        results.push(updated)
+        byId.set(id, updated)
+        const file = memorySourcePath(this.projectDir, '人物', existing.sources?.[0]?.path) ?? join(this.projectDir, '记忆', '人物', `${sanitizeForFileName(existing.name)}.md`)
+        const updatedFile = patch.name && patch.name !== existing.name ? join(this.projectDir, '记忆', '人物', `${sanitizeForFileName(patch.name)}.md`) : file
+        updated.sources = [{ path: relative(this.projectDir, updatedFile).replace(/\\/g, '/'), mtime: updated.updatedAt }]
+        fingerprints.set(id, { file: updatedFile, fingerprint: await memoryFileFingerprint(updatedFile) })
+      }
+      return results
+    })
+  }
+
+  private async writeUpdated(existing: Character, patch: UpdateCharacterInput): Promise<Character> {
     const dir = join(this.projectDir, '记忆', '人物')
     // 显示名保留原文；落盘路径始终经 sanitize（与 create 一致）
     const displayName = patch.name ?? existing.name
-    const oldPath = join(dir, `${sanitizeForFileName(existing.name)}.md`)
-    const newPath = join(dir, `${sanitizeForFileName(displayName)}.md`)
+    const oldPath = memorySourcePath(this.projectDir, '人物', existing.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(existing.name)}.md`)
+    const newPath = displayName === existing.name ? oldPath : join(dir, `${sanitizeForFileName(displayName)}.md`)
     // customFields 浅合并：patch 里的 key 覆盖原值，未列出的 key 保留
     const mergedCustomFields = patch.customFields
       ? { ...(existing.customFields ?? {}), ...patch.customFields }
@@ -107,11 +150,14 @@ export class CharacterRepo {
   }
 
   async delete(id: string): Promise<void> {
-    const all = await this.list()
-    const target = all.find((c) => c.id === id)
+    return withFileLock(join(this.projectDir, '记忆', '人物'), () => this.deleteExisting(id))
+  }
+
+  private async deleteExisting(id: string): Promise<void> {
+    const target = await this.get(id)
     if (!target) return
     const dir = join(this.projectDir, '记忆', '人物')
-    try { await fs.unlink(join(dir, `${sanitizeForFileName(target.name)}.md`)) } catch { /* ignore */ }
+    try { await fs.unlink(memorySourcePath(this.projectDir, '人物', target.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(target.name)}.md`)) } catch { /* ignore */ }
     if (target.name !== sanitizeForFileName(target.name)) {
       try { await fs.unlink(join(dir, `${target.name}.md`)) } catch { /* ignore */ }
     }

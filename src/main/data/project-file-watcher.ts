@@ -2,8 +2,9 @@ import { watch, type FSWatcher } from 'fs'
 import { sep } from 'path'
 import type { BrowserWindow } from 'electron'
 import { safeSend } from '../ipc/safe-handle'
+import { invalidateMemoryFile } from './memory/repository-cache'
 
-export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose'
+export type FileChangeKind = 'outline' | 'rhythm' | 'progress' | 'characters' | 'prose' | 'memory'
 
 export interface FileChangeEvent {
   projectId: string
@@ -43,6 +44,7 @@ export class ProjectFileWatcher {
     try {
       this.watcher = watch(dir, { recursive: true }, (_event, filename) => {
         if (!filename) return
+        invalidateMemoryFile(dir + sep + filename)
         const kind = classifyChange(filename)
         if (!kind) return
         this.scheduleNotify(kind)
@@ -106,13 +108,15 @@ function classifyChange(filename: string): FileChangeKind | null {
   // 章节进度笔记
   if (norm === '记忆系统/章节进度.md') return 'progress'
   // 角色卡（旧格式单文件 + 新格式每角色一文件）
-  if (norm === '记忆系统/角色卡.md' || norm.startsWith('设定/角色/')) {
+  if (norm === '记忆系统/角色卡.md' || norm.startsWith('设定/角色/') || norm.startsWith('记忆/人物/')) {
     return 'characters'
   }
   // 细纲
   if (norm.startsWith('细纲/') && norm.endsWith('.md')) return 'outline'
   // 正文
   if (norm.startsWith('正文/') && norm.endsWith('.md')) return 'prose'
+
+  if (/^(记忆|追踪|设定|记忆系统)\//.test(norm) && norm.endsWith('.md')) return 'memory'
 
   return null
 }

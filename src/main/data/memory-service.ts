@@ -1,9 +1,16 @@
 import { CharacterRepo } from './memory/character-repo'
 import { RelationshipRepo } from './memory/relationship-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
+import { cachedMemoryList } from './memory/repository-cache'
+import { LocationRepo } from './memory/location-repo'
+import { WorldviewRepo } from './memory/worldview-repo'
+import { TimelineRepo } from './memory/timeline-repo'
+import { PlotPointRepo } from './memory/plot-point-repo'
+import { ItemRepo } from './memory/item-repo'
 import type { ProjectService } from './project-service'
 import type {
   Character,
+  MemoryStatistics,
   CreateCharacterInput,
   UpdateCharacterInput,
   HistoryEntry,
@@ -25,6 +32,37 @@ import type {
 export class MemoryService {
   constructor(private readonly projectService: ProjectService) {}
 
+  async getStatistics(projectId: string): Promise<MemoryStatistics> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const [statistics] = await cachedMemoryList(dir, 'statistics', async () => {
+      const [characters, relationships, foreshadowings, locations, worldview, timeline, plotPoints, items] = await Promise.all([
+        new CharacterRepo(dir).list(),
+        new RelationshipRepo(dir).list(),
+        new ForeshadowingMdRepo(dir).list(),
+        new LocationRepo(dir).list(),
+        new WorldviewRepo(dir).list(),
+        new TimelineRepo(dir).list(),
+        new PlotPointRepo(dir).list(),
+        new ItemRepo(dir).list()
+      ])
+      return [{
+        id: 'statistics',
+        counts: {
+          character: characters.length,
+          relationship: relationships.length,
+          foreshadowing: foreshadowings.length,
+          location: locations.length,
+          worldview: worldview.length,
+          timeline: timeline.length,
+          plot_point: plotPoints.length,
+          item: items.length
+        },
+        pendingForeshadowing: foreshadowings.filter(item => item.status !== 'collected' && item.status !== 'missed').length
+      }]
+    })
+    return { counts: statistics.counts, pendingForeshadowing: statistics.pendingForeshadowing }
+  }
+
   // ===== 角色 =====
   async listCharacters(projectId: string): Promise<Character[]> {
     const dir = await this.projectService.resolveDir(projectId)
@@ -32,8 +70,8 @@ export class MemoryService {
   }
 
   async getCharacter(projectId: string, id: string): Promise<Character | null> {
-    const list = await this.listCharacters(projectId)
-    return list.find((c) => c.id === id) ?? null
+    const dir = await this.projectService.resolveDir(projectId)
+    return new CharacterRepo(dir).get(id)
   }
 
   async createCharacter(projectId: string, input: CreateCharacterInput): Promise<Character> {
