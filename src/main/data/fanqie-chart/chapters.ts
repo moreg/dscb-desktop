@@ -11,6 +11,7 @@ import type {
   FanqieMultiBookProgress
 } from '../../../shared/fanqie-chart'
 import { readJson, writeJsonAtomic } from '../atomic'
+import { memoryFileFingerprint } from '../memory/repository-cache'
 import { decryptPrivateChars } from './glyph-match'
 import { correctTitle, extractFontUrls, fixCoverUrl, formatReadCount, restoreText } from './parse'
 
@@ -90,6 +91,8 @@ async function requestBytes(url: string, referer?: string, signal?: AbortSignal)
 }
 
 export class FanqieChapterScraper {
+  private readonly openingSnapshots = new Map<string, { detailRevision: string; chapterIds: string[]; revisions: string[]; revision: string; chapters: FanqieChapterContent[]; bytes: number }>()
+  private readonly openingRevisions = new WeakMap<FanqieChapterContent[], string>()
   constructor(private readonly userData: string) {}
 
   private booksDir(): string {
@@ -141,15 +144,53 @@ export class FanqieChapterScraper {
 
   /** 只读取目录前三章的有效本地正文，分析时不发起网络抓取。 */
   async readCachedOpening(bookId: string): Promise<FanqieChapterContent[]> {
-    const detail = await readJson<FanqieBookDetail | null>(this.detailFile(bookId), null)
+    const detailRevision = await memoryFileFingerprint(this.detailFile(bookId))
+    const previous = this.openingSnapshots.get(bookId)
+    const chapterIds = previous?.detailRevision === detailRevision ? previous.chapterIds :
+      (await readJson<FanqieBookDetail | null>(this.detailFile(bookId), null))?.chapters.slice(0, 3).map(chapter => chapter.id) ?? []
+    const revisions = await Promise.all(chapterIds.map(id => memoryFileFingerprint(this.chapterFile(bookId, id))))
+    const revision = JSON.stringify([detailRevision, chapterIds, revisions])
+    if (previous?.revision === revision) {
+      this.openingSnapshots.delete(bookId)
+      this.openingSnapshots.set(bookId, previous)
+      const result = structuredClone(previous.chapters)
+      this.openingRevisions.set(result, revision)
+      return result
+    }
+    const records = await Promise.all(chapterIds.map((id, index) => {
+      const previousIndex = previous?.chapterIds.indexOf(id) ?? -1
+      if (previousIndex >= 0 && previous!.revisions[previousIndex] === revisions[index]) {
+        return previous!.chapters.find(chapter => chapter.id === id) ?? null
+      }
+      return readJson<FanqieChapterContent | null>(this.chapterFile(bookId, id), null)
+    }))
     const result: FanqieChapterContent[] = []
-    for (const chapter of detail?.chapters.slice(0, 3) ?? []) {
-      const cached = await readJson<FanqieChapterContent | null>(this.chapterFile(bookId, chapter.id), null)
-      if (cached?.bookId === bookId && cached.id === chapter.id && !cached.hasGarbled && cached.content.trim().length > 50) {
-        result.push(cached)
+    for (let index = 0; index < chapterIds.length; index++) {
+      const cached = records[index]
+      const id = chapterIds[index]
+      if (cached?.bookId === bookId && cached.id === id && !cached.hasGarbled && cached.content.trim().length > 50) {
+        result.push(structuredClone(cached))
       }
     }
+    const after = JSON.stringify([
+      await memoryFileFingerprint(this.detailFile(bookId)), chapterIds,
+      await Promise.all(chapterIds.map(id => memoryFileFingerprint(this.chapterFile(bookId, id))))
+    ])
+    if (after === revision) {
+      const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8')
+      this.openingRevisions.set(result, revision)
+      if (bytes <= 16 * 1024 * 1024) {
+        this.openingSnapshots.set(bookId, { detailRevision, chapterIds, revisions, revision, chapters: structuredClone(result), bytes })
+        while (this.openingSnapshots.size > 128 || [...this.openingSnapshots.values()].reduce((total, snapshot) => total + snapshot.bytes, 0) > 16 * 1024 * 1024) {
+          this.openingSnapshots.delete(this.openingSnapshots.keys().next().value!)
+        }
+      }
+    } else this.openingSnapshots.delete(bookId)
     return result
+  }
+
+  openingRevision(chapters: FanqieChapterContent[]): string | undefined {
+    return this.openingRevisions.get(chapters)
   }
 
   async listCachedChapterIds(bookId: string): Promise<string[]> {

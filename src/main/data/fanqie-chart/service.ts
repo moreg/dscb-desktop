@@ -21,7 +21,10 @@ import {
   parseFanqieChartType
 } from '../../../shared/fanqie-chart'
 import { readJson, writeJsonAtomic } from '../atomic'
-import type { LlmService } from '../llm-service'
+import { withFileLock } from '../file-lock'
+import { AsyncLimiter } from '../async-limiter'
+import { mapMemoryFiles } from '../memory/repository-cache'
+import type { LlmService, GenerateOptions } from '../llm-service'
 import { prepareBooks, sourceHash, tagStatistics, validateInsights, validateGoldenThreeSummary } from './analysis'
 import { decryptPrivateChars } from './glyph-match'
 import {
@@ -55,7 +58,8 @@ export interface ChartProgress {
 }
 
 export class FanqieChartService {
-  private tail: Promise<unknown> = Promise.resolve()
+  private readonly modelLimiter = new AsyncLimiter(2)
+  private readonly analysisRevisions = new Map<string, { revision: string; sourceHash: string }>()
   readonly chapterScraper: FanqieChapterScraper
 
   constructor(
@@ -125,17 +129,16 @@ export class FanqieChartService {
     return path.join(this.root(), `${fanqieChartKey(chartType)}.json`)
   }
 
-  private enqueue<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(work, work)
-    this.tail = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
+  private enqueue<Value>(chartType: string, work: () => Promise<Value>): Promise<Value> {
+    return withFileLock(this.fileOf(chartType), work)
+  }
+
+  private generate(prompt: string, options: GenerateOptions): Promise<string> {
+    return this.modelLimiter.run(() => this.llm.generateStream(prompt, options), options.signal)
   }
 
   list(): Promise<FanqieChartRecord[]> {
-    return this.enqueue(() => this.readAll())
+    return this.readAll()
   }
 
   async readAll(): Promise<FanqieChartRecord[]> {
@@ -155,7 +158,6 @@ export class FanqieChartService {
           const note = await this.chapterScraper.inspectOpeningCache(record.books)
           if (note !== record.chapterFetchNote) {
             record.chapterFetchNote = note
-            await writeJsonAtomic(path.join(this.root(), name), record)
           }
         }
         records.push(record)
@@ -166,13 +168,13 @@ export class FanqieChartService {
 
   delete(chartType: string): Promise<void> {
     parseFanqieChartType(chartType)
-    return this.enqueue(async () => {
+    return this.enqueue(chartType, async () => {
       await fs.rm(this.fileOf(chartType), { force: true })
     })
   }
 
   fetch(chartType: string, force: boolean, onProgress?: ChartProgress): Promise<FanqieChartRecord> {
-    return this.enqueue(async () => {
+    return this.enqueue(chartType, async () => {
       const record = await this.fetchUnqueued(chartType, force, onProgress)
       let chapterFetchNote = ''
       try {
@@ -283,7 +285,7 @@ export class FanqieChartService {
     onProgress?: ChartProgress,
     signal?: AbortSignal
   ): Promise<FanqieChartRecord> {
-    return this.enqueue(() => this.analyzeUnqueued(chartType, force, onProgress, signal))
+    return this.enqueue(chartType, () => this.analyzeUnqueued(chartType, force, onProgress, signal))
   }
 
   private async analyzeUnqueued(
@@ -293,15 +295,37 @@ export class FanqieChartService {
     signal?: AbortSignal
   ): Promise<FanqieChartRecord> {
     const record = await this.requireRecord(chartType)
-    const openingChapters: FanqieChapterContent[] = []
-    for (const book of prepareBooks(record.books)) {
+    if (signal?.aborted) throw new Error('分析已取消')
+    const callerSignal = signal
+    const controller = new AbortController()
+    signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal
+    const openings = await mapMemoryFiles(prepareBooks(record.books), async book => {
       if (signal?.aborted) throw new Error('分析已取消')
-      openingChapters.push(...await this.chapterScraper.readCachedOpening(book.id))
+      const chapters = await this.chapterScraper.readCachedOpening(book.id)
+      return { bookId: book.id, chapters, revision: this.chapterScraper.openingRevision(chapters) }
+    })
+    const marketRevision = sourceHash(record.books)
+    if (signal?.aborted) throw new Error('分析已取消')
+    const openingRevision = openings.every(book => book.revision !== undefined)
+      ? JSON.stringify([marketRevision, openings.map(book => [book.bookId, book.revision])]) : undefined
+    const validated = this.analysisRevisions.get(chartType)
+    if (!force && openingRevision && validated?.revision === openingRevision && validated.sourceHash === record.analysis?.sourceHash &&
+        !record.analysis.inProgress && !record.analysis.retryRequired) return record
+    const openingChapters = openings.flatMap(book => book.chapters)
+    const chaptersByBook = new Map<string, FanqieChapterContent[]>()
+    for (const chapter of openingChapters) {
+      const chapters = chaptersByBook.get(chapter.bookId) ?? []
+      chapters.push(chapter)
+      chaptersByBook.set(chapter.bookId, chapters)
     }
     const hash = createHash('sha256').update(JSON.stringify({
       version: 'opening-parallel-v3', books: sourceHash(record.books),
       chapters: openingChapters.map(ch => ({ bookId: ch.bookId, id: ch.id, title: ch.title, content: ch.content }))
     })).digest('hex')
+    if (openingRevision) {
+      this.analysisRevisions.set(chartType, { revision: openingRevision, sourceHash: hash })
+      while (this.analysisRevisions.size > 100) this.analysisRevisions.delete(this.analysisRevisions.keys().next().value!)
+    }
     const legacyHash = createHash('sha256').update(JSON.stringify({
       version: 'opening-summary-v2', books: sourceHash(record.books),
       chapters: openingChapters.map(ch => ({ bookId: ch.bookId, id: ch.id, title: ch.title, content: ch.content }))
@@ -322,33 +346,38 @@ export class FanqieChartService {
     let insights: FanqieChartInsight[] = record.analysis && (record.analysis.marketSourceHash === marketHash || legacyCurrent)
       ? record.analysis.insights.filter(item => item.dimension !== 'opening_patterns' && item.dimension !== 'golden_three_directions')
       : []
-    if (!insights.length) {
-      onProgress?.('正在分析这期榜单的书目资料')
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const text = await this.llm.generateStream(buildAnalysisPrompt({
-          chartLabel: parsed.chartLabel, category: parsed.categoryLabel, chartDate: record.chartDate,
-          limitations, books: record.books, repairNotes: notes
-        }), {
-          systemPrompt: '只输出 JSON 对象，不要解释。', maxTokens: 8192,
-          meta: { feature: 'fanqieChart' }, signal, strengthOverride: { temperature: 0.2 }
-        })
-        const checked = validateInsights(findJsonObject(text), record.books)
-        insights = checked.insights
-        if (insights.length >= 4 && checked.issues.length === 0) break
-        notes = checked.issues.length ? checked.issues : ['没有解析出带原文依据的结论']
-        if (insights.length >= 4) break
-      }
-    } else onProgress?.('书目资料未变化，复用市场分析')
-    if (!insights.length) throw new Error(notes?.[0] ?? '分析没有得到可用结论')
-    const marketInsights = insights
-    const combineInsights = () => [...marketInsights, ...record.books.flatMap(book => perBook.get(book.bookId) ?? [])]
+    const marketTask = (async () => {
+      if (!insights.length) {
+        onProgress?.('正在分析这期榜单的书目资料')
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const text = await this.generate(buildAnalysisPrompt({
+            chartLabel: parsed.chartLabel, category: parsed.categoryLabel, chartDate: record.chartDate,
+            limitations, books: record.books, repairNotes: notes
+          }), {
+            systemPrompt: '只输出 JSON 对象，不要解释。', maxTokens: 8192,
+            meta: { feature: 'fanqieChart' }, signal, strengthOverride: { temperature: 0.2 }
+          })
+          const checked = validateInsights(findJsonObject(text), record.books)
+          insights = checked.insights
+          if (insights.length >= 4 && checked.issues.length === 0) break
+          notes = checked.issues.length ? checked.issues : ['没有解析出带原文依据的结论']
+          if (insights.length >= 4) break
+        }
+      } else onProgress?.('书目资料未变化，复用市场分析')
+      if (!insights.length) throw new Error(notes?.[0] ?? '分析没有得到可用结论')
+    })().then(() => ({ ok: true as const }), error => {
+      controller.abort()
+      return { ok: false as const, error }
+    })
+    const combineInsights = () => [...insights.filter(item => item.dimension !== 'opening_patterns' && item.dimension !== 'golden_three_directions'), ...record.books.flatMap(book => perBook.get(book.bookId) ?? [])]
+    const statistics = tagStatistics(record.books)
     const makeAnalysis = (summary: FanqieGoldenThreeSummary | null, inProgress: boolean, summarySourceHash?: string): FanqieChartAnalysis => ({
       chartType, category: parsed.categoryLabel, chartDate: record.chartDate, analyzedAt: new Date().toISOString(),
       totalBooks: record.books.length, analyzedBooks: evidence.length, excludedBooks: record.books.length - evidence.length,
       introCount: evidence.filter(book => book.intro).length, readCountCount: evidence.filter(book => /\d/.test(book.readCount)).length,
       taggedCount: evidence.filter(book => book.tags.length).length, isPartial: record.isPartial,
       targetCount: record.targetCount, topN: evidence.filter(book => book.rank != null && book.rank <= 10).length,
-      limitations: [...limitations], tagStatistics: tagStatistics(record.books), insights: combineInsights(),
+      limitations: [...limitations], tagStatistics: statistics, insights: combineInsights(),
       sourceHash: hash, marketSourceHash: marketHash, openingBookCount, openingChapterCount: openingChapters.length,
       goldenThreeSummary: summary, summarySourceHash, inProgress, retryRequired
     })
@@ -362,13 +391,13 @@ export class FanqieChartService {
       return persistTail
     }
     await publish('开始逐本分析，最多同时处理2本书')
-    const targets = record.books.filter(book => openingChapters.some(ch => ch.bookId === book.bookId))
+    const targets = record.books.filter(book => chaptersByBook.has(book.bookId))
     let nextBook = 0
     let completed = 0
     const worker = async () => {
       while (nextBook < targets.length && !signal?.aborted) {
         const book = targets[nextBook++]
-        const chapters = openingChapters.filter(ch => ch.bookId === book.bookId)
+        const chapters = chaptersByBook.get(book.bookId)!
         if (chapters.length < 3) limitations.push(`《${book.title}》仅有${chapters.length}章有效正文，三章建议依据不完整。`)
         const bookHash = createHash('sha256').update(JSON.stringify({ version: 'book-opening-v1',
           title: book.title, genre: book.genre, tags: book.tags,
@@ -395,7 +424,7 @@ export class FanqieChartService {
             onProgress?.(`正在分析《${book.title}》开篇正文（已完成${completed}/${targets.length}）`)
             for (let attempt = 0; attempt < 2; attempt++) {
               if (signal?.aborted) throw new Error('分析已取消')
-              const text = await this.llm.generateStream(buildOpeningAnalysisPrompt(book, chapters, openingNotes), {
+              const text = await this.generate(buildOpeningAnalysisPrompt(book, chapters, openingNotes), {
                 systemPrompt: '只输出 JSON 对象，不要解释。', maxTokens: 6000,
                 meta: { feature: 'fanqieChart' }, signal, strengthOverride: { temperature: 0.2 }
               })
@@ -420,8 +449,13 @@ export class FanqieChartService {
         await publish(`${reused ? '复用缓存' : '分析完成'}：《${book.title}》（${completed}/${targets.length}）`)
       }
     }
-    const workers = await Promise.allSettled(Array.from({ length: Math.min(2, targets.length) }, () => worker()))
+    const [workers, marketOutcome] = await Promise.all([
+      Promise.allSettled(Array.from({ length: Math.min(2, targets.length) }, () => worker())),
+      marketTask
+    ])
     await persistTail
+    if (callerSignal?.aborted) throw new Error('分析已取消')
+    if (!marketOutcome.ok) throw marketOutcome.error
     if (signal?.aborted) throw new Error('分析已取消')
     const failedWorker = workers.find(result => result.status === 'rejected')
     if (failedWorker?.status === 'rejected') throw failedWorker.reason
@@ -444,7 +478,7 @@ export class FanqieChartService {
         let repairNotes: string[] | undefined
         for (let attempt = 0; attempt < 2; attempt++) {
           if (signal?.aborted) throw new Error('分析已取消')
-          const text = await this.llm.generateStream(buildGoldenThreeSummaryPrompt({
+          const text = await this.generate(buildGoldenThreeSummaryPrompt({
             category: parsed.categoryLabel, chartLabel: parsed.chartLabel, books: summaryBooks,
             insights: openingInsights, limitations, repairNotes
           }), {
@@ -493,7 +527,7 @@ export class FanqieChartService {
     signal?: AbortSignal,
     onProgress?: ChartProgress
   ): Promise<FanqieChartRecord> {
-    return this.enqueue(() => this.generateIdeasUnqueued(chartType, ideaCount, focusTags, onToken, signal, onProgress))
+    return this.enqueue(chartType, () => this.generateIdeasUnqueued(chartType, ideaCount, focusTags, onToken, signal, onProgress))
   }
 
   private async generateIdeasUnqueued(
@@ -512,15 +546,17 @@ export class FanqieChartService {
     const parsed = parseFanqieChartType(chartType)
     const count = Math.min(5, Math.max(1, ideaCount))
     const tags = focusTags.map((tag) => tag.trim()).filter(Boolean).slice(0, 8)
-    let ideas: FanqieChartIdea[] = []
+    const ideas: FanqieChartIdea[] = []
     for (let attempt = 0; attempt < 2; attempt++) {
-      const text = await this.llm.generateStream(
+      if (signal?.aborted) throw new Error('脑洞生成已取消')
+      const text = await this.generate(
         buildIdeasPrompt({
           chartLabel: parsed.chartLabel,
           category: parsed.categoryLabel,
           chartDate: record.chartDate,
           books: record.books,
-          ideaCount: count,
+          ideaCount: count - ideas.length,
+          acceptedIdeas: ideas.map(idea => ({ title: idea.title, goldenFinger: idea.goldenFinger, coreConcept: idea.coreConcept, openingHook: idea.openingHook })),
           focusTags: tags,
           goldenThreeSummary: summary,
           repairNotes: attempt ? ['每个脑洞必须包含完整的第一、第二、第三章方向及各章全部六个字段，数量必须满足请求'] : undefined
@@ -534,8 +570,16 @@ export class FanqieChartService {
           strengthOverride: { temperature: 0.7 }
         }
       )
-      ideas = coerceIdeas(findJsonObject(text), record.books, count)
+      if (signal?.aborted) throw new Error('脑洞生成已取消')
+      const candidates = coerceIdeas(findJsonObject(text), record.books, 5)
+      const normalize = (value: string) => value.normalize('NFKC').replace(/[\s\p{P}\p{S}]/gu, '').toLocaleLowerCase()
+      for (const candidate of candidates) {
+        if (ideas.some(idea => normalize(idea.title) === normalize(candidate.title) || normalize(idea.coreConcept) === normalize(candidate.coreConcept))) continue
+        ideas.push(candidate)
+        if (ideas.length === count) break
+      }
       if (ideas.length === count) break
+      onProgress?.(`已保留 ${ideas.length} 个完整脑洞，补生成 ${count - ideas.length} 个`)
     }
     if (ideas.length !== count) throw new Error('脑洞结果缺少完整的前三章写作方向或数量不足，请再生成一次')
     const payload: FanqieChartIdeas = {

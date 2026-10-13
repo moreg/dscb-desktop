@@ -146,6 +146,20 @@ afterEach(() => {
 })
 
 describe('长篇脑洞真实组件事件', () => {
+  it('合并一千个流式片段为一次界面更新，完成时保留全部原文', async () => {
+    const pending = stream()
+    button(brain(), '生成 3 个脑洞').props.onClick()
+    const context = hooks.contexts.get('brain')!
+    const writes = context.writes
+    for (let index = 0; index < 1000; index++) brainstorm.mock.calls[0][1]('片段', false)
+    expect(context.writes).toBe(writes)
+    vi.advanceTimersByTime(40)
+    expect(context.writes).toBe(writes + 1)
+    pending.resolve({ ok: true, ideas: [idea(1), idea(2), idea(3)] })
+    await settled()
+    expect(readLongStoryBrainstormRecovery(key, storage).recovery.raw).toBe('片段'.repeat(1000))
+  })
+
   it('传递方向与合并要求；同一事件周期不能重复生成、采用或收藏', () => {
     seedIdeas(); const adopted = vi.fn().mockReturnValue(true)
     let tree = brain({ requirements: '父层要求', sourceBrief: '现有想法', targetChapters: 300, onAdopt: adopted })

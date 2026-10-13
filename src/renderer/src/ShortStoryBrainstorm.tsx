@@ -1,3 +1,4 @@
+import { createBufferedText } from '../../shared/buffered-text'
 import { useEffect, useRef, useState } from 'react'
 import type { StreamHandleOf } from '../../shared/types'
 import { shortStoryIdeaBrief } from '../../shared/short-story'
@@ -57,6 +58,7 @@ export default function ShortStoryBrainstorm({
   const stoppingRunRef = useRef<number | null>(null)
   const busyRef = useRef(false)
   const timerRef = useRef<number | null>(null)
+  const outputRef = useRef<ReturnType<typeof createBufferedText> | null>(null)
   const busyCallbackRef = useRef(onBusyChange)
   busyCallbackRef.current = onBusyChange
   const generating = state.status === 'generating'
@@ -79,6 +81,7 @@ export default function ShortStoryBrainstorm({
     setState(next)
   }
   function flush(): void {
+    outputRef.current?.flush()
     if (mountedRef.current) setStorageError(!writeShortStoryBrainstormRecovery(activeKeyRef.current, stateRef.current))
   }
   function setBusy(value: boolean): void { busyRef.current = value; busyCallbackRef.current?.(value) }
@@ -93,6 +96,9 @@ export default function ShortStoryBrainstorm({
     setMessage(loaded.recovery.status === 'stopped' && loaded.recovery.raw ? '已恢复上次中断前收到的文本，原有方案仍保留。'
       : loaded.recovery.ideas.length || loaded.recovery.favorites.length ? '已恢复上次的候选、历史与收藏。' : '')
     return () => {
+      outputRef.current?.flush()
+      outputRef.current?.clear()
+      outputRef.current = null
       mountedRef.current = false; runRef.current += 1
       if (timerRef.current !== null) window.clearTimeout(timerRef.current)
       timerRef.current = null
@@ -122,6 +128,12 @@ export default function ShortStoryBrainstorm({
     if (genre.length > 200 || requirements.length > 10000 || sourceBrief.length > 10000) { setError('题材最多 200 字，梗概与写作要求各最多 10000 字，请缩短后生成。'); return }
     if (rewrite?.focus === 'custom' && !rewrite.instruction.trim()) { setError('请填写这次改写的具体要求。'); return }
     const requestRun = ++runRef.current; stoppingRunRef.current = null
+    outputRef.current?.clear()
+    const output = createBufferedText(text => {
+      if (mountedRef.current && runRef.current === requestRun) commit(current => ({ ...current, raw: current.raw + text }))
+    })
+    outputRef.current = output
+    let receiving = true
     const direction = stateRef.current.direction
     const source = signature(genre, requirements, targetWords, sourceBrief, direction)
     const rewriteSnapshot = rewrite ? { idea: { ...rewrite.idea }, focus: rewrite.focus, instruction: rewrite.instruction } : undefined
@@ -135,11 +147,14 @@ export default function ShortStoryBrainstorm({
       const seed = window.crypto.randomUUID()
       const handle = window.api.brainstormShortStory({ genre, requirements, targetWords, sourceBrief, direction,
         excludedIdeas, previousIdeas, rewrite: rewriteSnapshot, variationSeed: seed }, (token, done) => {
-        if (!mountedRef.current || runRef.current !== requestRun) return
-        if (!done && typeof token === 'string' && token) commit(current => ({ ...current, raw: current.raw + token }))
+        if (!receiving || !mountedRef.current || runRef.current !== requestRun) return
+        if (done) { output.flush(); receiving = false }
+        else if (typeof token === 'string' && token) output.push(token)
       })
       handleRef.current = handle
       const result = await handle
+      receiving = false
+      output.flush()
       if (!mountedRef.current || runRef.current !== requestRun) return
       if (result && !result.ok && isAborted(result.error)) { markStopped(); return }
       if (!result?.ok || !validShortStoryBrainstormBatch(result.ideas) || (rewriteSnapshot &&
@@ -161,6 +176,8 @@ export default function ShortStoryBrainstorm({
         setMessage(`已生成 ${ideas.length} 个脑洞。喜欢的方案可以先收藏，也可以直接采用。`)
       }
     } catch (error) {
+      receiving = false
+      output.flush()
       if (!mountedRef.current || runRef.current !== requestRun) return
       if (isAborted(error)) markStopped()
       else { commit(current => ({ ...current, status: 'failed' })); setError(`生成失败，原有方案与收到的文本仍保留：${errorText(error)}`) }
@@ -180,6 +197,7 @@ export default function ShortStoryBrainstorm({
       const result = await handle.abort()
       if (!mountedRef.current || runRef.current !== requestRun || handleRef.current !== handle || !busyRef.current) return
       if (!result.ok) { setError('暂时无法停止生成，请稍后重试。'); return }
+      outputRef.current?.flush()
       runRef.current += 1; handleRef.current = null; stoppingRunRef.current = null
       markStopped(); setStopping(false); setBusy(false); flush()
     } catch (error) { if (mountedRef.current && runRef.current === requestRun) setError(`停止失败：${errorText(error)}`) }

@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'fs/promises'
+import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { FanqieChartService } from '../src/main/data/fanqie-chart/service'
 import { GOLDEN_THREE_STAGES } from '../src/main/data/fanqie-chart/analysis'
-import { writeJsonAtomic } from '../src/main/data/atomic'
+import { readJson, writeJsonAtomic } from '../src/main/data/atomic'
 import type { FanqieChartAnalysis, FanqieChartBook, FanqieChartRecord, FanqieChapterContent } from '../src/shared/fanqie-chart'
 import type { LlmService } from '../src/main/data/llm-service'
 
@@ -46,6 +47,136 @@ async function setup() {
 }
 
 describe('逐本分析缓存与并发', () => {
+  it('returns an unchanged analysis after metadata checks without rereading opening JSON or calling models', async () => {
+    const fixture = await setup()
+    try {
+      for (const book of books) {
+        await writeJsonAtomic(path.join(fixture.dir, 'fanqie-books', book.bookId, 'detail.json'), { chapters: [{ id: '1' }] })
+        await writeJsonAtomic(path.join(fixture.dir, 'fanqie-books', book.bookId, 'chapters', '1.json'), fixture.chapters.get(book.bookId))
+      }
+      const service = new FanqieChartService(fixture.dir, { generateStream: fixture.generateStream } as unknown as LlmService)
+      const original = await service.analyze(chartType, false)
+      fixture.generateStream.mockClear()
+      const reads = vi.spyOn(fs, 'readFile')
+      try {
+        expect(await service.analyze(chartType, false)).toEqual(original)
+        expect(fixture.generateStream).not.toHaveBeenCalled()
+        expect(reads.mock.calls.map(([file]) => String(file))).toEqual([path.join(fixture.dir, 'fanqie-charts', 'new_book_male__261.json')])
+      } finally {
+        reads.mockRestore()
+      }
+      await writeJsonAtomic(path.join(fixture.dir, 'fanqie-books', 'a', 'chapters', '1.json'), {
+        ...fixture.chapters.get('a'), content: fixture.chapters.get('a')!.content + '新的冲突。'
+      })
+      expect((await service.analyze(chartType, false)).analysis?.sourceHash).not.toBe(original.analysis?.sourceHash)
+      expect(fixture.generateStream.mock.calls).toHaveLength(2)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('starts opening analysis before the blocked market model finishes', async () => {
+    const fixture = await setup()
+    let release!: (text: string) => void
+    let marketPrompt = ''
+    let openingStarted = false
+    fixture.generateStream.mockImplementation(async prompt => {
+      if (prompt.includes('书籍ID：')) openingStarted = true
+      if (!prompt.includes('书籍ID：') && !prompt.includes('任务：分类黄金三章汇总')) {
+        marketPrompt = prompt
+        return new Promise<string>(resolve => { release = resolve })
+      }
+      return reply(prompt)
+    })
+    const run = fixture.create().analyze(chartType, false)
+    try {
+      await vi.waitFor(() => expect(openingStarted).toBe(true))
+    } finally {
+      release(reply(marketPrompt))
+      await run
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not block list reads or a different chart behind a running analysis', async () => {
+    const fixture = await setup()
+    const controller = new AbortController()
+    fixture.generateStream.mockImplementation(async (_prompt, options) => new Promise<string>((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new Error('已取消')), { once: true })
+    }))
+    const service = fixture.create()
+    const otherChart = 'new_book_male:262'
+    const record = await readJson<FanqieChartRecord | null>(path.join(fixture.dir, 'fanqie-charts', 'new_book_male__261.json'), null)
+    await writeJsonAtomic(path.join(fixture.dir, 'fanqie-charts', 'new_book_male__262.json'), { ...record, chartType: otherChart })
+    const run = service.analyze(chartType, false, undefined, controller.signal)
+    const stopped = expect(run).rejects.toThrow('分析已取消')
+    let listed = false
+    let deleted = false
+    let listing: Promise<unknown> | undefined
+    let deletion: Promise<unknown> | undefined
+    try {
+      await vi.waitFor(() => expect(fixture.generateStream.mock.calls.length).toBe(2))
+      listing = service.list().then(records => { expect(records.some(record => record.chartType === chartType)).toBe(true); listed = true })
+      deletion = service.delete(otherChart).then(() => { deleted = true })
+      await vi.waitFor(() => { expect(listed).toBe(true); expect(deleted).toBe(true) })
+    } finally {
+      controller.abort()
+      await stopped
+      await Promise.all([listing, deletion])
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('limits model calls across simultaneous charts to two', async () => {
+    const fixture = await setup()
+    const record = await readJson<FanqieChartRecord | null>(path.join(fixture.dir, 'fanqie-charts', 'new_book_male__261.json'), null)
+    await writeJsonAtomic(path.join(fixture.dir, 'fanqie-charts', 'new_book_male__262.json'), { ...record, chartType: 'new_book_male:262' })
+    let active = 0
+    let peak = 0
+    fixture.generateStream.mockImplementation(async prompt => {
+      peak = Math.max(peak, ++active)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      active--
+      return reply(prompt)
+    })
+    try {
+      const service = fixture.create()
+      await Promise.all([service.analyze(chartType, false), service.analyze('new_book_male:262', false)])
+      expect(peak).toBe(2)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps valid ideas and asks the retry only for missing nonduplicate ideas', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      fixture.generateStream.mockClear()
+      const idea = (title: string) => ({
+        title, coreConcept: title + '独有的契约规则', goldenFinger: title + '能力',
+        openingChapters: [1, 2, 3].map(chapter => ({
+          chapter, openingEvent: '债主来访', protagonistAction: '主角行动', conflict: '规则阻力',
+          payoff: '获得回报', endHook: '新问题', summaryApplication: '主动兑现'
+        }))
+      })
+      fixture.generateStream.mockImplementationOnce(async () => JSON.stringify({ ideas: [idea('第一案'), { title: '不完整' }] }))
+        .mockImplementationOnce(async prompt => {
+          expect(prompt).toContain('写 2 个')
+          expect(prompt).toContain('已经保留')
+          expect(prompt).toContain('第一案')
+          return JSON.stringify({ ideas: [idea('第一案'), idea('第二案'), idea('第三案')] })
+        })
+      const record = await service.generateIdeas(chartType, 3, [])
+      expect(fixture.generateStream).toHaveBeenCalledTimes(2)
+      expect(record.ideas?.ideas.map(candidate => candidate.title)).toEqual(['第一案', '第二案', '第三案'])
+      expect(record.ideas?.ideas[0].coreConcept).toBe('第一案独有的契约规则')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   it('限制两本并发，完成一本立即发布，全部完成才汇总', async () => {
     const fixture = await setup()
     try {

@@ -51,6 +51,18 @@ describe('长篇脑洞 IPC', () => {
     expect(activeStreamCount()).toBe(0)
   })
 
+  it('合并同一批次的流式片段，并在完成事件前发送全部原文', async () => {
+    generateStream.mockImplementation(async (_prompt: string, options: GenerateOptions) => {
+      for (const character of output) options.onToken?.(character)
+      return output
+    })
+    await handlers.get('longStory:brainstorm')!(event(), { ...input, requestId })
+    expect(send.mock.calls).toEqual([
+      ['longStory:brainstormToken', { requestId, token: output, done: false }],
+      ['longStory:brainstormToken', { requestId, token: '', done: true }]
+    ])
+  })
+
   it('未指定章数也允许生成', async () => {
     expect(await handlers.get('longStory:brainstorm')!(event(), { ...input, targetChapters: undefined, requestId })).toEqual({ ok: true, ideas })
     expect(generateStream.mock.calls[0][0]).toContain('未指定')

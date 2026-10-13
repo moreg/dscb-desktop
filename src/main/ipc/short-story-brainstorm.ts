@@ -1,3 +1,4 @@
+import { createBufferedText } from '../../shared/buffered-text'
 import { BrowserWindow } from 'electron'
 import { z } from 'zod'
 import type { ShortStoryBrainstormResult } from '../../shared/short-story'
@@ -21,7 +22,12 @@ export function registerShortStoryBrainstormIpc(llm: LlmService): void {
     const win = BrowserWindow.fromWebContents(e.sender)
     const signal = beginStream(input.requestId)
     const cancelOnClose = () => { abortStream(input.requestId) }
+    let finished = false
     e.sender.once('destroyed', cancelOnClose)
+    const output = createBufferedText(token => {
+      safeSend(win, 'shortStory:brainstormToken', { requestId: input.requestId, token, done: false })
+    }, 16)
+    signal.addEventListener('abort', output.flush, { once: true })
     try {
       if (signal.aborted || e.sender.isDestroyed()) return { ok: false, error: 'LLM_ABORTED' }
       const prompt = buildShortStoryBrainstormPrompt(input)
@@ -32,9 +38,9 @@ export function registerShortStoryBrainstormIpc(llm: LlmService): void {
         meta: { feature: prompt.feature },
         signal,
         onToken: token => {
-          if (signal.aborted || !token) return
+          if (signal.aborted || finished || !token) return
           received = true
-          safeSend(win, 'shortStory:brainstormToken', { requestId: input.requestId, token, done: false })
+          output.push(token)
         }
       })
       if (signal.aborted) return { ok: false, error: 'LLM_ABORTED' }
@@ -52,6 +58,10 @@ export function registerShortStoryBrainstormIpc(llm: LlmService): void {
     } catch (err) {
       return { ok: false, error: signal.aborted ? 'LLM_ABORTED' : err instanceof Error ? err.message : String(err) }
     } finally {
+      output.flush()
+      output.clear()
+      signal.removeEventListener('abort', output.flush)
+      finished = true
       safeSend(win, 'shortStory:brainstormToken', { requestId: input.requestId, token: '', done: true })
       e.sender.removeListener('destroyed', cancelOnClose)
       endStream(input.requestId)

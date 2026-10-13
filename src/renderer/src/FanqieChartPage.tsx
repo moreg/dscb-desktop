@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { createBufferedText } from '../../shared/buffered-text'
 import './fanqie-chart.css'
 import {
   FANQIE_CHART_TYPES,
@@ -82,6 +83,7 @@ export default function FanqieChartPage(): ReactElement {
   const [multiBatchProgress, setMultiBatchProgress] = useState<FanqieMultiBookProgress | null>(null)
   const stopAll = useRef(0)
   const task = useRef<StreamHandleOf<FanqieChartRecord> | null>(null)
+  const ideaOutput = useRef<ReturnType<typeof createBufferedText> | null>(null)
 
   const categories = fanqieCategoriesFor(base)
   const chartType = category ? `${base}:${category}` : ''
@@ -122,9 +124,11 @@ export default function FanqieChartPage(): ReactElement {
 
   useEffect(() => {
     void loadCachedSummary()
-  }, [loadCachedSummary, current])
+  }, [loadCachedSummary, current?.books, current?.chapterFetchNote])
 
   useEffect(() => () => {
+    ideaOutput.current?.clear()
+    ideaOutput.current = null
     stopAll.current += 1
     void task.current?.abort()
     void multiBatchTask.current?.abort()
@@ -140,6 +144,8 @@ export default function FanqieChartPage(): ReactElement {
     setSelectedTags([])
     setShowAllTags(false)
     setIdeaPreview('')
+    ideaOutput.current?.clear()
+    ideaOutput.current = null
     setError('')
   }, [chartType])
 
@@ -283,23 +289,30 @@ export default function FanqieChartPage(): ReactElement {
     setBusy('ideas')
     setError('')
     setIdeaPreview('')
+    ideaOutput.current?.clear()
+    const output = createBufferedText(text => {
+      if (ideaOutput.current === output) setIdeaPreview(previous => (previous + text).slice(-4000))
+    })
+    ideaOutput.current = output
     const handle = window.api.generateFanqieChartIdeas(
       { chartType, ideaCount: 3, tags: selectedTags },
       (token) => {
-        if (token) setIdeaPreview((prev) => (prev + token).slice(-4000))
+        if (ideaOutput.current === output && token) output.push(token)
       }
     )
     task.current = handle
     try {
       const record = await handle
+      output.flush()
       setRecords((list) => upsert(list, record))
-      setIdeaPreview('')
+      if (ideaOutput.current === output) setIdeaPreview('')
     } catch (err) {
       const message = explain(err)
       if (message) setError(message)
     } finally {
-      if (task.current === handle) task.current = null
-      setBusy('')
+      output.clear()
+      if (ideaOutput.current === output) ideaOutput.current = null
+      if (task.current === handle) { task.current = null; setBusy('') }
     }
   }
 

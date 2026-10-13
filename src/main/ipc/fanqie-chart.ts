@@ -1,4 +1,5 @@
 import { BrowserWindow, ipcMain } from 'electron'
+import { createBufferedText } from '../../shared/buffered-text'
 import { z } from 'zod'
 import { FanqieChartService } from '../data/fanqie-chart/service'
 import { beginStream, endStream } from '../data/stream-abort-registry'
@@ -103,13 +104,18 @@ export function registerFanqieChartIpc(service: FanqieChartService): void {
     const win = BrowserWindow.fromWebContents(event.sender)
     const validated = validateInput(ideasSchema, payload)
     const signal = beginStream(validated.requestId)
+    const output = createBufferedText(token => {
+      safeSend(win, 'fanqieChart:token', { requestId: validated.requestId, token, done: false })
+    }, 16)
+    let finished = false
+    signal.addEventListener('abort', output.flush, { once: true })
     try {
       return await service.generateIdeas(
         validated.chartType,
         validated.ideaCount ?? 3,
         validated.tags ?? [],
         (token) => {
-          safeSend(win, 'fanqieChart:token', { requestId: validated.requestId, token, done: false })
+          if (!signal.aborted && !finished) output.push(token)
         },
         signal,
         (message, analysis) => {
@@ -119,6 +125,10 @@ export function registerFanqieChartIpc(service: FanqieChartService): void {
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : String(err), { cause: err })
     } finally {
+      output.flush()
+      finished = true
+      output.clear()
+      signal.removeEventListener('abort', output.flush)
       endStream(validated.requestId)
       safeSend(win, 'fanqieChart:token', { requestId: validated.requestId, token: '', done: true })
     }

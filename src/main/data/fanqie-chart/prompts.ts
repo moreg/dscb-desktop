@@ -86,6 +86,7 @@ export function buildIdeasPrompt(input: {
   ideaCount: number
   focusTags: string[]
   goldenThreeSummary: FanqieGoldenThreeSummary
+  acceptedIdeas?: Array<{ title: string; goldenFinger: string; coreConcept: string; openingHook: string }>
   repairNotes?: string[]
 }): string {
   const evidence = prepareBooks(input.books)
@@ -100,7 +101,8 @@ export function buildIdeasPrompt(input: {
 ${focus}
 
 前十在卖什么：
-${JSON.stringify(head.map(publicBook))}
+${JSON.stringify(head.map(book => ({ id: book.id, rank: book.rank })))}
+以上书籍的完整材料见下方全部样本，不重复列出。
 
 标签频次：
 ${JSON.stringify(stats)}
@@ -123,7 +125,8 @@ ${JSON.stringify(input.goldenThreeSummary)}
 
 只输出 JSON，结构：
 {"ideas":[{"titleCandidates":["书名甲","书名乙","书名丙"],"strategy":"fusion","genre":"主类型","hookLine":"一句话梗","goldenFinger":"规则和第一次兑现","fusion":"第二个类型怎样改变回报，单一类型就写新切法","coreConcept":"处境、规则、矛盾","sellingPoint":"读者图什么、第一章兑现什么","protagonist":"姓名、身份、目标和缺点","openingHook":"第一章的行动和当场赢到什么","marketReasoning":"继承了哪类场面，又避开了哪本的组合","readerFit":"相近的阅读偏好","riskNotes":"同质化风险","openingChapters":[{"chapter":1,"openingEvent":"开场事件","protagonistAction":"主角行动","conflict":"具体阻力","payoff":"当章兑现","endHook":"章末钩子","summaryApplication":"汇总机制的具体应用"},{"chapter":2,"openingEvent":"承接前章","protagonistAction":"进一步行动","conflict":"冲突升级","payoff":"升级回报","endHook":"新的问题","summaryApplication":"应用方式"},{"chapter":3,"openingEvent":"引爆冲突","protagonistAction":"关键决断","conflict":"高潮阻力","payoff":"兑现开篇承诺","endHook":"长期循环","summaryApplication":"应用方式"}],"trendBasis":[{"bookId":"真实id","field":"intro","quote":"原文","mechanism":"这本哪一场让人想看下去"}]}]}
-${input.repairNotes?.length ? `上次结果有缺项，请整份重写：${JSON.stringify(input.repairNotes)}` : ''}`
+${input.acceptedIdeas?.length ? `已经保留以下合格方案，只补充本次要求的 ${input.ideaCount} 个新方案，不要重写或重复这些方案的书名、概念和机制：${JSON.stringify(input.acceptedIdeas)}` : ''}
+${input.repairNotes?.length ? `上次结果有缺项，请补全本次新方案：${JSON.stringify(input.repairNotes)}` : ''}`
 }
 
 function publicBook(book: EvidenceBook): Record<string, unknown> {

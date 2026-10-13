@@ -1,3 +1,4 @@
+import { withFileLock } from '../file-lock'
 import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import path from 'path'
@@ -364,42 +365,44 @@ export async function decryptPrivateChars(
   onProgress?: (message: string) => void
 ): Promise<Map<number, string>> {
   const hash = createHash('sha256').update(fontBytes).digest('hex')
-  const memory = mapCache.get(hash)
-  if (memory && chars.every((ch) => memory.has(ch.charCodeAt(0)))) return memory
-  const mapFile = path.join(cacheDir, 'fonts', `${hash}.json`)
-  const saved: Record<string, string> = {}
-  try {
-    Object.assign(saved, JSON.parse(await fs.readFile(mapFile, 'utf8')) as Record<string, string>)
-  } catch {
-    // 这套字体还没对照过。
-  }
-  const missing = chars.filter((ch) => !(String(ch.charCodeAt(0)) in saved))
-  if (missing.length > 0) {
-    const standards = await loadStandardGlyphs(cacheDir, onProgress)
-    const draw = await canvasOf()
-    const family = `fanqie${hash.slice(0, 12)}`
-    if (!loadedFamilies.has(family)) {
-      const fontPath = path.join(cacheDir, 'fonts', `${hash}.woff`)
-      await fs.mkdir(path.dirname(fontPath), { recursive: true })
-      await fs.writeFile(fontPath, fontBytes)
-      fontLibrary?.use(family, [fontPath])
-      loadedFamilies.add(family)
+  return withFileLock(path.join(cacheDir, 'fonts', hash), async () => {
+    const memory = mapCache.get(hash)
+    if (memory && chars.every((ch) => memory.has(ch.charCodeAt(0)))) return memory
+    const mapFile = path.join(cacheDir, 'fonts', `${hash}.json`)
+    const saved: Record<string, string> = {}
+    try {
+      Object.assign(saved, JSON.parse(await fs.readFile(mapFile, 'utf8')) as Record<string, string>)
+    } catch {
+      // 这套字体还没对照过。
     }
-    onProgress?.(`正在还原 ${missing.length} 个加密字`)
-    for (const [index, ch] of missing.entries()) {
-      const code = String(ch.charCodeAt(0))
-      const rendered = renderGlyph(draw, ch, family)
-      saved[code] = rendered ? matchGlyph(rendered, standards) ?? '' : ''
-      if (index > 0 && index % 30 === 0) await new Promise((resolve) => setImmediate(resolve))
+    const missing = chars.filter((ch) => !(String(ch.charCodeAt(0)) in saved))
+    if (missing.length > 0) {
+      const standards = await loadStandardGlyphs(cacheDir, onProgress)
+      const draw = await canvasOf()
+      const family = `fanqie${hash.slice(0, 12)}`
+      if (!loadedFamilies.has(family)) {
+        const fontPath = path.join(cacheDir, 'fonts', `${hash}.woff`)
+        await fs.mkdir(path.dirname(fontPath), { recursive: true })
+        await fs.writeFile(fontPath, fontBytes)
+        fontLibrary?.use(family, [fontPath])
+        loadedFamilies.add(family)
+      }
+      onProgress?.(`正在还原 ${missing.length} 个加密字`)
+      for (const [index, ch] of missing.entries()) {
+        const code = String(ch.charCodeAt(0))
+        const rendered = renderGlyph(draw, ch, family)
+        saved[code] = rendered ? matchGlyph(rendered, standards) ?? '' : ''
+        if (index > 0 && index % 30 === 0) await new Promise((resolve) => setImmediate(resolve))
+      }
+      await fs.mkdir(path.dirname(mapFile), { recursive: true })
+      await fs.writeFile(mapFile, JSON.stringify(saved))
     }
-    await fs.mkdir(path.dirname(mapFile), { recursive: true })
-    await fs.writeFile(mapFile, JSON.stringify(saved))
-  }
-  const map = new Map<number, string>()
-  for (const [code, value] of Object.entries(saved)) {
-    if (value) map.set(Number(code), value)
-    else map.set(Number(code), '')
-  }
-  mapCache.set(hash, map)
-  return map
+    const map = new Map<number, string>()
+    for (const [code, value] of Object.entries(saved)) {
+      if (value) map.set(Number(code), value)
+      else map.set(Number(code), '')
+    }
+    mapCache.set(hash, map)
+    return map
+  })
 }

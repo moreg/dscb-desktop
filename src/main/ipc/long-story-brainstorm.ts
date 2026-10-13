@@ -1,3 +1,4 @@
+import { createBufferedText } from '../../shared/buffered-text'
 import { BrowserWindow } from 'electron'
 import { z } from 'zod'
 import type { LongStoryBrainstormResult } from '../../shared/long-story-brainstorm'
@@ -20,6 +21,10 @@ export function registerLongStoryBrainstormIpc(llm: LlmService): void {
     let receivedText = ''
     let finished = false
     e.sender.once('destroyed', cancelOnClose)
+    const output = createBufferedText(token => {
+      safeSend(win, 'longStory:brainstormToken', { requestId: input.requestId, token, done: false })
+    }, 16)
+    signal.addEventListener('abort', output.flush, { once: true })
     try {
       if (signal.aborted || e.sender.isDestroyed()) return { ok: false, error: 'LLM_ABORTED' }
       const prompt = buildLongStoryBrainstormPrompt(input)
@@ -34,7 +39,7 @@ export function registerLongStoryBrainstormIpc(llm: LlmService): void {
           received = true
           // 超长返回会被解析器拒绝；累计文本同样限长，原文仍按 token 推送给页面。
           receivedText = (receivedText + token).slice(0, 100001)
-          safeSend(win, 'longStory:brainstormToken', { requestId: input.requestId, token, done: false })
+          output.push(token)
         }
       })
       if (signal.aborted) return { ok: false, error: 'LLM_ABORTED' }
@@ -59,6 +64,9 @@ export function registerLongStoryBrainstormIpc(llm: LlmService): void {
       }
       return { ok: false, error: signal.aborted ? 'LLM_ABORTED' : message }
     } finally {
+      output.flush()
+      output.clear()
+      signal.removeEventListener('abort', output.flush)
       finished = true
       safeSend(win, 'longStory:brainstormToken', { requestId: input.requestId, token: '', done: true })
       e.sender.removeListener('destroyed', cancelOnClose)
