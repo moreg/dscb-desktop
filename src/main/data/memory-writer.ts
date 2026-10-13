@@ -509,16 +509,29 @@ export class MemoryWriter {
       if (nextChanges.length) ledger.chapters[String(chapter)] = nextChanges
       else delete ledger.chapters[String(chapter)]
       const ordered = Object.entries(ledger.chapters).sort(([a], [b]) => Number(a) - Number(b))
+      const latestValues = new Map<string, string>()
+      const changesByCharacter = new Map<string, Array<{ chapter: string; change: LedgerStateChange }>>()
+      const fieldsByCharacter = new Map<string, typeof ledger.fields[string][]>()
+      for (const record of Object.values(ledger.fields)) {
+        const records = fieldsByCharacter.get(record.characterId) ?? []
+        records.push(record)
+        fieldsByCharacter.set(record.characterId, records)
+      }
+      for (const [chapter, chapterChanges] of ordered) {
+        for (const change of chapterChanges) {
+          latestValues.set(`${change.characterId}:${change.key}`, change.value)
+          const entries = changesByCharacter.get(change.characterId) ?? []
+          entries.push({ chapter, change })
+          changesByCharacter.set(change.characterId, entries)
+        }
+      }
       const accepted = new Set<string>()
       const updates: Array<{ id: string; patch: UpdateCharacterInput }> = []
       for (const char of chars) {
         const patch: UpdateCharacterInput = { customFields: {} }
         let dirty = false
-        for (const record of Object.values(ledger.fields).filter((r) => r.characterId === char.id)) {
-          let desired = record.baseline
-          for (const [, chapterChanges] of ordered) {
-            for (const change of chapterChanges) if (change.characterId === char.id && change.key === record.field) desired = change.value
-          }
+        for (const record of fieldsByCharacter.get(char.id) ?? []) {
+          const desired = latestValues.get(`${char.id}:${record.field}`) ?? record.baseline
           if (readCharacterField(char, record.field) !== record.lastApplied) continue
           accepted.add(`${char.id}:${record.field}`)
           if (desired !== record.lastApplied) {
@@ -529,9 +542,9 @@ export class MemoryWriter {
         }
         const track = ledger.tracks[char.id]
         if (track && fieldToPlain(char.customFields?.['状态轨迹']) === track.lastApplied) {
-          const entries = ordered.flatMap(([n, chapterChanges]) => chapterChanges
-            .filter((c) => c.characterId === char.id && accepted.has(`${char.id}:${c.key}`))
-            .map((c) => `第${n}章 ${c.field}：${c.value}`))
+          const entries = (changesByCharacter.get(char.id) ?? [])
+            .filter(({ change }) => accepted.has(`${char.id}:${change.key}`))
+            .map(({ chapter, change }) => `第${chapter}章 ${change.field}：${change.value}`)
           const desired = [track.baseline, ...entries].filter(Boolean).join('；')
           if (desired !== track.lastApplied) {
             patch.customFields!['状态轨迹'] = desired
@@ -545,8 +558,8 @@ export class MemoryWriter {
       await writeTextAtomic(file, JSON.stringify(ledger, null, 2) + '\n')
       return {
         count: nextChanges.filter((c) => accepted.has(`${c.characterId}:${c.key}`)).length,
-        fields: new Set(chars.flatMap((char) => Object.values(ledger.fields)
-          .filter((r) => r.characterId === char.id && accepted.has(`${char.id}:${r.field}`))
+        fields: new Set(chars.flatMap((char) => (fieldsByCharacter.get(char.id) ?? [])
+          .filter((r) => accepted.has(`${char.id}:${r.field}`))
           .map((r) => `${char.name}:${r.field}`)))
       }
     })

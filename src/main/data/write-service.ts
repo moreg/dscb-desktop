@@ -3650,200 +3650,242 @@ export class WriteService {
     chapterNumber: number,
     opts?: { needEndingState?: boolean }
   ): Promise<ChapterContext> {
-    // 本章细纲：优先 md，回退 JSON
-    let detail: ChapterDetail | undefined
-    let prevDetail: ChapterDetail | undefined
-    try {
-      const all = await new DetailedOutlineMdRepo(dir).listAll()
-      detail = all.find((d) => d.chapterNumber === chapterNumber)
-      prevDetail = all.find((d) => d.chapterNumber === chapterNumber - 1)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load detailed outline from md:', err)
-      // fall through to JSON fallback
-    }
-    if (!detail) {
+    const detailTask = (async () => {
+      // 本章细纲：优先 md，回退 JSON
+      let detail: ChapterDetail | undefined
+      let prevDetail: ChapterDetail | undefined
       try {
-        const items = await new OutlineRepository(dir).listDetailed()
-        const item = items.find((d) => d.chapterNumber === chapterNumber)
-        if (item) {
-          detail = {
-            chapterNumber,
-            title: '',
-            plotSummary: item.plotSummary,
-            coolPoint: item.coolPoint,
-            charactersAppearing: item.charactersAppearing,
-            foreshadowings: item.foreshadowings,
-            hook: item.hook,
-            wordEstimate: item.wordEstimate,
-            goldenLine: item.goldenLine,
-            volume: item.volume,
-            emotion: item.emotion,
-            climax: item.climax,
-            writingRequirements: composeWritingRequirements(
-              item.writingRequirementTemplateId,
-              item.writingRequirementCustomText,
-              item.writingRequirements
-            ),
-            writingRequirementTemplateId: item.writingRequirementTemplateId,
-            writingRequirementCustomText: item.writingRequirementCustomText
-          }
-        }
+        const repo = new DetailedOutlineMdRepo(dir)
+        const [current, previous] = await Promise.all([
+          repo.readChapter(chapterNumber),
+          chapterNumber > 1 ? repo.readChapter(chapterNumber - 1) : Promise.resolve(null)
+        ])
+        detail = current ?? undefined
+        prevDetail = previous ?? undefined
       } catch (err) {
-        console.warn('[loadChapterContext] Failed to load detailed outline from repository:', err)
-        // detail stays undefined
+        console.warn('[loadChapterContext] Failed to load detailed outline from md:', err)
+        // fall through to JSON fallback
       }
-    }
+      if (!detail) {
+        try {
+          const items = await new OutlineRepository(dir).listDetailed()
+          const item = items.find((d) => d.chapterNumber === chapterNumber)
+          if (item) {
+            detail = {
+              chapterNumber,
+              title: '',
+              plotSummary: item.plotSummary,
+              coolPoint: item.coolPoint,
+              charactersAppearing: item.charactersAppearing,
+              foreshadowings: item.foreshadowings,
+              hook: item.hook,
+              wordEstimate: item.wordEstimate,
+              goldenLine: item.goldenLine,
+              volume: item.volume,
+              emotion: item.emotion,
+              climax: item.climax,
+              writingRequirements: composeWritingRequirements(
+                item.writingRequirementTemplateId,
+                item.writingRequirementCustomText,
+                item.writingRequirements
+              ),
+              writingRequirementTemplateId: item.writingRequirementTemplateId,
+              writingRequirementCustomText: item.writingRequirementCustomText
+            }
+          }
+        } catch (err) {
+          console.warn('[loadChapterContext] Failed to load detailed outline from repository:', err)
+          // detail stays undefined
+        }
+      }
+      return { detail, prevDetail }
+    })()
 
-    // 节奏图谱
-    let rhythmEntry: RhythmEntry | undefined
-    try {
-      const rhythm = await new RhythmHtmlRepo(dir).read()
-      rhythmEntry = rhythm?.find((r) => r.chapter === chapterNumber)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load rhythm data:', err)
-      // skip
-    }
+    const rhythmTask = (async () => {
+      // 节奏图谱
+      let rhythmEntry: RhythmEntry | undefined
+      try {
+        const rhythm = await new RhythmHtmlRepo(dir).read()
+        rhythmEntry = rhythm?.find((r) => r.chapter === chapterNumber)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load rhythm data:', err)
+        // skip
+      }
+      return rhythmEntry
+    })()
 
-    // 总纲 synopsis + 卷结构：优先 OutlineMdRepo（大纲/大纲.md），回退旧 OutlineRepository（outlines/main.json）
-    let mainSynopsis = ''
-    let volumeOutline: VolumeOutline | undefined
-    try {
-      const outlineRead = await new OutlineMdRepo(dir).read()
-      if (outlineRead) {
-        mainSynopsis = outlineRead.main.synopsis ?? ''
-        // 找本章所属卷，加载卷纲文件
-        const vol = outlineRead.volumes.find(
-          (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
-        )
-        if (vol) {
-          volumeOutline = await this.loadVolumeOutline(dir, vol.number)
-          if (volumeOutline) {
-            volumeOutline = {
-              ...volumeOutline,
-              chapterStart: vol.chapterStart,
-              chapterEnd: vol.chapterEnd
+    const outlineTask = (async () => {
+      // 总纲 synopsis + 卷结构：优先 OutlineMdRepo（大纲/大纲.md），回退旧 OutlineRepository（outlines/main.json）
+      let mainSynopsis = ''
+      let volumeOutline: VolumeOutline | undefined
+      try {
+        const outlineRead = await new OutlineMdRepo(dir).read()
+        if (outlineRead) {
+          mainSynopsis = outlineRead.main.synopsis ?? ''
+          // 找本章所属卷，加载卷纲文件
+          const vol = outlineRead.volumes.find(
+            (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
+          )
+          if (vol) {
+            volumeOutline = await this.loadVolumeOutline(dir, vol.number)
+            if (volumeOutline) {
+              volumeOutline = {
+                ...volumeOutline,
+                chapterStart: vol.chapterStart,
+                chapterEnd: vol.chapterEnd
+              }
             }
           }
         }
-      }
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load outline from md:', err)
-      // skip
-    }
-    // 大纲.md 的 synopsis 为空或「（待生成）」占位时，回退读 outlines/main.json（老项目兼容）
-    if (!mainSynopsis || mainSynopsis === '（待生成）') {
-      try {
-        const main = await new OutlineRepository(dir).readMain()
-        const fallback = main?.synopsis ?? ''
-        if (fallback && fallback !== '（待生成）') mainSynopsis = fallback
       } catch (err) {
-        console.warn('[loadChapterContext] Failed to load main outline synopsis:', err)
+        console.warn('[loadChapterContext] Failed to load outline from md:', err)
         // skip
       }
-    }
-
-    // 上一章全文用于续写；末尾片段单独用于结尾状态提取。
-    let prevTail = ''
-    let prevProse = ''
-    if (chapterNumber > 1) {
-      try {
-        const md = await new ProseRepo(dir).read(chapterNumber - 1)
-        if (md) {
-          prevProse = md
-          prevTail = tail(md, PREV_TAIL_CHARS)
+      // 大纲.md 的 synopsis 为空或「（待生成）」占位时，回退读 outlines/main.json（老项目兼容）
+      if (!mainSynopsis || mainSynopsis === '（待生成）') {
+        try {
+          const main = await new OutlineRepository(dir).readMain()
+          const fallback = main?.synopsis ?? ''
+          if (fallback && fallback !== '（待生成）') mainSynopsis = fallback
+        } catch (err) {
+          console.warn('[loadChapterContext] Failed to load main outline synopsis:', err)
+          // skip
         }
-      } catch (err) {
-        console.warn('[loadChapterContext] Failed to load previous chapter prose:', err)
-        // skip
       }
-    }
-    if (opts?.needEndingState && prevProse.length > EXISTING_TEXT_MAX_CHARS) {
-      throw new Error('PREVIOUS_CHAPTER_CONTEXT_TOO_LARGE')
-    }
+      return { mainSynopsis, volumeOutline }
+    })()
 
-    // 角色卡：先 md，回退 JSON
-    let characters: Character[] = []
-    try {
-      const list = await new CharacterRepo(dir).list()
-      if (list.length > 0) characters = list
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load character cards:', err)
-      // skip
-    }
-    if (characters.length === 0) {
+    const previousTask = (async () => {
+      // 上一章全文用于续写；末尾片段单独用于结尾状态提取。
+      let prevTail = ''
+      let prevProse = ''
+      if (chapterNumber > 1) {
+        try {
+          const md = await new ProseRepo(dir).read(chapterNumber - 1)
+          if (md) {
+            prevProse = md
+            prevTail = tail(md, PREV_TAIL_CHARS)
+          }
+        } catch (err) {
+          console.warn('[loadChapterContext] Failed to load previous chapter prose:', err)
+          // skip
+        }
+      }
+      if (opts?.needEndingState && prevProse.length > EXISTING_TEXT_MAX_CHARS) {
+        throw new Error('PREVIOUS_CHAPTER_CONTEXT_TOO_LARGE')
+      }
+
+      // 上一章结尾状态结构化提取（Phase 12 Task 1）
+      // 这是一次完整 LLM 调用，只有写正文的 renderUserPrompt 用得到；
+      // 「按要求重写 / 出建议 / 追问」都不读它，故默认不跑（见 needEndingState）。
+      let prevEndingState: PrevEndingState | undefined
+      if (opts?.needEndingState && prevTail) {
+        prevEndingState = await this.getEndingStateCached(dir, chapterNumber, prevTail)
+      }
+      return { prevTail, prevProse, prevEndingState }
+    })()
+
+    const charactersTask = (async () => {
+      // 角色卡：先 md，回退 JSON
+      let characters: Character[] = []
       try {
-        characters = await new CharacterRepository(dir).list()
+        const list = await new CharacterRepo(dir).list()
+        if (list.length > 0) characters = list
       } catch (err) {
-        console.warn('[loadChapterContext] Failed to load characters from repository:', err)
+        console.warn('[loadChapterContext] Failed to load character cards:', err)
         // skip
       }
-    }
+      if (characters.length === 0) {
+        try {
+          characters = await new CharacterRepository(dir).list()
+        } catch (err) {
+          console.warn('[loadChapterContext] Failed to load characters from repository:', err)
+          // skip
+        }
+      }
+      return characters
+    })()
 
-    // 伏笔：先 md，回退 JSON
-    let foreshadowings: Foreshadowing[] = []
-    try {
-      const list = await new ForeshadowingMdRepo(dir).list()
-      if (list.length > 0) foreshadowings = list
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load foreshadowing cards:', err)
-      // skip
-    }
-    if (foreshadowings.length === 0) {
+    const foreshadowingsTask = (async () => {
+      // 伏笔：先 md，回退 JSON
+      let foreshadowings: Foreshadowing[] = []
       try {
-        foreshadowings = await new ForeshadowingRepository(dir).list()
+        const list = await new ForeshadowingMdRepo(dir).list()
+        if (list.length > 0) foreshadowings = list
       } catch (err) {
-        console.warn('[loadChapterContext] Failed to load foreshadowings from repository:', err)
+        console.warn('[loadChapterContext] Failed to load foreshadowing cards:', err)
         // skip
       }
-    }
+      if (foreshadowings.length === 0) {
+        try {
+          foreshadowings = await new ForeshadowingRepository(dir).list()
+        } catch (err) {
+          console.warn('[loadChapterContext] Failed to load foreshadowings from repository:', err)
+          // skip
+        }
+      }
+      return foreshadowings
+    })()
 
-    // 上一章结尾状态结构化提取（Phase 12 Task 1）
-    // 这是一次完整 LLM 调用，只有写正文的 renderUserPrompt 用得到；
-    // 「按要求重写 / 出建议 / 追问」都不读它，故默认不跑（见 needEndingState）。
-    let prevEndingState: PrevEndingState | undefined
-    if (opts?.needEndingState && prevTail) {
-      prevEndingState = await this.getEndingStateCached(dir, chapterNumber, prevTail)
-    }
+    const trackingTask = (async () => {
+      // 追踪目录（角色状态/时间线/进度摘要/问题记录）
+      let tracking: TrackingContext | null = null
+      try {
+        tracking = await new TrackingMdRepo(dir).read(chapterNumber)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load tracking:', err)
+        // skip
+      }
+      return tracking
+    })()
 
-    // 追踪目录（角色状态/时间线/进度摘要/问题记录）
-    let tracking: TrackingContext | null = null
-    try {
-      tracking = await new TrackingMdRepo(dir).read(chapterNumber)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load tracking:', err)
-      // skip
-    }
+    const summariesTask = (async () => {
+      // 中程记忆：本章之前最近 N 章剧情点摘要（优先记忆/剧情点，细纲补洞）
+      let recentPlotSummaries: PlotChapterSummary[] = []
+      try {
+        recentPlotSummaries = await new PlotPointRepo(dir).listSummariesBefore(
+          chapterNumber,
+          RECENT_PLOT_SUMMARY_LIMIT + 1
+        )
+        recentPlotSummaries = recentPlotSummaries.filter((s) => s.chapterNumber < chapterNumber - 1)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load recent plot summaries:', err)
+      }
+      return recentPlotSummaries
+    })()
 
-    // 中程记忆：本章之前最近 N 章剧情点摘要（优先记忆/剧情点，细纲补洞）
-    let recentPlotSummaries: PlotChapterSummary[] = []
-    try {
-      recentPlotSummaries = await new PlotPointRepo(dir).listSummariesBefore(
-        chapterNumber,
-        RECENT_PLOT_SUMMARY_LIMIT + 1
-      )
-      recentPlotSummaries = recentPlotSummaries.filter((s) => s.chapterNumber < chapterNumber - 1)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load recent plot summaries:', err)
-    }
+    const settingsTask = (async () => {
+      // 设定目录（题材定位/世界观/势力/规则）
+      let settings: SettingsContext | null = null
+      try {
+        settings = await new SettingsMdRepo(dir).read(chapterNumber)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load settings:', err)
+        // skip
+      }
+      return settings
+    })()
 
-    // 设定目录（题材定位/世界观/势力/规则）
-    let settings: SettingsContext | null = null
-    try {
-      settings = await new SettingsMdRepo(dir).read(chapterNumber)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load settings:', err)
-      // skip
-    }
-
-    // 近期设定演进（正文已揭晓补丁，优先于旧底稿冲突项）
-    let settingsEvolution: SettingsEvolutionEntry[] = []
-    try {
-      settingsEvolution = await new SettingsWriter(dir).readRecentEvolution(5, chapterNumber)
-    } catch (err) {
-      console.warn('[loadChapterContext] Failed to load settings evolution:', err)
-    }
-
-    const laterProseExists = (await new ProseRepo(dir).listChapterNumbers()).some((n) => n >= chapterNumber)
+    const evolutionTask = (async () => {
+      // 近期设定演进（正文已揭晓补丁，优先于旧底稿冲突项）
+      let settingsEvolution: SettingsEvolutionEntry[] = []
+      try {
+        settingsEvolution = await new SettingsWriter(dir).readRecentEvolution(5, chapterNumber)
+      } catch (err) {
+        console.warn('[loadChapterContext] Failed to load settings evolution:', err)
+      }
+      return settingsEvolution
+    })()
+    const [
+      { detail, prevDetail }, rhythmEntry, { mainSynopsis, volumeOutline },
+      { prevTail, prevProse, prevEndingState }, loadedCharacters, foreshadowings,
+      tracking, recentPlotSummaries, settings, settingsEvolution
+    ] = await Promise.all([
+      detailTask, rhythmTask, outlineTask, previousTask, charactersTask, foreshadowingsTask,
+      trackingTask, summariesTask, settingsTask, evolutionTask
+    ])
+    let characters = loadedCharacters
+    const laterProseExists = (await new ProseRepo(dir).listChapterNumbers()).some(number => number >= chapterNumber)
     const characterAliases = buildCharacterAliasGroups(characters, chapterNumber, { excludeUndated: laterProseExists })
     characters = projectCharactersForChapter(characters, chapterNumber, tracking?.characterStates ?? [], laterProseExists)
 
@@ -3873,6 +3915,7 @@ export class WriteService {
    * 上一章被改动后 key 自然失效。失败不缓存，下次仍会重试。
    */
   private readonly endingStateCache = new Map<string, PrevEndingState>()
+  private readonly endingStateRequests = new Map<string, Promise<PrevEndingState | undefined>>()
 
   /**
    * 记录本次会话里哪些 key 的提取真的尝试过但失败了（跟 endingStateCache 同一套 key）。
@@ -3911,6 +3954,18 @@ export class WriteService {
     const key = this.endingStateKey(dir, chapterNumber, prevTail)
     const hit = this.endingStateCache.get(key)
     if (hit) return hit
+    const pending = this.endingStateRequests.get(key)
+    if (pending) return pending
+    const request = this.extractEndingStateCached(key, chapterNumber, prevTail)
+    this.endingStateRequests.set(key, request)
+    try {
+      return await request
+    } finally {
+      if (this.endingStateRequests.get(key) === request) this.endingStateRequests.delete(key)
+    }
+  }
+
+  private async extractEndingStateCached(key: string, chapterNumber: number, prevTail: string): Promise<PrevEndingState | undefined> {
     try {
       const state = await this.flow.extractEndingState(prevTail, chapterNumber - 1)
       // 上限很小：同一会话里也就在几章之间来回切

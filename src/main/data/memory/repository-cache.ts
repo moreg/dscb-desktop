@@ -1,5 +1,5 @@
 import { promises as fs } from 'fs'
-import { join, resolve, sep } from 'path'
+import { join, resolve, sep, dirname } from 'path'
 import { readText, parseDoc, type ParsedDoc } from '../skill-format/md-parser'
 
 const CONCURRENCY = 8
@@ -8,6 +8,8 @@ const MAX_ENTRIES = 4096
 const textCache = new Map<string, { fingerprint: string; text: string; doc?: ParsedDoc }>()
 const pendingReads = new Map<string, Promise<string>>()
 let textBytes = 0
+const directories = new Map<string, { fingerprint: string; entries: import('fs').Dirent[]; checkedAt: number }>()
+const DIRECTORY_RECHECK_MS = 5000
 
 export async function mapMemoryFiles<Input, Output>(inputs: Input[], action: (input: Input) => Promise<Output>): Promise<Output[]> {
   const results: Output[] = []
@@ -29,6 +31,12 @@ export async function memoryFileFingerprint(file: string): Promise<string> {
 
 export function invalidateMemoryFile(file: string): void {
   const key = resolve(file)
+  directories.delete(key)
+  directories.delete(dirname(key))
+  forgetText(key)
+}
+
+function forgetText(key: string): void {
   const cached = textCache.get(key)
   if (cached) textBytes -= Buffer.byteLength(cached.text, 'utf8')
   textCache.delete(key)
@@ -42,13 +50,13 @@ export function memorySourcePath(projectDir: string, subdirectory: string, sourc
 }
 
 function retainText(file: string, fingerprint: string, text: string): void {
-  invalidateMemoryFile(file)
+  forgetText(file)
   const bytes = Buffer.byteLength(text, 'utf8')
   if (bytes > MAX_BYTES) return
   textCache.set(file, { fingerprint, text })
   textBytes += bytes
   while (textCache.size > MAX_ENTRIES || textBytes > MAX_BYTES) {
-    invalidateMemoryFile(textCache.keys().next().value!)
+    forgetText(textCache.keys().next().value!)
   }
 }
 
@@ -113,6 +121,29 @@ const sourcePaths: Record<EntityKind, string[]> = {
   statistics: ['记忆', '设定', '追踪', '细纲', '记忆系统']
 }
 
+async function readDirectory(file: string, fingerprint: string): Promise<import('fs').Dirent[]> {
+  const cached = directories.get(file)
+  if (cached?.fingerprint === fingerprint && Date.now() - cached.checkedAt < DIRECTORY_RECHECK_MS) {
+    directories.delete(file)
+    directories.set(file, cached)
+    return cached.entries.slice()
+  }
+  try {
+    const entries = await fs.readdir(file, { withFileTypes: true })
+    if (entries.length <= 20_000 && await memoryFileFingerprint(file) === fingerprint) {
+      directories.set(file, { fingerprint, entries, checkedAt: Date.now() })
+      while (directories.size > 1024 || [...directories.values()].reduce((total, entry) => total + entry.entries.length, 0) > 20_000) {
+        directories.delete(directories.keys().next().value!)
+      }
+    }
+    return entries.slice()
+  } catch (error) {
+    directories.delete(file)
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+}
+
 async function sourceFingerprint(projectDir: string, kind: EntityKind): Promise<{ fingerprint: string; files: Map<string, string> }> {
   const paths: string[] = []
   const fingerprints = new Map<string, string>()
@@ -121,7 +152,7 @@ async function sourceFingerprint(projectDir: string, kind: EntityKind): Promise<
     fingerprints.set(resolve(file), fingerprint)
     paths.push(`${file}\0${fingerprint}`)
     if (fingerprint === 'missing' || file.endsWith('.md')) return
-    const entries = await fs.readdir(file, { withFileTypes: true })
+    const entries = await readDirectory(file, fingerprint)
     for (const entry of entries.sort((first, second) => first.name.localeCompare(second.name))) {
       if (entry.isDirectory()) await visit(join(file, entry.name))
     }
@@ -176,5 +207,8 @@ export function invalidateMemoryProject(projectDir: string): void {
   }
   for (const key of entityIndexes.keys()) {
     if (key.startsWith(root + '\0')) entityIndexes.delete(key)
+  }
+  for (const directory of directories.keys()) {
+    if (directory === root || directory.startsWith(root + sep)) directories.delete(directory)
   }
 }

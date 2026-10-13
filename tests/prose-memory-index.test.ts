@@ -13,6 +13,22 @@ describe('ProseMemoryIndex source evidence', () => {
     await mkdir(join(dir, '正文'), { recursive: true })
   })
 
+  it('reuses the parsed disk index on fully warmed queries and revalidates external index edits', async () => {
+    await writeFile(join(dir, '正文', '001.md'), '令牌藏在桥下。')
+    const index = new ProseMemoryIndex(dir)
+    for (let attempt = 0; attempt < 3; attempt++) await index.searchBefore(3, '令牌')
+    const reads = vi.spyOn(fs, 'readFile')
+    try {
+      expect((await index.searchBefore(3, '令牌'))[0].text).toContain('桥下')
+      expect(reads).not.toHaveBeenCalled()
+      await writeFile(join(dir, '.cache', 'prose-memory-index.json'), '{damaged')
+      expect((await index.searchBefore(3, '令牌'))[0].text).toContain('桥下')
+      expect(reads.mock.calls.some(([file]) => String(file).endsWith('prose-memory-index.json'))).toBe(true)
+    } finally {
+      reads.mockRestore()
+    }
+  })
+
   it('recalls a relevant event beyond the recent twelve chapters with exact source locations', async () => {
     const original = '# 第1章\r\n\r\n雨停了。\r\n\r\n林远把琉璃令牌交给沈清秋。\r\n她将它藏在左袖。\r\n\r\n山门终于打开。'
     await writeFile(join(dir, '正文', '001.md'), original)

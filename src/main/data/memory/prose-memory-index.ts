@@ -1,3 +1,5 @@
+import { searchProsePassages } from './prose-search'
+import { memoryFileFingerprint } from './repository-cache'
 import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -152,46 +154,12 @@ export class ProseMemoryIndex {
     try { index = await pending } finally {
       if (refreshes.get(refreshKey) === pending) refreshes.delete(refreshKey)
     }
-    const excluded = new Set(opts.excludeChapters ?? [])
-    const candidates = index.chapters.filter((c) => c.chapterNumber < chapterNumber && !excluded.has(c.chapterNumber))
-      .flatMap((c) => c.passages.map((p) => ({ ...p, chapterNumber: c.chapterNumber, sourcePath: c.sourcePath, sourceHash: c.sourceHash, score: 0 })))
-    const frequency = new Map<string, number>()
-    for (const p of candidates) {
-      const normalized = p.text.toLocaleLowerCase()
-      for (const term of terms.keys()) if (normalized.includes(term)) frequency.set(term, (frequency.get(term) ?? 0) + 1)
-    }
-    for (const p of candidates) {
-      const normalized = p.text.toLocaleLowerCase()
-      for (const [term, weight] of terms) {
-        if (normalized.includes(term)) p.score += weight * Math.log(1 + candidates.length / (frequency.get(term) ?? 1))
-      }
-    }
-    candidates.sort((a, b) => b.score - a.score || b.chapterNumber - a.chapterNumber || a.startOffset - b.startOffset)
-    const selected: ProseMemoryHit[] = []
-    const seen = new Set<string>()
-    let remaining = maxChars
-    for (const candidate of candidates) {
-      if (candidate.score <= 0 || selected.length >= maxResults || remaining <= 0) break
-      const key = candidate.text.replace(/\s+/g, '')
-      if (seen.has(key)) continue
-      seen.add(key)
-      const text = candidate.text.slice(0, remaining).replace(/[\uD800-\uDBFF]$/, '').trimEnd()
-      if (!text) continue
-      selected.push({ ...candidate, text, endOffset: candidate.startOffset + text.length, endLine: candidate.startLine + (text.match(/\n/g)?.length ?? 0) })
-      remaining -= text.length
-    }
-    return selected
+    return searchProsePassages(index.chapters, chapterNumber, terms, opts, maxChars, maxResults)
   }
 
   private async refresh(chapterNumber: number): Promise<StoredIndex> {
     const cachePath = join(this.projectDir, '.cache', 'prose-memory-index.json')
-    let previous: StoredIndex = { version: 1, chapters: [] }
-    try {
-      const stored = JSON.parse(await fs.readFile(cachePath, 'utf8')) as StoredIndex
-      if (stored.version === 1 && Array.isArray(stored.chapters)) {
-        previous = { version: 1, chapters: stored.chapters.filter(validIndexedChapter) }
-      }
-    } catch { /* Missing or damaged cache is rebuilt from source evidence. */ }
+    const previous = await readStoredIndex(cachePath)
     const old = new Map(previous.chapters.map((c) => [c.sourcePath, c]))
     const allSources = await listProseSources(this.projectDir)
     const currentPaths = new Set(allSources.map((s) => s.sourcePath))
@@ -228,7 +196,37 @@ export class ProseMemoryIndex {
     if (changed) {
       try { await writeJsonAtomic(cachePath, result) } catch { /* Read-only projects can still recall from this in-memory refresh. */ }
     }
+    if (!changed && result.chapters.length === previous.chapters.length &&
+        result.chapters.every((chapter, index) => chapter === previous.chapters[index])) return previous
     return result
+  }
+}
+
+const storedIndexes = new Map<string, { fingerprint: string; index: StoredIndex; bytes: number }>()
+
+async function readStoredIndex(file: string): Promise<StoredIndex> {
+  try {
+    const before = await memoryFileFingerprint(file)
+    const cached = storedIndexes.get(file)
+    if (cached?.fingerprint === before) {
+      storedIndexes.delete(file)
+      storedIndexes.set(file, cached)
+      return cached.index
+    }
+    const text = await fs.readFile(file, 'utf8')
+    const stored = JSON.parse(text) as StoredIndex
+    const index: StoredIndex = { version: 1, chapters: stored.version === 1 && Array.isArray(stored.chapters) ? stored.chapters.filter(validIndexedChapter) : [] }
+    const bytes = Buffer.byteLength(text, 'utf8')
+    if (await memoryFileFingerprint(file) === before && bytes <= 16 * 1024 * 1024) {
+      storedIndexes.set(file, { fingerprint: before, index, bytes })
+      while (storedIndexes.size > 4 || [...storedIndexes.values()].reduce((sum, entry) => sum + entry.bytes, 0) > 16 * 1024 * 1024) {
+        storedIndexes.delete(storedIndexes.keys().next().value!)
+      }
+    }
+    return index
+  } catch {
+    storedIndexes.delete(file)
+    return { version: 1, chapters: [] }
   }
 }
 

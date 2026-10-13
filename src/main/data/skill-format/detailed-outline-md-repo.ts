@@ -25,6 +25,7 @@ interface CachedOutlineFile {
 
 // 自检会逐次新建 Repo；缓存需跨实例复用，同时限制打开多个项目后的内存占用。
 const chapterReadCache = new Map<string, CachedOutlineFile>()
+const chapterFileReads = new Map<string, Promise<CachedOutlineFile | null>>()
 const CHAPTER_READ_CACHE_LIMIT = 128
 
 function fileRevision(stat: Awaited<ReturnType<typeof fs.stat>>): string {
@@ -88,6 +89,18 @@ export class DetailedOutlineMdRepo {
   }
 
   private async readChapterFile(path: string): Promise<CachedOutlineFile | null> {
+    const pending = chapterFileReads.get(path)
+    if (pending) return pending
+    const request = this.loadChapterFile(path)
+    chapterFileReads.set(path, request)
+    try {
+      return await request
+    } finally {
+      if (chapterFileReads.get(path) === request) chapterFileReads.delete(path)
+    }
+  }
+
+  private async loadChapterFile(path: string): Promise<CachedOutlineFile | null> {
     try {
       const before = fileRevision(await fs.stat(path))
       const cached = chapterReadCache.get(path)

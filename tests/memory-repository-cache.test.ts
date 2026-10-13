@@ -24,6 +24,21 @@ afterEach(async () => {
 })
 
 describe('memory repository cache', () => {
+  it('reuses directory listings while continuing to detect file-content changes', async () => {
+    const repo = new CharacterRepo(projectDir)
+    const created = await repo.create({ name: '角色', identity: '原始身份' })
+    await repo.list()
+    const listings = vi.spyOn(fs, 'readdir')
+    expect((await repo.get(created.id))?.identity).toBe('原始身份')
+    expect(listings).not.toHaveBeenCalled()
+    await fs.writeFile(join(projectDir, '记忆', '人物', '角色.md'), '# 角色\n\n## 基本信息\n\n- **身份**：外部修改\n')
+    expect((await repo.get(created.id))?.identity).toBe('外部修改')
+    await fs.writeFile(join(projectDir, '记忆', '人物', '另一个.md'), '# 另一个\n')
+    expect(await repo.list()).toHaveLength(2)
+    await fs.unlink(join(projectDir, '记忆', '人物', '另一个.md'))
+    expect(await repo.list()).toHaveLength(1)
+  })
+
   it('caches compact statistics and refreshes counts after internal and external changes', async () => {
     const projects = { resolveDir: async () => projectDir } as unknown as ProjectService
     const service = new MemoryService(projects)

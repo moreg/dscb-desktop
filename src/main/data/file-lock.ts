@@ -6,11 +6,13 @@ export async function withFileLock<T>(key: string, fn: () => Promise<T>): Promis
   const gate = new Promise<void>((resolve) => {
     release = resolve
   })
-  queues.set(key, prev.then(() => gate, () => gate))
+  const next = prev.then(() => gate, () => gate)
+  queues.set(key, next)
   await prev
   try {
     return await fn()
   } finally {
     release()
+    if (queues.get(key) === next) queues.delete(key)
   }
 }
