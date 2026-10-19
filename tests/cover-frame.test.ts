@@ -4,7 +4,7 @@ import { COVER_FRAME_SAFETY_PROMPT, COVER_GENERATION_HEIGHT, COVER_GENERATION_WI
 import { renderCoverImage } from '../src/main/data/cover-image-output'
 
 describe('封面生图画布与文字裁剪安全区', () => {
-  it.each(['1023x1364', '600x800'])('原图约定的文字安全区经过实际裁剪到 %s 后仍留足 6%% 边距', async (target) => {
+  it.each(['1023x1364', '600x800'])('原图约定的文字安全区等比缩放到 %s 后仍留足 6%% 边距', async (target) => {
     const source = new Canvas(COVER_GENERATION_WIDTH, COVER_GENERATION_HEIGHT)
     const context = source.getContext('2d')
     const x = Math.ceil(COVER_GENERATION_WIDTH * COVER_TEXT_SAFE_MARGIN.horizontal)
@@ -37,7 +37,7 @@ describe('封面生图画布与文字裁剪安全区', () => {
     expect(updated).toContain(COVER_FRAME_SAFETY_PROMPT)
     expect(updated).not.toContain('inner ~85%')
     expect(updated).not.toContain('portrait 3:4 ratio')
-    expect(updated).toContain('1024x1536（2:3）')
+    expect(updated).toContain('1536x2048（3:4）')
     expect(withCoverFrameSafety(updated)).toBe(updated)
   })
 
@@ -56,7 +56,7 @@ it('中文安全区与英文旧安全区合并为一份中文约束，不改其�
   expect(output).toContain("书名文字：'安全区 3:4'，顶部。")
   expect(output).toContain("作者署名：作者名'画幅安全区'，底部。")
   expect(output).toContain('手改说明：保持旧照片中的Frame safety文字。')
-  expect(output).toContain('上下各裁去 5.6%')
-  expect(output).toContain('画布高度的 11%')
+  expect(output).toContain('完整画面即成品构图')
+  expect(output).toContain('画布高度的 6%')
   expect(withCoverFrameSafety(output)).toBe(output)
 })

@@ -220,7 +220,7 @@ export function buildCliImagePrompt(channel: 'codex' | 'grok', model: string, pr
   return [
     `${invoke}，直接生成一张小说封面图片。禁止用 Python/PowerShell/脚本/SVG 画图代替，忽略本提示中与图片无关的要求。`,
     `画面提示词：${prompt}`,
-    `图片尺寸：${COVER_GENERATION_SIZE}（竖版），只生成一张图。`,
+    `图片尺寸：${COVER_GENERATION_SIZE}（3:4 竖版），直接按此比例生成，只生成一张图；不要先生成其他比例再裁剪。`,
     outputFile
       ? `只允许本次新生成的图片作为结果。必须把图片保存或复制到唯一输出文件 ${JSON.stringify(outputFile)}，不要使用其他任务或旧会话的图片。完成后报告这个路径，禁止另选输出位置。`
       : '完成后把图片文件保存到磁盘，并在回复中报告图片文件的完整绝对路径。'

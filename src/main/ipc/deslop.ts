@@ -87,6 +87,7 @@ export function registerDeslopIpc(
         let result: Awaited<ReturnType<typeof deslopService.deslop>>
         try {
           result = await deslopService.deslop(validated.text, {
+            dialogueComposition: { mode: 'edit' },
             levelOverride: validated.levelOverride,
             polishNarrative: true,
             polishDialogue: true,
@@ -98,6 +99,9 @@ export function registerDeslopIpc(
             meta: { projectId: validated.projectId },
             signal
           })
+          if (result.dialogueQuality?.passed === false) {
+            throw new Error(`自动对白验收未通过：${result.dialogueQuality.issues.join('；')}。原正文未修改。`)
+          }
         } finally {
           endStream(validated.requestId)
         }

@@ -7,6 +7,7 @@ import { validateInsights, validateGoldenThreeSummary, GOLDEN_THREE_STAGES } fro
 import { writeJsonAtomic } from '../src/main/data/atomic'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { FanqieChapterContent, FanqieChartBook, FanqieChartRecord } from '../src/shared/fanqie-chart'
+import { qualityIdea, passingReviews } from './helpers/fanqie-idea'
 
 const books: FanqieChartBook[] = ['a', 'b'].map((bookId, index) => ({
   bookId, rank: index + 1, title: `测试书${bookId}`, author: '', cover: '', genre: '都市',
@@ -97,12 +98,13 @@ describe('正文分析与黄金三章方向', () => {
       expect(generateStream).toHaveBeenCalledTimes(withSummary ? 6 : 3)
       if (withSummary) {
         let ideaAttempts = 0
-        const idea = { title: '原创脑洞', coreConcept: '主角以契约反制债主',
+        const idea = { ...qualityIdea('原创脑洞'),
           openingChapters: [1, 2, 3].map(chapter => ({ chapter,
             openingEvent: `债主带来第${chapter}次危机`, protagonistAction: '主角利用契约规则反制',
             conflict: '债主试图更改规则', payoff: '主角保住自己的店铺',
             endHook: '新债主找上门', summaryApplication: '主动推动冲突并兑现回报' })) }
         generateStream.mockImplementation(async prompt => {
+          if (prompt.includes('你是严格的网文选题终审编辑')) return passingReviews(1)
           expect(prompt).toContain('本分类黄金三章总体写作方向')
           expect(prompt).toContain(second.analysis!.goldenThreeSummary!.directions[0].claim)
           ideaAttempts += 1

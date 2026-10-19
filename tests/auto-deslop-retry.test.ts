@@ -91,7 +91,7 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.calls('deslop:verify')[0][0]).toContain(formatted)
     expect(context.calls('deslop:verify')[0][0]).toContain(original)
     expect(output.content).toBe(original)
-    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 2 })
+    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 1 })
   })
 
   it('正文护栏、事实核验和最终采用都使用格式后候选，格式器不传给润色服务', async () => {
@@ -127,20 +127,45 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.calls('deslop:repair')[0][1]).toMatchObject({ meta: { projectId: 'p1', chapterNumber: 3 } })
     expect(context.deslop).toHaveBeenNthCalledWith(2, FIXED,
       expect.objectContaining({ levelOverride: 'mild', isTail: false }))
-    // 修复原始输出与复扫后的最终输出都须通过正文护栏。
-    expect(context.validateCandidate.mock.calls.map(([text]) => text)).toEqual([CANDIDATE, FIXED, FIXED])
+    // 每份不同的稿件都须过正文护栏；复扫未改字节时复用同稿校验。
+    expect(context.validateCandidate.mock.calls.map(([text]) => text)).toEqual([CANDIDATE, FIXED])
   })
 
-  it('连续两轮修复仍有差异时保留最初原稿并记录具体原因', async () => {
+  it('唯一命中的局部事实修复经过复扫和核验才采用', async () => {
+    const context = setup({ verifyReplies: [DIFFERENCE, PASSED],
+      repairReplies: [JSON.stringify({ patches: [{ before: '两把钥匙', after: '一把钥匙' }] })] })
+    const output = await context.run()
+    expect(output.content).toBe(FIXED)
+    expect(output.report).toMatchObject({ status: 'applied', repairAttempts: 1, verificationAttempts: 2 })
+    expect(context.deslop).toHaveBeenNthCalledWith(2, FIXED, expect.any(Object))
+  })
+
+  it('事实修复后的比例检查携带已修复问题，避免补台词时重新引入', async () => {
+    const context = setup({ verifyReplies: [DIFFERENCE, PASSED] })
+    // 此处验证复扫上下文传递，独立对白测试覆盖实际比例与语义验收。
+    context.deslop.mockReset().mockImplementation(async text => result(text, { dialogueQuality: {
+      passed: true, beforeRatio: .7, afterRatio: .7, attempts: 2, issues: []
+    } })).mockResolvedValueOnce(result(CANDIDATE, { dialogueQuality: {
+      passed: true, beforeRatio: .7, afterRatio: .7, attempts: 1, issues: []
+    } }))
+    const output = await context.run({ dialogueComposition: { mode: 'edit', context: '章节事实上下文' }, formatCandidate: formatChapterProse })
+    expect(output.report.dialogueQuality?.attempts).toBe(3)
+    const options = context.deslop.mock.calls[1][1]
+    expect(options?.dialogueComposition?.context).toContain('章节事实上下文')
+    expect(options?.dialogueComposition?.context).toContain('钥匙数量从一把变成两把')
+    expect(options?.initialDialogueDraft).toBeUndefined()
+  })
+
+  it('一次修复仍有差异时保留最初原稿并记录具体原因', async () => {
     const context = setup({ verifyReplies: [DIFFERENCE] })
 
     const output = await context.run()
 
     expect(output.content).toBe(ORIGINAL)
-    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 2, verificationAttempts: 3 })
+    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 1, verificationAttempts: 2 })
     expect(output.report.issues).toContain('钥匙数量从一把变成两把')
-    expect(context.calls('deslop:repair')).toHaveLength(2)
-    expect(context.deslop).toHaveBeenCalledTimes(3)
+    expect(context.calls('deslop:repair')).toHaveLength(1)
+    expect(context.deslop).toHaveBeenCalledTimes(2)
   })
 
   it('每轮修复和核验都以最初原稿为事实基线，避免累计漂移', async () => {
@@ -152,14 +177,12 @@ describe('自动去 AI 味事实修复和核验重试', () => {
 
     const output = await context.run()
 
-    expect(output.content).toBe(SECOND_FIXED)
-    expect(output.report).toMatchObject({ status: 'applied', repairAttempts: 2, verificationAttempts: 3 })
+    expect(output.content).toBe(ORIGINAL)
+    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 1, verificationAttempts: 2 })
     const allCalls = [...context.calls('deslop:repair'), ...context.calls('deslop:verify')]
     for (const [prompt] of allCalls) expect(prompt).toContain(ORIGINAL)
-    const lastRepair = context.calls('deslop:repair')[1][0]
-    expect(lastRepair).toContain(FIXED)
-    expect(lastRepair).toContain('守门人的说话者发生变化')
-    expect(context.calls('deslop:verify')[2][0]).toContain(SECOND_FIXED)
+    expect(context.calls('deslop:repair')).toHaveLength(1)
+    expect(context.calls('deslop:verify')[1][0]).toContain(FIXED)
   })
 
   it('修复回到最初原稿时可直接保留并报告无需再改', async () => {
@@ -237,14 +260,14 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.calls('deslop:repair')).toHaveLength(1)
   })
 
-  it('修复输出为空或格式错误也计入两轮预算，最终保留原稿', async () => {
+  it('修复输出为空或格式错误也计入一次预算，最终保留原稿', async () => {
     const context = setup({ verifyReplies: [DIFFERENCE], repairReplies: ['不是 JSON', JSON.stringify({ text: '' })] })
 
     const output = await context.run()
 
     expect(output.content).toBe(ORIGINAL)
-    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 2 })
-    expect(context.calls('deslop:repair')).toHaveLength(2)
+    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 1 })
+    expect(context.calls('deslop:repair')).toHaveLength(1)
     expect(context.deslop).toHaveBeenCalledOnce()
   })
 
@@ -279,7 +302,7 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.deslop).toHaveBeenCalledOnce()
   })
 
-  it('修复稿复扫又产生事实差异时，核验复扫后稿件并占用下一轮修复', async () => {
+  it('修复稿复扫又产生事实差异时，核验复扫后稿件到达预算后保留原稿', async () => {
     const drifted = FIXED.replace('东屋', '西屋')
     const context = setup({ verifyReplies: [DIFFERENCE,
       JSON.stringify({ unchanged: false, issues: ['东屋改成西屋'] }), PASSED] })
@@ -287,12 +310,11 @@ describe('自动去 AI 味事实修复和核验重试', () => {
 
     const output = await context.run()
 
-    expect(output.content).toBe(FIXED)
-    expect(output.report).toMatchObject({ repairAttempts: 2, verificationAttempts: 3 })
+    expect(output.content).toBe(ORIGINAL)
+    expect(output.report).toMatchObject({ status: 'review_required', repairAttempts: 1, verificationAttempts: 2 })
     expect(context.calls('deslop:verify')[1][0]).toContain(drifted)
     expect(context.calls('deslop:verify')[1][0]).toContain(ORIGINAL)
-    expect(context.calls('deslop:repair')[1][0]).toContain('东屋改成西屋')
-    expect(context.calls('deslop:repair')[1][0]).toContain(drifted)
+    expect(context.calls('deslop:repair')).toHaveLength(1)
   })
 
   it.each([

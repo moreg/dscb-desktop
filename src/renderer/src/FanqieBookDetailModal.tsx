@@ -7,6 +7,7 @@ import {
   type FanqieChartBook
 } from '../../shared/fanqie-chart'
 import FanqieChapterReaderModal from './FanqieChapterReaderModal'
+import { chartBookTags } from '../../shared/fanqie-chart-tags'
 
 interface Props {
   bookId: string
@@ -235,9 +236,9 @@ export default function FanqieBookDetailModal({
                     </span>
                   </div>
 
-                  {detail.tags.length > 0 ? (
+                  {chartBookTags(detail).length > 0 ? (
                     <div className="fanqie-tags" style={{ marginTop: 6 }}>
-                      {detail.tags.map((t) => (
+                      {chartBookTags(detail).map((t) => (
                         <span key={t} className="fanqie-tag">
                           {t}
                         </span>

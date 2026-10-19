@@ -56,7 +56,7 @@ describe('DetailedOutlineMdRepo.readChapter', () => {
     for (const number of [1, 2, 3, 4]) {
       expect(await repo.readChapter(number)).toEqual(expected.find((d) => d.chapterNumber === number))
     }
-    expect((await repo.readChapter(2))?.plotSummary).toBe('船上断电')
+    expect((await repo.readChapter(2))?.plotSummary).toBe('每章文件内容')
   })
 
   it('旧卷缓存索引可读取不同章，并在卷内容变化后重新建立索引', async () => {

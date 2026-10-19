@@ -1,3 +1,5 @@
+import type { ProjectService } from './project-service'
+import { readWritingPlatformConfig } from './writing-platform'
 import type { LlmService } from './llm-service'
 import {
   parseChapterNameJson,
@@ -18,10 +20,9 @@ export type { ChapterNameCandidate, SuggestChapterNameInput, SuggestChapterNameR
  * feature='chapter-name' 路由到 opening 大类（与大纲/章名风格路由一致）。
  */
 export class ChapterNameService {
-  constructor(private readonly llm: LlmService) {}
+  constructor(private readonly llm: LlmService, private readonly projects?: ProjectService) {}
 
   async suggest(input: SuggestChapterNameInput): Promise<SuggestChapterNameResult> {
-    const system = buildChapterNameSystemPrompt(input.genre, null)
     const user = buildChapterNameUserPrompt({
       chapterNumber: input.chapterNumber,
       currentTitle: input.currentTitle,
@@ -31,6 +32,8 @@ export class ChapterNameService {
 
     let raw: string
     try {
+      const platform = this.projects ? await readWritingPlatformConfig(await this.projects.resolveDir(input.projectId)) : null
+      const system = buildChapterNameSystemPrompt(input.genre, null, platform)
       raw = await this.llm.generateStream(user, {
         systemPrompt: system,
         maxTokens: 256, // 章名仅几十字，256 token 已留足

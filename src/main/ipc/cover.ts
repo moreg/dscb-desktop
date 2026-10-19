@@ -65,6 +65,9 @@ const typographySchema = z.object({
 })
 
 const generateCoverSchema = z.object({
+  useNovelContent: z.boolean().optional(),
+  compositionLocked: z.boolean().optional(),
+  changeVisualPlan: z.boolean().optional(),
   projectId: projectIdSchema,
   bookName: bookNameSchema,
   authorName: authorNameSchema,
@@ -75,6 +78,10 @@ const generateCoverSchema = z.object({
   stylePreset: stylePresetSchema.optional(),
   typography: typographySchema.optional(),
   scene: z.object({
+    genreSignal: z.string().max(2000).optional(),
+    sellingPoint: z.string().max(2000).optional(),
+    visualHierarchy: z.string().max(2000).optional(),
+    compositionGuide: z.string().max(2000).optional(),
     characterDesc: z.string().max(4000).optional(),
     backgroundDesc: z.string().max(4000).optional(),
     colorPalette: z.string().max(2000).optional(),
@@ -98,6 +105,8 @@ const generateCoverSchema = z.object({
 })
 
 const extractCoverPromptSchema = z.object({
+  changeVisualPlan: z.boolean().optional(),
+  previousPrompt: z.string().max(8000).optional(),
   projectId: projectIdSchema,
   bookName: bookNameSchema,
   authorName: authorNameSchema,

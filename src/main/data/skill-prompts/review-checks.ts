@@ -81,15 +81,15 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     group: 'quality',
     label: '破折号碎片化',
     defaultSeverity: 'error',
-    hint: '单字碎片或破折号密度超阈值（/100字）'
+    hint: '单字碎片检查；密度仅作语境复核提示，不按次数改写'
   },
   {
     checkId: 'long_sentence',
     kind: 'algorithm',
     group: 'quality',
     label: '超长句',
-    defaultSeverity: 'warn',
-    hint: '句子超阈值字数无句号（阈值可配）'
+    defaultSeverity: 'info',
+    hint: '句长观察值（可配），只供可读性复核，不按长度机械断句'
   },
   {
     checkId: 'comma_stack',
@@ -112,8 +112,8 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     kind: 'algorithm',
     group: 'paragraph',
     label: '段落过长',
-    defaultSeverity: 'warn',
-    hint: '段落超阈值字数，手机阅读易疲劳（阈值可配）'
+    defaultSeverity: 'info',
+    hint: '段长观察值（可配），按信息转折分段，不设固定合格线'
   },
   {
     checkId: 'dialogue_tag',
@@ -121,7 +121,7 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     group: 'dialogue',
     label: '对话标签单一',
     defaultSeverity: 'info',
-    hint: '"道/说"标签占比过高，建议混用动作/情绪/神态标签'
+    hint: '仅观察标签分布，不强求多样性，不为标签新增动作'
   },
   {
     checkId: 'sensitive',

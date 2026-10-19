@@ -1,5 +1,6 @@
 import type { FanqieChartBase, FanqieChartBook } from '../../../shared/fanqie-chart'
 import { fanqieChartPageUrl } from '../../../shared/fanqie-chart'
+import { isSelectableTag } from '../../../shared/fanqie-chart-tags'
 
 const DEFAULT_COVER_HASH = '5cb03bd354145bc7815a5e09d4b15cfc'
 const PUA = /[\uE000-\uF8FF]/
@@ -43,7 +44,7 @@ function asTags(raw: unknown, genre: unknown): string[] {
     if (!tag || /^\d+$/.test(tag) || PUA.test(tag) || parts.includes(tag)) continue
     parts.push(tag)
   }
-  return parts
+  return parts.filter(isSelectableTag)
 }
 
 function creationStatus(value: unknown): string {
@@ -67,7 +68,7 @@ export function parseRankBooks(payload: unknown, startRank = 1): FanqieChartBook
     if (!bookId || seen.has(bookId)) continue
     seen.add(bookId)
     const title = String(row.bookName ?? row.title ?? '').trim()
-    const intro = String(row.abstract ?? row.intro ?? '').replace(/\s+\n/g, '\n').trim().slice(0, 500)
+    const intro = String(row.abstract ?? row.intro ?? '').replace(/\s+\n/g, '\n').trim()
     books.push({
       rank,
       bookId,
@@ -181,7 +182,7 @@ export function restoreBook(book: FanqieChartBook, map: ReadonlyMap<number, stri
   const genre = restoreText(book.genre, map, 0).trim()
   const tags = book.tags
     .map((tag) => restoreText(tag, map, 0).trim())
-    .filter((tag) => tag && !hasPrivateOrBox(tag))
+    .filter((tag) => tag && !hasPrivateOrBox(tag) && isSelectableTag(tag))
   const garbled = !hasCjk(title) || hasPrivateOrBox(title)
   return {
     ...book,

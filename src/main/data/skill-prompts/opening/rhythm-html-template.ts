@@ -1,7 +1,7 @@
 /**
  * 节奏图谱.html 模版（源自《小说立项》技能 v3.2 硬性规定）。
  * 支持「正文写作」技能回填实际情绪值（actualized=true），图表区分实际值（实线）和预测值（虚线），
- * 并集成 6 类违规节奏检查及控制台日志记录。
+ * 并检查结构和字段有效性，不按固定节奏公式判作品质量。
  */
 export const RHYTHM_HTML_TEMPLATE = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -137,153 +137,22 @@ __RHYTHM_ENTRIES__
             };
         })();
 
-        // ========== 节奏检查（仅对已回填章节判定）==========
+        // ========== 结构检查（预测与实际均检查，不套固定节奏公式）==========
         function checkRhythm(data) {
-            logger.info('checkRhythm', '===== 开始检查 =====', {
-                totalChapters: data.length,
-                actualizedCount: data.filter(isActualized).length,
-                forecastCount: data.filter(d => !isActualized(d)).length
-            });
-
             const violations = [];
-
-            // 入口防御性检查：找出已回填但缺字段的章节
-            const invalidActualized = data.filter(d =>
-                isActualized(d) && (d.emotion === undefined || d.climax === undefined)
-            );
-            if (invalidActualized.length > 0) {
-                logger.error('checkRhythm', '已回填章节存在缺字段（这些章节将被跳过，不参与违规判定）', {
-                    invalidChapters: invalidActualized.map(d => d.chapter),
-                    details: invalidActualized.map(d => ({
-                        chapter: d.chapter,
-                        title: d.title,
-                        hasEmotion: d.emotion !== undefined,
-                        hasClimax: d.climax !== undefined
-                    }))
-                });
-                logger.warn('checkRhythm', \`已跳过 \${invalidActualized.length} 个缺字段的已回填章节\`, {
-                    skipped: invalidActualized.map(d => d.chapter)
-                });
+            const chaptersSeen = new Set();
+            for (const d of data) {
+                const add = msg => violations.push({ chapter: d.chapter, type: '数据格式', msg });
+                if (!Number.isInteger(d.chapter) || d.chapter < 1) add('章号须为正整数');
+                if (chaptersSeen.has(d.chapter)) add('章号重复');
+                chaptersSeen.add(d.chapter);
+                if (typeof d.title !== 'string' || !d.title.trim()) add('标题为空或类型不正确');
+                if (!Number.isInteger(d.volume) || d.volume < 1) add('卷号须为正整数');
+                if (!Number.isInteger(d.emotion) || d.emotion < 1 || d.emotion > 10) add('情绪值须为 1—10 整数');
+                if (![0, 1, 2, 3, 3.5, 4].includes(d.climax)) add('爽点编码非法');
+                if (typeof d.actualized !== 'boolean') add('actualized 须为布尔值');
             }
-
-            const actualizedData = data.filter(d =>
-                isActualized(d) && d.emotion !== undefined && d.climax !== undefined
-            );
-            const forecastData = data.filter(d => !isActualized(d));
-
-            logger.info('checkRhythm', '数据拆分', {
-                actualized: actualizedData.map(d => d.chapter),
-                forecast: forecastData.map(d => d.chapter)
-            });
-
-            // 违规类型 1：连续 2 章爽点类型 = 0（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规1】开始扫描连续无爽点', {
-                scanRange: actualizedData.length > 0 ? \`第\${actualizedData[0].chapter}-\\第\${actualizedData[actualizedData.length-1].chapter}章\` : '空'
-            });
-            for (let i = 0; i < actualizedData.length - 1; i++) {
-                const c1 = actualizedData[i], c2 = actualizedData[i + 1];
-                const climax1 = getClimaxIdx(c1.climax), climax2 = getClimaxIdx(c2.climax);
-                if (climax1 === 0 && climax2 === 0) {
-                    logger.warn('checkRhythm', '【违规1】命中：连续 2 章无爽点', {
-                        chapter1: c1.chapter, title1: c1.title, climax1: c1.climax,
-                        chapter2: c2.chapter, title2: c2.title, climax2: c2.climax
-                    });
-                    violations.push({ chapter: c1.chapter, type: '无爽点', msg: '已回填章节连续 2 章无爽点' });
-                    violations.push({ chapter: c2.chapter, type: '无爽点', msg: '已回填章节连续 2 章无爽点' });
-                }
-            }
-            logger.debug('checkRhythm', '【违规1】扫描完成', { violationsAdded: violations.filter(v => v.type === '无爽点').length });
-
-            // 违规类型 2：相邻大高潮（含卷中/卷终决战）间隔 > 15 章（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规2】开始扫描大高潮间隔');
-            let lastPeak = -1, lastPeakInfo = null;
-            actualizedData.forEach(d => {
-                if (isPeak(d.climax)) {
-                    if (lastPeak !== -1 && d.chapter - lastPeak > 15) {
-                        logger.warn('checkRhythm', '【违规2】命中：相邻大高潮间隔 > 15 章', {
-                            prevChapter: lastPeak, prevTitle: lastPeakInfo.title, prevClimax: lastPeakInfo.climax,
-                            currChapter: d.chapter, currTitle: d.title, currClimax: d.climax,
-                            gap: d.chapter - lastPeak
-                        });
-                        violations.push({
-                            chapter: lastPeak,
-                            type: '高潮拖沓',
-                            msg: '已回填章节：与下一高潮间隔 ' + (d.chapter - lastPeak) + ' 章，超过 15 章上限'
-                        });
-                    }
-                    lastPeak = d.chapter;
-                    lastPeakInfo = d;
-                }
-            });
-            logger.debug('checkRhythm', '【违规2】扫描完成', { violationsAdded: violations.filter(v => v.type === '高潮拖沓').length });
-
-            // 违规类型 3：卷终决战情绪值 < 10（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规3】开始扫描卷终决战情绪值');
-            actualizedData.forEach(d => {
-                if (isFinal(d.climax) && d.emotion < 10) {
-                    logger.warn('checkRhythm', '【违规3】命中：卷终决战情绪值 < 10', {
-                        chapter: d.chapter, title: d.title, volume: d.volume,
-                        emotion: d.emotion, climax: d.climax
-                    });
-                    violations.push({ chapter: d.chapter, type: '卷终未达高潮', msg: '已回填章节：卷终决战情绪值 ' + d.emotion + '，应 = 10' });
-                }
-            });
-            logger.debug('checkRhythm', '【违规3】扫描完成', { violationsAdded: violations.filter(v => v.type === '卷终未达高潮').length });
-
-            // 违规类型 4：同一卷出现 2 次以上卷终决战（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规4】开始统计每卷卷终决战次数');
-            const volumeFinals = {};
-            actualizedData.forEach(d => {
-                if (isFinal(d.climax)) {
-                    volumeFinals[d.volume] = (volumeFinals[d.volume] || 0) + 1;
-                }
-            });
-            logger.debug('checkRhythm', '【违规4】卷终决战统计', { volumeFinals });
-            actualizedData.forEach(d => {
-                if (isFinal(d.climax) && volumeFinals[d.volume] > 1) {
-                    logger.warn('checkRhythm', '【违规4】命中：同卷多次卷终决战', {
-                        chapter: d.chapter, title: d.title, volume: d.volume,
-                        climax: d.climax, countInVolume: volumeFinals[d.volume]
-                    });
-                    violations.push({ chapter: d.chapter, type: '卷终重复', msg: '已回填章节：第 ' + d.volume + ' 卷出现 ' + volumeFinals[d.volume] + ' 次卷终决战' });
-                }
-            });
-            logger.debug('checkRhythm', '【违规4】扫描完成', { violationsAdded: violations.filter(v => v.type === '卷终重复').length });
-
-            // 违规类型 5：第 1 章就出现大高潮/卷终决战（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规5】检查第 1 章（已回填章节中的首章）');
-            if (actualizedData.length > 0 && isPeak(actualizedData[0].climax)) {
-                logger.warn('checkRhythm', '【违规5】命中：第 1 章大高潮/卷终决战', {
-                    chapter: actualizedData[0].chapter, title: actualizedData[0].title,
-                    climax: actualizedData[0].climax, climaxIdx: getClimaxIdx(actualizedData[0].climax)
-                });
-                violations.push({ chapter: actualizedData[0].chapter, type: '开篇过曝', msg: '已回填章节：第 1 章爽点强度 ' + getClimaxIdx(actualizedData[0].climax) + '，应 ≤ 2（中打脸）' });
-            }
-
-            // 违规类型 6：卷中决战出现在 < 35 章的短/中卷（仅检查已回填章节）
-            logger.debug('checkRhythm', '【违规6】开始扫描卷中决战是否在长卷');
-            actualizedData.forEach(d => {
-                if (isMidFinal(d.climax)) {
-                    const volumeChapters = data.filter(x => x.volume === d.volume);
-                    if (volumeChapters.length < 35) {
-                        logger.warn('checkRhythm', '【违规6】命中：卷中决战在短/中卷', {
-                            chapter: d.chapter, title: d.title, volume: d.volume,
-                            climax: d.climax, volumeLength: volumeChapters.length
-                        });
-                        violations.push({ chapter: d.chapter, type: '卷中决战过早', msg: '已回填章节：卷中决战仅允许 35+ 章长卷使用，当前卷仅 ' + volumeChapters.length + ' 章' });
-                    }
-                }
-            });
-            logger.debug('checkRhythm', '【违规6】扫描完成', { violationsAdded: violations.filter(v => v.type === '卷中决战过早').length });
-
-            logger.info('checkRhythm', '===== 检查完成 =====', {
-                totalViolations: violations.length,
-                violationsByType: violations.reduce((acc, v) => {
-                    acc[v.type] = (acc[v.type] || 0) + 1;
-                    return acc;
-                }, {})
-            });
-
+            logger.info('checkRhythm', '结构与数据检查完成', { totalViolations: violations.length });
             return violations;
         }
 

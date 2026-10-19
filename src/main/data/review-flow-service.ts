@@ -1,3 +1,4 @@
+import { PLANNING_RULES } from './skill-prompts/opening/planning-rules'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { AuditSeverity, AuditViolation, CustomReviewCheck, ReviewCheckId } from '../../shared/types'
 import { findJsonObject } from '../../shared/json-extract'
@@ -64,7 +65,7 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
 - strong：悬念/冲突/反转强，吸引继续阅读
 - weak：有悬念但不够强烈，或仅伏笔型
 - none：无钩子，事件结束后正常收尾
-若不是 strong，请说明可如何加强。`
+仅在已知整章完成且确有漏掉细纲收束时报告问题，不以未达到 strong 单独判错，不新增危险或反转凑钩子。`
   },
   style_match: {
     checkId: 'style_match',
@@ -76,12 +77,12 @@ const CHECK_SPECS: Record<ReviewCheckId, CheckSpec> = {
     checkId: 'cool_point',
     instruction: `分析「爽点」（仅爽文题材）：打脸爽/装逼爽/逆袭爽是否到位（铺垫充分、高潮干脆、情绪释放完整）。
 若本作非爽文题材，输出空数组。
-若爽点不足，指出缺哪类爽点。`
+按本章已规划的事件和题材承诺判断，不要求每章打脸，不新增爽点或轮流震惊。`
   },
   quote_contradiction: {
     checkId: 'quote_contradiction',
     instruction: `检查「引文语气/动作/情绪矛盾」：对话内容与配套的语气/动作/神态/情绪描述是否矛盾。
-例如"我恨你！"她温柔地说；"别过来！"他纹丝不动地站着。`
+结合反话、伪装、隐忍和现场上下文判断；例如“我恨你”配温柔语气或“别过来”配站定不动并不自动矛盾，须给出具体因果证据。`
   },
   // 算法类 checkId 不会走到这里，占位满足 Record 完整性
   meta_break: { checkId: 'meta_break', instruction: '' },
@@ -113,6 +114,8 @@ const LLM_CHECK_IDS: ReadonlySet<ReviewCheckId> = new Set([
 
 export interface DeepReviewContext {
   chapterNumber: number
+  /** 仅调用方有明确依据时设置；未知状态不强制章末收束。 */
+  chapterComplete?: boolean
   /** 题材（中文，注入 style_match / cool_point 判断） */
   genre?: string
   /** 启用的 LLM 检查项；缺省跑全部，空数组表示全部关闭 */
@@ -253,6 +256,8 @@ export class ReviewFlowService {
       ``,
       `## 检查任务`,
       spec.instruction,
+      PLANNING_RULES,
+      ctx.chapterComplete === true ? `已确认整章完成，章末按细纲落实对话或事件收束。` : `章节完成状态未确认或仍在续写，不把末尾停点判为漏钩子，不要求整章完成项。`,
       ``,
       ctx.genre ? `## 本作题材\n${ctx.genre}` : '',
       ctx.characterCards ? `## 角色卡（对照用）\n${ctx.characterCards}` : '',

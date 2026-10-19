@@ -11,6 +11,7 @@ import type {
   FanqieMultiBookProgress
 } from '../../../shared/fanqie-chart'
 import { readJson, writeJsonAtomic } from '../atomic'
+import { cleanSourceTags } from '../../../shared/fanqie-chart-tags'
 import { memoryFileFingerprint } from '../memory/repository-cache'
 import { decryptPrivateChars } from './glyph-match'
 import { correctTitle, extractFontUrls, fixCoverUrl, formatReadCount, restoreText } from './parse'
@@ -234,6 +235,11 @@ export class FanqieChapterScraper {
     const cachedIds = await this.listCachedChapterIds(bookId)
     if (!force && existing && existing.chapters.length > 0) {
       let changed = false
+      const cleanedTags = cleanSourceTags(existing.tags)
+      if (JSON.stringify(existing.tags) !== JSON.stringify(cleanedTags)) {
+        existing.tags = cleanedTags
+        changed = true
+      }
       if (!existing.cover && knownBook?.cover) {
         existing.cover = fixCoverUrl(knownBook.cover)
         changed = Boolean(existing.cover)
@@ -361,7 +367,7 @@ export class FanqieChapterScraper {
       wordCount: wordCount || '',
       readCount: readCount || '',
       status: status || '',
-      tags: tags || [],
+      tags: cleanSourceTags(tags),
       chapters,
       cachedChapterIds: cachedIds,
       updatedAt: new Date().toISOString()

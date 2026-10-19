@@ -614,7 +614,7 @@ export const COMPOSITION_DESC: Record<CoverComposition, string> = {
   closeup: '人物特写，面部占画面上半部',
   fullbody: '全身构图，姿态富有动感',
   scene: '无主体人物，以环境场景为主',
-  duo: '双人构图，两位人物相对而立，体现情绪关系'
+  duo: '双人构图，站位、动作与视线服务故事中的人物关系，不固定为对视'
 }
 
 /** 仅将完整命中的旧内置文本转换为中文，不按子串翻译手改文案。 */
@@ -695,12 +695,19 @@ function sentence(text: string): string {
 }
 
 /** 学习建议让位于成品比例、文字安全与用户选定的布局。 */
-export function compileCoverLearningRules(rules: string[], typography?: CoverTypographyOptions): string[] {
+export function compileCoverLearningRules(rules: string[], typography?: CoverTypographyOptions, scene?: CoverScene): string[] {
   const explicitPosition = typography?.titlePosition && typography.titlePosition !== 'auto'
   const explicitAuthorPosition = typography?.authorPosition && typography.authorPosition !== 'auto'
   const locationDirective = /upper|middle|lower|position|placement|candidate|band|top|bottom|center|vertical|horizontal|left|right|上方|上部|上侧|上三分|上半|顶部|顶端|下方|下部|下侧|下三分|下半|底部|底端|中间|居中|中央|中部|左侧|右侧|左边|右边|竖排|横排|位置|三分之一/i
   return [...new Set(rules.map((rule) => rule.trim()).filter((rule) => {
     if (!rule) return false
+    // 作品已有明确画面时，统计观察不再作为绘画指令；构图和色光只有一处来源。
+    if (scene?.sellingPoint || scene?.genreSignal) {
+      if (/^(?:本地样本观察|样本统计|sample statistics)/i.test(rule)) return false
+      if (scene.compositionGuide && locationDirective.test(rule)) return false
+      if (scene.colorPalette && /配色|色调|主色|暖色|冷色|饱和|色族|\b(?:palette|hues?|saturat\w*|warm colo\w*|cool colo\w*)\b/i.test(rule)) return false
+      if (scene.lighting && /光线|灯光|光源|\b(?:lighting|light source)\b/i.test(rule)) return false
+    }
     const ratios = rule.match(/\b\d+\s*[:：]\s*\d+\b/g) ?? []
     if (ratios.some((ratio) => ratio.replace(/\s/g, '').replace('：', ':') !== DEFAULT_COVER_RATIO)) return false
     // 数值面积统一由文字层决定，样本中的观察不能变成第二条硬约束。
@@ -720,7 +727,8 @@ export function filterCoverPromptLearningRules(basePrompt: string, rules: string
 
 export function patchCoverPromptTypography(basePrompt: string, replacementPrompt: string, typography?: CoverTypographyOptions, originalRules?: string[]): string {
   const layers = [/^(?:Title text |书名文字[:：])/, /^(?:Author byline:|作者署名[:：])/,
-    /^(?:Typography hierarchy:|文字层级[:：])/, /^(?:Frame safety:|画幅安全区[:：])/]
+    /^(?:Typography hierarchy:|文字层级[:：])/, /^(?:Frame safety:|画幅安全区[:：])/,
+    /^排版留白[:：]/]
   const replacement = new Map<number, string>()
   for (const line of replacementPrompt.split('\n')) {
     const layer = layers.findIndex((pattern) => pattern.test(line))
@@ -773,7 +781,10 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   const effectiveComposition = args.channel && requestedComposition === 'duo' ? 'duo' : resolveCoverChannelComposition(direction.composition ?? (direction.noPeople === true
     ? 'scene'
     : !fullDirectionOverride && direction.noPeople !== false && preset?.noPeople ? 'scene' : args.composition), args.channel)
-  const composition = COMPOSITION_DESC[effectiveComposition]
+  // 特写不固定占据上半部，让人物为最终标题位置留出空间。
+  const composition = effectiveComposition === 'closeup'
+    ? '人物特写，突出面部神情，面部避开书名与署名区域'
+    : COMPOSITION_DESC[effectiveComposition]
   const scene = args.scene
   const typography = args.typography
   const titleFont = typography?.titleFont && typography.titleFont !== 'auto'
@@ -793,6 +804,13 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     : preset?.authorPosition ?? AUTHOR_POSITIONS.bottom_center
 
   const lines: string[] = []
+  // 提炼出的作品定位直接进入生图，不让单一分类和统计样本替代融合题材。
+  if (scene?.genreSignal?.trim()) lines.push('作品题材与情绪：' + sentence(scene.genreSignal))
+  if (scene?.sellingPoint?.trim()) lines.push('核心卖点的可见表达：' + sentence(scene.sellingPoint))
+  if (scene?.visualHierarchy?.trim()) lines.push('视觉主次与人物主动权：' + sentence(applyCoverChannelToStyle(scene.visualHierarchy, args.channel)))
+  if (scene?.sellingPoint?.trim()) {
+    lines.push('叙事优先级：在所选媒介、作者明确方向与人物频道约束内，画面首先表现上述题材、卖点和主动权。以下学习样本的配色、氛围与布局只作不冲突的参考。上述内容是绘画指令，不要作为额外文字印在封面上。')
+  }
   // 风格层
   if (preset) {
     // 已明确选风格时只保留平台的移动端可读性与比例要求，避免平台默认的
@@ -810,7 +828,7 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   // 文字层
   lines.push(`书名文字：'${args.bookName}'，${titlePosition}；字体为${titleFont}；字效为${titleEffect}。`)
   lines.push(
-    `作者署名：作者名'${args.authorName}'，紧接一个简体'著'字作为小号后缀，约为作者名字高的55%至70%，前留小间距，不添加其他标点；${authorPosition}；字体为${authorFont}。`
+    `作者署名：'${args.authorName} 著'，作为完整署名准确呈现一次，字号明显小于书名；${authorPosition}；字体为${authorFont}。`
   )
   const verticalTitle = /\bvertical(?:ly)?\b|竖排/i.test(titlePosition)
   const sideByline = /\bvertical(?:ly)?\b|竖排/i.test(authorPosition)
@@ -824,12 +842,19 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
       : '采用清晰单行横排，仅必要时按语义换行'
   const bylineSpace = sideByline
     ? '在书名旁预留窄侧区供作者署名竖排'
-    : '在标题下方预留独立底部署名区'
+    : /右下|bottom.right/i.test(authorPosition)
+      ? '在右下安全区预留独立署名区'
+      : '在下方居中预留独立底部署名区'
   lines.push(
-    `文字层级：书名最大且最易读，约占封面面积的${preset?.titleArea ?? '20至35'}%；${grouping}；${bylineSpace}。文字背景保持干净，不遮挡面部和关键道具。准确呈现简体书名和署名各一次，不错字、不重复字形。`
+    `文字层级：书名最大且最易读，约占封面面积的${preset?.titleArea ?? '20至35'}%；${grouping}；换行或断列不拆开完整词语，不增删文字，标点保持原文；${bylineSpace}。文字背景保持干净，不遮挡面部和关键道具。准确呈现简体书名和署名各一次，不错字、不重复字形。`
   )
+  const titleZone = /竖排|vertical/i.test(titlePosition)
+    ? /左|left/i.test(titlePosition) ? '左侧文字区' : '右侧文字区'
+    : /下三分|lower/i.test(titlePosition) ? '下三分之一文字区'
+      : /中央|center/i.test(titlePosition) ? '中央文字区' : '上三分之一文字区'
+  lines.push(`排版留白：为书名预留${titleZone}，该区域背景简洁、明暗稳定；人物面部、关键道具与高亮特效避开文字区，主体轮廓与背景清楚分离。`)
   lines.push(COVER_FRAME_SAFETY_PROMPT)
-  const learningRules = compileCoverLearningRules(args.learningRules ?? [], typography)
+  const learningRules = compileCoverLearningRules(args.learningRules ?? [], typography, scene)
   if (learningRules.length) {
     const learnedPrefix = args.directionWins
       ? '学习规则（建议，服从作者明确方向）：'
@@ -837,8 +862,10 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     lines.push(learnedPrefix + learningRules.join(' '))
   }
   // 题材 + 构图 + 画面层
-  lines.push(`${preset || mediumOverride || mediumRequirement ? GENRE_SUBJECTS[args.genre] : style.tag}。`)
-  lines.push(`${composition}。`)
+  if (!scene?.genreSignal?.trim()) lines.push(`${preset || mediumOverride || mediumRequirement ? GENRE_SUBJECTS[args.genre] : style.tag}。`)
+  lines.push(scene?.compositionGuide?.trim()
+    ? sentence(`${effectiveComposition === 'duo' ? '双人构图' : composition}：${applyCoverChannelToStyle(scene.compositionGuide, args.channel)}`)
+    : `${composition}。`)
   // 纯场景构图不描述主体人物，否则与「no human figure as main subject」自相矛盾
   if (effectiveComposition !== 'scene') {
     const defaultCharacter = subjectOverride
@@ -858,15 +885,10 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   if (args.styleHint && args.styleHint.trim()) {
     lines.push(sentence(args.styleHint))
   }
-  // 通用修饰
-  const finish = mediumOverride
-    ? '专业印刷级封面，作者明确方向优先于画风参考'
-    : preset
-      ? '专业印刷级封面，保持所选媒介与视觉语言'
-      : '专业书籍封面，高细节数字绘画质感'
   lines.push(
-    `${finish}；不加水印，除书名和作者署名外不出现其他文字。`
+    '成品检查：缩小到手机封面缩略图后，书名仍清晰可读，主体仍可辨认；背景细节与装饰不抢视觉焦点。不加水印，除书名和作者署名外不出现其他文字。背景横幅、招牌、票据、屏幕和徽记仅用无可读文字的图形。'
   )
+  if (scene?.sellingPoint?.trim()) lines.push('题材卖点检查：遮住书名后，仍能通过主体动作、可见结果和辅助线索识别作品题材与核心卖点；角色的视觉主次符合故事中的主动权，不以通用俊男美女合照代替叙事。')
 
   return withCoverChannel(lines.join('\n'), args.channel)
 }

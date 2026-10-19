@@ -45,7 +45,8 @@ describe('DeslopService.deslop 二次清理循环', () => {
     await service.deslop(source, { isTail: false, levelOverride: 'mild', polishDialogue: true })
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('Gate E：对话去腔调')
-    expect(prompts[0]).toContain('逐句判断台词是否像这个人物在此刻会说的话')
+    expect(prompts[0]).toContain('先读整场再改单句')
+    expect(prompts[0]).toContain('不能只核对单句是否合理')
   })
 
   it('复扫无 blocking 时跳过二次清理', async () => {

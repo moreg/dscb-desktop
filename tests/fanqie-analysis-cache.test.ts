@@ -8,6 +8,7 @@ import { GOLDEN_THREE_STAGES } from '../src/main/data/fanqie-chart/analysis'
 import { readJson, writeJsonAtomic } from '../src/main/data/atomic'
 import type { FanqieChartAnalysis, FanqieChartBook, FanqieChartRecord, FanqieChapterContent } from '../src/shared/fanqie-chart'
 import type { LlmService } from '../src/main/data/llm-service'
+import { qualityIdea, relationshipIdea, passingReviews } from './helpers/fanqie-idea'
 
 const chartType = 'new_book_male:261'
 const books: FanqieChartBook[] = ['a', 'b', 'c', 'd'].map((bookId, i) => ({ bookId, rank: i + 1,
@@ -47,6 +48,130 @@ async function setup() {
 }
 
 describe('逐本分析缓存与并发', () => {
+  it('关系换皮或推进过快须补生成，跨轮比较保留方案的实际关系事件', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      const first = relationshipIdea('第一案', 0)
+      const rejected = relationshipIdea('失速方案', 1)
+      const repaired = relationshipIdea('第三案', 2)
+      let generations = 0, audits = 0
+      fixture.generateStream.mockClear()
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.includes('你是严格的网文选题终审编辑')) {
+          audits++
+          if (audits === 1) {
+            const result = JSON.parse(passingReviews(2, [first, rejected]))
+            result.reviews[1].romancePacing = false
+            result.reviews[1].relationshipOriginality = false
+            result.reviews[1].reasons = [{ item: 'romancePacing', reason: '与第一案相同：首章修复旧情、次章邀约、第三章表白接受多线关系，变化缺乏积累', requiredModification: '改变关系起点和阶段终点' }]
+            return JSON.stringify(result)
+          }
+          expect(prompt).toContain(first.openingChapters![1].payoff)
+          return passingReviews(1, [repaired])
+        }
+        generations++
+        if (generations === 2) {
+          expect(prompt).toContain('变化缺乏积累')
+          expect(prompt).toContain('改变关系起点和阶段终点')
+          expect(prompt).toContain(first.openingChapters![0].payoff)
+        }
+        return JSON.stringify({ ideas: generations === 1 ? [first, rejected] : [repaired] })
+      })
+      const result = await service.generateIdeas(chartType, 2, ['多女主'])
+      expect(result.ideas?.ideas.map(idea => idea.title)).toEqual(['第一案', '第三案'])
+      expect(generations).toBe(2)
+      expect(audits).toBe(2)
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
+  it('标签和机制终审拒收后把具体原因带入重试，只保存修正后的方案', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      fixture.generateStream.mockClear()
+      let generations = 0, reviews = 0
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.includes('你是严格的网文选题终审编辑')) {
+          reviews++
+          expect(prompt).toContain('多女主')
+          if (reviews === 1) return JSON.stringify({ reviews: [{ index: 0, content: true, originality: false, tags: false, diversity: true,
+            reasons: ['折叠道路与历史开门机制重复；多女主仅列职业分工，缺少关系推进事件'] }] })
+          return passingReviews(1, [relationshipIdea('修正方案', 1)])
+        }
+        generations++
+        if (generations === 2) expect(prompt).toContain('多女主仅列职业分工，缺少关系推进事件')
+        return JSON.stringify({ ideas: [relationshipIdea(generations === 1 ? '待修方案' : '修正方案', generations - 1)] })
+      })
+      const result = await service.generateIdeas(chartType, 1, ['多女主'])
+      expect(result.ideas?.ideas.map(idea => idea.title)).toEqual(['修正方案'])
+      expect(generations).toBe(2)
+      expect(reviews).toBe(2)
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
+  it('伪造引用、缺少金手指不能进入终审，失败保留旧结果', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      fixture.generateStream.mockImplementation(async prompt => prompt.includes('你是严格的网文选题终审编辑')
+        ? passingReviews(1) : JSON.stringify({ ideas: [qualityIdea()] }))
+      const previous = await service.generateIdeas(chartType, 1, [])
+      fixture.generateStream.mockClear()
+      fixture.generateStream.mockImplementation(async prompt => {
+        expect(prompt).not.toContain('你是严格的网文选题终审编辑')
+        return JSON.stringify({ ideas: [{ ...qualityIdea('坏方案', 1), goldenFinger: '', trendBasis: qualityIdea().trendBasis.map(ref => ({ ...ref, quote: '不存在的原文' })) }] })
+      })
+      await expect(service.generateIdeas(chartType, 1, [])).rejects.toThrow('goldenFinger')
+      expect(fixture.generateStream).toHaveBeenCalledTimes(3)
+      expect((await service.list())[0].ideas).toEqual(previous.ideas)
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
+  it('重启后仍检查历史机制，改名不能重复生成', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      fixture.generateStream.mockImplementation(async prompt => prompt.includes('你是严格的网文选题终审编辑')
+        ? passingReviews(1) : JSON.stringify({ ideas: [qualityIdea()] }))
+      await service.generateIdeas(chartType, 1, [])
+      const reopened = fixture.create()
+      await reopened.analyze(chartType, false)
+      fixture.generateStream.mockClear()
+      fixture.generateStream.mockImplementation(async prompt => {
+        expect(prompt).toContain('历史方案的机制')
+        expect(prompt).toContain(qualityIdea().goldenFinger)
+        return JSON.stringify({ ideas: [{ ...qualityIdea('只换书名'), coreConcept: '新背景与新人物' }] })
+      })
+      await expect(reopened.generateIdeas(chartType, 1, [])).rejects.toThrow('高度相似')
+      expect(fixture.generateStream).toHaveBeenCalledTimes(3)
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
+  it('终审返回无效JSON时不保存；终审期间取消也不保存', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      const controller = new AbortController()
+      let cancel = false
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (!prompt.includes('你是严格的网文选题终审编辑')) return JSON.stringify({ ideas: [qualityIdea()] })
+        if (cancel) controller.abort()
+        return cancel ? passingReviews(1) : '无法审核'
+      })
+      await expect(service.generateIdeas(chartType, 1, [])).rejects.toThrow('终审未返回有效')
+      expect((await service.list())[0].ideas).toBeNull()
+      cancel = true
+      await expect(service.generateIdeas(chartType, 1, [], undefined, controller.signal)).rejects.toThrow('已取消')
+      expect((await service.list())[0].ideas).toBeNull()
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
   it('returns an unchanged analysis after metadata checks without rereading opening JSON or calling models', async () => {
     const fixture = await setup()
     try {
@@ -154,24 +279,20 @@ describe('逐本分析缓存与并发', () => {
       const service = fixture.create()
       await service.analyze(chartType, false)
       fixture.generateStream.mockClear()
-      const idea = (title: string) => ({
-        title, coreConcept: title + '独有的契约规则', goldenFinger: title + '能力',
-        openingChapters: [1, 2, 3].map(chapter => ({
-          chapter, openingEvent: '债主来访', protagonistAction: '主角行动', conflict: '规则阻力',
-          payoff: '获得回报', endHook: '新问题', summaryApplication: '主动兑现'
-        }))
-      })
+      const idea = (title: string) => qualityIdea(title, ['第一案', '第二案', '第三案'].indexOf(title))
       fixture.generateStream.mockImplementationOnce(async () => JSON.stringify({ ideas: [idea('第一案'), { title: '不完整' }] }))
+        .mockImplementationOnce(async () => passingReviews(1))
         .mockImplementationOnce(async prompt => {
           expect(prompt).toContain('写 2 个')
           expect(prompt).toContain('已经保留')
           expect(prompt).toContain('第一案')
           return JSON.stringify({ ideas: [idea('第一案'), idea('第二案'), idea('第三案')] })
         })
+        .mockImplementationOnce(async () => passingReviews(2))
       const record = await service.generateIdeas(chartType, 3, [])
-      expect(fixture.generateStream).toHaveBeenCalledTimes(2)
+      expect(fixture.generateStream).toHaveBeenCalledTimes(4)
       expect(record.ideas?.ideas.map(candidate => candidate.title)).toEqual(['第一案', '第二案', '第三案'])
-      expect(record.ideas?.ideas[0].coreConcept).toBe('第一案独有的契约规则')
+      expect(record.ideas?.ideas[0].coreConcept).toBe(idea('第一案').coreConcept)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

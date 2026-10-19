@@ -164,7 +164,9 @@ describe('cover IPC boundaries', () => {
   it('keeps scene data, prompt provenance and the actual learning context across IPC', async () => {
     const input = {
       ...coverInput,
-      scene: { characterDesc: 'a woman with a red umbrella', backgroundDesc: 'foggy lane' },
+      scene: { characterDesc: 'a woman with a red umbrella', backgroundDesc: 'foggy lane',
+        genreSignal: '民俗悬疑', sellingPoint: '湿伞下没有脚印',
+        visualHierarchy: '伞为第一焦点', compositionGuide: '低机位突出伞与地面' },
       promptSource: 'edited',
       learningContext: { libraryVersion: 'v1', rules: ['Keep title readable.'], sourceSampleCount: 3, resolvedStylePreset: 'dark_suspense', sources: ['statistics:3'] }
     }

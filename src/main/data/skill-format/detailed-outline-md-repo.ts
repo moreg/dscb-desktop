@@ -71,7 +71,7 @@ export class DetailedOutlineMdRepo {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw err
     }
-    for (const file of files.sort()) {
+    for (const file of files.sort(compareOutlineFiles)) {
       if (!file.endsWith('.md')) continue
       const namedChapter = file.match(/^细纲_第(\d+)章/)
       if (namedChapter && Number(namedChapter[1]) !== chapterNumber) continue
@@ -149,13 +149,14 @@ export class DetailedOutlineMdRepo {
       throw err
     }
     const details: ChapterDetail[] = []
-    for (const f of files.sort()) {
+    for (const f of files.sort(compareOutlineFiles)) {
       if (!f.endsWith('.md')) continue
       const text = await readText(join(dir, f))
       if (!text) continue
       details.push(...this.parseFile(f, text))
     }
-    return details.sort((a, b) => a.chapterNumber - b.chapterNumber)
+    return details.filter((d, i) => details.findIndex(other => other.chapterNumber === d.chapterNumber) === i)
+      .sort((a, b) => a.chapterNumber - b.chapterNumber)
   }
 
   /**
@@ -179,7 +180,7 @@ export class DetailedOutlineMdRepo {
       if (e.code === 'ENOENT') return null
       throw err
     }
-    for (const f of files.sort()) {
+    for (const f of files.sort(compareOutlineFiles)) {
       if (!f.endsWith('.md')) continue
       const text = await readText(join(dir, f))
       if (!text) continue
@@ -800,4 +801,9 @@ function toRawFields(fields: Map<string, FieldValue>, order: string[]): Record<s
     out[k] = Array.isArray(v) ? [...v] : v
   }
   return out
+}
+
+/** 新逐章稿优先，旧卷文件继续兼容；所有读取入口采用同一优先级。 */
+function compareOutlineFiles(a: string, b: string): number {
+  return Number(!/^细纲_第\d+章/.test(a)) - Number(!/^细纲_第\d+章/.test(b)) || a.localeCompare(b)
 }

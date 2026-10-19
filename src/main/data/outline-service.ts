@@ -8,6 +8,8 @@ import { readText } from './skill-format/md-parser'
 import { writeTextAtomic } from './atomic'
 import { join } from 'path'
 import { promises as fs } from 'fs'
+import { randomUUID } from 'crypto'
+import { buildMainOutlinePrompt } from './skill-prompts/opening/main-outline'
 import type { LlmService } from './llm-service'
 import type {
   MainOutline,
@@ -17,15 +19,12 @@ import type {
   Volume,
   VolumeOutline
 } from '../../shared/types'
+import { readWritingPlatformConfig } from './writing-platform'
+import { sanitizeTitleForFilename } from './opening-markdown'
 import { composeWritingRequirements } from '../../shared/writing-requirement-templates'
 
 
-/**
- * 大纲服务。Phase 1 只读：
- * - getMain / listDetailed 从 大纲.md / 细纲/第NN卷.md / 节奏图谱.html 读取。
- * - 卷结构（getVolumes）与逐章节奏（getRhythm）新增能力。
- * - updateMain / generateMain / generateDetailed 写入路径留 Phase 3。
- */
+/** 大纲与细纲的读取、编辑和生成；兼容卷级旧稿，优先读取逐章细纲。 */
 export class OutlineService {
   constructor(
     private readonly projectService: ProjectService,
@@ -97,7 +96,7 @@ export class OutlineService {
 
   /**
    * 更新指定章节的细纲。
-   * 写入 细纲/第NN卷.md，更新后重新读取返回最新值。
+   * 优先更新逐章细纲，兼容卷级旧稿，更新后重新读取返回最新值。
    */
   async updateDetailed(
     projectId: string,
@@ -237,45 +236,28 @@ export class OutlineService {
     return { ...read.main, theme: patch.theme ?? read.main.theme }
   }
 
-  async generateMain(_projectId: string): Promise<MainOutline> {
-    throw new Error('该操作需 Phase 3b（LLM 生成输出 v3.2）支持，当前未实现。')
-  }
-
-  private async getVolumeNumberForChapter(dir: string, chapterNumber: number): Promise<number> {
-    try {
-      const read = await new OutlineMdRepo(dir).read()
-      if (read && read.volumes.length > 0) {
-        const vol = read.volumes.find((v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd)
-        if (vol) return vol.number
-      }
-    } catch (err) {
-      console.warn('[getVolumeNumberForChapter] Failed to read volumes:', err)
+  async generateMain(projectId: string): Promise<MainOutline> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const meta = await this.projectService.getProjectData(projectId)
+    const file = join(dir, '大纲', '大纲.md')
+    const before = await readText(file)
+    const coreSettings = await readText(join(dir, '设定', '核心设定.md'))
+      || await readText(join(dir, '设定', '题材定位.md')) || ''
+    if (!coreSettings.trim() && !meta.description?.trim()) throw new Error('请先提供作品脑洞或核心设定，再生成大纲')
+    const prompt = buildMainOutlinePrompt({ ...meta, coreSettings, previousOutline: before ?? undefined,
+      platform: await readWritingPlatformConfig(dir) })
+    const raw = await this.llm.generateStream(prompt, { maxTokens: 16384,
+      meta: { feature: 'outline-generate', projectId } })
+    const content = raw.trim().replace(/^```(?:markdown|md)?\s*\n/, '').replace(/\n```$/, '')
+    if (!/^#\s+[^\n]+/m.test(content) || !/^## 主线剧情走向\s*$/m.test(content)) {
+      throw new Error('模型未返回可读取的大纲结构，原文件未修改')
     }
-    return 1
-  }
-
-  private async ensureChapterSectionExists(dir: string, chapterNumber: number): Promise<void> {
-    const volNum = await this.getVolumeNumberForChapter(dir, chapterNumber)
-    const padded = String(volNum).padStart(2, '0')
-    const folder = join(dir, '细纲')
-    await fs.mkdir(folder, { recursive: true })
-    const file = join(folder, `第${padded}卷.md`)
-    let text: string
-    try {
-      text = await fs.readFile(file, 'utf-8')
-    } catch (err) {
-      text = `# 第 ${volNum} 卷细纲\n\n`
-    }
-
-    const { parseDoc, parseChapterHeadingNumber } = await import('./skill-format/md-parser')
-    const doc = parseDoc(text)
-    const chSec = doc.sections.find((s) => parseChapterHeadingNumber(s.title) === chapterNumber)
-    if (!chSec) {
-      // Append a new section for this chapter
-      const appendText = `\n\n## 第 ${chapterNumber} 章：未命名\n- **核心事件**：\n`
-      text = text.trim() + appendText
-      await writeTextAtomic(file, text)
-    }
+    if ((await readText(file)) !== before) throw new Error('生成期间大纲已被修改，请检查后重试')
+    if (before?.trim()) await writeTextAtomic(join(dir, '大纲', '_基线', `大纲_${randomUUID()}.md`), before)
+    await writeTextAtomic(file, content + '\n')
+    const result = await new OutlineMdRepo(dir).read()
+    if (!result) throw new Error('生成的大纲无法读取')
+    return result.main
   }
 
   async generateDetailed(projectId: string, chapterNumber: number): Promise<DetailedOutlineItem> {
@@ -299,6 +281,7 @@ export class OutlineService {
 
     // 1. 读取核心设定
     const coreSettings = await readText(join(dir, '设定', '核心设定.md'))
+      || await readText(join(dir, '设定', '题材定位.md'))
     if (!coreSettings) throw new Error('核心设定文件不存在，请先在「设定/核心设定.md」中创建')
 
     // 2. 读取卷级大纲
@@ -319,8 +302,19 @@ export class OutlineService {
       fromChapter,
       count,
       chapterWordCount,
-      isGolden
+      isGolden,
+      await readWritingPlatformConfig(dir)
     )
+    const contextPaths = ['设定/关系.md', '追踪/角色状态.md', '追踪/伏笔.md', '追踪/时间线.md', '追踪/上下文.md', '追踪/细纲规划.md']
+    const context = await Promise.all(contextPaths.map(async file => {
+      const text = await readText(join(dir, file))
+      return text?.trim() ? `### ${file}（只读来源，计划不是已发生事实）\n${text}` : ''
+    }))
+    const volumeContext = await this.getVolumeOutlines(projectId)
+    prompt += `\n\n### 所在卷规划\n${volumeContext.map(v => JSON.stringify(v)).join('\n')}`
+    prompt += `\n\n### 事实基线与跨章计划\n${context.filter(Boolean).join('\n\n')}`
+    const rhythm = await this.getRhythm(projectId)
+    prompt += `\n\n### 逐章既定标题与节奏来源\n${JSON.stringify(rhythm.filter(r => r.chapter >= fromChapter && r.chapter < fromChapter + count))}\n未回填的是预测，已回填的是实际值，不能据 false 认定正文未成稿。`
     const description = meta.description?.trim()
     prompt += buildAdoptedOpeningDirections(meta.openingChapters, fromChapter, count)
     if (description) {
@@ -330,13 +324,17 @@ export class OutlineService {
     // 5. 调用大语言模型生成细纲
     const md = await this.llm.generateStream(prompt, {
       systemPrompt: OPENING_SYSTEM_PROMPT,
-      maxTokens: 8192,
+      maxTokens: Math.min(32768, 8192 * count),
       meta: { feature: 'outline-generate', projectId }
     })
 
     // 6. 解析生成的细纲文本
     const { splitByChapterMarker } = await import('./opening-markdown')
-    const chapters = splitByChapterMarker(md)
+    const markers = [...md.matchAll(/^={2,}\s*第\s*(\d+)\s*章\s*={2,}\s*$/gm)]
+    const chapters = markers.length ? markers.map((m, i) => ({
+      chapterNumber: Number(m[1]),
+      content: md.slice(m.index! + m[0].length, markers[i + 1]?.index ?? md.length).trim()
+    })) : splitByChapterMarker(md).filter(ch => ch.content.trim())
 
     // 容错：如果只生成 1 章且未识别到分隔符，则全文作为一个章节
     let parsedChapters = chapters
@@ -345,44 +343,32 @@ export class OutlineService {
     }
 
     const { parseChapterBlock } = await import('./skill-format/detailed-outline-md-repo')
-    const writer = new DetailedOutlineWriter(dir)
-
+    const seen = new Set<number>()
+    const plans: Array<{ file: string; text: string }> = []
+    const repo = new DetailedOutlineMdRepo(dir)
     for (const ch of parsedChapters) {
-      if (!ch.chapterNumber || !ch.content.trim()) continue
-
-      const lines = ch.content.trim().split(/\r?\n/)
-      let heading = `## 第 ${ch.chapterNumber} 章`
-      let body = ch.content
-      const firstLine = lines[0]?.trim() ?? ''
-      if (firstLine.startsWith('#') || firstLine.includes(`第${ch.chapterNumber}章`)) {
-        heading = lines[0]
-        body = lines.slice(1).join('\n')
+      if (!Number.isInteger(ch.chapterNumber) || ch.chapterNumber < fromChapter || ch.chapterNumber >= fromChapter + count || seen.has(ch.chapterNumber)) {
+        throw new Error('生成细纲的章号越界或重复，尚未保存，请重试')
       }
-
-      const parsed = parseChapterBlock(heading, body)
-      if (!parsed) continue
-
-      // 7. 确保章节在 细纲/第01卷.md 中存在节点
-      await this.ensureChapterSectionExists(dir, ch.chapterNumber)
-
-      // 8. 写入文件
-      const patch: DetailedOutlinePatch = {
-        title: parsed.title,
-        plotSummary: parsed.plotSummary,
-        coolPoint: parsed.coolPoint,
-        hook: parsed.hook,
-        charactersAppearing: parsed.charactersAppearing,
-        foreshadowings: parsed.foreshadowings,
-        wordEstimate: parsed.wordEstimate,
-        goldenLine: parsed.goldenLine,
-        emotion: parsed.emotion,
-        climax: parsed.climax,
-        writingRequirements: parsed.writingRequirements,
-        writingRequirementTemplateId: parsed.writingRequirementTemplateId,
-        writingRequirementCustomText: parsed.writingRequirementCustomText
+      seen.add(ch.chapterNumber)
+      const heading = ch.content.match(/^#{1,3}\s*第\s*\d+\s*章[^\n]*/m)?.[0]
+      const parsed = heading ? parseChapterBlock(heading.replace(/^#+\s*/, ''), ch.content) : null
+      const title = parsed?.title?.trim()
+      if (!title || sanitizeTitleForFilename(title) !== title) {
+        throw new Error(`第 ${ch.chapterNumber} 章缺少有效标题或含文件名非法字符，尚未保存`)
       }
-      await writer.update(ch.chapterNumber, patch)
+      const previous = await repo.readRaw(ch.chapterNumber)
+      const fileName = `细纲_第${String(ch.chapterNumber).padStart(3, '0')}章_${title}.md`
+      if (previous && /^细纲_第\d+章/.test(previous.fileName) && previous.fileName !== fileName) {
+        throw new Error(`第 ${ch.chapterNumber} 章标题与已有细纲不一致，尚未保存；请先统一章名`)
+      }
+      // 保存完整细纲，不将情节点、预算、禁区等扩展内容压成字段补丁。
+      const content = ch.content.trim().replace(/^#(?!#)[^\n]*\n+/, '')
+      plans.push({ file: join(dir, '细纲', fileName), text: `# ${fileName}\n\n${content}\n` })
     }
+    if (seen.size !== count) throw new Error(`模型只返回 ${seen.size}/${count} 章细纲，尚未保存，请缩小范围重试`)
+    // 全批次章号和标题检查通过后才开始落盘；实际记忆与图谱始终只读。
+    for (const plan of plans) await writeTextAtomic(plan.file, plan.text)
 
     // 9. 读取最新值并返回
     const items = await this.listDetailed(projectId)

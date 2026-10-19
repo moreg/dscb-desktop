@@ -21,6 +21,9 @@ import {
 } from '../skill-prompts/deslop/anti-ai-methods'
 import { buildStructureJudgePrompt, parseStructureJudgeOutput } from '../skill-prompts/deslop/structure-judge'
 import { countWords } from '../words'
+import { ensureDialogueQuality, dialogueExpressionFindings, type DialogueCompositionOptions } from '../dialogue-quality'
+import { contentRevision } from '../chapter-revision'
+import { formatChapterProse } from '../../../shared/format-chapter-prose'
 import { summarizeTextDiff } from '../../../shared/text-diff'
 import { guardLanguageLeak } from './language-guard'
 import type {
@@ -43,6 +46,15 @@ export interface DeslopCallbacks {
  * IPC 层解析后注入 whitelist/bannedWords/textOverrides/styleContext。
  */
 export interface DeslopOptions {
+  /** 自动写作的对白修复总预算；0 表示仅复核。 */
+  dialogueRepairLimit?: number
+  /** 事实修复后的复核仍使用最初原稿；不能将修复稿当成新事实。 */
+  factBaseline?: string
+  onProgress?: (message: string) => void
+  /** 整章/续写验收；片段改写不设置。前部只读，比例按完整章节计算。 */
+  dialogueComposition?: DialogueCompositionOptions
+  /** 内部恢复自动修复检查点；text仍是唯一事实基线，恢复稿必须完整重新验收。 */
+  initialDialogueDraft?: string
   onToken?: (token: string) => void
   levelOverride?: DeslopLevel
   /** 自动精修时额外检查对白语感，即使规则扫描没有命中。 */
@@ -288,6 +300,57 @@ export class DeslopService {
    * 截断结果又会被 acceptRewrite 拒绝——表现为「长文点了润色什么都没发生」。切块是唯一出路。
    */
   async deslop(text: string, opts: DeslopOptions = {}): Promise<DeslopResult> {
+    if (opts.dialogueComposition) {
+      opts.onToken?.('\n正在实测对白比例、自动修复并复核人物互动…\n')
+      const scans = new Map<string, DeslopScanReport>()
+      const scanOnce = async (value: string): Promise<DeslopScanReport> => {
+        const cached = scans.get(value)
+        if (cached) return cached
+        const scan = await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+        scans.set(value, scan)
+        return scan
+      }
+      const initialScan = await scanOnce(text)
+      const level = opts.levelOverride ?? initialScan.level
+      const baseline = opts.factBaseline ?? text
+      const result = await ensureDialogueQuality(baseline, opts.initialDialogueDraft ?? text, this.llm, {
+        ...opts.dialogueComposition, signal: opts.signal, meta: opts.meta,
+        maxRepairs: opts.dialogueRepairLimit,
+        onProgress: message => {
+          opts.onProgress?.(message)
+          opts.onToken?.(`\n${message}\n`)
+        },
+        context: [opts.dialogueComposition.context ?? '',
+          opts.styleContext ? `【项目题材与文风】\n${JSON.stringify(opts.styleContext)}` : '',
+          opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真与实测对白比例）】\n${JSON.stringify(opts.textOverrides)}` : ''
+        ].filter(Boolean).join('\n\n'),
+        maxChangeRatio: opts.dialogueComposition.allowSceneRewrite ? 0.35 : level === 'severe' ? 0.35 : level === 'moderate' ? 0.25 : 0.15,
+        // 整章对白修复按功能处理停顿/打断，不能先机械变句号再让审核追认。
+        prepare: formatChapterProse,
+        validate: async value => {
+          const scan = await scanOnce(value)
+          return dialogueExpressionFindings(value, scan.findings).slice(0, 16).map(f => `第${f.line}行：${f.excerpt}；${f.message}`)
+        }
+      })
+      throwIfAborted(opts.signal)
+      const scan = await scanOnce(result.text)
+      return { rewritten: result.text, processedGates: [...new Set(['E', ...initialScan.findings.map(f => f.gate)])] as DeslopResult['processedGates'],
+        beforeWords: countWords(text), afterWords: countWords(result.text),
+        deleteRatio: 1 - countWords(result.text) / Math.max(1, countWords(text)),
+        dialogueQuality: result.report,
+        ...(result.report.passed && result.factsUnchanged ? { semanticVerification: {
+          scope: 'full_chapter_facts_and_expression' as const,
+          originalRevision: contentRevision(baseline), candidateRevision: contentRevision(result.text),
+          prefixRevision: contentRevision(opts.dialogueComposition.existingText?.trim() ?? '')
+        } } : {}),
+        remainingFindings: result.report.passed ? dialogueExpressionFindings(result.text, scan.findings) : [...scan.findings, {
+          line: 1, column: 1, gate: 'E', type: 'dialogue-quality-incomplete', severity: 'blocking',
+          excerpt: text.slice(0, 60), message: result.report.issues.join('；')
+        }],
+        changeSummary: [result.report.passed
+          ? `- 对话占比 ${(result.report.afterRatio * 100).toFixed(2)}%，自动修复 ${result.report.attempts} 次；自动检查未检出事实与场景问题，仍须通读验收。`
+          : `- [需复核] 自动对白验收未通过：${result.report.issues.join('；')}`] }
+    }
     const emit = (t: string): void => opts.onToken?.(t)
     const tail = opts.isTail ?? true
     const chunks = splitForDeslop(text)

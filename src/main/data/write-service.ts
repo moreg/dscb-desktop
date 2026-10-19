@@ -1,3 +1,5 @@
+import { PLANNING_RULES, buildPlanningPlatformRules } from './skill-prompts/opening/planning-rules'
+import { DIALOGUE_RULES } from './skill-prompts/chapter-rules'
 import { join, dirname } from 'path'
 import { promises as fs } from 'fs'
 import type { ProjectService } from './project-service'
@@ -65,7 +67,7 @@ import { readText, parseDoc } from './skill-format/md-parser'
 import { parseForeshadowReceipt } from '../../shared/parsers'
 import { findJsonArray, findJsonObject } from '../../shared/json-extract'
 import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
-import { formatChapterProse } from '../../shared/format-chapter-prose'
+import { formatChapterProse, joinContinuation } from '../../shared/format-chapter-prose'
 import { CHAPTER_INDEX_NOT_PROSE } from '../../shared/strip-chapter-meta'
 import { suggestChapterStrength } from '../../shared/chapter-strength-suggestion'
 import { DeslopService, hasRealChange } from './deslop/deslop-service'
@@ -158,6 +160,7 @@ export interface BatchState {
 }
 
 interface ChapterFlowOptions extends ChapterGenerateOptions {
+  styleProfileId?: string | null
   /** 批量模式先保存正文，再运行会改变记忆/细纲的后处理。 */
   onContentGenerated?: (content: string) => Promise<void>
   /** 恢复已保存章节的后处理，不能再次生成或覆盖正文。 */
@@ -228,8 +231,8 @@ export interface ChapterGenerateOptions extends GenerateOptions {
   onPromptMeta?: (meta: ChapterPromptMeta) => void
   onGenerationStage?: (stage: ChapterGenerationStage) => void
   onAutoDeslopResult?: (result: AutoDeslopResult) => void
-  /** 完整生成稿的恢复检查点；在自动润色前通知批量调用方。 */
-  onProseGenerated?: (content: string) => void
+  /** 自动润色前的原稿保存回调；必须等待落盘完成。未提供时由服务保存。 */
+  onProseGenerated?: (content: string) => void | Promise<void>
 }
 
 export interface BatchGenerateOptions extends GenerateOptions {
@@ -611,6 +614,7 @@ export class WriteService {
       fromOutline: prompt.wordTarget.fromOutline,
       bound: prompt.wordTarget.bound
     })
+    const savedBefore = await this.chapterService.getChapter(projectId, chapterNumber)
     onGenerationStage?.('generating')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
@@ -621,11 +625,18 @@ export class WriteService {
     // 批量/手机端拿返回值，编辑器拿流式token；两条路径都只保留正文。
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
     await this.validateGeneratedProse(projectId, chapterNumber, prose, opts.existingText)
-    onProseGenerated?.(prose)
-    return this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
+    await onProseGenerated?.(prose)
+    const rawContent = formatChapterProse(joinContinuation(opts.existingText ?? '', prose))
+    if (!onProseGenerated) await this.chapterService.updateContent(projectId, chapterNumber, rawContent,
+      contentRevision(savedBefore.content), { source: 'ai', note: '生成原稿（自动润色前保存）' })
+    const polished = await this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
       signal: opts.signal, existingText: opts.existingText,
-      isTail: prompt.continueMode !== 'extend', onGenerationStage, onAutoDeslopResult
+      isTail: prompt.continueMode !== 'extend', onGenerationStage, onAutoDeslopResult, reviewInstruction: opts.tempContext
     })
+    if (!onProseGenerated && polished !== prose) await this.chapterService.updateContent(projectId, chapterNumber,
+      formatChapterProse(joinContinuation(opts.existingText ?? '', polished)), contentRevision(rawContent),
+      { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
+    return polished
   }
 
   private async validateGeneratedProse(projectId: string, chapterNumber: number, prose: string, existingText?: string): Promise<void> {
@@ -682,7 +693,17 @@ export class WriteService {
         }, { signal, meta: { feature: 'foreshadowRepairVerify', projectId, chapterNumber } })
       })
       throwIfAborted(signal)
-      return result('applied', '遗漏伏笔已自动补写，原细纲复核通过。', repaired.content)
+      const finalContent = this.deslopService
+        ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired.content, null, {
+          signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: content
+        }) : repaired.content
+      if (finalContent !== repaired.content) {
+        const checked = await this.checkOutlineWithRetry(chapterNumber, outline, finalContent, checkOpts, signal)
+        if (checked.checked === false || missingForeshadowings(checked, plans).length) {
+          throw new Error('补写后的对白修复未通过伏笔复核')
+        }
+      }
+      return result('applied', '遗漏伏笔已自动补写，对白与原细纲复核通过。', finalContent)
     } catch (err) {
       throwIfAborted(opts.signal)
       if ((err as Error).message?.includes('LLM_ABORTED') || (err as Error).name === 'AbortError') throw err
@@ -692,12 +713,19 @@ export class WriteService {
 
   private async autoDeslopGeneratedProse(
     projectId: string, chapterNumber: number, prose: string, styleProfileId: string | null,
-    opts: Pick<ChapterGenerateOptions, 'signal' | 'existingText' | 'onGenerationStage' | 'onAutoDeslopResult'> & { isTail: boolean }
+    opts: Pick<ChapterGenerateOptions, 'signal' | 'existingText' | 'onGenerationStage' | 'onAutoDeslopResult'> & { isTail: boolean; reviewInstruction?: string; previousDraft?: string; allowSceneRewrite?: boolean }
   ): Promise<string> {
     throwIfAborted(opts.signal)
+    await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
+      opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, prose)) : prose, {
+        status: 'review_required', message: '生成原稿已保存，自动润色尚未完成，待复核。', remainingIssues: 0
+      })
     if (!this.deslopService || !prose.trim()) {
-      opts.onAutoDeslopResult?.({ status: prose.trim() ? 'failed' : 'unchanged',
-        message: prose.trim() ? '自动去 AI 味服务未启用，已保留生成稿。' : '本次没有新增正文，无需润色。', remainingIssues: 0 })
+      const report: AutoDeslopResult = { status: prose.trim() ? 'failed' : 'unchanged',
+        message: prose.trim() ? '待复核：自动去 AI 味服务未启用，已保留生成稿。' : '本次没有新增正文，无需润色。', remainingIssues: 0 }
+      await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
+        opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, prose)) : prose, report)
+      opts.onAutoDeslopResult?.(report)
       return prose
     }
     opts.onGenerationStage?.('deslop')
@@ -705,13 +733,17 @@ export class WriteService {
     try {
       const dir = await this.projectService.resolveDir(projectId)
       const project = await this.projectService.getProjectData(projectId)
-      const style = await this.loadStyleProfile(dir, styleProfileId ?? project.defaultStyleProfileId ?? null)
-      const [rules, whitelist] = await Promise.all([
-        this.resolveDeslopRules(), this.resolveDeslopWhitelist(projectId)
+      const [style, rules, whitelist, outlineText] = await Promise.all([
+        this.loadStyleProfile(dir, styleProfileId ?? project.defaultStyleProfileId ?? null),
+        this.resolveDeslopRules(), this.resolveDeslopWhitelist(projectId),
+        this.loadChapterOutlineText(dir, chapterNumber)
       ])
       result = await autoDeslopProse(prose, {
         service: this.deslopService, llm: this.llm, ...rules, whitelist,
+        dialogueComposition: { mode: 'write', existingText: opts.existingText,
+          context: outlineText, revisionInstruction: opts.reviewInstruction, previousDraft: opts.previousDraft, allowSceneRewrite: opts.allowSceneRewrite },
         signal: opts.signal, isTail: opts.isTail,
+        onProgress: message => opts.onGenerationStage?.(`deslop:${message}`),
         formatCandidate: formatChapterProse,
         styleContext: { genre: project.genre ?? '通用', ...(style ? { style: {
           identifiedStyle: style.identifiedStyle, tone: style.tone, sentencePatterns: style.sentencePatterns,
@@ -727,6 +759,12 @@ export class WriteService {
         message: `自动去 AI 味未完成，已保留生成稿：${err instanceof Error ? err.message : String(err)}`, remainingIssues: 0 } }
     }
     throwIfAborted(opts.signal)
+    if (result.report.dialogueQuality?.passed === false || result.report.status === 'failed' || result.report.status === 'review_required') {
+      result.content = prose
+      result.report = { ...result.report, message: `待复核：${result.report.message}` }
+    }
+    await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
+      opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, result.content)) : result.content, result.report)
     opts.onAutoDeslopResult?.(result.report)
     return result.content
   }
@@ -833,6 +871,7 @@ export class WriteService {
     throwIfAborted(opts.signal)
     this.invalidateChapterMemorySync(projectId, chapterNumber)
     await this.memoryCoordinator.exclusive(projectId, async () => undefined)
+    const savedBefore = await this.chapterService.getChapter(projectId, chapterNumber)
     const prompt = await this.buildAdjustChapterPrompt(
       projectId,
       chapterNumber,
@@ -853,10 +892,15 @@ export class WriteService {
     })
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
     await this.validateGeneratedProse(projectId, chapterNumber, prose)
-    onProseGenerated?.(prose)
-    return this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
-      signal: opts.signal, isTail: true, onGenerationStage, onAutoDeslopResult
+    await onProseGenerated?.(prose)
+    if (!onProseGenerated) await this.chapterService.updateContent(projectId, chapterNumber, prose,
+      contentRevision(savedBefore.content), { source: 'ai', note: '调整生成原稿（自动润色前保存）' })
+    const polished = await this.autoDeslopGeneratedProse(projectId, chapterNumber, prose, styleProfileId, {
+      signal: opts.signal, isTail: true, onGenerationStage, onAutoDeslopResult, reviewInstruction: instruction, previousDraft: content, allowSceneRewrite: true
     })
+    if (!onProseGenerated && polished !== prose) await this.chapterService.updateContent(projectId, chapterNumber,
+      polished, contentRevision(prose), { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
+    return polished
   }
 
   /**
@@ -2433,6 +2477,13 @@ export class WriteService {
         opts.onAutoDeslopResult?.(report)
       }
     })
+    // 恢复旧批次的已保存正文也要过新验收，不能从“补跑检查”入口绕过比例要求。
+    if (contentOverride !== undefined && this.deslopService) {
+      content = await this.autoDeslopGeneratedProse(projectId, chapterNumber, content, opts.styleProfileId ?? null, {
+        signal: opts.signal, isTail: true, reviewInstruction: opts.tempContext, onGenerationStage: stage => onProgress(stage),
+        onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
+      })
+    }
     await onContentGenerated?.(content)
     // 批量正文已保存，必须绑定本次稿件，不能把保存后的另一窗口改稿误当成允许提交的基线。
     let savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
@@ -2525,11 +2576,19 @@ export class WriteService {
         throwIfAborted(memoryTicket.controller.signal)
         // 保存同样使用正文版本检查；另一窗口改稿时不能覆盖。
         const previousContent = content
-        await this.chapterService.updateContent(projectId, chapterNumber, repaired.content, savedBefore, {
+        // 写后补伏笔也会改变对白占比，最终落盘前必须重新验收。
+        const repairedContent = this.deslopService
+          ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired.content, opts.styleProfileId ?? null, {
+            signal: memoryTicket.controller.signal, isTail: true, reviewInstruction: opts.tempContext, previousDraft: previousContent,
+            onGenerationStage: stage => onProgress(stage),
+            onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
+          }) : repaired.content
+        await this.chapterService.updateContent(projectId, chapterNumber, repairedContent, savedBefore, {
           source: 'ai', note: '自动补写遗漏伏笔'
         })
-        content = repaired.content
-        outlineDiff = repaired.report
+        content = repairedContent
+        outlineDiff = content === repaired.content ? repaired.report
+          : await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
         savedBefore = hashProse(content)
         this.postProcessCache.delete(postProcessCacheKey(projectId, chapterNumber, previousContent))
         cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
@@ -2775,7 +2834,7 @@ export class WriteService {
         if (aborted) return { ok: false, results, error: '已停止批量去 AI 味' }
         if (!saved) {
           const result: SavedChapterPolishResult = { chapterNumber, changed: false, error: message,
-            autoDeslop: { status: 'failed', message: `本章未修改：${message}`, remainingIssues: 0, issues: [message] } }
+            autoDeslop: report ?? { status: 'failed', message: `本章未修改：${message}`, remainingIssues: 0, issues: [message] } }
           results.push(result)
           onChapterComplete(chapterNumber, result)
         }
@@ -2847,11 +2906,13 @@ export class WriteService {
             console.warn(`[generateChaptersBatch] Failed to compute strength suggestion for ch ${ch}:`, err)
           }
         }
+        let savedRevision = contentRevision(before)
         const persistContent = async (content: string): Promise<void> => {
           generatedContent = content
-          await this.chapterService.updateContent(projectId, ch, content, contentRevision(before), {
+          await this.chapterService.updateContent(projectId, ch, content, savedRevision, {
             source: 'ai', note: resumingPostProcess ? '恢复批量章节检查' : '批量生成正文'
           })
+          savedRevision = contentRevision(content)
           contentSaved = true
           await (opts as BatchGenerateOptions).onContentSaved?.(ch)
         }
@@ -2863,7 +2924,7 @@ export class WriteService {
               ...opts, styleProfileId, strengthOverride,
               onGenerationStage: (stage: ChapterGenerationStage) => (opts as BatchGenerateOptions).onGenerationStage?.(stage, ch),
               onAutoDeslopResult: (report: AutoDeslopResult) => (opts as BatchGenerateOptions).onAutoDeslopResult?.(report, ch),
-              onProseGenerated: (prose: string) => { generatedContent = prose },
+              onProseGenerated: persistContent,
               ...(resumingPostProcess ? { contentOverride: before } : {}),
               ...(runOptions?.autoContinue ? { proseFirst: true } : {}),
               onContentGenerated: persistContent
@@ -3274,13 +3335,17 @@ export class WriteService {
     const trimmed = content.length > 8000 ? content.slice(0, 8000) + '\n\n…（后文已省略）' : content
     return [
       `你是资深网文/小说编辑，请以专业编辑视角审阅下面这一章正文，找出影响阅读体验最关键的问题，并给出可以直接落地的修改建议。`,
+      PLANNING_RULES,
+      buildPlanningPlatformRules(await readWritingPlatformConfig(await this.projectService.resolveDir(projectId))),
+      DIALOGUE_RULES,
+      content.length > 8000 ? `当前仅提供前 8000 字，未展示章末；整章比例、完成度与章末均不得宣称已评估。` : `仅依据已提供内容与可证实事实审核，未知章节完成状态时不强迫章末收束。`,
       ``,
       `**优先排查的维度**（不必全覆盖，按本章短板挑最值得改的；最多 8 条，问题不明显时少于 5 条也行，宁可不写也不要凑数）：`,
       `1. **节奏与张力**：开篇是否有钩子；信息密度是否平均（动作/对白/描写/内心戏的占比是否失衡）；高潮前的铺垫是否到位；有没有该慢的地方一笔带过、该快的地方写拖了。`,
       `2. **人物塑造**：人物的反应/动作/语言是否符合其性格与处境；有没有"工具人式"的应声虫对白；情绪转折是否有支点，还是凭空跳跃；内心活动是否过载，挤掉了外部行动。`,
-      `3. **场景与画面感**：感官细节（视/听/嗅/触/味）是否单一或缺失；环境描写是否服务于情绪，还是为写而写；动作描写是否清晰可视化，还是模糊的形容词堆砌。`,
-      `4. **用词精准度**：动词是否有力（避免大量"是/有/变得/十分"等弱动词）；形容词/副词是否冗余；有没有套路化的"网文腔"（嘴角勾起、眼神一凛、轰然作响 等）；同义重复或啰嗦表达。`,
-      `5. **对白质感**：对白是否推动情节或揭示性格，还是只在交换信息；语气是否符合人物身份；"说"字句和动作提示词是否单调。`,
+      `3. **场景与画面感**：仅保留理解位置、行动条件、危险或线索所必需的环境；不为补感官或烘托情绪新增描写；动作描写是否清晰可视化，还是模糊的形容词堆砌。`,
+      `4. **用词精准度**：动词是否准确，不因出现“是/有/变得/十分”等普通词直接判错；形容词/副词是否冗余；有没有套路化的"网文腔"（嘴角勾起、眼神一凛、轰然作响 等）；同义重复或啰嗦表达。`,
+      `5. **对白质感**：对白是否推动情节或揭示性格，还是只在交换信息；语气是否符合人物身份；是否存在无用途重复标签；不强求多样标签，不增加动作占位。`,
       `6. **逻辑与连贯**：时间线、空间感、因果链有无跳跃或自相矛盾；人物动机是否成立；伏笔和回收是否自然。`,
       `7. **视角与文风一致性**：视角是否稳定（有无无意识的全知滑入）；叙述距离是否合适；风格是否前后统一。`,
       ``,
@@ -3294,14 +3359,10 @@ export class WriteService {
       `- "改写"必须是改后的成品本身，能整句替换"原文"，禁止写成"把…改成…/应该…/可以…/拆到…/不要…"这种说明性句式。`,
       `- 若问题属于结构调整、跨段落删改，无法用单句替换，则"改写"一行写"（此为结构调整，请参考理由手动改）"，并在"理由"里讲清结构怎么调。`,
       `- 单条建议聚焦一个问题，不要一条里塞两件事。"改写"应当明显优于"原文"（不是同义改写）。`,
-      `- **"改写"成品必须自身去 AI 味**，禁止出现以下高频 AI 套路表达（你正在批评的词，自己改写时也不许用）：`,
-      `  · 情态比喻：仿佛 / 犹如 / 宛若 / 如同 / 一丝 / 一抹 / 些许 / 几分`,
-      `  · 程度副词堆叠：缓缓 / 微微 / 轻轻 / 淡淡 / 不禁 / 不由得`,
-      `  · 表情套路：眼中闪过一丝X / 嘴角勾起一抹X / 眉头微皱 / 瞳孔微缩`,
-      `  · 心理外露：心中涌起/一动 / 心头一震 / 心下暗道 / 深吸一口气`,
-      `  · 句式套路："不是A，而是B" / "，带着一丝X" / "声音不大，却带着X的力量" / "他/她知道……"`,
-      `  · 判断/升华：不容置疑 / 显而易见 / 这一刻，他终于明白 / 他不知道的是，更大的风暴即将来临`,
-      `  替换思路：用具体动作、身体反应、可见细节、短句断句代替；与其写"她微微一笑，眼中闪过一丝失落"，不如写"她扯了下嘴角，没说话"。改写后若仍含上述表达，视为不合格。`,
+      `- **"改写"成品必须自身去 AI 味**，按叙事用途处理套路，不把一种微动作替换成另一种。`,
+      `- 仿佛、缓缓、眼中闪过、嘴角勾起、不是A，而是B 等用于定位具体问题，不按词频逐词禁用；必要心理判断可直接保留，不强制外化。`,
+      `- 改写必须保持说话人、事件顺序、视角、已知信息、情绪、关系和结果；不新增提问、承诺、反转或情节。少写无用途环境、重复心理和发声解说，不删掉关键行动与因果。`,
+      `- 正文整章对白目标 70%，但短片段不为比例扩写。缺整章或可靠统计时说明未评估；不压直接对白成旁白摘要，也不把旁白套引号凑比例。`,
       `- 不要客套话、不要总评/前言/标题、不要打分、不要 Markdown 标记。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
@@ -4491,6 +4552,7 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】（在不违背临时写作要求的前提下）。如果没有，先补足再输出。`)
   }
   parts.push('只输出小说正文，不附记忆回执、规划表或自检报告。')
+  parts.push('【本次对白篇幅与推进方式】\n整章直接台词字数占比目标70%，按不含标点空白的正文字数计算，约每1000有效字应有700字人物直接对白与300字必要旁白。前文即使旁白偏多，本次也不要沿袭其对白密度。把当前场景的消息、条件、争执、试探、选择写成各有立场的接话，旁白只补动作、结果和必要因果，不先用旁白讲完再让人物总结。续写按已有正文与新增片段合计考虑整章，不能重写前部。不要靠长篇独白、复述设定、轮流捧场或给旁白套引号凑比例。')
   return parts.join('\n\n')
 }
 

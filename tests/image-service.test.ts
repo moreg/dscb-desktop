@@ -343,7 +343,7 @@ describe('提示词与扩展名', () => {
     const prompt = buildCliImagePrompt('codex', 'gpt-image-2', '雨夜霓虹', output)
     expect(prompt).toContain(JSON.stringify(output))
     expect(prompt).toContain('gpt-image-2')
-    expect(prompt).toContain('1024x1536')
+    expect(prompt).toContain('1536x2048（3:4 竖版）')
     expect(prompt).toContain('禁止用')
     expect(buildCliImagePrompt('grok', 'grok-image', 'x')).not.toContain('gpt-image-2')
   })

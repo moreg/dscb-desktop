@@ -5,6 +5,7 @@ import { writeJsonAtomic } from './atomic'
 import { ImageService } from './image-service'
 import { ProjectService } from './project-service'
 import type { CoverLearningLibraryService } from './cover-learning-library'
+import type { CoverPromptService } from './cover-prompt-service'
 import {
   inferGenre,
   buildCoverPrompt,
@@ -15,6 +16,7 @@ import {
 } from './skill-prompts/cover/cover-styles'
 import type {
   CoverFile,
+  CoverPromptDraft,
   CoverGenre,
   CoverFeedback,
   CoverGenerationMetadata,
@@ -24,7 +26,7 @@ import type {
   UpdateCoverFeedbackInput,
   GenerateCoverInput
 } from '../../shared/types'
-import { withVisualDirection } from './cover-visual-direction'
+import { applyCoverGenerationStyle, requestsCoverVisualPlanChange } from './cover-generation-style'
 import { withCoverChannel } from './cover-channel'
 import { COVER_GENERATION_SIZE, withCoverFrameSafety } from './cover-frame'
 import { decodeCoverImage, coverOutputSize, renderCoverImage, validateCoverCrop, DEFAULT_COVER_CROP } from './cover-image-output'
@@ -32,7 +34,7 @@ export { withVisualDirection } from './cover-visual-direction'
 export { COVER_GENERATION_SIZE } from './cover-frame'
 
 const COVER_DIR = '封面'
-/** 由 1024×1536 居中裁切得到，不放大、不拉伸；1023:1364 精确等于 3:4。 */
+/** 3:4 原图等比缩小后的默认成品上限，不放大、不拉伸。 */
 export const DEFAULT_COVER_OUTPUT_SIZE = '1023x1364'
 export const MAX_COVER_PROMPT_CHARACTERS = 8000
 
@@ -41,8 +43,8 @@ export const MAX_COVER_PROMPT_CHARACTERS = 8000
  *
  * Step 1-1.5：题材判定（书名关键词推断）
  * Step 2：构建中文提示词（文字层 + 风格层 + 画面层，兼容旧英文手改内容）
- * Step 3：调 ImageService 出图 + 无拉伸裁成默认 3:4 + 落盘（自增版本号）+ 保存 prompt 副本
- * Step 3.5：平台上传尺寸居中裁剪（番茄 600×800）
+ * Step 3：调 ImageService 直接生成 3:4 + 等比缩放 + 落盘（自增版本号）+ 保存 prompt 副本
+ * Step 3.5：等比缩放至平台上传尺寸（番茄 600×800）；返回比例不符时保留全图并提示
  *
  * 产物结构（项目目录下）：
  *   封面/
@@ -60,7 +62,8 @@ export class CoverService {
   constructor(
     private readonly projectService: ProjectService,
     private readonly image: ImageService,
-    private readonly learningLibrary?: CoverLearningLibraryService
+    private readonly learningLibrary?: CoverLearningLibraryService,
+    private readonly novelPromptService?: CoverPromptService
   ) {}
 
   /**
@@ -207,6 +210,27 @@ export class CoverService {
   ): Promise<CoverFile> {
     const dir = await this.resolveCoverDir(input.projectId)
     signal.throwIfAborted()
+    const changePlan = input.changeVisualPlan || requestsCoverVisualPlanChange(input.visualDirection)
+    let novelPlan: CoverPromptDraft | undefined
+    if (input.useNovelContent ?? Boolean(this.novelPromptService && input.promptSource !== 'edited')) {
+      if (!this.novelPromptService) throw new Error('COVER_CONTENT_SERVICE_UNAVAILABLE: 小说内容提炼服务不可用，未回退题材模板')
+      const previous = changePlan ? (await this.list(input.projectId)).find(cover => !cover.isUploadSize) : undefined
+      const previousPrompt = previous
+        ? await fs.readFile(join(dir, `封面_v${previous.version}.prompt.txt`), 'utf-8').catch(() => undefined) : undefined
+      novelPlan = await this.novelPromptService.extract({
+        projectId: input.projectId, bookName: input.bookName, authorName: input.authorName,
+        platform: input.platform, channel: input.channel, stylePreset: input.stylePreset,
+        typography: input.typography, genreOverride: input.genreOverride,
+        ...(input.compositionLocked ? { compositionOverride: input.composition } : {}),
+        extraHint: [input.visualDirection, input.styleHint].filter(Boolean).join('\n') || undefined,
+        changeVisualPlan: changePlan,
+        ...(changePlan ? { previousPrompt: previousPrompt ?? input.promptOverride } : {})
+      }, signal)
+      signal.throwIfAborted()
+      input = { ...input, genreOverride: novelPlan.genre, composition: novelPlan.composition,
+        scene: novelPlan.scene, styleHint: novelPlan.styleHint, promptOverride: novelPlan.prompt,
+        learningContext: novelPlan.learningContext }
+    }
     // Step 1.5：题材判定
     const genre: CoverGenre = input.genreOverride ?? inferGenre(input.bookName)
     const platform = PLATFORM_STYLES[input.platform]
@@ -215,19 +239,23 @@ export class CoverService {
     const resolved = input.promptOverride?.trim()
       ? { prompt: input.promptOverride.trim(), context: input.learningContext }
       : await this.buildWithContext(input)
+    const variant = !novelPlan && changePlan
+      ? Math.max(0, ...(await this.list(input.projectId)).map(cover => cover.version)) + 1 : 0
     const prompt = withCoverFrameSafety(withCoverChannel(
-      withVisualDirection(resolved.prompt, input.visualDirection, input.channel), input.channel
+      applyCoverGenerationStyle(resolved.prompt, input, variant), input.channel
     ))
     if (prompt.length > MAX_COVER_PROMPT_CHARACTERS) {
       throw new Error(`COVER_PROMPT_TOO_LONG: 实际出图提示词共 ${prompt.length} 字符，超过 ${MAX_COVER_PROMPT_CHARACTERS} 字符预算。请精简提示词或停用部分学习规则后重建；当前内容已完整保留。`)
     }
     const generationMetadata: CoverGenerationMetadata = {
+      ...(novelPlan ? { contentBased: true, contentSources: novelPlan.sources, contentSummary: novelPlan.summary } : {}),
       promptSource: input.promptSource ?? (input.promptOverride?.trim() ? 'edited' : 'template'),
       generatedAt: new Date().toISOString(),
       genre,
       platform: input.platform,
       channel: input.channel,
-      stylePreset: resolved.context?.resolvedStylePreset ?? input.stylePreset,
+      stylePreset: input.stylePreset && input.stylePreset !== 'auto'
+        ? input.stylePreset : resolved.context?.resolvedStylePreset ?? input.stylePreset,
       learningContext: resolved.context ? {
         ...resolved.context,
         // 手改可以删除规则；只记录实际仍在最终提示词里的建议。
@@ -248,12 +276,14 @@ export class CoverService {
     setPhase('saving')
     const original = await decodeCoverImage(b64)
     const outputSize = coverOutputSize(original.width, original.height)
-    const master = await renderCoverImage(original.png, outputSize)
-    const upload = platform.uploadSize ? await renderCoverImage(original.png, platform.uploadSize) : undefined
+    // 服务可能忽略请求尺寸；完整保留返回画面，不以自动裁剪掩盖比例不符。
+    const ratioMatches = original.width * 4 === original.height * 3
+    const crop = { ...DEFAULT_COVER_CROP, fit: ratioMatches ? 'cover' as const : 'contain' as const }
+    const master = await renderCoverImage(original.png, outputSize, crop)
+    const upload = platform.uploadSize ? await renderCoverImage(original.png, platform.uploadSize, crop) : undefined
     const warnings: string[] = []
     if (original.width < 600 || original.height < 800) warnings.push(`原图仅 ${original.width}×${original.height} 像素，清晰度不足；主成品保留实际分辨率。`)
-    const visibleShare = Math.min((original.width / original.height) / 0.75, 0.75 / (original.width / original.height))
-    if (visibleShare < 0.85) warnings.push('原图比例与 3:4 差异较大，请预览裁剪，或选择保留全图。')
+    if (!ratioMatches) warnings.push(`图像服务返回 ${original.width}×${original.height}，未遵守请求的 3:4 比例；已保留全图并补边，未自动裁剪。`)
 
     // 正式文件只在完整解码、处理成功后提交；占位锁与成品分开。
     const { version, fullPath, lockPath } = await this.acquireUniqueCoverPath(dir)
@@ -262,7 +292,7 @@ export class CoverService {
     const [outputWidth, outputHeight] = outputSize.split('x').map(Number)
     Object.assign(generationMetadata, {
       storageVersion: 2, originalFileName, sourceWidth: original.width, sourceHeight: original.height,
-      outputWidth, outputHeight, crop: { ...DEFAULT_COVER_CROP }, warnings
+      outputWidth, outputHeight, crop, warnings
     })
     const staged = new Map<string, Buffer | string>([
       [`封面_v${version}.metadata.json`, JSON.stringify(generationMetadata, null, 2)],
@@ -286,6 +316,7 @@ export class CoverService {
       size: stat.size,
       genre,
       generationMetadata,
+      ...(novelPlan ? { novelPlan } : {}),
       originalFileName,
       warnings,
       createdAt: stat.mtime.toISOString()

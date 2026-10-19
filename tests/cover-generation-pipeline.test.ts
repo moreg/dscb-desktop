@@ -16,7 +16,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })))
 })
 
-async function fixture(width = 96, height = 144) {
+async function fixture(width = 96, height = 144, novelPromptService?: ConstructorParameters<typeof CoverService>[3]) {
   const root = await fs.mkdtemp(join(tmpdir(), 'cover-pipeline-'))
   cleanup.push(root)
   const canvas = new Canvas(width, height)
@@ -32,7 +32,8 @@ async function fixture(width = 96, height = 144) {
   const edit = vi.fn(async (_prompt: string, _size: string, _path: string, _signal?: AbortSignal) => png.toString('base64'))
   const service = new CoverService(
     { resolveDir: async (id: string) => join(root, id) } as ConstructorParameters<typeof CoverService>[0],
-    { generate, edit } as unknown as ConstructorParameters<typeof CoverService>[1]
+    { generate, edit } as unknown as ConstructorParameters<typeof CoverService>[1],
+    undefined, novelPromptService
   )
   const input: GenerateCoverInput = {
     projectId: 'p1', bookName: '夜路', authorName: '作者', platform: 'fanqie',
@@ -54,6 +55,74 @@ async function pixels(file: string): Promise<{ width: number; height: number; to
 }
 
 describe('封面生成任务和成品提交', () => {
+  it('将当前二次元选择与换方案要求发送到图像服务并保存实际提示词', async () => {
+    const extract = vi.fn().mockResolvedValueOnce({ genre: 'urban', composition: 'duo',
+      scene: { characterDesc: '白裙女生与持盾学长', backgroundDesc: '迎新礼堂的暗界裂缝' },
+      prompt: "Title text '夜路'.\nAuthor byline: 作者著.\n主体人物：白裙女生与持盾学长。\n背景场景：迎新礼堂的暗界裂缝。",
+      summary: '女主在迎新礼堂猎杀，学长保护学生', sources: ['大纲', '第 1 章正文']
+    }).mockResolvedValueOnce({ genre: 'urban', composition: 'scene',
+      scene: { backgroundDesc: '礼堂破裂的舞台，猎刀与摘下的黑框眼镜' },
+      prompt: "Title text '夜路'.\nAuthor byline: 作者著.\n背景场景：礼堂破裂的舞台，猎刀与摘下的黑框眼镜。",
+      summary: '以猎刀和眼镜表达隐藏身份', sources: ['大纲', '第 1 章正文']
+    })
+    const { service, input, dir, generate } = await fixture(96, 128, { extract } as unknown as ConstructorParameters<typeof CoverService>[3])
+    const changed = { ...input, stylePreset: 'anime_illustration' as const, changeVisualPlan: true,
+      useNovelContent: true,
+      promptOverride: `${input.promptOverride}\n画风约束（真人写实封面）：真人摄影。\n写实媒介约束：真实肤质。\n主体人物：白衬衫青年，拿着收据。` }
+    const first = await service.generate(changed)
+    const second = await service.generate(changed)
+    const firstPrompt = generate.mock.calls[0][0]
+    const secondPrompt = generate.mock.calls[1][0]
+    expect(firstPrompt).toContain('二次元媒介约束')
+    expect(firstPrompt).not.toContain('写实媒介约束：')
+    expect(firstPrompt).toContain('白裙女生与持盾学长')
+    expect(firstPrompt).not.toContain('白衬衫青年，拿着收据')
+    expect(secondPrompt).not.toBe(firstPrompt)
+    expect(secondPrompt).toContain('猎刀与摘下的黑框眼镜')
+    expect(extract.mock.calls[0][0]).not.toHaveProperty('compositionOverride')
+    expect(extract.mock.calls[1][0].previousPrompt).toBe(firstPrompt)
+    expect(first.generationMetadata?.contentSources).toEqual(['大纲', '第 1 章正文'])
+    expect(await fs.readFile(join(dir, `封面_v${first.version}.prompt.txt`), 'utf-8')).toBe(firstPrompt)
+    expect(await fs.readFile(join(dir, `封面_v${second.version}.prompt.txt`), 'utf-8')).toBe(secondPrompt)
+  })
+  it('内容提炼失败时停止出图，不用题材模板代替；作者显式手写可按原稿生成', async () => {
+    const extract = vi.fn().mockRejectedValue(new Error('COVER_PROMPT_NO_MATERIAL'))
+    const { service, input, generate } = await fixture(96, 128, { extract } as unknown as ConstructorParameters<typeof CoverService>[3])
+    await expect(service.generate({ ...input, useNovelContent: true })).rejects.toThrow('COVER_PROMPT_NO_MATERIAL')
+    expect(generate).not.toHaveBeenCalled()
+    await service.generate({ ...input, useNovelContent: false, promptSource: 'edited' })
+    expect(generate.mock.calls[0][0]).toContain(input.promptOverride)
+    expect(extract).toHaveBeenCalledTimes(1)
+  })
+  it('直接请求 3:4，等比输出保留原画面上下边缘', async () => {
+    const { service, input, dir, generate } = await fixture(96, 128)
+    const result = await service.generate(input)
+    expect(generate.mock.calls[0][1]).toBe('1536x2048')
+    expect(await pixels(join(dir, result.fileName))).toMatchObject({
+      width: 96, height: 128, top: [255, 0, 0, 255], bottom: [0, 0, 255, 255]
+    })
+    expect(await pixels(join(dir, '封面_v1_上传.png'))).toMatchObject({
+      width: 600, height: 800, top: [255, 0, 0, 255], bottom: [0, 0, 255, 255]
+    })
+    expect(result.warnings?.join('')).not.toContain('未遵守')
+  })
+
+  it('服务忽略请求返回 2:3 时保留完整画面、补边并提示，不自动截取', async () => {
+    const { service, input, dir } = await fixture(96, 144)
+    const result = await service.generate(input)
+    expect(result.generationMetadata?.crop?.fit).toBe('contain')
+    expect(result.warnings?.join('')).toContain('未遵守请求的 3:4 比例')
+    for (const file of [result.fileName, '封面_v1_上传.png']) {
+      const image = await loadImage(join(dir, file))
+      const canvas = new Canvas(image.width, image.height)
+      const context = canvas.getContext('2d')
+      context.drawImage(image, 0, 0)
+      const x = Math.floor(image.width / 2)
+      expect([...context.getImageData(x, 0, 1, 1).data]).toEqual([255, 0, 0, 255])
+      expect([...context.getImageData(x, image.height - 1, 1, 1).data]).toEqual([0, 0, 255, 255])
+    }
+  })
+
   it.each(['male', 'female'] as const)('新建中文模板实际出图保留 %s 频道和人物细节，存盘与发送内容一致', async (channel) => {
     const { service, input, generate, dir } = await fixture()
     await service.generate({ ...input, promptOverride: undefined, channel, genreOverride: 'urban',
@@ -74,7 +143,7 @@ describe('封面生成任务和成品提交', () => {
     const visualDirection = channel === 'male' ? '女性人物，全身，冷色灯光' : '男性人物，全身，暖色灯光'
     const result = await service.generate({ ...input, channel, visualDirection })
     const prompt = withCoverFrameSafety(withCoverChannel(withVisualDirection(input.promptOverride!, visualDirection, channel), channel))
-    expect(generate).toHaveBeenCalledWith(prompt, '1024x1536', expect.any(AbortSignal))
+    expect(generate).toHaveBeenCalledWith(prompt, '1536x2048', expect.any(AbortSignal))
     expect(await fs.readFile(join(dir, '封面_v1.prompt.txt'), 'utf8')).toBe(prompt)
     expect(result.generationMetadata?.channel).toBe(channel)
     expect((await service.list('p1')).every((file) => file.generationMetadata?.channel === channel)).toBe(true)
@@ -90,7 +159,7 @@ describe('封面生成任务和成品提交', () => {
     await fs.writeFile(refImagePath, png)
     const result = await service.generate({ ...input, channel, refImagePath })
     expect(generate).not.toHaveBeenCalled()
-    expect(edit).toHaveBeenCalledWith(withCoverFrameSafety(withCoverChannel(input.promptOverride!, channel)), '1024x1536', refImagePath, expect.any(AbortSignal))
+    expect(edit).toHaveBeenCalledWith(withCoverFrameSafety(withCoverChannel(input.promptOverride!, channel)), '1536x2048', refImagePath, expect.any(AbortSignal))
     expect(result.generationMetadata?.channel).toBe(channel)
     expect(await fs.readFile(join(dir, '封面_v1.ref.txt'), 'utf8')).toBe(refImagePath)
   })
@@ -98,7 +167,7 @@ describe('封面生成任务和成品提交', () => {
   it('自动频道保留已有画面文字，补实际画布安全区且不写入显式频道记录', async () => {
     const { service, input, generate } = await fixture()
     const result = await service.generate(input)
-    expect(generate).toHaveBeenCalledWith(input.promptOverride + '\n' + COVER_FRAME_SAFETY_PROMPT, '1024x1536', expect.any(AbortSignal))
+    expect(generate).toHaveBeenCalledWith(input.promptOverride + '\n' + COVER_FRAME_SAFETY_PROMPT, '1536x2048', expect.any(AbortSignal))
     expect(result.generationMetadata?.channel).toBeUndefined()
   })
 

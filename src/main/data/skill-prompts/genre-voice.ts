@@ -70,9 +70,9 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
   {
     key: 'urban',
     label: '现代都市',
-    tone: '口语化、接地气、带梗',
+    tone: '口语化、接地气；幽默随人物与场合自然出现',
     pace: '快、干脆',
-    syntax: '短句为主，对话多，内心吐槽多',
+    syntax: '短句为主，对话多；必要的内心反应简短呈现，不要求持续吐槽',
     taboo: '禁用文绉绉书面腔、古风称谓',
     replacements: [
       ['嘴角带了点弧度', '笑了一下'],
@@ -236,7 +236,7 @@ export function renderGenreVoiceMarkdown(voice: GenreVoice): string {
     lines.push(`- 按情境选用的题材语气词（符合时代与人物身份时使用）：${voice.suggestedParticles.join('、')}`)
   }
   lines.push('')
-  lines.push('**语感替换示例**（左 AI 味 → 右本题材自然写法）：')
+  lines.push('**语感用词参考**（不是逐词替换表；先核对原意与场景，普通词不因出现在左侧就判错，无用途动作应省略，不能把原意换成另一个动作）：')
   for (const [bad, good] of voice.replacements) {
     lines.push(`- "${bad}" → "${good}"`)
   }

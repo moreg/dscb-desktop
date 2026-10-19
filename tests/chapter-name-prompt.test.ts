@@ -110,18 +110,17 @@ describe('parseChapterNameJson', () => {
 })
 
 describe('buildChapterNameSystemPrompt / buildChapterNameUserPrompt', () => {
-  it('system prompt embeds TOMATO_CHAPTER_NAME_SPEC and JSON output requirement', () => {
-    const sys = buildChapterNameSystemPrompt('玄幻修真', undefined)
-    // TOMATO spec 关键内容必须出现（嵌入式简化版保留核心 8 结构 + 七禁七必）
-    expect(sys).toContain('番茄小说章名风格规范')
-    expect(sys).toContain('反差/反转型')
-    expect(sys).toContain('打脸/反杀型')
-    expect(sys).toContain('12-20字')
+  it('按项目平台选择章名策略，未知平台不猜测', () => {
+    const unknown = buildChapterNameSystemPrompt('玄幻修真')
+    expect(unknown).not.toContain('常规 4—8 字')
+    const sys = buildChapterNameSystemPrompt('玄幻修真', null, { platform: 'fanqie', text: '目标平台：番茄' })
+    expect(sys).toContain('常规 4—8 字')
+    expect(sys).toContain('不强塞流量词')
+    expect(sys).not.toContain('title 必须 12-20 字')
     expect(sys).toContain('JSON')
-    expect(sys).toContain('title')
-    expect(sys).toContain('reason')
-    // 与完整 spec 字段一致
-    expect(sys).toContain('核心关键词在前 15 字')
+    const qimao = buildChapterNameSystemPrompt('悬疑', null, { platform: 'qimao', text: '目标平台：七猫' })
+    expect(qimao).not.toContain('常规 4—8 字')
+    expect(qimao).toContain('不剧透')
   })
 
   it('system prompt includes genre voice when provided', () => {

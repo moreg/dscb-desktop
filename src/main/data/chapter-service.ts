@@ -10,12 +10,16 @@ import { countWords } from './words'
 import { CHAPTER_NAME_MAX_LEN, sanitizeChapterName } from '../../shared/parsers'
 import { ChapterRevisionConflictError, contentRevision } from './chapter-revision'
 import { ChapterVersionRepository } from './chapter-version-repository'
+import { promises as fs } from 'fs'
+import { join } from 'path'
+import { writeJsonAtomic } from './atomic'
 import type {
   ChapterMeta,
   ChapterContent,
   ChapterDetail,
   ChapterSource,
-  RhythmEntry
+  RhythmEntry,
+  AutoDeslopResult
 } from '../../shared/types'
 
 /**
@@ -180,7 +184,22 @@ export class ChapterService {
       climax: det?.climax ?? entry?.climax,
       appearingCharacters: this.mapCharactersToIds(det?.charactersAppearing, nameToId)
     }
+    try {
+      const stored = JSON.parse(await fs.readFile(join(dir, '.cache', 'auto-deslop', `chapter-${n}.json`), 'utf-8'))
+      if (stored.revision === contentRevision(content)) meta.autoDeslop = stored.report
+    } catch { /* 没有润色记录的章节沿用原状态。 */ }
     return { meta, content }
+  }
+
+  async setAutoDeslopReport(projectId: string, n: number, content: string, report: AutoDeslopResult): Promise<void> {
+    try {
+      const dir = await this.projectService.resolveDir(projectId)
+      const folder = join(dir, '.cache', 'auto-deslop')
+      await fs.mkdir(folder, { recursive: true })
+      await writeJsonAtomic(join(folder, `chapter-${n}.json`), { revision: contentRevision(content), report })
+    } catch (err) {
+      console.warn('[ChapterService] Failed to save polish review status:', err)
+    }
   }
 
   async updateContent(

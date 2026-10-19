@@ -172,7 +172,7 @@ if (!hasSingleInstanceLock) {
   registerLongStoryBrainstormIpc(llmService)
 
   // 章名命名服务（依赖 LlmService，必须在 llmService 实例化后构造）
-  const chapterNameService = new ChapterNameService(llmService)
+  const chapterNameService = new ChapterNameService(llmService, projectService)
   registerChaptersIpc(projectService, chapterService, chapterNameService)
 
   const outlineService = new OutlineService(projectService, llmService)
@@ -249,7 +249,6 @@ if (!hasSingleInstanceLock) {
     llmService
   )
   await coverLearningLibrary.initialize()
-  const coverService = new CoverService(projectService, imageService, coverLearningLibrary)
   const coverPromptService = new CoverPromptService(
     projectService,
     llmService,
@@ -257,6 +256,7 @@ if (!hasSingleInstanceLock) {
     chapterService,
     coverLearningLibrary
   )
+  const coverService = new CoverService(projectService, imageService, coverLearningLibrary, coverPromptService)
   registerCoverIpc(coverService, settings, coverPromptService, coverLearningLibrary)
   const bookTestService = new BookTestService(projectService, outlineService, llmService, coverService)
   registerBookTestIpc(bookTestService)

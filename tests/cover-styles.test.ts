@@ -393,11 +393,31 @@ describe('画风、文字布局和统一画幅约束', () => {
     expect(learnedSide).toContain('窄侧区')
   })
 
+  it('右下署名保留右下区域，特写不再强占标题的上半部', () => {
+    const prompt = buildCoverPrompt({ ...base, composition: 'closeup', typography: { titlePosition: 'top', authorPosition: 'bottom_right' } })
+    expect(prompt).toContain('在右下安全区预留独立署名区')
+    expect(prompt).toContain('为书名预留上三分之一文字区')
+    expect(prompt).toContain('面部避开书名与署名区域')
+    expect(prompt).not.toContain('面部占画面上半部')
+    expect(prompt).not.toContain('在标题下方预留')
+    expect(prompt).not.toContain('55%至70%')
+    expect(prompt).toContain('缩小到手机封面缩略图后')
+  })
+
+  it('换标题位置同步重编留白区域，并保留手改人物描述', () => {
+    const original = buildCoverPrompt({ ...base, typography: { titlePosition: 'top' } }) + '\n主体手改：保留红雨衣。'
+    const replacement = buildCoverPrompt({ ...base, typography: { titlePosition: 'vertical_left' } })
+    const patched = patchCoverPromptTypography(original, replacement, { titlePosition: 'vertical_left' })
+    expect(patched).toContain('为书名预留左侧文字区')
+    expect(patched).not.toContain('为书名预留上三分之一文字区')
+    expect(patched).toContain('主体手改：保留红雨衣。')
+  })
+
   it('统一安全区行只出现一次，保留精确书名署名和著字，不再重复旧画幅要求', () => {
     const prompt = buildCoverPrompt({ ...base, bookName: '女将军与男人城', authorName: '少年她' })
     expect(prompt.split('\n').filter((line) => line.startsWith('画幅安全区：'))).toEqual([COVER_FRAME_SAFETY_PROMPT])
     expect(prompt).toContain("书名文字：'女将军与男人城'")
-    expect(prompt).toContain("作者名'少年她'，紧接一个简体'著'字")
+    expect(prompt).toContain("'少年她 著'")
     expect(prompt).toContain('不重复字形')
     expect(prompt).not.toContain('portrait 3:4 ratio')
     expect(prompt).not.toContain('inner ~85%')
@@ -440,7 +460,7 @@ describe('旧英文提示词和内置学习预设兼容', () => {
       learningRules: ['NEW LIBRARY RULE: use a blue umbrella.'] })
     const patched = patchCoverPromptTypography(original, replacement, { titlePosition: 'vertical_left' }, rules)
     expect(patched).toContain("书名文字：'女将军与男人城'")
-    expect(patched).toContain("作者署名：作者名'少年她'，紧接一个简体'著'字")
+    expect(patched).toContain("作者署名：'少年她 著'")
     expect(patched).toContain('文字层级：')
     expect(patched).toContain(COVER_FRAME_SAFETY_PROMPT)
     expect(patched).not.toContain('Title text ')
@@ -476,7 +496,7 @@ describe('buildCoverPrompt 完整提示词构建', () => {
       composition: 'closeup'
     })
     expect(prompt).toContain("'剑道独尊'")
-    expect(prompt).toContain("'青椒炒肉'")
+    expect(prompt).toContain("'青椒炒肉 著'")
   })
 
   it('作者名后带「著」落款后缀', () => {
@@ -487,7 +507,7 @@ describe('buildCoverPrompt 完整提示词构建', () => {
       genre: 'xianxia',
       composition: 'closeup'
     })
-    expect(prompt).toContain("作者名'青椒炒肉'，紧接一个简体'著'字")
+    expect(prompt).toContain("'青椒炒肉 著'")
   })
 
   it('包含平台风格', () => {
@@ -556,7 +576,7 @@ describe('buildCoverPrompt 完整提示词构建', () => {
       composition: 'closeup'
     })
     expect(prompt).toContain('不加水印')
-    expect(prompt).toContain('数字绘画')
+    expect(prompt).toContain('书名仍清晰可读')
   })
 
   it('styleHint 追加到 prompt', () => {

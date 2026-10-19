@@ -37,7 +37,7 @@ describe('番茄脑洞转项目携带三章方向', () => {
       for (const folder of ['设定', '大纲']) await mkdir(path.join(dir, folder), { recursive: true })
       await writeFile(path.join(dir, '设定', '核心设定.md'), '# 核心设定\n陈言是店主。')
       await writeFile(path.join(dir, '大纲', '大纲.md'), '# 《新书名》大纲\n陈言以契约对抗债主。')
-      const generateStream = vi.fn(async () => '=== 第2章 ===\n## 第 2 章：债主登门\n- **核心事件**：陈言反击债主\n- **字数预估**：约 2500 字')
+      const generateStream = vi.fn(async () => '=== 第2章 ===\n## 第 2 章：债主登门\n- **核心事件**：陈言反击债主\n- **字数预估**：约 2500 字\n=== 第3章 ===\n## 第 3 章：契约反击\n- **核心事件**：陈言兑现契约\n- **字数预估**：约 2500 字')
       const outline = new OutlineService(reopened, { generateStream } as unknown as LlmService)
       await outline.generateDetailedRange(project.id, 2, 2)
       const prompt = generateStream.mock.calls[0] as unknown as [string]

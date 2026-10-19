@@ -64,7 +64,7 @@ describe('封面生成来源与效果反馈', () => {
     expect(patched).toContain('AUTHOR EDIT: retain the red umbrella.')
     expect(load).not.toHaveBeenCalled()
     const result = await service.generate({ ...input, channel: 'female', promptOverride: patched })
-    expect(generate).toHaveBeenCalledWith(withCoverFrameSafety(withCoverChannel(patched, 'female')), '1024x1536', expect.any(AbortSignal))
+    expect(generate).toHaveBeenCalledWith(withCoverFrameSafety(withCoverChannel(patched, 'female')), '1536x2048', expect.any(AbortSignal))
     expect(result.generationMetadata?.channel).toBe('female')
     expect(result.generationMetadata?.learningContext).toEqual({ ...context, rules: ['KEEP THIS RULE'] })
   })
@@ -108,7 +108,7 @@ describe('封面生成来源与效果反馈', () => {
   it('保留编辑框的旧学习快照，仅补画布安全区，原图和上传图共享实际规则来源', async () => {
     const { root, service, input, context, load, generate } = await fixture()
     const result = await service.generate(input)
-    expect(generate).toHaveBeenCalledWith(withCoverFrameSafety(input.promptOverride!), '1024x1536', expect.any(AbortSignal))
+    expect(generate).toHaveBeenCalledWith(withCoverFrameSafety(input.promptOverride!), '1536x2048', expect.any(AbortSignal))
     expect(load).not.toHaveBeenCalled()
     expect(result.generationMetadata?.learningContext).toEqual({ ...context, rules: ['KEEP THIS RULE'] })
     expect(result.generationMetadata?.promptSource).toBe('edited')

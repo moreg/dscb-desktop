@@ -194,6 +194,7 @@ export interface ProjectTitleCandidate {
 }
 
 export interface ChapterMeta {
+  autoDeslop?: AutoDeslopResult
   schemaVersion: number
   updatedAt: string
   chapterNumber: number
@@ -470,7 +471,7 @@ export type StreamHandleOf<T> = Promise<T> & {
 export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
-export type ChapterGenerationStage = 'generating' | 'deslop' | 'foreshadowRepair'
+export type ChapterGenerationStage = 'generating' | 'deslop' | `deslop:${string}` | 'foreshadowRepair'
 
 /** 单章交稿前的伏笔补写结论；失败时保留本轮生成稿。 */
 export interface AutoForeshadowRepairResult {
@@ -478,8 +479,19 @@ export interface AutoForeshadowRepairResult {
   message: string
 }
 
+export interface DialogueQualityReport {
+  /** 未通过的候选稿，仅供继续修订与核对；不得当成通过正文自动采用。 */
+  pendingDraft?: string
+  passed: boolean
+  beforeRatio: number
+  afterRatio: number
+  attempts: number
+  issues: string[]
+}
+
 /** 自动精修结论；需复核或失败时保留生成原稿。 */
 export interface AutoDeslopResult {
+  dialogueQuality?: DialogueQualityReport
   status: 'applied' | 'unchanged' | 'review_required' | 'failed'
   message: string
   remainingIssues: number
@@ -2886,6 +2898,14 @@ export interface DeslopStyleContext {
 
 /** 去 AI 味润色结果（Phase 4 产出） */
 export interface DeslopResult {
+  /** 内部合并核验凭据；绑定完整文本，排版或事实修复后不能复用旧凭据。 */
+  semanticVerification?: {
+    scope: 'full_chapter_facts_and_expression'
+    originalRevision: string
+    candidateRevision: string
+    prefixRevision: string
+  }
+  dialogueQuality?: DialogueQualityReport
   /** 润色后全文（文件模式落盘，文本模式返回） */
   rewritten: string
   /** 命中并处理的 Gate 列表 */
@@ -3068,6 +3088,14 @@ export interface CoverTypographyOptions {
  * 提炼后保留在界面中，调整文字设计时复用同一画面资料。
  */
 export interface CoverScene {
+  /** 完整题材组合与阅读情绪，不局限于单一分类。 */
+  genreSignal?: string
+  /** 核心卖点及其可见动作、结果或反差。 */
+  sellingPoint?: string
+  /** 视觉主次与故事中的人物主动权。 */
+  visualHierarchy?: string
+  /** 所选构图内的具体取景、站位与动势。 */
+  compositionGuide?: string
   /** 主体人物：外貌 / 服饰 / 神态 / 手持物 */
   characterDesc?: string
   /** 背景场景 */
@@ -3082,6 +3110,12 @@ export interface CoverScene {
 
 /** 封面输入 */
 export interface GenerateCoverInput {
+  /** 默认先依据小说内容设计；作者明确手写完整画面时可关闭。 */
+  useNovelContent?: boolean
+  /** 仅显式选择构图时锁定；自动构图由小说内容决定。 */
+  compositionLocked?: boolean
+  /** 不满意后在指定媒介内更换绘制语言与画面方案。 */
+  changeVisualPlan?: boolean
   /** 项目 id（封面存到项目目录下） */
   projectId: string
   /** 书名 */
@@ -3142,6 +3176,8 @@ export interface CoverPromptDraft {
 
 /** 提炼封面提示词的入参 */
 export interface ExtractCoverPromptInput {
+  changeVisualPlan?: boolean
+  previousPrompt?: string
   projectId: string
   /** 书名（进提示词的文字层） */
   bookName: string
@@ -3168,6 +3204,8 @@ export interface ExtractCoverPromptInput {
 
 /** 封面文件信息（落盘后） */
 export interface CoverFile {
+  /** 本次从小说提炼出的方案，供生成后回填编辑器。 */
+  novelPlan?: CoverPromptDraft
   /** 文件名，如 封面_v1.png */
   fileName: string
   /** 相对项目目录的路径，如 封面/封面_v1.png */
@@ -3308,6 +3346,9 @@ export interface CoverLearningContext {
 }
 
 export interface CoverGenerationMetadata {
+  contentBased?: boolean
+  contentSources?: string[]
+  contentSummary?: string
   learningContext?: CoverLearningContext
   promptSource: 'template' | 'edited'
   generatedAt: string

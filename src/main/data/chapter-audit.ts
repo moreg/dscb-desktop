@@ -960,12 +960,12 @@ function pushQualityViolations(
           if (idx >= 0) {
             out.push({
               category: 'quality',
-              severity: 'warn',
+              severity: 'info',
               message: `破折号密度过高：本段 ${dashCount} 处 ——（约每 100 字 ${density.toFixed(1)} 处）`,
               snippet: truncate(para, 80),
               offset: idx,
               ruleId: 'dash_fragment',
-              suggestion: '改为句号/逗号控制节奏，破折号每章不超过 3-5 处'
+              suggestion: '仅复核是否无效打断或影响理解；有语意用途则保留，不按次数删改'
             })
           }
         }
@@ -986,12 +986,12 @@ function pushQualityViolations(
         if (idx >= 0) {
           out.push({
             category: 'quality',
-            severity: 'warn',
-            message: `超长句：连续 ${hanCount} 字无句号，建议断句`,
+            severity: 'info',
+            message: `句长观察：连续 ${hanCount} 字，仅供语意与可读性复核，不据长度判错`,
             snippet: truncate(s, 80),
             offset: idx,
             ruleId: 'long_sentence',
-            suggestion: '拆成 2-3 句，降低阅读负担'
+            suggestion: '仅在语意不清时自然断句；台词按独立对话段处理，不补回引号内句号'
           })
           scanFrom = idx + s.length
           reported++
@@ -1013,7 +1013,7 @@ function pushQualityViolations(
         snippet: extractContext(content, m.index, m[0].length),
         offset: m.index,
         ruleId: 'comma_stack',
-        suggestion: '拆分成多个短句'
+        suggestion: '按语意判断是否需要分句，不按逗号数量机械拆分'
       })
       reported++
     }
@@ -1060,12 +1060,12 @@ function pushLongParagraphViolations(
       if (idx >= 0) {
         out.push({
           category: 'paragraph',
-          severity: 'warn',
+          severity: 'info',
           message: `段落过长：${hanCount} 字，手机阅读易疲劳`,
           snippet: truncate(para, 60),
           offset: idx,
           ruleId: 'long_paragraph',
-          suggestion: `拆分为 2-3 段（建议单段 ${thresholds.maxParagraphLen} 字以内）`
+          suggestion: `仅在信息、目标或视角转折处自然分段；长度是观察值，不是合格线`
         })
         reported++
       }
@@ -1074,7 +1074,7 @@ function pushLongParagraphViolations(
 }
 
 /**
- * 对话标签单一："道/说"占对话标签比例过高。出自技能 3.7。
+ * 对话标签统计（本身不构成问题）："道/说"占对话标签比例过高。出自技能 3.7。
  * 启发式：统计对话后的"X道/说/问"标签，若"道/说"占 ≥ 70% 且总数 ≥ 5 → info。
  */
 function pushDialogueTagViolations(
@@ -1099,10 +1099,10 @@ function pushDialogueTagViolations(
     out.push({
       category: 'dialogue',
       severity: 'info',
-      message: `对话标签单一：${daoShuo}/${total} 个标签用"道/说/笑"，占比 ${(ratio * 100).toFixed(0)}%`,
+      message: `对话标签统计（本身不构成问题）：${daoShuo}/${total} 个标签用"道/说/笑"，占比 ${(ratio * 100).toFixed(0)}%`,
       offset: 0,
       ruleId: 'dialogue_tag',
-      suggestion: '混用动作/情绪/神态标签（点头/皱眉/冷笑/沉默），或直接用对话开头省略标签'
+      suggestion: '仅复核标签是否无用途；说话人清楚时可省略，不强求标签多样性，不新增微动作'
     })
   }
 }

@@ -1,4 +1,5 @@
 import { createWritingProject } from './helpers/writing-project'
+import { acceptedDeslop } from './helpers/accepted-deslop'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -25,7 +26,7 @@ describe('续写质量与长篇记忆集成', () => {
     dir = await projects.resolveDir(id)
     generateStream = vi.fn().mockResolvedValue('{}')
     const llm = { generateStream } as unknown as LlmService
-    service = new WriteService(projects, llm)
+    service = new WriteService(projects, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
   })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 

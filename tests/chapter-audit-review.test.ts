@@ -218,12 +218,12 @@ describe('chapter-audit (dash_fragment 破折号碎片化)', () => {
     expect(hit).toBeDefined()
   })
 
-  it('密度超阈值 → warn', () => {
+  it('密度仅为观察提示，不按次数判错', () => {
     // 一段里塞多个 —— 但不是单字碎片
     const para = '他走了——然后停下——回头看她——叹了口气——又走了——终于离开。'
     const content = makeValidContent() + '\n\n' + para
     const report = auditChapter(content, { reviewRules: reviewRulesOn() })
-    const warn = report.violations.find((v) => v.ruleId === 'dash_fragment' && v.severity === 'warn')
+    const warn = report.violations.find((v) => v.ruleId === 'dash_fragment' && v.severity === 'info')
     expect(warn).toBeDefined()
   })
 
@@ -241,14 +241,14 @@ describe('chapter-audit (dash_fragment 破折号碎片化)', () => {
 })
 
 describe('chapter-audit (long_paragraph / long_sentence)', () => {
-  it('段落超阈值 → warn', () => {
+  it('段长只作观察提示', () => {
     // 单段 > 300 字
     const longPara = '他一直往前走着没有回头。'.repeat(40) // ~400 字
     const content = makeValidContent() + '\n\n' + longPara
     const report = auditChapter(content, { reviewRules: reviewRulesOn() })
     const hit = report.violations.find((v) => v.ruleId === 'long_paragraph')
     expect(hit).toBeDefined()
-    expect(hit?.severity).toBe('warn')
+    expect(hit?.severity).toBe('info')
   })
 
   it('超长句（连续无句号）→ warn', () => {

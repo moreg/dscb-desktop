@@ -8,6 +8,7 @@ import type {
   FanqieTagStat
 } from '../../../shared/fanqie-chart'
 import { hasPrivateOrBox } from './parse'
+import { chartBookTags, FANQIE_CHART_TAG_RULES_VERSION } from '../../../shared/fanqie-chart-tags'
 
 export const INSIGHT_DIMENSIONS = [
   'genre_characteristics',
@@ -46,13 +47,7 @@ export interface EvidenceBook {
 }
 
 export function bookTags(book: FanqieChartBook): string[] {
-  const values = [book.genre, ...book.tags]
-  const out: string[] = []
-  for (const value of values) {
-    const tag = value.trim()
-    if (tag && !out.includes(tag)) out.push(tag)
-  }
-  return out
+  return chartBookTags(book)
 }
 
 export function prepareBooks(books: FanqieChartBook[]): EvidenceBook[] {
@@ -124,7 +119,7 @@ export function sourceHash(books: FanqieChartBook[]): string {
       readCount: book.readCount,
       garbled: book.garbled
     }))
-  return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+  return createHash('sha256').update(JSON.stringify({ tagRules: FANQIE_CHART_TAG_RULES_VERSION, books: payload })).digest('hex')
 }
 
 export function validateInsights(

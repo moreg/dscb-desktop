@@ -60,7 +60,7 @@ export class DetailedOutlineWriter {
       throw new Error('CHAPTER_NOT_FOUND: 细纲目录不存在')
     }
 
-    for (const f of files.sort()) {
+    for (const f of files.sort((a, b) => Number(!/^细纲_第\d+章/.test(a)) - Number(!/^细纲_第\d+章/.test(b)) || a.localeCompare(b))) {
       if (!f.endsWith('.md')) continue
       const file = join(dir, f)
       const updated = await this.updateChapterInFile(file, chapterNumber, patch)

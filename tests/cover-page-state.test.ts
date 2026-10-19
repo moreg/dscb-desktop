@@ -48,6 +48,9 @@ describe('cover title and byline verification', () => {
   const standard = "Title text '新书名' in bold type.\nAuthor byline: the author name '新作者' followed by 著.\nKeep the red umbrella."
   const chinese = "书名文字：'新书名'，使用醒目的现代字体。\n作者署名：作者名'新作者'，紧接小号的‘著’字。\n保留红伞。"
   it('verifies Chinese titles and bylines while detecting stale fields', () => {
+    const optimized = "书名文字：'新书名'，现代字体。\n作者署名：'新作者 著'，小号字体。"
+    expect(inspectCoverPromptText(optimized, '新书名', '新作者')).toBe('matches')
+    expect(inspectCoverPromptText(optimized, '新书名', '旧作者')).toBe('mismatch')
     expect(inspectCoverPromptText(chinese, '新书名', '新作者')).toBe('matches')
     expect(inspectCoverPromptText(chinese, '旧书名', '新作者')).toBe('mismatch')
     expect(inspectCoverPromptText(chinese, '新书名', '旧作者')).toBe('mismatch')

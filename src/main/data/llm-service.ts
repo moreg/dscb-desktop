@@ -160,6 +160,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   'chapter-adjust-plan': 'chapter',
   // 审稿质检
   review: 'review',
+  'deslop:scene-dialogue-review': 'review',
   deepReview: 'review',
   batchDeepReview: 'review',
   foreshadowRepairVerify: 'review',

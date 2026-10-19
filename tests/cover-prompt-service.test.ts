@@ -218,6 +218,86 @@ describe('CoverPromptService.extract', () => {
     platform: 'fanqie' as const
   }
 
+  it('自动修复v4中跨层排版、署名占位、方案比较和连续动作，保留作者已填署名', async () => {
+    const bad = completeResponse({ composition: 'duo',
+      sellingPoint: '比较红酒与杀怪场景，选择后者，女生摊手讨钱',
+      compositionGuide: '两人错位，上三分之一供书名排版，作者署名待提供',
+      characterDesc: '女生摊掌，男生低头看她的手，再抬眼与她对视' })
+    const fixed = completeResponse({ composition: 'duo',
+      sellingPoint: '女生站在倒下的怪物旁，朝男生摊掌讨钱',
+      compositionGuide: '女生前景，男生侧后回应',
+      characterDesc: '女生摊掌，男生看向她伸出的手',
+      summaryZh: '比较两个有依据的场面后选择杀怪索费，突出女强反差' })
+    const { service, generateStream } = makeService({ llmResponse: fixed })
+    generateStream.mockResolvedValueOnce(bad)
+    const draft = await service.extract({ ...input, stylePreset: 'anime_illustration' })
+    expect(generateStream).toHaveBeenCalledTimes(2)
+    expect(generateStream.mock.calls[1][0]).toContain('【修复本次画面字段】')
+    expect(draft.prompt).toContain('女生站在倒下的怪物旁，朝男生摊掌讨钱')
+    expect(draft.prompt).toContain("作者署名：'老猫 著'")
+    expect(draft.prompt).not.toMatch(/待提供|上三分之一供书名|再抬眼|比较红酒/)
+    expect(draft.summary).toContain('比较两个有依据的场面')
+  })
+
+  it('一次修复后仍含排版冲突时不返回可提交出图的草稿', async () => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ compositionGuide: '标题在上方，作者署名待提供' }) })
+    await expect(service.extract(input)).rejects.toThrow('COVER_PROMPT_CONFLICT')
+    expect(generateStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('按作品画面剔除学习库的色光、位置和统计指令，保留不冲突的可读性建议', () => {
+    const prompt = buildCoverPrompt({ ...input, genre: 'modern_romance', composition: 'duo',
+      stylePreset: 'anime_illustration',
+      scene: { genreSignal: '校园异能轻喜剧', sellingPoint: '女主杀怪后收钱',
+        compositionGuide: '女主在前，男主侧后', colorPalette: '蓝白与浅金', lighting: '明亮侧光' },
+      learningRules: ['本地样本观察：70%采用低饱和。', '标题优先放上三分之一。',
+        'Use warm hues for emphasis.', '光线以昏暗月光为主。', '主体轮廓清晰，缩略图可辨。'] })
+    expect(prompt).not.toMatch(/70%|标题优先放上三分之一|warm hues|昏暗月光/)
+    expect(prompt).toContain('主体轮廓清晰，缩略图可辨')
+    expect(prompt).toContain('配色：蓝白与浅金')
+    expect(prompt).toContain('光线：明亮侧光')
+  })
+
+  it.each([
+    {
+      genre: 'modern_romance', composition: 'duo',
+      genreSignal: '校园异能言情，女强马甲与双强暗恋，利落诙谐',
+      sellingPoint: '依据女主击退魔犬后向学长收钱，前景女生摊掌讨账、脚边怪物退散',
+      visualHierarchy: '女生是第一焦点并掌握主动权，男生位于侧后方平视回应',
+      compositionGuide: '女生在前、男生侧后错位，手势连接讨账动作，不作俯视压迫'
+    },
+    {
+      genre: 'mystery', composition: 'scene',
+      genreSignal: '民俗悬疑，封闭空间与身份谜团，压抑不安',
+      sellingPoint: '依据空屋里多出一双湿鞋的线索，以干燥门槛和向屋内延伸的湿脚印制造反差',
+      visualHierarchy: '湿鞋为第一焦点，脚印引导到无人的暗门，不出现人物',
+      compositionGuide: '低机位突出门槛与湿鞋，暗门缩在纵深处'
+    }
+  ])('无人工方向时将 $genre 的作品定位和主动权完整送入生图，并保留到排版刷新', async (brief) => {
+    const { service, generateStream } = makeService({ llmResponse: completeResponse({ ...brief,
+      characterDesc: brief.composition === 'scene' ? '' : '许棠与周竞两位大学生',
+      backgroundDesc: '故事中的活动场所', summaryZh: brief.sellingPoint }) })
+    const draft = await service.extract({ ...input, stylePreset: 'anime_illustration' })
+    const instruction = generateStream.mock.calls[0][0] as string
+    expect(instruction).toContain('genre 只是检索分类')
+    expect(instruction).toContain('女强不能自动画成仰望强势男性的被保护者')
+    expect(instruction).toContain('不能默认相对站立')
+    expect(instruction).not.toContain('duo（双人对视）')
+    const rebuilt = buildCoverPrompt({ ...input, genre: draft.genre, composition: draft.composition,
+      scene: draft.scene, stylePreset: 'anime_illustration', typography: { titlePosition: 'vertical_left' } })
+    for (const key of ['genreSignal', 'sellingPoint', 'visualHierarchy', 'compositionGuide'] as const) {
+      expect(COVER_DRAFT_SCHEMA.required).toContain(key)
+      expect(draft.scene?.[key]).toBe(brief[key])
+      expect(draft.prompt).toContain(brief[key])
+      expect(rebuilt).toContain(brief[key])
+    }
+    expect(draft.prompt).not.toContain('现代言情、亲密关系与温暖氛围。')
+    expect(draft.prompt).not.toContain('两位人物相对而立')
+    expect(draft.prompt).toContain('题材卖点检查')
+    expect(draft.prompt).not.toContain('作者画面方向')
+    if (brief.composition === 'scene') expect(draft.prompt).not.toContain('主体人物：')
+  })
+
   it('提炼字段和schema统一要求自然中文，中文人物道具逐字进入草稿且保留稳定枚举', async () => {
     const scene = {
       characterDesc: '六十岁的独臂女刀客，灰发束起，身穿旧铜甲，握着一把断刀',
@@ -412,7 +492,7 @@ describe('CoverPromptService.extract', () => {
     expect(draft.prompt).toContain('配色：ash grey and blood red。')
     expect(draft.prompt).toContain('偏冷色调，雪山，断刀')
     expect(draft.prompt).toContain("书名文字：'断刀行'")
-    expect(draft.prompt).toContain("'老猫'")
+    expect(draft.prompt).toContain("'老猫 著'")
     expect(draft.prompt).toContain('不加水印')
 
     // 走 auxiliary 路由，且带上 projectId 便于用量归属

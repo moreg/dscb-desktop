@@ -372,6 +372,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
    */
   const [prompt, setPrompt] = useState('')
   const [promptDirty, setPromptDirty] = useState(false)
+  const [promptManuallyEdited, setPromptManuallyEdited] = useState(false)
   /** 拼出当前提示词时用的平台，用于提示「改了平台但提示词没跟着变」 */
   const [promptPlatform, setPromptPlatform] = useState<CoverPlatform | null>(null)
   const [summary, setSummary] = useState('')
@@ -527,7 +528,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
     invalidatePromptWork()
     setStylePreset(next)
     if (next === 'concept_symbol' && composition === 'auto') setAutomaticComposition(resolveCoverChannelComposition('scene', channel === 'auto' ? undefined : channel))
-    if (promptDirty) setPromptNotice('已保留当前提示词。要应用新风格，请重新提炼，或重置为模板。')
+    if (promptDirty) setPromptNotice('已保留小说画面资料；生成时应用当前选择的画风，替换旧画风约束。')
     setError('')
   }
 
@@ -613,7 +614,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
   const platformStale = promptDirty && promptPlatform !== null && promptPlatform !== platform
   const promptOverBudget = prompt.length > MAX_COVER_PROMPT_CHARACTERS
 
-  const handleGenerate = async (): Promise<void> => {
+  const handleGenerate = async (changeVisualPlan = covers.find(cover => !cover.isUploadSize)?.feedback?.status === 'rejected'): Promise<void> => {
     if (!generationTaskReady || generationBusy) {
       setError('正在确认或执行已有生成任务，请稍候。')
       return
@@ -649,14 +650,33 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
     try {
       // 编辑框原样提交；后端先处理提炼方向，再落实明确选择的人物频道。
       const direction = extraHint.trim()
-      await window.api.generateCover(buildInput({
+      const generated = await window.api.generateCover(buildInput({
         promptOverride: prompt,
+        useNovelContent: !promptManuallyEdited || changeVisualPlan,
+        compositionLocked: composition !== 'auto',
+        changeVisualPlan,
         promptSource: promptDirty ? 'edited' : 'template',
         learningContext: promptContext,
         ...(direction ? { visualDirection: direction } : {})
       }))
       if (mounted.current && activeProject.current === scope) {
-        setGenerationNotice('封面生成完成')
+        if (generated.novelPlan) {
+          const draft = generated.novelPlan
+          setPrompt(draft.prompt)
+          setPromptDirty(true)
+          setPromptManuallyEdited(false)
+          setPromptPlatform(platform)
+          setSummary(draft.summary)
+          setSources(draft.sources)
+          setScene(draft.scene)
+          setSceneStyleHint(draft.styleHint)
+          setPromptContext(draft.learningContext)
+          setAvailableContext(draft.learningContext)
+          setAppliedTextKey(textSettingsKey)
+          setAutomaticComposition(draft.composition)
+          setPromptNotice('已根据小说内容设计本次封面，画面依据显示在下方。')
+        }
+        setGenerationNotice(changeVisualPlan ? '新方案生成完成，已在所选媒介内调整绘制语言与画面组织' : '封面生成完成')
         await refreshHistory()
       }
     } catch (err) {
@@ -715,6 +735,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
       })
       if (!mounted.current || !promptWork.current.isCurrent(token)) return
       setPrompt(draft.prompt)
+      setPromptManuallyEdited(false)
       // 提炼结果视同手改：后续改平台/题材不该把它冲掉
       setPromptDirty(true)
       setPromptPlatform(platform)
@@ -738,6 +759,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
 
   /** 丢弃提炼与手改，回到当前平台/题材/构图的模板提示词 */
   const handleResetPrompt = async (): Promise<void> => {
+    setPromptManuallyEdited(false)
     const token = promptWork.current.begin()
     setBuildingPrompt(true)
     setError('')
@@ -1017,9 +1039,9 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
                   ? `${channel === 'male' ? '男性' : '女性'}人物已锁定，冲突要求会按频道调整`
                   : extraHint.trim()
                   ? '提炼方向优先级最高，压过这段提示词里冲突的人物和画风'
-                  : promptDirty
+                  : promptManuallyEdited
                     ? '已手改，保留画面内容并应用文字安全区'
-                    : '按平台/题材生成中文提示词，可直接编辑'}
+                    : '生成前会读取小说内容并更新画面，可先点右侧预览故事方案'}
               </span>
             </span>
             <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1054,9 +1076,9 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
                 style={{ fontSize: 12, padding: '2px 10px', height: 24 }}
                 onClick={() => void handleResetPrompt()}
                 disabled={extracting || generationBusy}
-                title="丢弃提炼与手改，回到当前平台/题材/构图的中文模板提示词"
+                title="清除手改和提炼快照，生成时重新依据小说内容设计"
               >
-                ↺ 重置为模板
+                ↺ 清除手改
               </button>
             </span>
           </label>
@@ -1068,6 +1090,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
               invalidatePromptWork()
               setPrompt(e.target.value)
               setPromptDirty(true)
+              setPromptManuallyEdited(true)
             }}
             placeholder={canBuild ? '' : '填写书名与作者名后自动生成'}
             spellCheck={false}
@@ -1100,7 +1123,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
           <details style={{ marginTop: 10 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12 }}>学习规则与版本</summary>
             <p className="meta">当前提示词使用：{promptContext?.libraryVersion ?? '未记录'} · 学习库来源总数 {promptContext?.sourceSampleCount ?? 0} 张（含历史记录）</p>
-            <p className="meta">生成会使用编辑框中的现有提示词，并应用所选人物频道、提炼方向和裁剪后的文字安全区。学习库更新后，重新提炼或重置为模板才会应用新规则。</p>
+            <p className="meta">默认生成会先读取本书的简介、大纲、人物卡和开篇正文，画面来自故事，学习库只提供绘制与设计语言。手动编辑完整提示词后按编辑内容生成；「换个方案」会重新结合小说内容设计，并避免重复上一张。</p>
             <button type="button" className="btn btn-ghost" onClick={() => void refreshLearningContext()} disabled={!canBuild}>
               检查最新学习规则
             </button>
@@ -1140,6 +1163,11 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
 
         {error ? <p className="diag-msg" style={{ color: 'var(--danger)' }}>{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
+          {covers.length > 0 ? <button
+            className="btn btn-ghost"
+            onClick={() => void handleGenerate(true)}
+            disabled={!generationTaskReady || generationBusy || buildingPrompt || extracting || textSettingsPending || templateBuildPending || textMismatch || !canBuild || !prompt.trim() || promptOverBudget}
+          >不满意，换个方案再生成</button> : null}
           <button
             className="btn btn-primary"
             onClick={() => void handleGenerate()}

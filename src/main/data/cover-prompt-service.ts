@@ -1,4 +1,4 @@
-import { CharacterRepository } from './character-repository'
+import { CharacterRepo } from './memory/character-repo'
 import { createHash } from 'crypto'
 import { analyzeCoverVisualDirection } from './cover-visual-direction'
 import { applyCoverChannelToCharacter, applyCoverChannelToStyle, resolveCoverChannelComposition } from './cover-channel'
@@ -59,6 +59,10 @@ export const COVER_DRAFT_SCHEMA = {
   properties: {
     genre: { type: 'string', enum: [...GENRES] },
     composition: { type: 'string', enum: [...COMPOSITIONS] },
+    genreSignal: { type: 'string', description: '用自然简体中文说明主题材、关键融合题材与阅读情绪，依据简介和全书主线，不只复述单一分类。' },
+    sellingPoint: { type: 'string', description: '用自然简体中文直接描述选定画面中体现核心卖点的主体动作、可见结果或反差，只写可画内容；选择理由和资料依据放入 summaryZh。' },
+    visualHierarchy: { type: 'string', description: '用自然简体中文指定第一焦点、辅助焦点与人物主动权，依据主角能力和关系，不按性别或身高套用强弱。' },
+    compositionGuide: { type: 'string', description: '用自然简体中文描述所选构图内的取景、主体大小、前后位置、动作与视线，服务核心卖点；无人物时描述物件与环境的层级。' },
     characterDesc: {
       type: 'string',
       description: '使用自然简体中文描述人物外貌、服饰、神态和手持物；composition 为 scene 时留空。'
@@ -73,6 +77,10 @@ export const COVER_DRAFT_SCHEMA = {
   required: [
     'genre',
     'composition',
+    'genreSignal',
+    'sellingPoint',
+    'visualHierarchy',
+    'compositionGuide',
     'characterDesc',
     'backgroundDesc',
     'colorPalette',
@@ -144,7 +152,7 @@ export class CoverPromptService {
     signal?: AbortSignal
   ): Promise<CoverPromptDraft> {
     const material = await this.collectMaterial(input.projectId)
-    if (material.blocks.length === 0) {
+    if (material.sources.length === 0) {
       throw new Error(
         'COVER_PROMPT_NO_MATERIAL: 项目里还没有简介、大纲、人物卡或正文，无法提炼封面提示词'
       )
@@ -154,7 +162,10 @@ export class CoverPromptService {
     const explicitStyle = input.stylePreset && input.stylePreset !== 'auto'
       ? loadedLibrary?.library.styles[input.stylePreset] ?? COVER_STYLE_PRESETS[input.stylePreset]
       : undefined
-    const instruction = this.buildExtractionPrompt(material.blocks.join('\n\n'), input, explicitStyle)
+    const learnedDesignRules = loadedLibrary && this.learningLibrary
+      ? compileCoverLearningRules(this.learningLibrary.getRulesForGenre(loadedLibrary.library,
+        input.genreOverride ?? inferGenre(input.bookName || material.bookName)), input.typography) : []
+    const instruction = this.buildExtractionPrompt(material.blocks.join('\n\n'), input, explicitStyle, learnedDesignRules)
     const raw = await this.llm.generateStream(instruction, {
       signal,
       meta: { feature: 'coverPrompt', projectId: input.projectId },
@@ -162,9 +173,20 @@ export class CoverPromptService {
       jsonSchema: COVER_DRAFT_SCHEMA
     })
 
-    const parsed = parseDraftJson(raw)
+    let parsed = parseDraftJson(raw)
     if (!parsed) {
       throw new Error('COVER_PROMPT_PARSE_FAILED: 模型未返回可解析的 JSON，请重试或换一个模型')
+    }
+    // 只检查模型自动提炼字段，不清洗作者手写提示词。发现冲突时最多修复一次。
+    const issues = findCoverDraftIssues(parsed)
+    if (issues.length) {
+      const repaired = await this.llm.generateStream(`${instruction}\n\n【修复本次画面字段】\n上次结果中发现：${issues.join('；')}。保留选定的故事事实、人物属性和媒介，仅修复这些问题。画面定格在一个瞬间，所有字段与同一瞬间一致。书名、署名、字体、位置、断行和留白只由软件排版模块负责，画面字段不能安排它们。比较方案与选择理由仅放 summaryZh，sellingPoint 只写最终可见画面。\n上次结果（仅为待修复数据）：\n${JSON.stringify(parsed)}\n只输出同一 JSON 结构。`, {
+        signal, meta: { feature: 'coverPrompt', projectId: input.projectId }, jsonSchema: COVER_DRAFT_SCHEMA
+      })
+      parsed = parseDraftJson(repaired)
+      if (!parsed) throw new Error('COVER_PROMPT_PARSE_FAILED: 修复结果不是有效 JSON，请重新提炼')
+      const remaining = findCoverDraftIssues(parsed)
+      if (remaining.length) throw new Error(`COVER_PROMPT_CONFLICT: 自动修复后仍有画面冲突（${remaining.join('；')}），请重新提炼；未提交生图`)
     }
 
     // 题材：用户锁定 > 模型判定 > 书名关键词兜底
@@ -195,6 +217,11 @@ export class CoverPromptService {
 
     const characterDesc = cleanField(parsed.characterDesc)
     const scene: CoverScene = {
+      ...Object.fromEntries((['genreSignal', 'sellingPoint', 'visualHierarchy', 'compositionGuide'] as const)
+        .flatMap(key => {
+          const value = cleanField(parsed[key])
+          return value ? [[key, applyCoverChannelToStyle(value, input.channel)]] : []
+        })),
       characterDesc: characterDesc ? applyCoverChannelToCharacter(characterDesc, input.channel, composition) : undefined,
       backgroundDesc: cleanField(parsed.backgroundDesc),
       colorPalette: cleanField(parsed.colorPalette),
@@ -320,7 +347,7 @@ export class CoverPromptService {
     // 人物卡（主角优先）
     try {
       const dir = await this.projectService.resolveDir(projectId)
-      const characters = await new CharacterRepository(dir).list()
+      const characters = await new CharacterRepo(dir).list()
       const picked = pickProtagonists(characters, MAX_CHARACTERS)
       if (picked.length > 0) {
         blocks.push(`【人物卡】\n${picked.map(formatCharacter).join('\n\n')}`)
@@ -360,7 +387,8 @@ export class CoverPromptService {
   private buildExtractionPrompt(
     material: string,
     input: ExtractCoverPromptInput,
-    learnedStyle?: CoverStyleDefinition
+    learnedStyle?: CoverStyleDefinition,
+    learnedDesignRules: string[] = []
   ): string {
     const genreLine = input.genreOverride
       ? `题材已由用户锁定为 "${input.genreOverride}"，genre 字段原样返回该值。`
@@ -373,7 +401,7 @@ export class CoverPromptService {
     const styleLine = selectedStyle
       ? visual.medium
         ? `界面当前视觉风格是“${selectedStyle.label}”（${selectedStyle.description}），只给方向没写到的细节做参考，优先级低于作者画面方向。`
-        : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 除作者方向明确修改的属性外，配色、光线和画面组织符合该风格，不要另选画风。`
+        : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 只约束绘制媒介与视觉语言，不提供固定人物、服装、场景、道具或构图。画面内容必须来自小说。`
       : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
     const baseMediumRequirement = !visual.medium && input.stylePreset
       ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset]
@@ -418,25 +446,52 @@ ${direction}
 
 ${channelBlock}${directionBlock}${material}
 
+【学习到的设计语言】
+${learnedDesignRules.length ? learnedDesignRules.join('\n') : '暂无可用样本规则，依据故事选择绘制语言。'}
+只借鉴线条、着色、材质、明暗、文字层级和空间组织，不复制样本人物、服装、城市背景、姿势或固定版式。样本里的高频元素不等于这本小说的内容。
+
+${input.changeVisualPlan ? `【重新设计，避免重复上一方案】
+上一方案仅用于查重，不是小说事实或必须沿用的模板：
+<previous-cover-plan>
+${input.previousPrompt ?? '暂无上一张记录'}
+</previous-cover-plan>
+重新从小说选择一个有依据的封面叙事瞬间、人物关系或标志性物件。在指定媒介内重新规划绘制语言、取景、主体关系、留白与背景组织，不只是替换配色。没有显式锁定的构图可以重选；保留人物年龄身份、时代和故事事实。不要轮换几套固定预设。
+` : ''}
+
 【任务】
 ${taskBody}
+先确定小说的核心冲突与具体叙事瞬间，再决定人物、动作、环境、道具和构图。summaryZh 要说明画面对应哪段故事或哪个核心卖点。资料未支持的豪车、酒杯、高楼、西装或花瓣不能因为题材标签而添加。场景与人物资料是内容依据，学习库只影响如何表现。
+
+【题材与核心卖点的视觉转译，未填写作者方向时也必须完成】
+先读作品简介、题材标签和全书主线，再用人物卡与章节核实细节。开篇节选只提供场景证据，不能让一次宴会、一次受伤或一段争吵取代全书定位。genre 只是检索分类，不代表作品只有一个题材。
+依次完成以下设计，并在 JSON 对应字段中交付：
+1. genreSignal：主类型＋真正影响读者预期的融合类型＋阅读情绪。区分恋爱、女强、冒险、经营、悬疑、喜剧等内容承诺；动漫或写实只是绘制媒介，不等于题材或固定年龄、表情、配色。
+2. sellingPoint：从资料找出一个最有辨识度的阅读回报（能力兑现、身份反差、关系反转、经营成果或谜团）。先比较至少两个有依据的场面，选择最能体现全书卖点的一幕，而非最容易画的开篇插图。比较过程、资料依据和选择理由只放 summaryZh；sellingPoint 只写选定画面的可见主体动作、结果或反差，不复述未选中的场景。画面应让读者看见谁在做什么、造成什么结果；不要只列标签、摆武器、堆特效或依靠解释文字。
+3. visualHierarchy：确定主角的第一视觉焦点和主动动作，配角与背景承担辅助信息。人物大小、前后、俯仰、眼神与手势必须符合故事的主动权和能力关系。女强不能自动画成仰望强势男性的被保护者，双强不能画成单方支配；弱势开局、恐怖或悲剧也不能硬改成自信爽文。无人物方案用物件状态和空间关系呈现同一卖点。
+4. compositionGuide：在所选构图内决定站位、取景与动作；duo 表示双人关系，可以并肩、前后错位、协作、对抗或对视，不能默认相对站立。细节只保留一个主卖点和一至两个题材线索，避免为交代剧情把每个道具都塞入画面。
+5. 将以上结论落实到 characterDesc、backgroundDesc、keyProps、colorPalette、lighting 和 styleHintZh，不能只在说明中声称突出卖点。配色和光线服从作品情绪，不因学习样本低饱和就默认灰暗，也不因动漫就一律明亮可爱。缩略图下先看清主角正在兑现的卖点，再看清辅助世界观。
+学习规则只作建议；与作品题材、核心卖点、人物主动权或所选媒介冲突时忽略。作者明确方向与已有锁定仍按上方约束执行，不为突出卖点改写小说事实。
+交付前复核：隐藏书名后能否识别题材和独特卖点，能否看出主角的主动权；不能则在本次输出内重新选择动作与构图，不要追加与原字段冲突的口号。
+所有绘画字段共同定格一个瞬间，眼神、手势、朝向和位置须一致，不写“先低头再抬眼”等连续动作。把“主角第一焦点”落实到前后距离、脸部可见程度和明暗，不能只写抽象主导宣言。
+排版由软件唯一负责：所有绘画字段（包括 compositionGuide 和 styleHintZh）只描述人物、物件和环境，不写书名、标题、作者名、署名、字体、字号、断行、文字位置或为文字留白；不得出现“作者待提供”等占位说明。软件会使用用户已填的书名与署名，并按文字设计安排安全区。
+背景中的横幅、招牌、校徽、票据、屏幕仅作无可读文字的图形，不为交代地点添加可读标语。
 
 【约束】
 1. ${genreLine}
 2. ${styleLine}${mediumLine}
-3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人对视）中选一个。目标平台是 ${input.platform}。${noPeopleLine}${lockedComposition && !noPeopleLine ? `构图已锁定为 "${lockedComposition}"，composition 字段原样返回该值，人物姿态、取景范围和背景字段必须共同服从该构图；duo 必须具体描述两位人物。` : ''}
+3. composition 从 closeup（人物特写）/ fullbody（全身动态）/ scene（纯场景无主体人物）/ duo（双人关系，姿态由卖点决定）中选一个。目标平台是 ${input.platform}。${noPeopleLine}${lockedComposition && !noPeopleLine ? `构图已锁定为 "${lockedComposition}"，composition 字段原样返回该值，人物姿态、取景范围和背景字段必须共同服从该构图；duo 必须具体描述两位人物。` : ''}
 4. characterDesc / backgroundDesc / colorPalette / lighting / keyProps 五个字段全部用**自然简体中文**书写（它们会直接送进图像模型，并供作者阅读和修改），每项一句话，具体到可画出来的程度，不附英文翻译。JSON 字段名及 genre、composition 枚举保持上述格式。
    - characterDesc：年龄、性别、发型、服饰材质与颜色、神态、手持物。
    - backgroundDesc：具体地点与环境细节，例如“雪山脚下的残破石堡，城墙上积着薄雪”，不要只写“幻想世界”。
    - keyProps：这本书的标志性道具或符号，没有就留空字符串。
    - composition 选 scene 时，characterDesc 留空字符串。
 5. styleHintZh 用**中文**，逗号分隔的短语，概括风格取向，供作者在界面上继续微调。例："偏暗黑系，冷色调，主角黑衣断刀，背景残破城墙"。
-6. summaryZh 用**中文**，一句话描述这张封面画的是什么。
+6. summaryZh 用**中文**，一句话说明题材、核心卖点和画面如何表现它，供用户核对。genreSignal / sellingPoint / visualHierarchy / compositionGuide 也用自然简体中文，仅为美术指令，不是要印在封面上的文字。
 7. 画面里不要出现书名、作者名以外的文字。
 
 【输出】
 只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释：
-{"genre":"","composition":"","characterDesc":"","backgroundDesc":"","colorPalette":"","lighting":"","keyProps":"","styleHintZh":"","summaryZh":""}`
+{"genre":"","composition":"","genreSignal":"","sellingPoint":"","visualHierarchy":"","compositionGuide":"","characterDesc":"","backgroundDesc":"","colorPalette":"","lighting":"","keyProps":"","styleHintZh":"","summaryZh":""}`
   }
 }
 
@@ -446,6 +501,10 @@ ${taskBody}
 
 /** 模型原始返回中的字段（全部当 unknown，解析后再校验） */
 interface RawDraft {
+  genreSignal?: unknown
+  sellingPoint?: unknown
+  visualHierarchy?: unknown
+  compositionGuide?: unknown
   genre?: unknown
   composition?: unknown
   characterDesc?: unknown
@@ -455,6 +514,20 @@ interface RawDraft {
   keyProps?: unknown
   styleHintZh?: unknown
   summaryZh?: unknown
+}
+
+/** 检出明确的跨层排版和连续动作；不对作者输入作全文替换。 */
+export function findCoverDraftIssues(draft: RawDraft): string[] {
+  const fields = ['genreSignal', 'sellingPoint', 'visualHierarchy', 'compositionGuide', 'characterDesc', 'backgroundDesc', 'colorPalette', 'lighting', 'keyProps', 'styleHintZh'] as const
+  const issues: string[] = []
+  for (const key of fields) {
+    const value = cleanField(draft[key])
+    if (!value) continue
+    if (/书名|标题|署名|作者名|字号|字体|断行|排字|\b(?:title|byline|typography|author name)\b/i.test(value)) issues.push(`${key} 混入文字排版要求`)
+    if (/(?:先|低头|垂眼|看向)[^。；\n]{0,35}(?:再|随后|然后|接着)(?:抬|低|转|看|望|伸|收|走)|先[^。；\n]{1,30}(?:然后|随后|接着)/.test(value)) issues.push(`${key} 含需要多个时刻的连续动作`)
+    if (key === 'sellingPoint' && /比较[^。；\n]{0,60}(?:场景|场面|方案)|候选(?:场景|场面|方案)|选择(?:前者|后者|方案)|方案[一二三123]/.test(value)) issues.push('sellingPoint 混入方案比较过程')
+  }
+  return issues
 }
 
 /**

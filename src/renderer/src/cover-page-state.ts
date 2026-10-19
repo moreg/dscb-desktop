@@ -44,6 +44,7 @@ export function inspectCoverPromptText(prompt: string, bookName: string, authorN
   const titleMatches = title[0].startsWith(`书名文字：'${bookName.trim()}'，`)
     || title[0].startsWith(`Title text '${bookName.trim()}' `)
   const authorMatches = author[0].startsWith(`作者署名：作者名'${authorName.trim()}'，`)
+    || author[0].startsWith(`作者署名：'${authorName.trim()} 著'，`)
     || author[0].startsWith('Author byline:') && author[0].includes(`the author name '${authorName.trim()}' `)
   return titleMatches && authorMatches
     ? 'matches' : 'mismatch'

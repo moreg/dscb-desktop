@@ -49,7 +49,8 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
     chapters = new ChapterService(projects)
     llm = { generateStream: vi.fn() } as unknown as LlmService
     deslop = { deslop: vi.fn(async (text: string) => ({ rewritten: text, processedGates: [],
-      beforeWords: countWords(text), afterWords: countWords(text), deleteRatio: 0, remainingFindings: [], changeSummary: [] })) } as unknown as DeslopService
+      beforeWords: countWords(text), afterWords: countWords(text), deleteRatio: 0, remainingFindings: [], changeSummary: [],
+      dialogueQuality: { passed: true, beforeRatio: 0.7, afterRatio: 0.7, attempts: 0, issues: [] } })) } as unknown as DeslopService
     service = new WriteService(projects, llm, undefined, undefined, chapters, settings, undefined, deslop)
     await chapters.updateContent(projectId, 1, RAW)
     await chapters.updateContent(projectId, 2, RAW)
@@ -243,7 +244,7 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
         ? JSON.stringify({ text: before })
         : JSON.stringify({ unchanged: false, issues: ['原稿先说核对印章再摊开账册，排版稿将摊开动作前移'] }))
     const result = await run({}, 1, 1).task
-    expect(result.results[0]).toMatchObject({ changed: false, autoDeslop: { status: 'review_required', repairAttempts: 2 } })
+    expect(result.results[0]).toMatchObject({ changed: false, autoDeslop: { status: 'review_required', repairAttempts: 1 } })
     expect((await chapters.getChapter(projectId, 1)).content).toBe(before)
     expect(service.generateChapterSummary).not.toHaveBeenCalled()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()

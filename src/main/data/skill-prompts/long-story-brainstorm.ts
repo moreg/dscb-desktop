@@ -1,3 +1,4 @@
+import { PLANNING_RULES } from './opening/planning-rules'
 import { z } from 'zod'
 import type { LongStoryBrainstormInput, LongStoryIdea, LongStoryIdeaFingerprint } from '../../../shared/long-story-brainstorm'
 import { LONG_STORY_IDEA_EXTRA_FIELDS, LONG_STORY_IDEA_LIMITS, longStoryIdeaMatchesPrevious } from '../../../shared/long-story-brainstorm'
@@ -41,6 +42,7 @@ export function buildLongStoryBrainstormPrompt(input: LongStoryBrainstormInput):
   const validated = longStoryBrainstormInputSchema.parse(input)
   return {
     system: [
+      PLANNING_RULES,
       '你是擅长中文大众网文的长篇小说策划，为可以持续连载并最终完结的长篇小说生成原创脑洞。先让读者一眼看懂为什么好看，再保证这个卖点能不断兑现。',
       '创作优先级：作者明确的题材与体验要求 > 一眼卖点、主角主动破局与早期兑现 > 持续连载的故事引擎 > 反转与伏笔设计。没有明确体验要求时，默认面向中文大众网文读者，卖点鲜明、爽点具体、主角行动有效，尽早给出正收益。',
       '尊重作者明确要求的悲剧、治愈、悬疑等体验，不把所有题材强行改成爽文。下文的爽点、小胜和正收益是默认创作取向；指定其他体验时，将早期兑现调整为相应的情绪满足、关系改善、有效线索或人物选择后果，保持作者要的基调，不硬塞金手指或打脸。',

@@ -1,3 +1,5 @@
+import { TOMATO_CHAPTER_NAME_SPEC } from './chapter-title-rules'
+import { renderWritingPlatformConfig, type WritingPlatformConfig } from './writing-platform'
 import type {
   FigureDraft,
   MemoryExtraction,
@@ -340,7 +342,7 @@ export function isForeshadowMatch(a: string, b: string): boolean {
    解析与清洗工具函数，供 main 与 renderer 共享。
    ========================================================= */
 
-/** 章名最大允许字符数。番茄章名规范 12-20 字，此处放宽到 50 兜底超长输入 */
+/** 章名最大允许字符数。输入长度保护，与具体平台的章名策略分开 */
 export const CHAPTER_NAME_MAX_LEN = 50
 
 /**
@@ -451,24 +453,26 @@ export interface ChapterNameUserPromptInput {
  * 1. 番茄章名风格规范（TOMATO_CHAPTER_NAME_SPEC）
  * 2. 体裁语感（resolveGenreVoice）
  * 3. 严格 JSON 输出（title + reason）
- * 4. 12-20 字硬性规则
+ * 4. 按项目平台策略，不固定套用长度与流量词
  *
  * 不依赖 Node API，可在 renderer 中使用。
  */
 export function buildChapterNameSystemPrompt(
   genre: string | undefined,
-  _style?: unknown
+  _style?: unknown,
+  platformConfig?: WritingPlatformConfig | null
 ): string {
   // 复用与续写一致的体裁定位段落，便于模型语感对齐
   const voiceHeader = genre
     ? `本作品体裁：${genre}。请按对应语感命名。`
-    : '本作品体裁未指定，请用通用网文番茄风格命名。'
+    : '本作品体裁未指定，请用清楚具体的章名。'
   return [
-    '你是番茄小说风格的资深网文编辑。任务：根据用户提供的章节正文（草稿），为该章起一个高度吸引点击的章名。',
+    '你是资深中文网文编辑。任务：根据用户提供的章节正文（草稿），为该章起一个高度吸引点击的章名。',
     '',
     voiceHeader,
     '',
-    TOMATO_CHAPTER_NAME_SPEC_TEXT,
+    platformConfig ? renderWritingPlatformConfig(platformConfig) : '平台配置缺失，保留本书既有风格，不自行套用番茄章名长度或转平台。',
+    platformConfig?.platform === 'fanqie' ? TOMATO_CHAPTER_NAME_SPEC : '标题具体清楚、贴合题材，不剧透，不强塞热梗或反差。',
     '',
     '【输出格式 · 严格 JSON】',
     '只输出一段 JSON，不要任何解释、markdown 代码块包裹、前后缀文字：',
@@ -476,7 +480,7 @@ export function buildChapterNameSystemPrompt(
     '',
     '【硬性规则】',
     '- title 仅含章名本体，不允许带「第 N 章」前缀（即使输入草稿里出现也要剥掉）。',
-    '- title 必须 12-20 字（含标点），少于 12 字或多于 20 字都会被驳回。',
+    '- 标题长度按用户与项目策略，不因未达到固定字数补背景或强塞第二个锚点。',
     '- reason 可选，30 字以内，缺失或非字符串都视为空。',
     '- 不允许标题里包含引号 / 括号 / 冒号 / 破折号 / emoji。'
   ].join('\n')
@@ -487,7 +491,7 @@ export function buildChapterNameUserPrompt(input: ChapterNameUserPromptInput): s
   const draftExcerpt = (input.draft || '').slice(0, max)
   const titleLine = input.currentTitle ? `当前标题：${input.currentTitle}` : '当前标题：（无）'
   return [
-    `【任务】为第 ${input.chapterNumber} 章起一个番茄风格的章名。`,
+    `【任务】为第 ${input.chapterNumber} 章起一个符合本书平台与文风的章名。`,
     titleLine,
     '',
     '【本章草稿（节选）】',
@@ -499,34 +503,3 @@ export function buildChapterNameUserPrompt(input: ChapterNameUserPromptInput): s
     '不要输出任何额外文字。'
   ].join('\n')
 }
-
-// 复用番茄章名规范（嵌入到 system prompt）。直接嵌入字符串而非 import，
-// 避免 shared/parsers.ts 被 main-only 依赖反向引用。
-const TOMATO_CHAPTER_NAME_SPEC_TEXT = `
-#### 🍅 番茄小说章名风格规范（强制）
-
-**基础规格**：
-- 字数 12-20 字（含标点），少于 12 字信息不足，多于 20 字移动端被截断
-- 纯中文 + 适当标点（逗号/句号/问号/感叹号），禁用括号、冒号、破折号、井号、省略号、emoji
-- 核心关键词在前 15 字内（读者扫读时前 15 字决定点击）
-
-**标题四要素（缺一不可）**：
-1. 含高流量关键词（重生/穿越/系统/打脸/逆袭/霸总/退婚/修仙等，按题材选）
-2. 交代核心冲突（谁和谁/面对什么困境，不能只写情绪状态）
-3. 含未完成信息点（悬念/反转/即将发生的危险，让读者产生"然后呢"）
-4. 传递情绪基调（爽/虐/甜/惊/怒/悬，强烈不平淡）
-
-**8 大爆款结构（按点击率排序）**：
-1. 反差/反转型：\`A 以为 X，结果 Y\`
-2. 打脸/反杀型：动作 + 对象 + 反差
-3. 网梗/代入型：当下梗 + 关键意象
-4. 悬念/钩子型：两个矛盾事实并列
-5. 关系推进型：人物关系变化
-6. 数字悬念型：数字 + 反差事件
-7. 身份反差型：表面 vs 真实身份
-8. 道具/场景型：具体物件 + 动作
-
-**七禁七必自检**：
-- 禁：>20字 / 抽象词（觉醒/突破/转折/启程/新生）/ 剧透 / 平铺 / 空洞 / 零信息 / 不带梗
-- 必：12-20字 / 含具体人事物 / 至少2个对立元素 / 1个明确疑问 / 1种情绪色彩 / 匹配8大结构之一
-`

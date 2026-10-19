@@ -181,7 +181,7 @@ export function parseChapterTitle(content: string): string {
  * 把章节标题清洗为文件名安全片段（用于 `细纲_第NNN章_标题.md` 的 `_标题` 部分）。
  * - 去除 Windows/Unix 文件系统非法字符：/ \ : * ? " < > |
  * - 去除控制字符
- * - 截断到 30 字（番茄章名 12-20 字，留余量）
+ * - 不按平台章名长度截断；文件系统非法字符另行处理
  * - 去除首尾空白和点号（避免 Windows 末尾点问题）
  */
 export function sanitizeTitleForFilename(title: string): string {
@@ -193,6 +193,6 @@ export function sanitizeTitleForFilename(title: string): string {
     .replace(/\s+/g, ' ') // 折叠多空白为单空格
     .replace(/[.]+$/g, '') // 末尾点号
     .trim()
-    .slice(0, 30)
+
   return cleaned
 }

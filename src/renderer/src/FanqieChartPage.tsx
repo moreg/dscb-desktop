@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { createBufferedText } from '../../shared/buffered-text'
+import { chartBookTags } from '../../shared/fanqie-chart-tags'
 import './fanqie-chart.css'
 import {
   FANQIE_CHART_TYPES,
@@ -319,10 +320,10 @@ export default function FanqieChartPage(): ReactElement {
   const tagChoices = useMemo(() => {
     const counts = new Map<string, number>()
     for (const book of current?.books ?? []) {
-      const tags = new Set([book.genre, ...book.tags].map(tag => tag.trim()).filter(Boolean))
+      const tags = chartBookTags(book)
       for (const tag of tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 16)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
   }, [current])
 
   const stats = current?.analysis?.tagStatistics ?? []
@@ -663,12 +664,7 @@ function BookRow({
   const [broken, setBroken] = useState(false)
   const wordText = formatFanqieWordCount(book.wordCount)
   const readText = formatFanqieReadCount(book.readCount)
-  const displayTags =
-    book.tags && book.tags.length > 0
-      ? book.tags.slice(0, 2)
-      : book.genre
-        ? [book.genre]
-        : []
+  const displayTags = chartBookTags(book).slice(0, 2)
 
   return (
     <article

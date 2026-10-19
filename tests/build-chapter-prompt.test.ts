@@ -273,7 +273,11 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const llm = { generateStream } as unknown as LlmService
 
     const service = new WriteService(ps, llm)
-    await service.generateChapterStream(projectId, 1)
+    const onAutoDeslopResult = vi.fn()
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe('正文')
+    expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', message: expect.stringContaining('已保留生成稿')
+    }))
 
     expect(generateStream).toHaveBeenCalledTimes(1)
     const [userPrompt, opts] = (generateStream as ReturnType<typeof vi.fn>).mock.calls[0] as [
@@ -300,7 +304,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const llm = { generateStream } as unknown as LlmService
 
     const service = new WriteService(ps, llm)
-    await service.generateChapterStream(projectId, 2)
+    await expect(service.generateChapterStream(projectId, 2)).resolves.toBe('正文')
 
     const opts = (generateStream as ReturnType<typeof vi.fn>).mock.calls[0][1] as GenerateOptions
     // 4000 字 × 1.7 × 1.3 ≈ 8840

@@ -1,4 +1,5 @@
 import { createWritingProject } from './helpers/writing-project'
+import { acceptedDeslop } from './helpers/accepted-deslop'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -276,7 +277,7 @@ describe('WriteService', () => {
 
   it('generateChapterStream calls llm with assembled prompt', async () => {
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const full = await service.generateChapterStream(projectId, 1)
     expect(full).toBe('生成的正文')
     expect(llm.generateStream).toHaveBeenCalled()
@@ -294,7 +295,7 @@ describe('WriteService', () => {
       '</script>'
     ].join('\n'), 'utf-8')
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     await service.generateChapterStream(projectId, 1, { autoStrength: true })
     expect(llm.generateStream).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       strengthOverride: { temperature: 1.0, reasoningEffort: 'high' }
@@ -309,7 +310,7 @@ describe('WriteService', () => {
 
   it('adjustChapterStream revises existing prose from a follow-up instruction', async () => {
     const llm = mockLlm('修订后的完整正文')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 
     const full = await service.adjustChapterStream(
       projectId,
@@ -330,7 +331,7 @@ describe('WriteService', () => {
 
   it('planAdjustChapterStream only asks for a plan, not revised prose', async () => {
     const llm = mockLlm('## 理解你的要求\n加强冲突。\n## 落笔要点\n1. 改对话')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 
     const full = await service.planAdjustChapterStream(
       projectId,
@@ -353,7 +354,7 @@ describe('WriteService', () => {
 
   it('adjustChapterStream includes confirmed plan when user approved suggestions', async () => {
     const llm = mockLlm('按方案修订后的正文')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const plan = '## 落笔要点\n1. 删旁白\n2. 加动作对峙'
 
     await service.adjustChapterStream(
@@ -376,7 +377,7 @@ describe('WriteService', () => {
 
   it('adjustChapter prompt enforces user instruction as highest priority over outline/character', async () => {
     const llm = mockLlm('修订后的完整正文')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 
     await service.adjustChapterStream(
       projectId,
@@ -439,7 +440,7 @@ describe('WriteService', () => {
     await new CharacterRepository(dir).create({ name: '林远', role: '主角', personality: '坚毅' })
 
     const llm = mockLlm('人物动机合理，因为……')
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const full = await service.answerChapterQuestionStream(
       projectId,
       2,
@@ -657,7 +658,7 @@ describe('WriteService', () => {
         prompt.includes('细纲联动校准器')
           ? JSON.stringify([2, 3, 4].map((ch) => ({ chapterNumber: ch, patch: { plotSummary: `承接正文${ch}` } })))
           : JSON.stringify({ patch: { plotSummary: '按正文重写的事件', title: '擅自改名' } }))
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -802,7 +803,7 @@ describe('WriteService', () => {
         reason: '承接上一章新结果',
         patch: { plotSummary: `承接改写后的核心事件${ch}` }
       }))))
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -1384,7 +1385,7 @@ describe('WriteService', () => {
      */
     it('passes generated content to all flow steps (not reloaded from disk)', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '这是步骤1生成的正文内容，尚未落盘。'
 
       // 创建细纲文件（DetailedOutlineMdRepo 读 细纲/第NN卷.md）
@@ -1471,7 +1472,7 @@ describe('WriteService', () => {
 
     it('isolates errors: one flow step failure does not abort others', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '正文内容'
 
       // 必须真有细纲，否则对照步骤根本不会被调用，"抛错也不影响其他步骤"就成了空跑
@@ -1526,7 +1527,7 @@ describe('WriteService', () => {
 
     it('calls onProgress with the batch step names in order', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 
       const genSpy = vi
         .spyOn(service, 'generateChapterStream')
@@ -1633,7 +1634,7 @@ describe('WriteService', () => {
 
     it('skips outline check when no detailed outline exists', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 
       const genSpy = vi
         .spyOn(service, 'generateChapterStream')
@@ -1746,7 +1747,7 @@ describe('WriteService', () => {
       )
 
       const llm = mockLlm('[]')
-      const service = new WriteService(ps, llm)
+      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       await service.detectCastStream(projectId, 1)
 
       expect(llm.generateStream).toHaveBeenCalled()

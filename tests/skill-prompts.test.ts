@@ -263,3 +263,20 @@ describe('genre-voice suggestedParticles（题材语气词）', () => {
     expect(prompt).not.toContain('按情境选用的题材语气词')
   })
 })
+
+
+describe('题材语感不强制机关式对白', () => {
+  it('都市保留口语与对话风格，不把带梗或持续吐槽当任务', () => {
+    const prompt = buildSystemPrompt('都市生活')
+    expect(prompt).toContain('幽默随人物与场合自然出现')
+    expect(prompt).toContain('不要求持续吐槽')
+    expect(prompt).not.toContain('口语化、接地气、带梗')
+    expect(prompt).not.toContain('内心吐槽多')
+    expect(prompt).not.toContain('4. 标准化收尾')
+    expect(prompt).toContain('普通的“好”“嗯”和直接回答按语境保留')
+    expect(prompt).toContain('整章对话占比目标 70%')
+  })
+  it('语感示例须核对原意，不能把普通词和动作机械替换', () => {
+    expect(buildSystemPrompt('都市')).toContain('不是逐词替换表；先核对原意与场景')
+  })
+})

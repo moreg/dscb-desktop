@@ -1,3 +1,4 @@
+import { isDeslopStage, deslopProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { finalizeChapterContinuation, finalizeChapterRewrite } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
@@ -1251,6 +1252,8 @@ export default function ChapterEditor({
         if (sessionEpochRef.current !== loadEpoch) return
         setData(c)
         setDraft(c.content, { captureScroll: false })
+        setAutoDeslopResult(c.meta.autoDeslop ?? null)
+        setAutoDeslopSnapshot(c.meta.autoDeslop ? c.content : null)
         setDirty(false)
         setSessionStartWords(c.meta.wordCount)
       })
@@ -4789,7 +4792,7 @@ export default function ChapterEditor({
             onClick={cancelActiveStream}
             title="停止当前 AI 生成，并恢复开始前的正文"
           >
-            {generationStage === 'foreshadowRepair' ? '⏹ 停止伏笔补写' : generationStage === 'deslop' ? '⏹ 停止自动润色' : '⏹ 停止生成'}
+            {generationStage === 'foreshadowRepair' ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
           <button
@@ -4870,9 +4873,9 @@ export default function ChapterEditor({
         </div>
       </div>
 
-      {generationStage === 'deslop' && (generating || adjusting) ? (
+      {isDeslopStage(generationStage) && (generating || adjusting) ? (
         <div className="meta" role="status" style={{ marginBottom: 8 }}>
-          正文已生成，正在自动去 AI 味…
+          生成原稿已保存 · {deslopProgressLabel(generationStage)}
         </div>
       ) : autoDeslopResult && autoDeslopSnapshot === draft ? (
         <div
@@ -4885,6 +4888,14 @@ export default function ChapterEditor({
             : autoDeslopResult.status === 'unchanged'
               ? '自动去 AI 味已完成，无需修改'
               : autoDeslopResult.message}
+          {autoDeslopResult.dialogueQuality?.passed === false && autoDeslopResult.dialogueQuality.pendingDraft && (
+            <details style={{ marginTop: 8 }}>
+              <summary>查看待复核修订稿（尚未替换正文）</summary>
+              <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto', userSelect: 'text' }}>
+                {autoDeslopResult.dialogueQuality.pendingDraft}
+              </pre>
+            </details>
+          )}
         </div>
       ) : null}
 

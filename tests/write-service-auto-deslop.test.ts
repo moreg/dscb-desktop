@@ -1,12 +1,13 @@
 import { createWritingProject } from './helpers/writing-project'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { WriteService, type ChapterGenerateOptions } from '../src/main/data/write-service'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { StyleProfileRepository } from '../src/main/data/style-profile-repository'
+import { ChapterService } from '../src/main/data/chapter-service'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { countWords } from '../src/main/data/words'
 import type { DeslopOptions, DeslopService } from '../src/main/data/deslop/deslop-service'
@@ -31,6 +32,7 @@ const POLISHED = RAW.replace('缓缓推开', '推开').replace('用手指沿着'
 
 function deslopResult(rewritten: string, patch: Partial<DeslopResult> = {}): DeslopResult {
   return {
+    dialogueQuality: { passed: true, beforeRatio: 0.7, afterRatio: 0.7, attempts: 0, issues: [] },
     rewritten,
     processedGates: ['A'],
     beforeWords: countWords(RAW),
@@ -151,6 +153,13 @@ describe('自动写作去 AI 味', () => {
     return vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:verify')
   }
 
+  it('本次临时写作要求必须继续进入自动润色与独立场景复核', async () => {
+    await service.generateChapterStream(projectId, 1, { tempContext: '整场重组，不要只改措辞' })
+    expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({
+      dialogueComposition: expect.objectContaining({ revisionInstruction: '整场重组，不要只改措辞' })
+    }))
+  })
+
   it('先保留生成稿，再轻度润色、核验事实并返回最终稿，日志不混入正文流', async () => {
     const events: string[] = []
     const onToken = vi.fn()
@@ -177,12 +186,26 @@ describe('自动写作去 AI 味', () => {
     expect(content).toBe(POLISHED)
     expect(events).toEqual(['raw', 'deslop'])
     expect(onToken.mock.calls.flat().join('')).toBe(RAW)
-    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['generating', 'deslop'])
+    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['generating', 'deslop', 'deslop:正在扫描表达与对白比例', 'deslop:事实核对 1/2'])
     expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({ levelOverride: 'mild', isTail: true }))
     expect(verificationCalls()).toHaveLength(1)
     expect(verificationCalls()[0][0]).toContain(RAW)
     expect(verificationCalls()[0][0]).toContain(POLISHED)
     expect(reports).toEqual([expect.objectContaining({ status: 'applied', remainingIssues: 0, message: expect.any(String) })])
+  })
+
+  it('润色开始前原稿已落盘，失败后保存待复核标记，重开只显示对应版本的标记', async () => {
+    vi.mocked(deslop.deslop).mockImplementation(async () => {
+      expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+      throw new Error('LLM_TIMEOUT')
+    })
+    expect(await service.generateChapterStream(projectId, 1)).toBe(RAW)
+    const chapters = new ChapterService(projects)
+    const saved = await chapters.getChapter(projectId, 1)
+    expect(saved.content).toBe(RAW)
+    expect(saved.meta.autoDeslop).toMatchObject({ status: 'failed', message: expect.stringContaining('待复核') })
+    await chapters.updateContent(projectId, 1, RAW + '\n林远合上门。')
+    expect((await chapters.getChapter(projectId, 1)).meta.autoDeslop).toBeUndefined()
   })
 
   it('沿用用户禁用词、规则覆盖、项目白名单及本次选择的文风', async () => {
@@ -245,7 +268,7 @@ describe('自动写作去 AI 味', () => {
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult(POLISHED, { changeSummary: [summary] }))
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0].status).toBe('review_required')
     expect(verificationCalls()).toHaveLength(0)
@@ -260,7 +283,7 @@ describe('自动写作去 AI 味', () => {
     }))
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0]).toMatchObject({ status: 'review_required', remainingIssues: 1 })
     expect(verificationCalls()).toHaveLength(0)
@@ -274,7 +297,7 @@ describe('自动写作去 AI 味', () => {
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult(candidate, { deleteRatio: 0 }))
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0].status).toBe('review_required')
     expect(verificationCalls()).toHaveLength(0)
@@ -284,7 +307,7 @@ describe('自动写作去 AI 味', () => {
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult('# 改写后正文\n' + POLISHED))
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0].status).toBe('review_required')
   })
@@ -301,21 +324,21 @@ describe('自动写作去 AI 味', () => {
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult(existingText))
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { existingText, onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { existingText, onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0].status).toBe('review_required')
   })
 
   it.each([
-    [JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }), 3],
-    [JSON.stringify({ unchanged: true, issues: ['新增了道具'] }), 3],
+    [JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }), 2],
+    [JSON.stringify({ unchanged: true, issues: ['新增了道具'] }), 2],
     [JSON.stringify({ unchanged: true }), 2],
     ['无法确定是否保持原文事实', 2]
   ])('事实对比经自动修复或格式重试仍未通过时保留原稿：%s', async (reply, expectedVerifications) => {
     verifierReply = reply
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(verificationCalls()).toHaveLength(expectedVerifications)
     expect(reports[0].status).toBe('review_required')
@@ -332,7 +355,7 @@ describe('自动写作去 AI 味', () => {
     }
     const { reports, onAutoDeslopResult } = results()
 
-    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
 
     expect(reports[0]).toMatchObject({ status: 'failed', message: expect.any(String) })
   })
@@ -391,7 +414,8 @@ describe('自动写作去 AI 味', () => {
     })
 
     expect(content).toBe(POLISHED)
-    expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({ levelOverride: 'mild', isTail: true }))
+    expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({ levelOverride: 'mild', isTail: true,
+      dialogueComposition: expect.objectContaining({ revisionInstruction: '让动作更简洁', previousDraft: RAW, allowSceneRewrite: true }) }))
     expect(verificationCalls()).toHaveLength(1)
     expect(reports[0].status).toBe('applied')
   })
@@ -429,7 +453,33 @@ describe('自动写作去 AI 味', () => {
     expect(onProgress.mock.calls.map(([step]) => step)).toContain('deslop')
   })
 
-  it('批量润色期间停止会保留独立恢复稿，继续时重新生成未保存章节', async () => {
+  it('批量润色失败仍保存原稿并完成写后流程，不报告保存失败', async () => {
+    vi.mocked(deslop.deslop).mockImplementation(async () => {
+      expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+      throw new Error('LLM_TIMEOUT')
+    })
+    const flow = (service as unknown as { flow: WriteFlowService }).flow
+    vi.spyOn(service, 'selfCheckChapter').mockResolvedValue(PASSED_CHECK)
+    vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify({
+      chapterNumber: 1, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [],
+      newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: []
+    }))
+    vi.spyOn(service, 'syncChapterAfterWrite').mockResolvedValue(null)
+    vi.spyOn(service, 'generateChapterSummary').mockResolvedValue({
+      chapterNumber: 1, sourceHash: 'summary', generatedAt: '', events: [], stateChanges: [], openThreads: [], stale: false
+    })
+    const onComplete = vi.fn()
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, onComplete)
+    expect(progress.status).toBe('completed')
+    expect(progress.completed).toEqual([1])
+    expect(progress.error).toBeUndefined()
+    expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+    expect(onComplete).toHaveBeenCalledWith(1, expect.objectContaining({
+      content: RAW, autoDeslop: expect.objectContaining({ status: 'failed', message: expect.stringContaining('待复核') })
+    }))
+  })
+
+  it('批量润色期间停止保留已保存原稿，继续时复用正文检查', async () => {
     await mkdir(path.join(dir, '细纲'), { recursive: true })
     await writeFile(path.join(dir, '细纲', '第01卷.md'),
       '# 第01卷\n\n## 第1章：院门交接\n\n**核心事件：** 核对印章后取得钥匙。\n', 'utf-8')
@@ -459,41 +509,44 @@ describe('自动写作去 AI 味', () => {
     })
 
     expect(paused.status).toBe('paused')
-    expect(paused.completed).toEqual([])
-    expect(paused.pendingPostProcessChapter).toBeUndefined()
-    expect(await new ProseRepo(dir).read(1)).toBe('')
+    expect(paused.completed).toEqual([1])
+    expect(paused.pendingPostProcessChapter).toBe(1)
+    expect(await new ProseRepo(dir).read(1)).toBe(RAW)
     expect(onChapterComplete).not.toHaveBeenCalled()
     expect(onAutoDeslopResult).not.toHaveBeenCalled()
     expect(memory).not.toHaveBeenCalled()
     expect(sync).not.toHaveBeenCalled()
-    const recoveryDir = path.join(dir, '.cache', 'batch-drafts')
-    const files = await readdir(recoveryDir)
-    expect(files).toHaveLength(1)
-    expect(files[0]).toMatch(/^chapter-1-\d+\.md$/)
-    expect(await readFile(path.join(recoveryDir, files[0]), 'utf-8')).toBe(RAW)
-    expect(paused.pauseReason).toContain(path.join(recoveryDir, files[0]))
+    expect(paused.pauseReason).toContain('正文已保存')
 
     const resumed = await service.resumeChaptersBatch(projectId, 1, 1, onChapterComplete,
       null, { onAutoDeslopResult }, paused)
 
     expect(resumed.status).toBe('completed')
     expect(resumed.completed).toEqual([1])
-    expect(generate).toHaveBeenCalledTimes(2)
+    expect(generate).toHaveBeenCalledOnce()
     expect(await new ProseRepo(dir).read(1)).toBe(POLISHED)
     expect(memory).toHaveBeenCalledOnce()
     expect(sync).toHaveBeenCalledOnce()
     expect(onChapterComplete).toHaveBeenCalledOnce()
     expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' }), 1)
-    expect(await readFile(path.join(recoveryDir, files[0]), 'utf-8')).toBe(RAW)
   })
 
-  it('旧测试适配器不注入润色服务时继续返回正文原稿', async () => {
+  it('缺少自动验收服务时保留原稿，不阻挡保存', async () => {
     service = new WriteService(projects, llm)
     mockPrompt()
 
-    expect(await service.generateChapterStream(projectId, 1)).toBe(RAW)
+    await expect(service.generateChapterStream(projectId, 1)).resolves.toBe(RAW)
 
     expect(deslop.deslop).not.toHaveBeenCalled()
     expect(verificationCalls()).toHaveLength(0)
+  })
+
+  it('验收准备阶段失败时返回原稿并报告待复核', async () => {
+    mockPrompt()
+    vi.spyOn(projects, 'getProjectData').mockRejectedValue(new Error('项目配置读取失败'))
+    const onAutoDeslopResult = vi.fn()
+    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe(RAW)
+    expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }))
+    expect(deslop.deslop).not.toHaveBeenCalled()
   })
 })

@@ -1,3 +1,4 @@
+import { isDeslopStage, deslopProgressLabel } from '../../shared/generation-progress'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoDeslopResult,
@@ -1493,6 +1494,7 @@ function BatchWriteDialog({
   // 运行中的实时进度：整批结果要等 promise 返回才有，连续写 10 章期间
   // 不自己记一份的话，界面上十几分钟都停在「0 / 10」，看着像卡死。
   const [liveCompleted, setLiveCompleted] = useState<number[]>([])
+  const [liveSavedChapters, setLiveSavedChapters] = useState<number[]>([])
   const [liveChapter, setLiveChapter] = useState<number | null>(null)
   // 逐章小结：整批跑完后仍保留，供用户按章返工
   const [summaries, setSummaries] = useState<BatchChapterSummary[]>([])
@@ -1544,6 +1546,7 @@ function BatchWriteDialog({
 
   // 展示用进度：运行中取实时计数，停下来后取后端返回的整批进度
   const displayCompleted = running ? liveCompleted : progress?.completed ?? []
+  const savedChapterCount = running ? new Set([...displayCompleted, ...liveSavedChapters]).size : displayCompleted.length
   const displayTotal = progress?.total ?? (rangeValid ? toChapter - fromChapter + 1 : 0)
   const displayChapter = running ? liveChapter : progress?.currentChapter ?? null
   const displayStatus: BatchProgress['status'] = running
@@ -1714,6 +1717,7 @@ function BatchWriteDialog({
     setLiveAutoDeslop(null)
     setRetryWait(null)
     setLiveCompleted(completed)
+    setLiveSavedChapters(completed)
     setLiveChapter(runFrom)
     setActiveTo(rangeTo)
     if (mode === 'start') {
@@ -1776,6 +1780,7 @@ function BatchWriteDialog({
         (stage, chapterNumber) => {
           if (batchRequestIdRef.current !== requestId) return
           setGenerationStage(stage)
+          if (isDeslopStage(stage)) setLiveSavedChapters(prev => prev.includes(chapterNumber) ? prev : [...prev, chapterNumber])
           setLiveChapter(chapterNumber)
           setRetryWait(null)
           if (stage === 'generating') {
@@ -1866,7 +1871,7 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章生成正文，自动去 AI 味并核对事实；发现差异会自动修复，最多两轮。随后跑质检、细纲对照和记忆同步。
+          逐章先保存生成原稿，再自动去 AI 味并核对事实。对白比例与语义合计最多修复 2 次，事实差异最多修复 1 次；核验格式异常最多重试 1 次。润色未通过则保留原稿、标记待复核，继续写后检查。
           {autoContinue
             ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。仅细纲缺失或同步失败时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
@@ -2059,14 +2064,14 @@ function BatchWriteDialog({
           <div className="batch-progress">
             <div className="batch-progress-head">
               <span className={`chip status-${displayStatus}`}>
-                {running && generationStage === 'deslop'
-                  ? '自动去 AI 味中'
+                {running && isDeslopStage(generationStage)
+                  ? deslopProgressLabel(generationStage)
                   : running && generationStage === null
                     ? '写后检查中'
                     : statusLabel[displayStatus]}
               </span>
               <span className="batch-progress-count">
-                {displayCompleted.length} / {displayTotal} 章已保存
+                {savedChapterCount} / {displayTotal} 章已保存
               </span>
             </div>
             {displayChapter ? (
@@ -2147,8 +2152,8 @@ function BatchWriteDialog({
         {streamingText ? (
           <div className="batch-streaming" ref={streamingBoxRef}>
             <div className="batch-streaming-head">
-              {generationStage === 'deslop'
-                ? '正文已生成，正在自动去 AI 味…'
+              {isDeslopStage(generationStage)
+                ? `生成原稿已保存 · ${deslopProgressLabel(generationStage)}`
                 : generationStage === null ? '正文预览，正在写后检查…' : '正在生成…'}
             </div>
             <pre className="batch-streaming-text">{streamingText}</pre>
