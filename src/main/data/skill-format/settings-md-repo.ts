@@ -44,7 +44,8 @@ export class SettingsMdRepo {
     let exists = true
     try {
       await fs.access(dir)
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       exists = false
     }
     if (!exists) return null
@@ -162,7 +163,8 @@ async function readTopLevelRules(settingsDir: string, beforeChapter?: number): P
   let files: string[]
   try {
     files = await fs.readdir(settingsDir)
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     return []
   }
   const docs: SettingsDoc[] = []

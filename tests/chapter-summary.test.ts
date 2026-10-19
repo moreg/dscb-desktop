@@ -14,7 +14,7 @@ import type { ChapterFlowResult } from '../src/shared/types'
 
 const prose = '林远推开院门，把账册交给守门人。守门人核对印章后放他进门。'
 const reply = (text: string, evidence = '林远推开院门') => JSON.stringify({
-  events: [{ text, evidence }], stateChanges: [], openThreads: []
+  events: [{ text, evidence }], stateChanges: [], openThreads: [], continuity: []
 })
 
 describe('章节概要', () => {
@@ -41,12 +41,101 @@ describe('章节概要', () => {
     expect(llm.generateStream).toHaveBeenCalledTimes(1)
 
     vi.mocked(llm.generateStream).mockResolvedValueOnce(reply('新概要', '正文里没有这句话'))
-    await expect(service.generateChapterSummary(projectId, 1, prose, { force: true })).rejects.toThrow('依据')
+    await expect(service.generateChapterSummary(projectId, 1, prose, { force: true })).resolves.toMatchObject({ stale: false })
     expect((await new ChapterSummaryRepo(dir).read(1))?.events[0].text).toBe(first.events[0].text)
 
     vi.mocked(llm.generateStream).mockResolvedValueOnce(reply('林远带着账册进门'))
     await service.generateChapterSummary(projectId, 1, prose, { force: true })
     expect((await new ChapterSummaryRepo(dir).read(1))?.events[0].text).toBe('林远带着账册进门')
+  })
+
+  it('normalizes punctuation-only quote differences back to exact source text without another model call', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(reply('账册交接', '林远推开院门, 把账册交给守门人。'))
+    const result = await service.generateChapterSummary(projectId, 1, prose)
+    expect(result.events[0].evidence).toBe('林远推开院门，把账册交给守门人。')
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+  })
+
+  it('automatically re-extracts invalid evidence and commits only the repaired, validated summary', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    const write = vi.spyOn(ChapterSummaryRepo.prototype, 'write')
+    try {
+      vi.mocked(llm.generateStream).mockResolvedValueOnce(reply('不存在的交接', '林远把账册交给船夫。'))
+        .mockImplementationOnce(async prompt => {
+          expect(prompt).toContain('自动修复并重新提取')
+          expect(prompt).toContain('依据与当前正文不符')
+          expect(prompt).toContain(prose)
+          expect(write).not.toHaveBeenCalled()
+          return reply('林远交出账册', '把账册交给守门人。')
+        })
+      const result = await service.generateChapterSummary(projectId, 1, prose)
+      expect(result.events[0]).toEqual({ text: '林远交出账册', evidence: '把账册交给守门人。' })
+      expect(llm.generateStream).toHaveBeenCalledTimes(2)
+      expect(write).toHaveBeenCalledOnce()
+    } finally { write.mockRestore() }
+  })
+
+  it('repairs a continuity ledger quote instead of stopping the single-chapter summary request', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    const ledger = (value: string, evidence: string) => JSON.stringify({ events: [{ text: '账册交接', evidence: prose }],
+      stateChanges: [], openThreads: [], continuity: [{ kind: 'item', subject: '账册', object: '', aspect: '持有者', value, evidence }] })
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(ledger('船夫', '账册交给了船夫。'))
+      .mockResolvedValueOnce(ledger('守门人', '把账册交给守门人。'))
+    const result = await service.generateChapterSummary(projectId, 1, prose, { requireContinuity: true })
+    expect(result.continuity?.[0]).toMatchObject({ value: '守门人', evidence: '把账册交给守门人。' })
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses actual source quotes after repeated extraction failures without asking to resync or inventing events', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    vi.mocked(llm.generateStream).mockResolvedValue(reply('虚构事件', '正文从未出现的句子。'))
+    const result = await service.generateChapterSummary(projectId, 1, prose, { requireContinuity: true })
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+    expect(result.events.length).toBeGreaterThan(0)
+    expect(result.events.every(item => prose.includes(item.evidence))).toBe(true)
+    expect(result.events[0].text).toContain('前文原文')
+    expect(result.stateChanges).toEqual([])
+    expect(result.continuity).toEqual([])
+    expect(JSON.stringify(result)).not.toContain('虚构事件')
+    expect(await new ProseRepo(dir).read(1)).toBe(prose)
+  })
+
+  it('preserves an already valid summary if every repair attempt fails', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    await service.generateChapterSummary(projectId, 1, prose)
+    const saved = await new ChapterSummaryRepo(dir).read(1)
+    vi.mocked(llm.generateStream).mockClear().mockResolvedValue('不是有效 JSON')
+    await service.generateChapterSummary(projectId, 1, prose, { force: true })
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+    expect(await new ChapterSummaryRepo(dir).read(1)).toEqual(saved)
+  })
+
+  it('stops retrying an outdated draft after an author edit and allows the newer draft to generate normally', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    const newer = '林远转身离去，账册仍在原处。'
+    vi.mocked(llm.generateStream).mockImplementationOnce(async () => {
+      await new ProseRepo(dir).write(1, newer)
+      return reply('交接', '没有这条原文依据。')
+    })
+    await expect(service.generateChapterSummary(projectId, 1, prose)).rejects.toThrow('旧概要未写入')
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(await new ChapterSummaryRepo(dir).read(1)).toBeNull()
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(reply('林远离去，未交出账册', newer))
+    await expect(service.generateChapterSummary(projectId, 1, newer)).resolves.toMatchObject({ stale: false })
+    expect((await new ChapterSummaryRepo(dir).readCurrent(1, newer))?.events[0].text).toContain('未交出账册')
+  })
+
+  it('honors cancellation before retrying evidence repair and does not commit a fallback after cancellation', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    const controller = new AbortController()
+    vi.mocked(llm.generateStream).mockImplementationOnce(async () => {
+      controller.abort()
+      return reply('错误摘要', '不存在的原文。')
+    })
+    await expect(service.generateChapterSummary(projectId, 1, prose, { signal: controller.signal })).rejects.toThrow('LLM_ABORTED')
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(await new ChapterSummaryRepo(dir).read(1)).toBeNull()
   })
 
   it('uses a current summary for older chapters and ignores one after its prose changes', async () => {
@@ -83,7 +172,7 @@ describe('章节概要', () => {
       events: [{ text: '交出账册', evidence: '把账册交给守门人。' }], stateChanges: [], openThreads: [],
       continuity: [{ kind: 'item', subject: '账册', object: '', aspect: '持有者', value: '船夫', evidence: '账册交给了船夫。' }]
     }))
-    await expect(service.generateChapterSummary(projectId, 1, prose, { force: true })).rejects.toThrow('依据')
+    await expect(service.generateChapterSummary(projectId, 1, prose, { force: true })).resolves.toMatchObject({ stale: false })
     expect((await new ChapterSummaryRepo(dir).read(1))?.continuity?.[0].value).toBe('守门人')
   })
 
@@ -116,10 +205,11 @@ describe('章节概要', () => {
     expect(prompt.user).not.toContain('第 2 章（正文原文摘录')
   })
 
-  it('reports an oversized previous chapter before extracting its ending state', async () => {
-    await new ProseRepo(dir).write(1, '甲'.repeat(40_001))
-    await expect(service.buildChapterPrompt(projectId, 2)).rejects.toThrow('PREVIOUS_CHAPTER_CONTEXT_TOO_LARGE')
-    expect(llm.generateStream).not.toHaveBeenCalled()
+  it('keeps oversized previous prose intact until provider-specific budget handling', async () => {
+    const previous = '甲'.repeat(40_001)
+    await new ProseRepo(dir).write(1, previous)
+    const prompt = await service.buildChapterPrompt(projectId, 2)
+    expect(prompt.user).toContain(previous)
   })
 
   it('finishes each batch summary before starting the next chapter', async () => {

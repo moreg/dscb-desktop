@@ -13,6 +13,8 @@ import {
 import { safeHandle, safeSend } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 import { join } from 'path'
+import { countWords } from '../data/words'
+import { measureDialogue } from '../data/dialogue-quality'
 import type { DeslopStyleContext } from '../../shared/types'
 
 const deslopTextSchema = z.string().min(1).max(500_000)
@@ -99,8 +101,19 @@ export function registerDeslopIpc(
             meta: { projectId: validated.projectId },
             signal
           })
-          if (result.dialogueQuality?.passed === false) {
-            throw new Error(`自动对白验收未通过：${result.dialogueQuality.issues.join('；')}。原正文未修改。`)
+          // Manual polishing returns an unapproved candidate for the author's choice.
+          // Automatic generation/batch acceptance continues to use the service's original result.
+          const candidate = result.dialogueQuality?.passed === false ? result.dialogueQuality.pendingDraft : undefined
+          if (candidate?.trim()) {
+            const scan = await deslopService.scan(candidate, { whitelist, bannedWords })
+            const beforeWords = countWords(validated.text)
+            result = { ...result, rewritten: candidate, beforeWords, afterWords: countWords(candidate),
+              deleteRatio: 1 - countWords(candidate) / Math.max(1, beforeWords), semanticVerification: undefined,
+              dialogueQuality: { ...result.dialogueQuality!, afterRatio: measureDialogue(candidate).ratio },
+              remainingFindings: [...scan.findings, {
+                line: 1, column: 1, gate: 'E', type: 'dialogue-quality-incomplete', severity: 'blocking',
+                excerpt: candidate.slice(0, 60), message: result.dialogueQuality!.issues.join('；')
+              }] }
           }
         } finally {
           endStream(validated.requestId)

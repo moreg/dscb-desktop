@@ -36,6 +36,7 @@ describe('续写质量与长篇记忆集成', () => {
       options.onToken(raw)
       return raw
     })
+    await new OutlineRepository(dir).upsertDetailed({ chapterNumber: 1, plotSummary: '门上的警告' })
     const onToken = vi.fn()
     const result = await service.generateChapterStream(id, 1, { onToken })
     expect(result).toBe('他在门上看见Keep Out，便收回了手。')
@@ -45,6 +46,8 @@ describe('续写质量与长篇记忆集成', () => {
   it('生成结果大段复制远章正文时拦截返回，不交给调用方保存', async () => {
     const old = '陆安推开祠堂的木门，一枚青铜钥匙从门楣上落下。他用袖口接住钥匙，看见齿缝中塞着尚未干透的红泥。院里没有脚印，只有井沿留着半只破鞋。他把钥匙放进内袋，绕过供桌走到后窗。窗纸上新割出的孔洞正对着山路，一匹无人的马停在那里，鞍边挂着他昨夜交给弟弟的包袱。'
     await new ProseRepo(dir).write(3, old, '钥匙')
+    await new OutlineRepository(dir).upsertDetailed({ chapterNumber: 249, plotSummary: '陆安抵达祠堂' })
+    await new OutlineRepository(dir).upsertDetailed({ chapterNumber: 250, plotSummary: '陆安调查新线索' })
     generateStream.mockResolvedValue(old)
     await expect(service.generateChapterStream(id, 250)).rejects.toThrow('LLM_PROSE_REPETITION')
   })

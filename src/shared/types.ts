@@ -472,7 +472,7 @@ export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
 export type AgyGenerationStatus = 'queued' | 'waiting' | 'streaming' | 'retrying'
-export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}`
+export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}` | `continuity:${string}`
 export interface PostWriteProgress {
   stage: 'outline' | 'generate' | 'review' | 'verify' | 'dialogue' | 'finalCheck' | 'selfCheck' | 'extract' | 'deepReview' | 'evidence' | 'plantEvidence' | 'writeMemory' | 'writeSettings' | 'summary'
   round?: number

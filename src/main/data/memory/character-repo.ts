@@ -1,4 +1,4 @@
-import { cachedMemoryList, findMemoryEntity, readMemoryDocuments, readMemoryText as readText, memoryFileFingerprint, memorySnapshot, memorySourcePath } from './repository-cache'
+import { cachedMemoryList, findMemoryEntity, readMemoryDocuments, readMemoryText as readText, memoryFileFingerprint, memorySnapshot, memorySourcePath, invalidateMemoryProject } from './repository-cache'
 import { join, resolve, relative } from 'path'
 import { promises as fs } from 'fs'
 import { parseDoc, parseBoldFields, parseSubsections, fieldToStr } from '../skill-format/md-parser'
@@ -46,7 +46,8 @@ export class CharacterRepo {
     let files: string[]
     try {
       files = await fs.readdir(rolesDir)
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       files = []
     }
     for (const { path: f, text, doc } of await readMemoryDocuments(rolesDir, files.filter(file => file.endsWith('.md')).sort())) {
@@ -101,11 +102,23 @@ export class CharacterRepo {
         const existing = byId.get(id)
         if (!existing) continue
         const previous = expectedById.get(id)
-        if (previous && this.serialize(previous) !== this.serialize(existing)) {
+        const identityFields = ['name', 'identity', 'role', 'personality', 'abilities', 'synopsis'] as const
+        if (previous && (this.serialize(previous) !== this.serialize(existing) ||
+          identityFields.some(field => previous[field] !== existing[field]))) {
           throw new Error('人物卡已被修改，请重新读取后重试')
         }
         const baseline = fingerprints.get(id)!
-        if (!baseline.fingerprint || await memoryFileFingerprint(baseline.file) !== baseline.fingerprint) {
+        const currentFingerprint = await memoryFileFingerprint(baseline.file)
+        if (!baseline.fingerprint || currentFingerprint !== baseline.fingerprint) {
+          invalidateMemoryProject(this.projectDir)
+          throw new Error('人物卡已被修改，请重新读取后重试')
+        }
+        // Same-size edits can share a filesystem timestamp. Re-read only the
+        // cards being changed before applying a patch computed from older text.
+        const cachedText = await readText(baseline.file)
+        const currentText = await fs.readFile(baseline.file, 'utf-8')
+        if (cachedText !== currentText) {
+          invalidateMemoryProject(this.projectDir)
           throw new Error('人物卡已被修改，请重新读取后重试')
         }
         const updated = await this.writeUpdated(existing, patch)

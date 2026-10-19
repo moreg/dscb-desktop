@@ -1,7 +1,8 @@
-import { cachedMemoryList, readMemoryDocuments, readMemoryText as readText } from './repository-cache'
+import { cachedMemoryList, readMemoryDocuments } from './repository-cache'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import {
+  readText,
   parseDoc,
   parseBoldFields,
   fieldToStr
@@ -88,6 +89,7 @@ export class PlotPointRepo {
     for (const name of await listPlotFileNames(plotDir)) {
       const num = extractChapterNumFromName(name)
       if (num == null || !targetSet.has(num)) continue
+      // Read current evidence directly: same-size external edits can share stat timestamps.
       const text = await readText(join(plotDir, name))
       if (!text) continue
       const doc = parseDoc(text)

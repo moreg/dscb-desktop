@@ -110,6 +110,11 @@ export function evaluateChapterSelfCheck(input: ChapterSelfCheckInput): ChapterS
     })
   }
 
+  if (ch > 1 && input.prevEndingState && input.prevEndingStateExtractionFailed) {
+    items.push({ id: 'prev_state_fallback', category: 'continuity', label: '上章状态自动补齐', verdict: 'warn',
+      detail: '结构化结尾状态未能提取，已按可用前文材料继续衔接；未知状态未补造，悬念、未完成事项和人物位置未完成结构化核验。' })
+  }
+
   // 2) 上章悬念
   if (input.prevEndingState?.suspense?.trim()) {
     items.push(

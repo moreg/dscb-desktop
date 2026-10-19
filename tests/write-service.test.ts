@@ -276,6 +276,7 @@ describe('WriteService', () => {
   })
 
   it('generateChapterStream calls llm with assembled prompt', async () => {
+    await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进门核对账册' })
     const llm = mockLlm('生成的正文')
     const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const full = await service.generateChapterStream(projectId, 1)
@@ -284,6 +285,7 @@ describe('WriteService', () => {
   })
 
   it('单章续写开启自动强度时按本章节奏覆盖本次生成', async () => {
+    await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进门核对账册' })
     const dir = await ps.resolveDir(projectId)
     const { writeFile, mkdir } = await import('fs/promises')
     await mkdir(path.join(dir, '图解'), { recursive: true })

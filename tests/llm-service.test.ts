@@ -510,7 +510,7 @@ describe('LlmService', () => {
 })
 
 describe('LlmService feature routing', () => {
-  it.each(['chapter', 'batchForeshadowRepair', 'chapterForeshadowRepair'])('routes %s to the configured prose provider', async (feature) => {
+  it.each(['chapter', 'batchForeshadowRepair', 'chapterForeshadowRepair', 'continuityRepair'])('routes %s to the configured prose provider', async (feature) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
     await s.write({

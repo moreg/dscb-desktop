@@ -1,5 +1,5 @@
 import { createWritingProject } from './helpers/writing-project'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -19,6 +19,8 @@ function mockLlm(reply: string): LlmService {
     generateStream: vi.fn().mockResolvedValue(reply)
   } as unknown as LlmService
 }
+
+afterEach(() => vi.restoreAllMocks())
 
 const mockSettings = {
   getProjectsRoot: async (fallback: string) => fallback
@@ -266,6 +268,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const library = new LibraryRepository(path.join(root, 'library.json'))
     ps = new ProjectService(path.join(root, 'projects'), library, mockSettings)
     projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
+    await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进屋核对账册' })
   })
 
   it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行一句一段', async () => {
@@ -313,10 +316,12 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const generateStream = vi.fn().mockResolvedValue('正文')
     const llm = { generateStream } as unknown as LlmService
 
+    await new ProseRepo(dir).write(1, '师父带林远走到山门外，让他在此等候。')
+    vi.spyOn(WriteFlowService.prototype, 'extractEndingState').mockResolvedValue({ chapterNumber: 1, characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
     const service = new WriteService(ps, llm)
     await expect(service.generateChapterStream(projectId, 2)).resolves.toBe('正文')
 
-    const opts = (generateStream as ReturnType<typeof vi.fn>).mock.calls[0][1] as GenerateOptions
+    const opts = vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'chapter')![1]!
     // 4000 字 × 1.7 × 1.3 ≈ 8840
     expect(opts.maxTokens).toBeGreaterThanOrEqual(8800)
   })

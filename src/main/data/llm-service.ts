@@ -156,6 +156,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   chapter: 'chapter',
   'chapter-adjust': 'chapter',
   batchForeshadowRepair: 'chapter',
+  continuityRepair: 'chapter',
   chapterForeshadowRepair: 'chapter',
   // 按要求重写 · 先出方案（与改写同属正文类）
   'chapter-adjust-plan': 'chapter',
@@ -165,6 +166,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   deepReview: 'review',
   batchDeepReview: 'review',
   foreshadowRepairVerify: 'review',
+  continuityRepairVerify: 'review',
   foreshadowPlantEvidence: 'review',
   // 去AI味改写
   humanize: 'humanize',
@@ -232,6 +234,8 @@ const LLM_STREAM_TIMEOUT_MS = 120_000
  * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
  */
 const LONG_TIMEOUT_FEATURES = new Set([
+  'continuityRepair',
+  'continuityRepairVerify',
   'chapter',
   'chapter-adjust',
   'chapter-adjust-plan',

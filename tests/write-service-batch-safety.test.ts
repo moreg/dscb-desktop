@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
+import { ChapterSummaryRepo } from '../src/main/data/memory/chapter-summary-repo'
 import { WriteService } from '../src/main/data/write-service'
 import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
@@ -329,19 +330,26 @@ describe('batch safety and recovery', () => {
     expect(flow.extractMemoryStream).toHaveBeenCalledTimes(4)
   })
 
-  it('pauses on summary failure and resumes from saved prose without regenerating it', async () => {
+  it('automatically retries missing summaries before the next chapter without regenerating prose', async () => {
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     vi.mocked(service.generateChapterSummary).mockRejectedValueOnce(new Error('概要请求失败'))
-    const first = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
-    expect(first.status).toBe('paused')
-    expect(first.pendingPostProcessChapter).toBe(1)
-    expect(first.pauseReason).toContain('概要请求失败')
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
     expect(await new ProseRepo(dir).read(1)).toBe(content)
-    const second = await service.resumeChaptersBatch(projectId, 1, 2, () => {}, null, {}, first, { autoContinue: true })
-    expect(second.status).toBe('completed')
     expect(generate).toHaveBeenCalledTimes(2)
     expect(service.generateChapterSummary).toHaveBeenCalledTimes(3)
+  })
+
+  it('falls back to dated source quotes when summary generation remains unavailable and keeps writing', async () => {
+    stubPostProcess()
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.generateChapterSummary).mockRejectedValue(new Error('概要请求失败'))
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    const summary = await new ChapterSummaryRepo(dir).readCurrent(1, content)
+    expect(summary?.events.every(item => content.includes(item.evidence))).toBe(true)
+    expect(summary?.stateChanges).toEqual([])
   })
 
   it('retries a flaky outline check in place instead of pausing the batch', async () => {
@@ -446,6 +454,136 @@ describe('batch safety and recovery', () => {
     expect(progress.completed).toEqual([1])
     expect(progress.pendingPostProcessChapter).toBe(1)
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  const brokenContinuity: ChapterSelfCheckReport = { ...passedCheck, ok: false, items: [
+    { id: 'confirmed_location_conflict', category: 'continuity', label: '人物位置矛盾', verdict: 'fail', detail: '人物同时出现在两地' }
+  ] }
+  const corrected = content.replace('守门人核对印章后放他进门。', '守门人核对印章后，让他留在门外等候。')
+  const continuityPatch = JSON.stringify({ replacements: [{ before: '守门人核对印章后放他进门。', after: '守门人核对印章后，让他留在门外等候。' }] })
+  function stubContinuityModel(): void {
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'continuityRepair') return continuityPatch
+      if (options?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: true, issues: [] })
+      return '[]'
+    })
+  }
+
+  it('automatically repairs confirmed continuity conflicts and uses rechecked prose and fresh memory for the next chapter', async () => {
+    stubPostProcess()
+    stubContinuityModel()
+    const previous = '师父让林远在门外等候，没有允许他进院。'
+    await new ProseRepo(dir).write(1, previous)
+    vi.spyOn(flow, 'extractEndingState').mockResolvedValue({ chapterNumber: 1,
+      characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
+    const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, chapter) => {
+      if (chapter === 3) {
+        expect(await new ProseRepo(dir).read(2)).toBe(corrected)
+        expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(corrected)
+        expect(vi.mocked(service.generateChapterSummary).mock.calls[0][2]).toBe(corrected)
+      }
+      return content
+    })
+    vi.mocked(service.selfCheckChapter).mockImplementation(async (_pid, ch, text) => ch === 2 && text === content ? brokenContinuity : passedCheck)
+    const stages: string[] = []
+    const completed = vi.fn()
+    const progress = await service.generateChaptersBatch(projectId, 2, 3, completed, null,
+      { onGenerationStage: stage => stages.push(stage) }, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(generate.mock.calls.map(call => call[1])).toEqual([2, 3])
+    expect(completed.mock.calls[0][1].content).toBe(corrected)
+    expect(vi.mocked(flow.extractMemoryStream).mock.calls.map(call => call[0])).toContain(corrected)
+    expect(vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'continuityRepair')?.[0]).toContain(previous)
+    expect(stages.some(stage => stage.startsWith('continuity:'))).toBe(true)
+  })
+
+  it.each(['logic_hole', 'character_breakdown'])('automatically repairs a confirmed %s from deep review before continuing', async (ruleId) => {
+    stubPostProcess()
+    stubContinuityModel()
+    const settings = (service as unknown as { settings: SettingsRepository }).settings
+    vi.spyOn(settings, 'getReviewRules').mockResolvedValue({ ...await settings.getReviewRules(), enabled: true, autoDeepReview: true })
+    vi.spyOn(service, 'auditChapter').mockResolvedValue(resultFor(1).audit)
+    const review = vi.spyOn(service, 'runDeepReview').mockImplementation(async (_pid, text, ch) => ch === 1 && text === content
+      ? [{ category: 'llm_review', severity: 'error', ruleId, message: '与前文事实矛盾' }] : [])
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status, progress.pauseReason).toBe('completed')
+    expect(await new ProseRepo(dir).read(1)).toBe(corrected)
+    expect(review.mock.calls.some(call => call[1] === corrected)).toBe(true)
+    expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(corrected)
+  })
+
+  it('retries failed semantic verification without saving the rejected candidate, then continues automatically', async () => {
+    stubPostProcess()
+    let verification = 0
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'continuityRepair') return continuityPatch
+      if (options?.meta?.feature === 'continuityRepairVerify') {
+        expect(await new ProseRepo(dir).read(1)).toBe(content)
+        return JSON.stringify(++verification === 1 ? { passed: false, issues: ['转场依据不足'] } : { passed: true, issues: [] })
+      }
+      return '[]'
+    })
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.selfCheckChapter).mockImplementation(async (_pid, ch, text) => ch === 1 && text === content ? brokenContinuity : passedCheck)
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    expect(verification).toBe(2)
+    expect(await new ProseRepo(dir).read(1)).toBe(corrected)
+  })
+
+  it('keeps retrying failed repairs automatically until the user stops, preserving the saved draft and memory', async () => {
+    stubPostProcess()
+    stubContinuityModel()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.selfCheckChapter).mockResolvedValue(brokenContinuity)
+    const controller = new AbortController()
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {
+      signal: controller.signal, onGenerationStage: stage => { if (stage.includes('稍后自动重试')) controller.abort() }
+    }, undefined, { autoContinue: true })
+    expect(progress.status).toBe('paused')
+    expect(controller.signal.aborted).toBe(true)
+    expect(progress.pauseReason).toContain('LLM_ABORTED')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(generate).toHaveBeenCalledOnce()
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(3)
+  })
+
+  it('does not overwrite an author edit arriving during automatic continuity verification', async () => {
+    stubPostProcess()
+    const authorEdit = content + '作者新加的台词。'
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'continuityRepair') return continuityPatch
+      if (options?.meta?.feature === 'continuityRepairVerify') {
+        const file = (await readdir(path.join(dir, '正文'))).find(name => name.endsWith('.md'))!
+        await writeFile(path.join(dir, '正文', file), authorEdit)
+        return JSON.stringify({ passed: true, issues: [] })
+      }
+      return '[]'
+    })
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.selfCheckChapter).mockImplementation(async (_pid, _ch, text) => text === content ? brokenContinuity : passedCheck)
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('paused')
+    expect(await new ProseRepo(dir).read(1)).toBe(authorEdit)
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('cancels continuity repair immediately and retains the current draft without synchronizing rejected changes', async () => {
+    stubPostProcess()
+    const controller = new AbortController()
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'continuityRepair') { controller.abort(); return continuityPatch }
+      return '[]'
+    })
+    vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(service.selfCheckChapter).mockResolvedValue(brokenContinuity)
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, { signal: controller.signal }, undefined, { autoContinue: true })
+    expect(progress.status).toBe('paused')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepairVerify')).toHaveLength(0)
   })
 
   it('keeps writing when only prose self-check hints remain after the prose-first sync', async () => {

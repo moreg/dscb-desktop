@@ -29,7 +29,8 @@ export async function listMdFilesDeep(rootDir: string): Promise<string[]> {
     let entries: import('fs').Dirent[]
     try {
       entries = await fs.readdir(cur, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       continue
     }
     for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {

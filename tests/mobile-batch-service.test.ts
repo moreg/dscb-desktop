@@ -129,6 +129,8 @@ describe('MobileBatchService: 电脑执行、可信恢复与写入安全', () =>
       await options!.onContentSaved!(1)
       expect((await saved()).job.progress).toMatchObject({ current: 1, completed: [1], pendingPostProcessChapter: 1, status: 'flow' })
       options!.onAutoDeslopResult!(result(1).autoDeslop!, 1)
+      options!.onGenerationStage!('continuity:衔接自动修复 · 复检', 1)
+      expect((await service.get(projectId))?.stage).toBe('checking')
       onChapter(1, result(1))
       onRetry!(2, 1, 3, 30_000)
       expect((await service.get(projectId))?.retryWait).toMatchObject({ chapter: 2, attempt: 1, maxAttempts: 3, waitMs: 30_000 })

@@ -21,8 +21,8 @@ export async function mapMemoryFiles<Input, Output>(inputs: Input[], action: (in
 
 export async function memoryFileFingerprint(file: string): Promise<string> {
   try {
-    const stat = await fs.stat(file)
-    return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`
+    const stat = await fs.stat(file, { bigint: true })
+    return `${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.ino}`
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing'
     throw error

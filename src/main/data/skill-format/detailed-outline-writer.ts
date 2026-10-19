@@ -12,6 +12,7 @@ import {
   type FieldValue
 } from './md-parser'
 import { writeTextAtomic } from '../atomic'
+import { OutlineRepository } from '../outline-repository'
 import { normalizeWritingRequirementLines } from '../../../shared/writing-requirement-templates'
 
 /**
@@ -56,8 +57,9 @@ export class DetailedOutlineWriter {
     let files: string[]
     try {
       files = await fs.readdir(dir)
-    } catch {
-      throw new Error('CHAPTER_NOT_FOUND: 细纲目录不存在')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      files = []
     }
 
     for (const f of files.sort((a, b) => Number(!/^细纲_第\d+章/.test(a)) - Number(!/^细纲_第\d+章/.test(b)) || a.localeCompare(b))) {
@@ -67,6 +69,12 @@ export class DetailedOutlineWriter {
       if (updated) return
     }
 
+    const legacy = new OutlineRepository(this.projectDir)
+    const item = (await legacy.listDetailed()).find(item => item.chapterNumber === chapterNumber)
+    if (item) {
+      await legacy.upsertDetailed({ ...item, ...patch })
+      return
+    }
     throw new Error(`CHAPTER_NOT_FOUND: 找不到第 ${chapterNumber} 章的细纲`)
   }
 

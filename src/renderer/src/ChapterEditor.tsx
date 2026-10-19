@@ -119,6 +119,7 @@ import {
   type SyncUndoReceipt
 } from '../../shared/post-write-sync-session'
 import AlertDialog from './AlertDialog'
+import DeslopResultActions from './DeslopResultActions'
 import ChapterVersionsDialog from './ChapterVersionsDialog'
 import {
   DEFAULT_WRITING_REQUIREMENT_TEMPLATES,
@@ -6191,12 +6192,12 @@ export default function ChapterEditor({
                     className="filter-chip"
                     style={{
                       color:
-                        deslopResult.remainingFindings.length === 0
+                        deslopResult.dialogueQuality?.passed !== false && deslopResult.remainingFindings.length === 0
                           ? 'var(--success)'
                           : 'var(--danger)'
                     }}
                   >
-                    {deslopResult.remainingFindings.length === 0 ? '复扫 100% 通过' : '复扫未通过'}
+                    {deslopResult.dialogueQuality?.passed !== false && deslopResult.remainingFindings.length === 0 ? '自动检查通过' : '待作者确认'}
                   </span>
                   <span className="filter-chip">Gate {deslopResult.processedGates.join('')}</span>
                   {deslopDiffView ? (
@@ -6373,35 +6374,13 @@ export default function ChapterEditor({
                   )}
                 </div>
 
-                {deslopResult.remainingFindings.length > 0 ? (
-                  <p className="diag-msg" style={{ color: 'var(--danger)', marginTop: 8 }}>
-                    ⛔ 最终复扫仍剩 {deslopResult.remainingFindings.length} 处问题，结果未达到可检测项 100% 清零，不能直接应用
-                  </p>
-                ) : null}
-                <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => { setDeslopResult(null); setDeslopLog(''); setDeslopBefore(null) }}
-                  >
-                    放弃
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    onClick={applyDeslopResult}
-                    disabled={deslopDiffView?.identical || deslopResult.remainingFindings.length > 0}
-                    title={
-                      deslopDiffView?.identical
-                        ? '无改动可应用'
-                        : deslopResult.remainingFindings.length > 0
-                          ? '最终复扫未通过：请重新润色或调整白名单后再试'
-                        : deslopDiffView?.staleBaseline
-                          ? '注意：会覆盖润色期间对正文的手动编辑'
-                          : undefined
-                    }
-                  >
-                    应用到正文
-                  </button>
-                </div>
+                <DeslopResultActions
+                  result={deslopResult}
+                  identical={deslopDiffView?.identical ?? false}
+                  staleBaseline={deslopDiffView?.staleBaseline ?? false}
+                  onDiscard={() => { setDeslopResult(null); setDeslopLog(''); setDeslopBefore(null) }}
+                  onApply={applyDeslopResult}
+                />
               </div>
             ) : null}
           </div>

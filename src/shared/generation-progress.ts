@@ -22,6 +22,7 @@ export function postWriteProgressLabel(progress: PostWriteProgress): string {
 }
 
 export function generationProgressLabel(stage: ChapterGenerationStage | null): string {
+  if (stage?.startsWith('continuity:')) return stage.slice('continuity:'.length)
   if (stage?.startsWith('foreshadow:')) return stage.slice('foreshadow:'.length)
   switch (stage) {
     case 'agy:queued': return 'AGY 排队中，等待前一个任务结束'

@@ -85,16 +85,16 @@ describe('全书批量重新生成概要', () => {
     expect(llm.generateStream).toHaveBeenCalledTimes(2)
   })
 
-  it('缺少连续性数组或证据无效时不覆盖旧概要，失败可再次处理', async () => {
+  it('缺少连续性数组时自动重新提取，原概要仅在新稿验证通过后替换', async () => {
     await new ProseRepo(dir).write(1, prose)
     await service.generateChapterSummary(id, 1, prose)
-    const old = await new ChapterSummaryRepo(dir).read(1)
     vi.mocked(llm.generateStream).mockResolvedValueOnce(JSON.stringify({ events: [{ text: '交接', evidence: prose }], stateChanges: [], openThreads: [] }))
     const result = await run()
-    expect(result.results[0].status).toBe('failed')
-    expect(result.results[0].error).toContain('连续性记录')
-    expect(await new ChapterSummaryRepo(dir).read(1)).toEqual(old)
-    expect((await run()).ok).toBe(true)
+    expect(result.results[0].status).toBe('generated')
+    expect(result.ok).toBe(true)
+    expect((await new ChapterSummaryRepo(dir).read(1))?.continuity?.[0].value).toBe('守门人')
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(llm.generateStream).mock.calls[2][0]).toContain('自动修复并重新提取')
   })
 
   it('生成期间正文改变时拒绝提交旧稿概要', async () => {

@@ -286,7 +286,7 @@ export class MobileBatchService implements MobileBatchRunner {
         job.updatedAt = Date.now()
       },
       onGenerationStage: (stage, chapter) => {
-        job.stage = stage === 'generating' || stage.startsWith('agy:') ? 'generating' : stage === 'foreshadowRepair' || stage.startsWith('foreshadow:') ? 'checking' : 'deslop'
+        job.stage = stage === 'generating' || stage.startsWith('agy:') ? 'generating' : stage === 'foreshadowRepair' || stage.startsWith('foreshadow:') || stage.startsWith('continuity:') ? 'checking' : 'deslop'
         job.progress.currentChapter = chapter
         job.progress.status = 'generating'
         // 下一章开始说明上一章写后处理已完成。

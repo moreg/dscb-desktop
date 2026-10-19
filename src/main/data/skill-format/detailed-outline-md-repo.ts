@@ -1,5 +1,6 @@
 import { join, resolve } from 'path'
 import { promises as fs } from 'fs'
+import { OutlineRepository } from '../outline-repository'
 import {
   readText,
   parseDoc,
@@ -68,7 +69,7 @@ export class DetailedOutlineMdRepo {
     try {
       files = await fs.readdir(dir)
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.readLegacyChapter(chapterNumber)
       throw err
     }
     for (const file of files.sort(compareOutlineFiles)) {
@@ -85,7 +86,25 @@ export class DetailedOutlineMdRepo {
       // 不把共享缓存里的可变字段/数组交给调用方。
       if (detail) return structuredClone(detail)
     }
-    return null
+    return this.readLegacyChapter(chapterNumber)
+  }
+
+  private async readLegacyDetails(): Promise<ChapterDetail[]> {
+    try {
+      await fs.stat(join(this.projectDir, 'outlines', 'detailed.json'))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
+    return (await new OutlineRepository(this.projectDir).listDetailed()).map(item => ({
+      ...item, title: '', writingRequirements: composeWritingRequirements(
+        item.writingRequirementTemplateId, item.writingRequirementCustomText, item.writingRequirements
+      )
+    }))
+  }
+
+  private async readLegacyChapter(chapterNumber: number): Promise<ChapterDetail | null> {
+    return (await this.readLegacyDetails()).find(item => item.chapterNumber === chapterNumber) ?? null
   }
 
   private async readChapterFile(path: string): Promise<CachedOutlineFile | null> {
@@ -145,7 +164,7 @@ export class DetailedOutlineMdRepo {
       files = await fs.readdir(dir)
     } catch (err) {
       const e = err as NodeJS.ErrnoException
-      if (e.code === 'ENOENT') return []
+      if (e.code === 'ENOENT') return this.readLegacyDetails()
       throw err
     }
     const details: ChapterDetail[] = []
@@ -155,6 +174,8 @@ export class DetailedOutlineMdRepo {
       if (!text) continue
       details.push(...this.parseFile(f, text))
     }
+    const legacy = await this.readLegacyDetails()
+    details.push(...legacy.filter(item => !details.some(detail => detail.chapterNumber === item.chapterNumber)))
     return details.filter((d, i) => details.findIndex(other => other.chapterNumber === d.chapterNumber) === i)
       .sort((a, b) => a.chapterNumber - b.chapterNumber)
   }
