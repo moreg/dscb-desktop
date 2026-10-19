@@ -62,6 +62,31 @@ describe('章节概要', () => {
     expect(stale[0].summary).not.toContain('林远交出账册并进门')
   })
 
+  it('persists evidence-backed continuity and recalls it beyond the recent chapter window', async () => {
+    await new ProseRepo(dir).write(1, prose)
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(JSON.stringify({
+      events: [{ text: '交出账册', evidence: '把账册交给守门人。' }], stateChanges: [], openThreads: [],
+      continuity: [{ kind: 'item', subject: '账册', object: '', aspect: '持有者', value: '守门人', evidence: '把账册交给守门人。' }]
+    }))
+    const result = await service.generateChapterSummary(projectId, 1, prose)
+    expect(result.continuity?.[0].value).toBe('守门人')
+    const prompt = await service.buildChapterPrompt(projectId, 60, null, '林远要取回账册')
+    expect(prompt.user).toContain('账册 · 持有者：守门人')
+    expect(prompt.user).toContain('长期连续性核对')
+
+    vi.mocked(llm.generateStream).mockClear().mockResolvedValue('{"findings":[]}')
+    await service.runDeepReview(projectId, '林远在门外等候，打算向守门人借走账册。', 60)
+    expect(vi.mocked(llm.generateStream).mock.calls.some(([text]) =>
+      text.includes('长期连续性核对') && text.includes('账册 · 持有者：守门人'))).toBe(true)
+
+    vi.mocked(llm.generateStream).mockResolvedValueOnce(JSON.stringify({
+      events: [{ text: '交出账册', evidence: '把账册交给守门人。' }], stateChanges: [], openThreads: [],
+      continuity: [{ kind: 'item', subject: '账册', object: '', aspect: '持有者', value: '船夫', evidence: '账册交给了船夫。' }]
+    }))
+    await expect(service.generateChapterSummary(projectId, 1, prose, { force: true })).rejects.toThrow('依据')
+    expect((await new ChapterSummaryRepo(dir).read(1))?.continuity?.[0].value).toBe('守门人')
+  })
+
   it('does not let a slower generation for an old draft replace a newer summary', async () => {
     const newer = '林远推开院门，守门人核对印章后放他进门。'
     await new ProseRepo(dir).write(1, prose)

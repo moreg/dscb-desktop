@@ -1,7 +1,8 @@
 import { join } from 'path'
-import { readJson, writeJsonAtomic } from '../atomic'
+import { writeJsonAtomic } from '../atomic'
 import { hashProse } from './prose-memory-index'
-import type { ChapterSummaryFact } from '../../../shared/types'
+import type { ChapterSummaryFact, ContinuityFact } from '../../../shared/types'
+import { readMemoryText } from './repository-cache'
 
 export interface ChapterSummary {
   schemaVersion: 1
@@ -11,6 +12,7 @@ export interface ChapterSummary {
   events: ChapterSummaryFact[]
   stateChanges: ChapterSummaryFact[]
   openThreads: ChapterSummaryFact[]
+  continuity?: ContinuityFact[]
 }
 
 export function chapterSummaryText(summary: ChapterSummary): string {
@@ -30,7 +32,7 @@ export class ChapterSummaryRepo {
 
   async read(chapterNumber: number): Promise<ChapterSummary | null> {
     let value: ChapterSummary | null
-    try { value = await readJson<ChapterSummary | null>(this.path(chapterNumber), null) }
+    try { const text = await readMemoryText(this.path(chapterNumber)); value = text ? JSON.parse(text) : null }
     catch (err) { if (err instanceof SyntaxError) return null; throw err }
     if (!value || value.schemaVersion !== 1 || value.chapterNumber !== chapterNumber ||
       typeof value.sourceHash !== 'string' || !Array.isArray(value.events) ||

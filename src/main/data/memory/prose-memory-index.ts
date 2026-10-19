@@ -43,7 +43,7 @@ export interface ProseSource {
 }
 
 type Passage = Pick<ProseMemoryHit, 'text' | 'startLine' | 'endLine' | 'startOffset' | 'endOffset'>
-interface IndexedChapter extends ProseSource {
+export interface IndexedChapter extends ProseSource {
   fingerprint: string
   sourceHash: string
   passages: Passage[]
@@ -143,6 +143,12 @@ export class ProseMemoryIndex {
     const maxResults = Math.max(0, Math.min(20, Math.floor(opts.maxResults ?? 6)))
     const terms = queryTerms(typeof query === 'string' ? { text: query } : query)
     if (chapterNumber <= 1 || !maxChars || !maxResults || terms.size === 0) return []
+    const index = await this.readBefore(chapterNumber)
+    return searchProsePassages(index, chapterNumber, terms, opts, maxChars, maxResults)
+  }
+
+  /** Validated saved prose, also used by long-term continuity recall without another full read. */
+  async readBefore(chapterNumber: number): Promise<IndexedChapter[]> {
     // Share only an in-flight refresh. A later query always rechecks source metadata.
     const refreshKey = `${this.projectDir}|before:${chapterNumber}`
     let pending = refreshes.get(refreshKey)
@@ -154,7 +160,9 @@ export class ProseMemoryIndex {
     try { index = await pending } finally {
       if (refreshes.get(refreshKey) === pending) refreshes.delete(refreshKey)
     }
-    return searchProsePassages(index.chapters, chapterNumber, terms, opts, maxChars, maxResults)
+    // Preserve identity for the search corpus cache in the common forward-writing case.
+    return index.chapters.some((chapter) => chapter.chapterNumber >= chapterNumber)
+      ? index.chapters.filter((chapter) => chapter.chapterNumber < chapterNumber) : index.chapters
   }
 
   private async refresh(chapterNumber: number): Promise<StoredIndex> {

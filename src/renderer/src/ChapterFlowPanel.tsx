@@ -1442,6 +1442,9 @@ export default function ChapterFlowPanel(props: Props) {
               {chapterSummary.events.map((item, i) => <p key={`event-${i}`}>事件：{item.text}</p>)}
               {chapterSummary.stateChanges.map((item, i) => <p key={`state-${i}`}>状态：{item.text}</p>)}
               {chapterSummary.openThreads.map((item, i) => <p key={`open-${i}`}>未结：{item.text}</p>)}
+              {chapterSummary.continuity?.map((item, i) => <p key={`continuity-${i}`} title={item.evidence}>
+                {item.kind === 'item' ? '道具' : item.kind === 'relationship' ? '关系' : '知情'}：{item.subject}{item.object ? ` → ${item.object}` : ''} · {item.aspect}：{item.value}
+              </p>)}
             </div>
           ) : null}
         </div>

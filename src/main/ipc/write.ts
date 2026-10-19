@@ -941,6 +941,42 @@ export function registerWriteIpc(service: WriteService): void {
 
   // 写作与已有正文精修共用项目锁；暂停、失败和取消均在 finally 中释放。
   const activeBatchRequests = new Set<string>()
+  ipcMain.handle('write:regenerateSummariesBatch', async (e, payload: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    try {
+      const input = validateInput(z.object({
+        projectId: projectIdSchema, requestId: z.string().min(1).max(255),
+        fromChapter: chapterNumberSchema.refine(Number.isSafeInteger),
+        toChapter: chapterNumberSchema.refine(Number.isSafeInteger),
+        onlyMissing: z.boolean(),
+        completed: z.array(z.object({ chapterNumber: chapterNumberSchema,
+          sourceHash: z.string().regex(/^[a-f0-9]{64}$/) })).max(100_000).optional()
+      }).refine((v) => v.fromChapter <= v.toChapter, '结束章号不能小于起始章号'), payload)
+      if (activeBatchProjects.has(input.projectId)) throw new Error('BATCH_ALREADY_RUNNING: 该项目已有批量任务，请等待当前任务结束')
+      if (activeBatchRequests.has(input.requestId)) throw new Error('BATCH_REQUEST_ALREADY_RUNNING: 请勿重复提交同一个批量任务')
+      activeBatchProjects.add(input.projectId)
+      activeBatchRequests.add(input.requestId)
+      try {
+        const signal = beginStream(input.requestId)
+        const abortBatch = () => { abortStream(input.requestId) }
+        e.sender.once('destroyed', abortBatch)
+        try {
+          if (e.sender.isDestroyed()) abortBatch()
+          return await service.regenerateSummariesBatch(input.projectId, input,
+            (result) => safeSend(win, 'write:batchSummaryChapterComplete', { requestId: input.requestId, result }),
+            { signal, onProgress: (progress) => safeSend(win, 'write:batchSummaryProgress', { requestId: input.requestId, progress }) })
+        } finally {
+          e.sender.removeListener('destroyed', abortBatch)
+          endStream(input.requestId)
+        }
+      } finally {
+        activeBatchProjects.delete(input.projectId)
+        activeBatchRequests.delete(input.requestId)
+      }
+    } catch (err) {
+      return { ok: false, results: [], error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('write:polishChaptersBatch', async (e, payload: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     try {

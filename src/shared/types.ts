@@ -922,6 +922,11 @@ export interface RendererApi {
   ) => Promise<{ content: string; report: AutoForeshadowRepairResult }>
   getChapterSummary: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterSummaryView | null>
   generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force?: boolean) => Promise<ChapterSummaryView>
+  regenerateSummariesBatch: (
+    projectId: string, options: ChapterSummaryBatchOptions,
+    onChapterComplete: (result: ChapterSummaryBatchItem) => void,
+    onProgress?: (progress: ChapterSummaryBatchProgress) => void, requestId?: string
+  ) => Promise<ChapterSummaryBatchResult>
   /** 单独跑写后自检（不写记忆） */
   selfCheckChapter: (
     projectId: string,
@@ -2649,6 +2654,40 @@ export interface ChapterSummaryFact {
   evidence: string
 }
 
+/** A dated, evidence-backed continuity update, not a timeless character/world fact. */
+export interface ContinuityFact {
+  kind: 'item' | 'relationship' | 'knowledge'
+  subject: string
+  /** Other character for relationships; stable secret/topic name for knowledge; empty for items. */
+  object: string
+  /** Stable dimension, e.g. 持有者/所有权/状态/信任/知情程度. */
+  aspect: string
+  value: string
+  evidence: string
+}
+
+export interface ChapterSummaryBatchOptions {
+  fromChapter: number
+  toChapter: number
+  onlyMissing: boolean
+  /** Successful chapters from a stopped/partial run; reuse only if both prose and summary still match. */
+  completed?: { chapterNumber: number; sourceHash: string }[]
+}
+export interface ChapterSummaryBatchItem {
+  chapterNumber: number
+  status: 'generated' | 'reused' | 'skipped' | 'failed'
+  sourceHash?: string
+  continuityCount?: number
+  error?: string
+}
+export interface ChapterSummaryBatchProgress { chapter: number; index: number; total: number }
+export interface ChapterSummaryBatchResult {
+  ok: boolean
+  stopped?: boolean
+  results: ChapterSummaryBatchItem[]
+  error?: string
+}
+
 export interface ChapterSummaryView {
   chapterNumber: number
   sourceHash: string
@@ -2656,6 +2695,7 @@ export interface ChapterSummaryView {
   events: ChapterSummaryFact[]
   stateChanges: ChapterSummaryFact[]
   openThreads: ChapterSummaryFact[]
+  continuity?: ContinuityFact[]
   stale: boolean
   /** True when a generation request reused a summary for the same prose. */
   reused?: boolean

@@ -5,6 +5,9 @@ import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryC
 import type {
   AutoDeslopResult,
   SavedChapterPolishResult,
+  ChapterSummaryBatchOptions,
+  ChapterSummaryBatchItem,
+  ChapterSummaryBatchProgress,
   DiagnosticFixKind,
   ListProjectsQuery,
   CreateProjectDataInput,
@@ -653,6 +656,25 @@ const api = {
     ipcRenderer.invoke('write:getChapterSummary', { projectId, chapterNumber, content }),
   generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force = false) =>
     ipcRenderer.invoke('write:generateChapterSummary', { projectId, chapterNumber, content, force }),
+  regenerateSummariesBatch: (
+    projectId: string, options: ChapterSummaryBatchOptions,
+    onChapterComplete: (result: ChapterSummaryBatchItem) => void,
+    onProgress?: (progress: ChapterSummaryBatchProgress) => void, externalRequestId?: string
+  ) => {
+    const requestId = externalRequestId ?? crypto.randomUUID()
+    const chapterHandler = (_e: unknown, payload: { requestId: string; result: ChapterSummaryBatchItem }) => {
+      if (payload.requestId === requestId) onChapterComplete(payload.result)
+    }
+    const progressHandler = (_e: unknown, payload: { requestId: string; progress: ChapterSummaryBatchProgress }) => {
+      if (payload.requestId === requestId) onProgress?.(payload.progress)
+    }
+    ipcRenderer.on('write:batchSummaryChapterComplete', chapterHandler as never)
+    if (onProgress) ipcRenderer.on('write:batchSummaryProgress', progressHandler as never)
+    return ipcRenderer.invoke('write:regenerateSummariesBatch', { ...options, projectId, requestId }).finally(() => {
+      ipcRenderer.removeListener('write:batchSummaryChapterComplete', chapterHandler as never)
+      if (onProgress) ipcRenderer.removeListener('write:batchSummaryProgress', progressHandler as never)
+    })
+  },
   selfCheckChapter: (projectId: string, chapterNumber: number, content: string) =>
     ipcRenderer.invoke('write:selfCheckChapter', {
       projectId,

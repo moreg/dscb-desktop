@@ -20,6 +20,7 @@ import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range
 import { dedupeForbiddenViolations } from './audit-dedupe'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 import BatchPolishDialog, { type BatchPolishRange } from './BatchPolishDialog'
+import BatchSummaryDialog from './BatchSummaryDialog'
 import {
   suggestChapterStrength,
   type ChapterStrengthSuggestion
@@ -132,6 +133,7 @@ export default function ChapterListPage({
   const [showNew, setShowNew] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
   const [showPolish, setShowPolish] = useState(false)
+  const [showSummaries, setShowSummaries] = useState(false)
   const [polishPreset, setPolishPreset] = useState<BatchPolishRange | undefined>(undefined)
   // 「一键写 10 章」带进批量对话框的预设（章数 + 连续模式）；手动入口不带
   const [batchPreset, setBatchPreset] = useState<
@@ -324,6 +326,10 @@ export default function ChapterListPage({
             </p>
           </div>
           <div className="page-head-actions">
+            <button className="btn btn-ghost" onClick={() => setShowSummaries(true)}
+              disabled={loading || showBatch || showPolish || !chapters.some((c) => c.wordCount > 0)}>
+              批量重新生成概要
+            </button>
             <button
               className="btn btn-ghost"
               onClick={() => {
@@ -593,6 +599,9 @@ export default function ChapterListPage({
           onChapterCompleted={() => refresh()}
         />
       ) : null}
+
+      {showSummaries && <BatchSummaryDialog key={projectId} projectId={projectId} chapters={chapters}
+        onClose={() => setShowSummaries(false)} />}
 
       {showCandidateReview ? (
         <MemoryCandidateDialog
