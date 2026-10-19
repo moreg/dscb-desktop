@@ -472,7 +472,13 @@ export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
 export type AgyGenerationStatus = 'queued' | 'waiting' | 'streaming' | 'retrying'
-export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair'
+export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}`
+export interface PostWriteProgress {
+  stage: 'outline' | 'generate' | 'review' | 'verify' | 'dialogue' | 'finalCheck' | 'selfCheck' | 'extract' | 'deepReview' | 'evidence' | 'plantEvidence' | 'writeMemory' | 'writeSettings' | 'summary'
+  round?: number
+  attempt?: number
+  detail?: string
+}
 
 /** 单章交稿前的伏笔补写结论；失败时保留本轮生成稿。 */
 export interface AutoForeshadowRepairResult {
@@ -907,7 +913,8 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts?: { force?: boolean }
+    opts?: { force?: boolean },
+    onProgress?: (progress: PostWriteProgress) => void
   ) => Promise<{
     memory: MemoryApplyResult
     settings: SettingsApplyResult
@@ -919,7 +926,8 @@ export interface RendererApi {
   /** 补跑伏笔检查/补写，只返回候选正文，采用后再同步记忆。 */
   repairChapterForeshadowings: (
     projectId: string, chapterNumber: number, content: string,
-    opts?: { partialChapter?: boolean; tempContext?: string }
+    opts?: { partialChapter?: boolean; tempContext?: string },
+    onProgress?: (progress: PostWriteProgress) => void
   ) => Promise<{ content: string; report: AutoForeshadowRepairResult }>
   getChapterSummary: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterSummaryView | null>
   generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force?: boolean) => Promise<ChapterSummaryView>

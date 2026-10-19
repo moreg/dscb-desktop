@@ -76,13 +76,18 @@ describe('WriteService.syncChapterAfterWrite', () => {
     const flow = (service as unknown as { flow: any }).flow
     const memSpy = vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(FIXED_EXTRACTION)
 
+    const onProgress = vi.fn()
     const result = await service.syncChapterAfterWrite(
       projectId,
       5,
-      '林远在青云山击败了赵乾，受了轻伤。'
+      '林远在青云山击败了赵乾，受了轻伤。',
+      { onProgress }
     )
 
     expect(result).not.toBeNull()
+    expect(onProgress.mock.calls.map(([progress]) => progress.stage)).toEqual([
+      'selfCheck', 'extract', 'evidence', 'writeMemory', 'writeSettings'
+    ])
     expect(result!.extraction.chapterNumber).toBe(5)
     expect(result!.extraction.newPlotPoints.length).toBe(1)
     expect(result!.memory.errors).toEqual([])

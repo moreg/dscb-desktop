@@ -27,6 +27,24 @@ function emit(channel: string, payload: unknown): void {
 describe('正文 preload 阶段事件与最终内容', () => {
   beforeEach(() => { listeners.clear(); invoke.mockReset() })
 
+  it.each(['repairChapterForeshadowings', 'syncChapterAfterWrite'] as const)('%s 的进度按请求隔离，异常后清理监听', async method => {
+    let fail!: (error: Error) => void
+    invoke.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+    const progress = vi.fn()
+    const task = api[method]('project-1', 1, '正文', undefined, progress)
+    const requestId = (invoke.mock.calls[0][1] as { requestId: string }).requestId
+    expect(requestId).toBeTruthy()
+    emit('write:postWriteProgress', { requestId: 'another-request', progress: { stage: 'outline' } })
+    emit('write:postWriteProgress', { requestId, progress: { stage: 'review', round: 2 } })
+    expect(progress.mock.calls).toEqual([[{ stage: 'review', round: 2 }]])
+    const rejected = expect(task).rejects.toThrow('任务失败')
+    fail(new Error('任务失败'))
+    await rejected
+    expect(listeners.get('write:postWriteProgress')?.size).toBe(0)
+    emit('write:postWriteProgress', { requestId, progress: { stage: 'writeMemory' } })
+    expect(progress).toHaveBeenCalledTimes(1)
+  })
+
   it('单章续写自动强度选项传入 IPC', async () => {
     invoke.mockResolvedValue({ ok: true, content: '正文' })
     await api.generateChapterStream('project-1', 1, null, undefined, undefined, vi.fn(), undefined, true)

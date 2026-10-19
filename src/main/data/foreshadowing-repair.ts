@@ -1,4 +1,4 @@
-import type { OutlineDiffItem, OutlineDiffReport } from '../../shared/types'
+import type { OutlineDiffItem, OutlineDiffReport, PostWriteProgress } from '../../shared/types'
 import { findJsonObject } from '../../shared/json-extract'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
 import { assertNovelProse } from './agent-meta-detect'
@@ -79,11 +79,14 @@ export async function repairMissingForeshadowings(input: {
   plans: readonly string[]
   context: string
   signal?: AbortSignal
+  onProgress?: (progress: PostWriteProgress) => void
 }, dependencies: {
   generate: (prompt: string) => Promise<string>
   check: (content: string) => Promise<OutlineDiffReport>
   /** Verify only the inserted content against the original prose and effective requirements. */
   verify: (original: string, candidate: string, inserted: readonly string[]) => Promise<void>
+  /** 完整细纲检查和新增内容核验必须均通过；联合请求减少重复通读。 */
+  review?: (original: string, candidate: string, inserted: readonly string[]) => Promise<OutlineDiffReport>
 }): Promise<{ content: string; report: OutlineDiffReport }> {
   let { content, report } = input
   if (content.length > 40000) throw new Error('伏笔补写需要完整正文，本章超过40000字符，请分章后重试')
@@ -107,13 +110,21 @@ export async function repairMissingForeshadowings(input: {
       '------ 当前完整正文（编号只用于定位） ------',
       ...currentParagraphs.map((p, i) => `[${i}] ${p}`)
     ].join('\n')
+    input.onProgress?.({ stage: 'generate', round: round + 1 })
     content = applyForeshadowingInsertions(content, await dependencies.generate(prompt))
     if (input.signal?.aborted) throw new Error('LLM_ABORTED')
-    report = await dependencies.check(content)
-    if (report.checked === false) throw new Error(`伏笔补写复核未完成：${report.error || '细纲对照失败'}`)
     const originalKeys = new Set(paragraphs(input.content).map(paragraphKey))
     const inserted = paragraphs(content).filter((p) => !originalKeys.has(paragraphKey(p)))
-    await dependencies.verify(input.content, content, inserted)
+    input.onProgress?.({ stage: 'review', round: round + 1 })
+    if (dependencies.review) {
+      report = await dependencies.review(input.content, content, inserted)
+    } else {
+      report = await dependencies.check(content)
+      if (report.checked === false) throw new Error(`伏笔补写复核未完成：${report.error || '细纲对照失败'}`)
+      input.onProgress?.({ stage: 'verify', round: round + 1 })
+      await dependencies.verify(input.content, content, inserted)
+    }
+    if (report.checked === false) throw new Error(`伏笔补写复核未完成：${report.error || '细纲对照失败'}`)
     if (input.signal?.aborted) throw new Error('LLM_ABORTED')
   }
   const remaining = missingForeshadowings(report, input.plans)

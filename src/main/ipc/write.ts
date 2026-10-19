@@ -19,6 +19,7 @@ import {
 } from './validation'
 import { z } from 'zod'
 import { formatChapterProse, joinContinuation } from '../../shared/format-chapter-prose'
+import { postWriteProgressLabel } from '../../shared/generation-progress'
 
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
@@ -175,6 +176,9 @@ export function registerWriteIpc(service: WriteService): void {
               signal, partialChapter: continueMode === 'extend', tempContext: validated.tempContext,
               onStart: () => safeSend(win, 'write:generationStage', {
                 requestId: validated.requestId, stage: 'foreshadowRepair'
+              }),
+              onProgress: progress => safeSend(win, 'write:generationStage', {
+                requestId: validated.requestId, stage: `foreshadow:${postWriteProgressLabel(progress)}`
               })
             }
           )
@@ -542,12 +546,13 @@ export function registerWriteIpc(service: WriteService): void {
   safeHandle(
     'write:syncChapterAfterWrite',
     async (
-      _e,
+      e,
       payload: {
         projectId: string
         chapterNumber: number
         content: string
         force?: boolean
+        requestId?: string
       }
     ) => {
       const validated = validateInput(
@@ -555,27 +560,37 @@ export function registerWriteIpc(service: WriteService): void {
           projectId: projectIdSchema,
           chapterNumber: chapterNumberSchema,
           content: chapterContentSchema,
-          force: z.boolean().optional()
+          force: z.boolean().optional(),
+          requestId: z.string().min(1).max(100).optional()
         }),
         payload
       )
+      const win = BrowserWindow.fromWebContents(e.sender)
       return service.syncChapterAfterWrite(
         validated.projectId,
         validated.chapterNumber,
         validated.content,
         // force：用户手动补跑，忽略 autoMemorySync / pipeline=off
-        { skipIfDisabled: validated.force !== true }
+        { skipIfDisabled: validated.force !== true,
+          onProgress: validated.requestId ? progress => safeSend(win, 'write:postWriteProgress', {
+            requestId: validated.requestId, progress
+          }) : undefined }
       )
     }
   )
 
-  safeHandle('write:repairChapterForeshadowings', async (_e, payload: {
-    projectId: string; chapterNumber: number; content: string; partialChapter?: boolean; tempContext?: string
+  safeHandle('write:repairChapterForeshadowings', async (e, payload: {
+    projectId: string; chapterNumber: number; content: string; partialChapter?: boolean; tempContext?: string; requestId?: string
   }) => {
     const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
-      content: chapterContentSchema, partialChapter: z.boolean().optional(), tempContext: z.string().max(10000).optional() }), payload)
+      content: chapterContentSchema, partialChapter: z.boolean().optional(), tempContext: z.string().max(10000).optional(),
+      requestId: z.string().min(1).max(100).optional() }), payload)
+    const win = BrowserWindow.fromWebContents(e.sender)
     return service.repairChapterForeshadowings(input.projectId, input.chapterNumber, input.content,
-      { partialChapter: input.partialChapter, tempContext: input.tempContext })
+      { partialChapter: input.partialChapter, tempContext: input.tempContext,
+        onProgress: input.requestId ? progress => safeSend(win, 'write:postWriteProgress', {
+          requestId: input.requestId, progress
+        }) : undefined })
   })
 
   safeHandle('write:getChapterSummary', async (_e, payload: { projectId: string; chapterNumber: number; content: string }) => {

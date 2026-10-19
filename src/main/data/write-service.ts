@@ -1,5 +1,6 @@
 import { PLANNING_RULES, buildPlanningPlatformRules } from './skill-prompts/opening/planning-rules'
 import { DIALOGUE_RULES } from './skill-prompts/chapter-rules'
+import { postWriteProgressLabel } from '../../shared/generation-progress'
 import { join, dirname } from 'path'
 import { promises as fs } from 'fs'
 import type { ProjectService } from './project-service'
@@ -688,7 +689,8 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts: { signal?: AbortSignal; partialChapter?: boolean; tempContext?: string; onStart?: () => void } = {}
+    opts: { signal?: AbortSignal; partialChapter?: boolean; tempContext?: string; onStart?: () => void;
+      onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void } = {}
   ): Promise<{ content: string; report: AutoForeshadowRepairResult }> {
     const result = (status: AutoForeshadowRepairResult['status'], message: string, text = content) =>
       ({ content: text, report: { status, message } })
@@ -700,6 +702,7 @@ export class WriteService {
       const outline = await this.loadChapterOutlineText(dir, chapterNumber)
       if (!outline.trim()) return result('skipped', '缺少本章细纲，未执行伏笔自动补写。')
       opts.onStart?.()
+      opts.onProgress?.({ stage: 'outline' })
       const signal = opts.signal ?? new AbortController().signal
       const checkOpts = { signal, partialChapter: opts.partialChapter, tempContext: opts.tempContext,
         meta: { feature: 'outlineCheck', projectId, chapterNumber } }
@@ -710,7 +713,7 @@ export class WriteService {
       const plans = detail?.foreshadowings ?? []
       if (!missingForeshadowings(report, plans).length) return result('unchanged', '本章伏笔核对完成，未发现漏写。')
       const repaired = await repairMissingForeshadowings({
-        chapterNumber, content, outline, report, plans, signal,
+        chapterNumber, content, outline, report, plans, signal, onProgress: opts.onProgress,
         context: [opts.partialChapter ? '本轮尚未收尾，只补已推进场景中的遗漏，禁止抢写尚未发生的后续情节点与伏笔。' : '',
           opts.tempContext ?? '', detail?.writingRequirements ?? '',
           JSON.stringify(foreshadowingsBeforeChapter(await new ForeshadowingMdRepo(dir).list(), chapterNumber))].join('\n')
@@ -723,14 +726,22 @@ export class WriteService {
         check: (text) => this.checkOutlineWithRetry(chapterNumber, outline, text, checkOpts, signal),
         verify: (original, candidate, inserted) => this.flow.verifyForeshadowingRepair({
           original, candidate, inserted, outline, partialChapter: opts.partialChapter, tempContext: opts.tempContext
-        }, { signal, meta: { feature: 'foreshadowRepairVerify', projectId, chapterNumber } })
+        }, { signal, meta: { feature: 'foreshadowRepairVerify', projectId, chapterNumber } }),
+        review: (original, candidate, inserted) => this.flow.reviewForeshadowingRepair({
+          original, candidate, inserted, outline, chapterNumber,
+          partialChapter: opts.partialChapter, tempContext: opts.tempContext
+        }, { signal, meta: { feature: 'foreshadowRepairReview', projectId, chapterNumber } },
+        stage => opts.onProgress?.({ stage: stage === 'outline' ? 'finalCheck' : 'verify', detail: '联合结果不完整，回退到分步核验' }))
       })
       throwIfAborted(signal)
+      if (this.deslopService) opts.onProgress?.({ stage: 'dialogue' })
       const finalContent = this.deslopService
         ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired.content, null, {
-          signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: content
+          signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: content,
+          onGenerationStage: stage => opts.onProgress?.({ stage: 'dialogue', detail: stage.startsWith('deslop:') ? stage.slice(7) : undefined })
         }) : repaired.content
       if (finalContent !== repaired.content) {
+        opts.onProgress?.({ stage: 'finalCheck' })
         const checked = await this.checkOutlineWithRetry(chapterNumber, outline, finalContent, checkOpts, signal)
         if (checked.checked === false || missingForeshadowings(checked, plans).length) {
           throw new Error('补写后的对白修复未通过伏笔复核')
@@ -1761,7 +1772,7 @@ export class WriteService {
     opts?: { skipIfDisabled?: boolean; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
       deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean
       /** 以正文为准：正文自检失败不再整章拦下记忆（逐条证据校验照旧） */
-      proseFirst?: boolean }
+      proseFirst?: boolean; onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void }
   ): Promise<{
     memory: MemoryApplyResult
     settings: SettingsApplyResult
@@ -1819,6 +1830,7 @@ export class WriteService {
     // 写后自检始终尝试（与记忆同步开关解耦）
     let selfCheck: ChapterSelfCheckReport | null = opts?.selfCheck ?? null
     if (opts?.selfCheck === undefined && content?.trim()) {
+      opts?.onProgress?.({ stage: 'selfCheck' })
       try {
         selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
       } catch (err) {
@@ -1861,6 +1873,7 @@ export class WriteService {
         }
       }
 
+      if (!opts?.extraction) opts?.onProgress?.({ stage: 'extract' })
       const memRaw = opts?.extraction ? '' : await this.flow.extractMemoryStream(
         content,
         chapterNumber,
@@ -1875,6 +1888,7 @@ export class WriteService {
         try {
           const rules = await this.settings.getReviewRules()
           if (rules.enabled && rules.autoDeepReview && this.memoryCoordinator.current(ticket)) {
+            opts?.onProgress?.({ stage: 'deepReview' })
             deepReview = await this.runDeepReview(projectId, content, chapterNumber, { signal: ticket.controller.signal })
           }
         } catch {
@@ -1890,6 +1904,7 @@ export class WriteService {
        * 却跟着无关的情节条目一起被拦下——连写 10 章下来记忆一条也进不去。
        */
       const foreshadowings = await new ForeshadowingMdRepo(dir).list()
+      opts?.onProgress?.({ stage: 'evidence' })
       // 以正文为准时正文就是定稿，自检/审稿结论只作提示，不再整章拦下记忆；
       // 记忆条目仍须在正文里找得到证据。
       const gateCheck = opts?.proseFirst && selfCheck
@@ -1915,6 +1930,7 @@ export class WriteService {
       const unplantedCollections = chapterIssues.length ? [] : verified.collectedForeshadowings
         .map((item) => foreshadowings.find((known) => known.id === item.foreshadowingId))
         .filter((item): item is Foreshadowing => Boolean(item && !item.plantChapter && item.status === 'pending'))
+      if (unplantedCollections.length) opts?.onProgress?.({ stage: 'plantEvidence' })
       const plantEvidence = await findSavedPlantEvidence({
         repo: new ProseRepo(dir), chapterNumber, collections: unplantedCollections,
         signal: ticket.controller.signal,
@@ -1924,6 +1940,7 @@ export class WriteService {
         })
       })
       const issues = [...chapterIssues, ...itemIssues]
+      opts?.onProgress?.({ stage: 'writeMemory' })
       return await this.memoryCoordinator.exclusive(projectId, async () => {
       const stillCurrent = async (): Promise<boolean> => {
         const savedNow = hashProse(await new ProseRepo(dir).read(chapterNumber))
@@ -1999,6 +2016,7 @@ export class WriteService {
 
       let settings: SettingsApplyResult
       try {
+        if (!opts?.memoryOnly) opts?.onProgress?.({ stage: 'writeSettings' })
         settings = opts?.memoryOnly ? emptySettings : await this.applySettingsPatches(projectId, verified, {
           onlyAuto: true
         })
@@ -2598,11 +2616,18 @@ export class WriteService {
       const plans = detail?.foreshadowings ?? []
       if (missingForeshadowings(outlineDiff, plans).length) {
         onProgress('foreshadowRepair')
+        opts.onGenerationStage?.('foreshadowRepair')
+        const reportRepairProgress = (progress: import('../../shared/types').PostWriteProgress): void => {
+          const stage = `foreshadow:${postWriteProgressLabel(progress)}` as const
+          onProgress(stage)
+          opts.onGenerationStage?.(stage)
+        }
         const repaired = await repairMissingForeshadowings({
           chapterNumber, content, outline: outlineText, report: outlineDiff, plans,
           context: [opts.tempContext ?? '', detail?.writingRequirements ?? '',
             JSON.stringify(foreshadowingsBeforeChapter(await new ForeshadowingMdRepo(dir).list(), chapterNumber))].join('\n'),
-          signal: memoryTicket.controller.signal
+          signal: memoryTicket.controller.signal,
+          onProgress: reportRepairProgress
         }, {
           generate: (prompt) => this.llm.generateStream(prompt, {
             ...flowOpts('batchForeshadowRepair'), maxTokens: 8192,
@@ -2611,7 +2636,10 @@ export class WriteService {
           check: (text) => this.checkOutlineWithRetry(chapterNumber, outlineText, text, flowOpts('batchOutline'), memoryTicket.controller.signal),
           verify: (original, candidate, inserted) => this.flow.verifyForeshadowingRepair({
             original, candidate, inserted, outline: outlineText, tempContext: opts.tempContext
-          }, flowOpts('foreshadowRepairVerify'))
+          }, flowOpts('foreshadowRepairVerify')),
+          review: (original, candidate, inserted) => this.flow.reviewForeshadowingRepair({
+            original, candidate, inserted, outline: outlineText, chapterNumber, tempContext: opts.tempContext
+          }, flowOpts('foreshadowRepairReview'), stage => reportRepairProgress({ stage: stage === 'outline' ? 'finalCheck' : 'verify', detail: '联合结果不完整，回退到分步核验' }))
         })
         throwIfAborted(memoryTicket.controller.signal)
         // 保存同样使用正文版本检查；另一窗口改稿时不能覆盖。

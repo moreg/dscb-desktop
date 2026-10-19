@@ -17,6 +17,22 @@ const repairMissingForeshadowings = (input: Parameters<typeof runRepairMissingFo
   runRepairMissingForeshadowings(input, { verify: async () => {}, ...dependencies })
 
 describe('automatic foreshadowing repair', () => {
+  it('联合复核不重复调用原来的两次检查，并报告轮次和实际阶段', async () => {
+    const onProgress = vi.fn()
+    const check = vi.fn()
+    const verify = vi.fn()
+    const review = vi.fn().mockResolvedValue(report(false))
+    const result = await repairMissingForeshadowings({ ...input(), onProgress }, {
+      generate: async () => patch(), check, verify, review
+    })
+    expect(result.content).toContain(addition)
+    expect(review).toHaveBeenCalledWith(prose, result.content, [addition])
+    expect(check).not.toHaveBeenCalled()
+    expect(verify).not.toHaveBeenCalled()
+    expect(onProgress.mock.calls.map(([progress]) => progress)).toEqual([
+      { stage: 'generate', round: 1 }, { stage: 'review', round: 1 }
+    ])
+  })
   it('inserts only new prose and keeps every existing paragraph and the original ending', () => {
     expect(applyForeshadowingInsertions(prose, patch())).toBe(prose.split('\n').slice(0, 2).join('\n') + '\n' + addition + '\n' + prose.split('\n')[2])
   })

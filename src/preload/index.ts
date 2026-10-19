@@ -33,6 +33,7 @@ import type {
   RhythmEvaluation,
   ChapterFlowResult,
   ChapterGenerationStage,
+  PostWriteProgress,
   ChapterStreamResult,
   FeatureCategory,
   FeatureRoutingEntry,
@@ -100,6 +101,20 @@ function makeStreamHandle<T>(
     requestId,
     abort: () => ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>
   } as unknown as StreamHandleOf<T>
+}
+
+async function invokeWithPostWriteProgress<T>(channel: string, payload: Record<string, unknown>, onProgress?: (progress: PostWriteProgress) => void): Promise<T> {
+  if (!onProgress) return ipcRenderer.invoke(channel, payload)
+  const requestId = crypto.randomUUID()
+  const handler = (_e: unknown, event: { requestId: string; progress: PostWriteProgress }) => {
+    if (event.requestId === requestId) onProgress(event.progress)
+  }
+  ipcRenderer.on('write:postWriteProgress', handler as never)
+  try {
+    return await ipcRenderer.invoke(channel, { ...payload, requestId })
+  } finally {
+    ipcRenderer.removeListener('write:postWriteProgress', handler as never)
+  }
 }
 
 const api = {
@@ -638,20 +653,22 @@ const api = {
   invalidateChapterMemorySync: (projectId: string, chapterNumber: number) =>
     ipcRenderer.invoke('write:invalidateChapterMemorySync', { projectId, chapterNumber }),
   repairChapterForeshadowings: (projectId: string, chapterNumber: number, content: string,
-    opts?: { partialChapter?: boolean; tempContext?: string }) =>
-    ipcRenderer.invoke('write:repairChapterForeshadowings', { projectId, chapterNumber, content, ...opts }),
+    opts?: { partialChapter?: boolean; tempContext?: string }, onProgress?: (progress: PostWriteProgress) => void) =>
+    invokeWithPostWriteProgress<Awaited<ReturnType<import('../shared/types').RendererApi['repairChapterForeshadowings']>>>(
+      'write:repairChapterForeshadowings', { projectId, chapterNumber, content, ...opts }, onProgress),
   syncChapterAfterWrite: (
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts?: { force?: boolean }
+    opts?: { force?: boolean },
+    onProgress?: (progress: PostWriteProgress) => void
   ) =>
-    ipcRenderer.invoke('write:syncChapterAfterWrite', {
+    invokeWithPostWriteProgress<Awaited<ReturnType<import('../shared/types').RendererApi['syncChapterAfterWrite']>>>('write:syncChapterAfterWrite', {
       projectId,
       chapterNumber,
       content,
       force: opts?.force === true
-    }),
+    }, onProgress),
   getChapterSummary: (projectId: string, chapterNumber: number, content: string) =>
     ipcRenderer.invoke('write:getChapterSummary', { projectId, chapterNumber, content }),
   generateChapterSummary: (projectId: string, chapterNumber: number, content: string, force = false) =>

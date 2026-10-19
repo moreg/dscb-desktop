@@ -1,4 +1,4 @@
-import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
+import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
@@ -20,6 +20,7 @@ import type {
   AuditReport,
   ChapterContent,
   ChapterGenerationStage,
+  PostWriteProgress,
   ChapterStatus,
   ChapterVersion,
   Character,
@@ -868,6 +869,19 @@ export default function ChapterEditor({
     receipt: SyncUndoReceipt | null
     selfCheck?: import('../../shared/types').ChapterSelfCheckReport | null
   } | null>(null)
+  const [postWriteElapsed, setPostWriteElapsed] = useState(0)
+  const postWriteStartedAt = postWriteSync?.at
+  const postWriteSyncing = postWriteSync?.phase === 'syncing'
+  useEffect(() => {
+    if (!postWriteSyncing || postWriteStartedAt == null) return
+    const update = () => setPostWriteElapsed(Math.max(0, Math.floor((Date.now() - postWriteStartedAt) / 1000)))
+    update()
+    const timer = setInterval(update, 1000)
+    return () => clearInterval(timer)
+  }, [postWriteSyncing, postWriteStartedAt])
+  const postWriteSyncMessage = postWriteSyncing
+    ? `${postWriteSync?.message} · 已用时 ${Math.floor(postWriteElapsed / 60)}分${postWriteElapsed % 60}秒`
+    : postWriteSync?.message ?? ''
   const [selfCheckLoading, setSelfCheckLoading] = useState(false)
   // Self-check results describe a draft revision, independently of memory-sync receipts/errors.
   const [selfCheckSnapshot, setSelfCheckSnapshot] = useState<ChapterSelfCheckSnapshot | null>(null)
@@ -2741,7 +2755,8 @@ export default function ChapterEditor({
           projectId: string,
           chapterNumber: number,
           content: string,
-          syncOpts?: { force?: boolean }
+          syncOpts?: { force?: boolean },
+          onProgress?: (progress: PostWriteProgress) => void
         ) => Promise<{
           memory: import('../../shared/types').MemoryApplyResult
           settings: import('../../shared/types').SettingsApplyResult
@@ -2803,7 +2818,12 @@ export default function ChapterEditor({
         projectId,
         chapterNumber,
         contentSnapshot,
-        opts?.force ? { force: true } : undefined
+        opts?.force ? { force: true } : undefined,
+        progress => {
+          if (memorySyncPendingRef.current !== syncToken || genRef.current !== myGen || draftRef.current !== contentSnapshot) return
+          setPostWriteSync(current => current?.phase === 'syncing' && current.contentForRetry === contentSnapshot
+            ? { ...current, message: postWriteProgressLabel(progress) } : current)
+        }
       )
       if (memorySyncPendingRef.current === syncToken) memorySyncPendingRef.current = null
       if (genRef.current !== myGen || draftRef.current !== contentSnapshot) return
@@ -2916,6 +2936,8 @@ export default function ChapterEditor({
       const sc = selfCheckTrackerRef.current.accepts(selfCheckRequest) ? sync.selfCheck ?? null : null
       let summaryError = ''
       try {
+        setPostWriteSync(current => current?.phase === 'syncing' && current.contentForRetry === contentSnapshot
+          ? { ...current, message: postWriteProgressLabel({ stage: 'summary' }) } : current)
         await window.api.generateChapterSummary(projectId, chapterNumber, contentSnapshot)
       } catch (err) {
         summaryError = `章节概要生成失败：${(err as Error).message}`
@@ -3155,7 +3177,7 @@ export default function ChapterEditor({
       foreshadowCheckContextRef.current, findPendingForChapter(loadPendingSyncQueue(getLocalStorage()), projectId, chapterNumber))
     foreshadowCheckContextRef.current = { projectId, chapterNumber, content: snapshot, foreshadowContext: checkContext }
     setFlowPanelOpen(true)
-    setPostWriteSync((current) => current ? { ...current, phase: 'syncing', message: '正在核对并补写伏笔，完成后同步记忆…' } : current)
+    setPostWriteSync((current) => current ? { ...current, phase: 'syncing', at: Date.now(), message: '准备核对伏笔…' } : current)
     let checkedContent: string
     const isCurrent = () => {
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return false
@@ -3167,7 +3189,11 @@ export default function ChapterEditor({
     }
     try {
       const repaired = await window.api.repairChapterForeshadowings(projectId, chapterNumber, snapshot,
-        checkContext)
+        checkContext, progress => {
+          if (!isCurrent()) return
+          setPostWriteSync(current => current?.phase === 'syncing' && current.contentForRetry === snapshot
+            ? { ...current, message: postWriteProgressLabel(progress) } : current)
+        })
       if (!isCurrent()) return
       if (repaired.report.status === 'failed') {
         pauseMemoryForForeshadowRepair(snapshot, repaired.report.message)
@@ -4839,7 +4865,7 @@ export default function ChapterEditor({
             onClick={cancelActiveStream}
             title={generating ? '停止当前生成并保留已有草稿' : '停止当前修改，并恢复开始前的正文'}
           >
-            {generationStage === 'foreshadowRepair' ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
+            {generationStage === 'foreshadowRepair' || generationStage?.startsWith('foreshadow:') ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
           <button
@@ -5186,7 +5212,7 @@ export default function ChapterEditor({
             postWriteSync && postWriteSync.phase !== 'idle'
               ? {
                   phase: postWriteSync.phase,
-                  message: postWriteSync.message,
+                  message: postWriteSyncMessage,
                   errors: postWriteSync.errors,
                   canUndo: postWriteSync.canUndo || syncHistoryDepth > 0,
                   undoDepth: Math.max(postWriteSync.undoDepth, syncHistoryDepth),
@@ -5315,7 +5341,7 @@ export default function ChapterEditor({
                           ? '✕'
                           : '–'}
                 </span>
-                <span className="post-write-sync-msg">{postWriteSync.message}</span>
+                <span className="post-write-sync-msg">{postWriteSyncMessage}</span>
               </div>
               {postWriteSync.errors.length > 0 && postWriteSync.phase !== 'syncing' ? (
                 <div

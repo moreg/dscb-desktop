@@ -3,6 +3,7 @@ import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
+import { parseOutlineDiffJson } from '../../shared/parsers'
 import type { MemoryExtraction } from '../../shared/types'
 
 // 纯解析函数从 shared/parsers re-export，供 main 测试与 renderer 共享
@@ -41,6 +42,10 @@ export class WriteFlowService {
     const raw = await this.llm.generateStream(prompt, { ...opts,
       meta: { ...opts.meta, feature: 'foreshadowRepairVerify' } })
     const obj = findJsonObject(raw)
+    this.assertForeshadowingVerification(input, obj)
+  }
+
+  private assertForeshadowingVerification(input: { candidate: string; inserted: readonly string[] }, obj: Record<string, unknown> | null | undefined): void {
     if (!obj || typeof obj.passed !== 'boolean' || !Array.isArray(obj.issues) ||
       (obj.passed && obj.issues.length) || (!obj.passed && !obj.issues.length)) {
       throw new Error('伏笔补写专项核验未返回有效结论')
@@ -114,9 +119,9 @@ export class WriteFlowService {
     outline: string,
     content: string,
     chapterNumber: number,
-    opts: GenerateOptions & { partialChapter?: boolean } = {}
+    opts: GenerateOptions & { partialChapter?: boolean; repairVerification?: { original: string; inserted: readonly string[] } } = {}
   ): Promise<string> {
-    const { partialChapter, tempContext, ...llmOpts } = opts
+    const { partialChapter, tempContext, repairVerification, ...llmOpts } = opts
     const prompt = [
       `请对照下面的章节细纲，检查正文是否按细纲写作。按 5 种差异类型分类输出。`,
       ...(tempContext?.trim() ? [
@@ -163,7 +168,18 @@ export class WriteFlowService {
       `  resolution: "updateOutline"|"updateContent"|"either"|"review",`,
       `  outlinePatch?: { ... }  // 可回写细纲时给出`,
       `}。`,
-      `无差异时输出空数组 []。不要任何解释、Markdown 代码块。`,
+      repairVerification ? '细纲差异数组放入下方联合输出的 diffs 字段，无差异时 diffs=[]。' : `无差异时输出空数组 []。不要任何解释、Markdown 代码块。`,
+      ...(repairVerification ? [
+        '同时独立核验伏笔补写是否引入新问题。只评价明确列出的新增段落，不把原正文已有的问题当成本次补写造成的问题。',
+        '逐项核对新增内容与原文的因果、人物认知、时间地点、设定是否一致，以及是否抢写后续情节、提前揭底。',
+        '作者临时要求优先于细纲；明确延期或限制揭示时服从该要求。部分续写仅允许补已推进场景，不要求后续回收与章末任务。',
+        '两套结论分别填写：diffs 必须完整覆盖全章五类差异与逐条伏笔；verification 仅评价新增段落。不得以其中一项通过代替另一项。',
+        'verification 的问题必须引用实际新增文字作证据，不以旧审稿报告的措辞变化判断新问题。',
+        '最终严格输出对象 {"diffs":[上述完整差异项],"verification":{"passed":true或false,"issues":[{"message":"具体问题","evidence":"新增段落中的连续原文"}]}}。',
+        'verification.passed=true 时 issues 必须为空；有新问题则 passed=false 且 issues 非空。缺少任何一套结论均视为核验未完成。',
+        '------ 原正文（只读基线） ------', repairVerification.original,
+        '------ 全部新增段落 ------', JSON.stringify(repairVerification.inserted)
+      ] : []),
       ``,
       `------ 本章细纲 ------`,
       outline || '（无细纲文本）',
@@ -175,6 +191,49 @@ export class WriteFlowService {
       ...llmOpts,
       meta: { feature: 'outlineCheck', ...opts.meta }
     })
+  }
+
+  async reviewForeshadowingRepair(input: {
+    original: string; candidate: string; inserted: readonly string[]; outline: string; chapterNumber: number;
+    partialChapter?: boolean; tempContext?: string
+  }, opts: GenerateOptions = {}, onFallback?: (stage: 'outline' | 'verify') => void): Promise<import('../../shared/types').OutlineDiffReport> {
+    const checkOpts = { ...opts, partialChapter: input.partialChapter, tempContext: input.tempContext }
+    const raw = await this.checkOutlineStream(input.outline, input.candidate, input.chapterNumber, {
+      ...checkOpts, maxTokens: 8192,
+      repairVerification: { original: input.original, inserted: input.inserted }
+    })
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    const obj = findJsonObject(raw)
+    const verification = obj?.verification
+    const report = obj && Array.isArray(obj.diffs)
+      ? parseOutlineDiffJson(JSON.stringify(obj.diffs), input.chapterNumber) : null
+    // 即使另一套输出损坏，也不能通过回退重试抹掉已有的实质否决。
+    if (verification && typeof verification === 'object' && !Array.isArray(verification)) {
+      const verdict = verification as Record<string, unknown>
+      if (verdict.passed === false && Array.isArray(verdict.issues) && verdict.issues.length) {
+        this.assertForeshadowingVerification(input, verdict)
+      }
+    }
+    if (report && report.checked !== false && verification && typeof verification === 'object' && !Array.isArray(verification)) {
+      const verdict = verification as Record<string, unknown>
+      if (typeof verdict.passed === 'boolean' && Array.isArray(verdict.issues) &&
+        (verdict.passed ? verdict.issues.length === 0 : verdict.issues.length > 0)) {
+        this.assertForeshadowingVerification(input, verdict)
+        return { ...report, checked: true, hasOutline: true }
+      }
+    }
+    // 联合输出不完整时按原流程分别核对，不能把缺失结论当作通过。
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    const legacyReport = !obj ? parseOutlineDiffJson(raw, input.chapterNumber) : null
+    if (!legacyReport || legacyReport.checked === false) onFallback?.('outline')
+    const checked = legacyReport && legacyReport.checked !== false ? legacyReport : parseOutlineDiffJson(
+      await this.checkOutlineStream(input.outline, input.candidate, input.chapterNumber, checkOpts), input.chapterNumber)
+    if (checked.checked === false) throw new Error(`伏笔补写复核未完成：${checked.error || '细纲对照失败'}`)
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    onFallback?.('verify')
+    await this.verifyForeshadowingRepair(input, opts)
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    return { ...checked, checked: true, hasOutline: true }
   }
 
   /**

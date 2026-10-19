@@ -23,6 +23,7 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
   const generate = vi.fn<WriteService['generateChapterStream']>()
   const adjust = vi.fn<WriteService['adjustChapterStream']>()
   const repair = vi.fn<WriteService['repairChapterForeshadowings']>()
+  const sync = vi.fn<WriteService['syncChapterAfterWrite']>()
   const report: AutoDeslopResult = { status: 'applied', message: '已完成自动去 AI 味', remainingIssues: 0 }
   beforeEach(() => {
     handlers.clear()
@@ -30,8 +31,33 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     clearAllStreams()
     generate.mockReset()
     adjust.mockReset()
+    sync.mockReset().mockResolvedValue(null)
     repair.mockReset().mockImplementation(async (_pid, _ch, content) => ({ content, report: { status: 'unchanged', message: '无遗漏' } }))
-    registerWriteIpc({ generateChapterStream: generate, adjustChapterStream: adjust, repairChapterForeshadowings: repair } as unknown as WriteService)
+    registerWriteIpc({ generateChapterStream: generate, adjustChapterStream: adjust, repairChapterForeshadowings: repair,
+      syncChapterAfterWrite: sync } as unknown as WriteService)
+  })
+
+  it('补跑伏笔和更新记忆均将真实进度绑定到本次请求', async () => {
+    repair.mockImplementation(async (_pid, _ch, content, opts) => {
+      opts?.onProgress?.({ stage: 'review', round: 2 })
+      return { content, report: { status: 'unchanged', message: '通过' } }
+    })
+    sync.mockImplementation(async (_pid, _ch, _text, opts) => {
+      opts?.onProgress?.({ stage: 'extract' })
+      opts?.onProgress?.({ stage: 'writeMemory' })
+      return null
+    })
+    await handlers.get('write:repairChapterForeshadowings')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, content: '正文', requestId: 'repair-1'
+    })
+    await handlers.get('write:syncChapterAfterWrite')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, content: '正文', requestId: 'memory-1'
+    })
+    expect(send.mock.calls).toEqual([
+      ['write:postWriteProgress', { requestId: 'repair-1', progress: { stage: 'review', round: 2 } }],
+      ['write:postWriteProgress', { requestId: 'memory-1', progress: { stage: 'extract' } }],
+      ['write:postWriteProgress', { requestId: 'memory-1', progress: { stage: 'writeMemory' } }]
+    ])
   })
 
   it('续写返回润色片段、模式和报告，流式原稿只作预览', async () => {
