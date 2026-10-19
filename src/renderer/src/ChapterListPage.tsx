@@ -1,4 +1,4 @@
-import { isDeslopStage, deslopProgressLabel } from '../../shared/generation-progress'
+import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoDeslopResult,
@@ -2073,8 +2073,8 @@ function BatchWriteDialog({
           <div className="batch-progress">
             <div className="batch-progress-head">
               <span className={`chip status-${displayStatus}`}>
-                {running && isDeslopStage(generationStage)
-                  ? deslopProgressLabel(generationStage)
+                {running && generationStage !== null
+                  ? generationProgressLabel(generationStage)
                   : running && generationStage === null
                     ? '写后检查中'
                     : statusLabel[displayStatus]}

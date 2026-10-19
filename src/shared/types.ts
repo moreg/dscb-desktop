@@ -471,7 +471,8 @@ export type StreamHandleOf<T> = Promise<T> & {
 export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
-export type ChapterGenerationStage = 'generating' | 'deslop' | `deslop:${string}` | 'foreshadowRepair'
+export type AgyGenerationStatus = 'queued' | 'waiting' | 'streaming' | 'retrying'
+export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair'
 
 /** 单章交稿前的伏笔补写结论；失败时保留本轮生成稿。 */
 export interface AutoForeshadowRepairResult {

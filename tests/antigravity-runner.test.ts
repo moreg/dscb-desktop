@@ -78,6 +78,77 @@ beforeEach(() => {
 })
 
 describe('runAntigravity', () => {
+  it('按顺序报告排队、等待和正文生成状态', async () => {
+    const onStatus = vi.fn()
+    await runAntigravity('正文', { onStatus })
+    expect(onStatus.mock.calls.map(call => call[0])).toEqual(['queued', 'waiting', 'streaming'])
+  })
+
+  it('排队任务取消立即返回，轮到它时也不会启动 CLI', async () => {
+    const child = new EventEmitter() as FakeChild
+    child.stdin = { write: vi.fn(), end: vi.fn() }
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = vi.fn()
+    let spawned = 0
+    fakeChildFactory = () => { spawned++; return child }
+    const first = runAntigravity('前一个任务')
+    await Promise.resolve()
+    const controller = new AbortController()
+    const onStatus = vi.fn()
+    const queued = runAntigravity('取消排队', { signal: controller.signal, onStatus })
+    controller.abort()
+    await expect(queued).rejects.toThrow('LLM_ABORTED')
+    expect(spawned).toBe(1)
+    child.emit('close', 0)
+    await first
+    fakeChildFactory = null
+    await runAntigravity('后续任务')
+    expect(spawned).toBe(1)
+    expect(onStatus.mock.calls.map(call => call[0])).toEqual(['queued'])
+  })
+
+  it('取消运行中的 CLI 即使没有 close 事件也能释放后续任务', async () => {
+    const child = new EventEmitter() as FakeChild
+    child.stdin = { write: vi.fn(), end: vi.fn() }
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = vi.fn()
+    fakeChildFactory = () => child
+    const controller = new AbortController()
+    const task = runAntigravity('任务', { signal: controller.signal })
+    await Promise.resolve()
+    controller.abort()
+    await expect(task).rejects.toThrow('LLM_ABORTED')
+    expect(child.kill).toHaveBeenCalled()
+    fakeChildFactory = null
+    await expect(runAntigravity('后续任务')).resolves.toMatchObject({ full: '默认回复' })
+  })
+
+  it('CLI 超时仍不退出时释放队列，并忽略迟到输出', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const child = new EventEmitter() as FakeChild
+      child.stdin = { write: vi.fn(), end: vi.fn() }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.kill = vi.fn()
+      fakeChildFactory = () => child
+      const onToken = vi.fn()
+      const first = runAntigravity('卡住的任务', { timeoutSec: 1, onToken })
+      const rejected = expect(first).rejects.toThrow('LLM_TIMEOUT')
+      await vi.advanceTimersByTimeAsync(1000)
+      await rejected
+      expect(child.kill).toHaveBeenCalled()
+      child.stdout.emit('data', Buffer.from('迟到正文'))
+      expect(onToken).not.toHaveBeenCalled()
+      fakeChildFactory = null
+      await expect(runAntigravity('后续任务')).resolves.toMatchObject({ full: '默认回复' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('prompt 作为 -p 参数传入，args 含 --dangerously-skip-permissions 且不含 --sandbox', async () => {
     fakeChildFactory = () =>
       createFakeChild({ stdout: '你好，世界', exitCode: 0 })

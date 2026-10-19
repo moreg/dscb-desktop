@@ -34,6 +34,7 @@ import { killProcessTree } from './kill-process-tree'
  * - `-p` 是单轮模式，不支持 sessionId 续聊
  */
 export interface AntigravityOptions {
+  onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   /** 模型显示名（如 "Gemini 3.1 Pro (High)"）；空则走 agy 默认模型 */
   model?: string
   /** 超时（秒），默认 300 */
@@ -136,7 +137,9 @@ export function runAntigravity(
       // 第一次失败时等一下再跑一次（刷新通常在秒级完成），避免直接把错误抛给用户。
       // 认证失败时 stdout 为空，不会重复喂 token。
       if (!retried && err && /AGY_AUTH_EXPIRED/.test(err.message)) {
+        if (opts.signal?.aborted) throw new Error(LLM_ABORTED_ERROR)
         retried = true
+        opts.onStatus?.('retrying')
         return new Promise((resolve) =>
           setTimeout(resolve, AUTH_RETRY_DELAY_MS)
         ).then(() => runAntigravityOnce(prompt, opts))
@@ -144,15 +147,25 @@ export function runAntigravity(
       throw err
     })
   // 串行化：前一个 agy 调用完成（或失败）后才跑下一个
+  if (opts.signal?.aborted) return Promise.reject(new Error(LLM_ABORTED_ERROR))
+  opts.onStatus?.('queued')
   const next = agyChain.then(exec, exec) // 即使前一个失败也继续
   agyChain = next.catch(() => {}) // 锁链不因业务错误断裂
-  return next
+  // 排队时取消也立即返回；轮到该任务时由 Once 的检查阻止启动进程。
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => reject(new Error(LLM_ABORTED_ERROR))
+    opts.signal?.addEventListener('abort', onAbort, { once: true })
+    if (opts.signal?.aborted) onAbort()
+    next.then(resolve, reject).finally(() => opts.signal?.removeEventListener('abort', onAbort))
+  })
 }
 
 async function runAntigravityOnce(
   prompt: string,
   opts: AntigravityOptions
 ): Promise<AntigravityResult> {
+  if (opts.signal?.aborted) throw new Error(LLM_ABORTED_ERROR)
+  opts.onStatus?.('waiting')
   const timeoutSec = opts.timeoutSec ?? DEFAULT_TIMEOUT_SEC
 
   // prompt 作为 -p 参数传入（agy 不从 stdin 读取）。
@@ -189,10 +202,28 @@ async function runAntigravityOnce(
       let stdoutPending = Buffer.alloc(0) // 跨 chunk 的不完整 UTF-8 尾部字节
       let stderrPending = Buffer.alloc(0)
       let settled = false
+      let streaming = false
+      // CLI 自身可能在会话结束后仍不退出，不能只依赖 --print-timeout。
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        cleanup()
+        killProcessTree(child)
+        reject(new Error('LLM_TIMEOUT'))
+      }, timeoutSec * 1000)
 
       // 中止信号：杀整棵进程树（Windows 上 SIGTERM 常杀不干净孙进程）
       const onAbort = (): void => {
-        if (!settled) killProcessTree(child)
+        if (settled) return
+        settled = true
+        cleanup()
+        killProcessTree(child)
+        reject(new Error(LLM_ABORTED_ERROR))
+      }
+      // 即使取消或超时后 CLI 不发送 close，也要释放串行队列。
+      const cleanup = (): void => {
+        clearTimeout(timeout)
+        opts.signal?.removeEventListener('abort', onAbort)
       }
       if (opts.signal) {
         if (opts.signal.aborted) {
@@ -201,12 +232,8 @@ async function runAntigravityOnce(
           opts.signal.addEventListener('abort', onAbort, { once: true })
         }
       }
-      // 进程结束时移除 abort 监听器，避免 AbortSignal 上残留监听器
-      const cleanup = (): void => {
-        opts.signal?.removeEventListener('abort', onAbort)
-      }
-
       child.stdout.on('data', (chunk: Buffer) => {
+        if (settled) return
         // 防止 UTF-8 多字节字符被 chunk 边界截断导致乱码（�）：
         // 中文字符占 3 字节，若 chunk 恰好在字符中间断开，toString('utf8') 会输出 U+FFFD。
         // 方案：拼上前一个 chunk 的尾部残留，按完整字符边界截取，不完整的尾部留给下一个 chunk。
@@ -215,10 +242,15 @@ async function runAntigravityOnce(
         const decoded = combined.subarray(0, completeLen).toString('utf8')
         stdoutPending = combined.subarray(completeLen)
         stdoutBuf += decoded
+        if (decoded && !streaming) {
+          streaming = true
+          opts.onStatus?.('streaming')
+        }
         opts.onToken?.(decoded)
       })
 
       child.stderr.on('data', (chunk: Buffer) => {
+        if (settled) return
         const combined = Buffer.concat([stderrPending, chunk])
         const completeLen = utf8CompleteLength(combined)
         stderrBuf += combined.subarray(0, completeLen).toString('utf8')

@@ -39,6 +39,34 @@ describe('resolveGenreVoice', () => {
 })
 
 describe('buildSystemPrompt', () => {
+  it('先前保存的无句号规则在拼装时迁移为结尾保留句号', () => {
+    const old = '同一对引号内禁止出现中文句号「。」（包括闭合引号前）；陈述台词以闭合引号收尾'
+    const prompt = buildSystemPrompt(undefined, null, { dialogue: old })
+    expect(prompt).not.toContain('包括闭合引号前')
+    expect(prompt).not.toContain('陈述台词以闭合引号收尾')
+    expect(prompt).toContain('陈述台词只在闭合引号前保留一个句号')
+  })
+  it.each([undefined, 'extend', 'finish'] as const)('%s 模式统一排版，旧版风格覆盖后仍有明确约束', (mode) => {
+    const defaults = buildSystemPrompt(undefined, null, undefined, null, mode)
+    expect(defaults).not.toContain('不要每句都独立成段')
+    expect(defaults).not.toContain('同一行动与其直接反馈可以放在一段')
+    const prompt = buildSystemPrompt(undefined, null, {
+      style_targets: '旧版风格：不要每句都独立成段。', dialogue: ''
+    }, null, mode)
+    const finalRules = prompt.slice(prompt.lastIndexOf('【正文排版要求'))
+    expect(finalRules).toContain('两句话必须换行分段')
+    expect(finalRules).toContain('陈述台词只在闭合引号前保留一个句号')
+    expect(finalRules).toContain('多个引号完整的独立段落')
+  })
+
+  it('已保存的旧内置分段规则迁移为一句一段，保留其他自定义要求', () => {
+    const oldRule = '- **段落按语意组织**：同一行动与其直接反馈可以放在一段，目标、视角或新的阻力改变时再断段；一句成段也可以，但不要每句都独立成段。对白按人物当下的语气断句，不因标点统一而抹平停顿。'
+    const prompt = buildSystemPrompt(undefined, null, { style_targets: oldRule + '\n保留作者自己的语气要求。' })
+    expect(prompt).not.toContain('不要每句都独立成段')
+    expect(prompt).toContain('**一句一段**')
+    expect(prompt).toContain('保留作者自己的语气要求。')
+  })
+
   it('embeds 12 forbidden word categories with hints', () => {
     const prompt = buildSystemPrompt('现代都市')
     for (const cat of FORBIDDEN_WORD_CATEGORIES) {

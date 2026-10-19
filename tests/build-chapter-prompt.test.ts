@@ -268,6 +268,16 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
   })
 
+  it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行一句一段', async () => {
+    const raw = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
+    const expected = '林远推开门。\n屋里没人。\n“先签字。”\n“还等什么？”\n“快点！”'
+    const llm = mockLlm(raw)
+    const service = new WriteService(ps, llm)
+    expect(await service.generateChapterStream(projectId, 1)).toBe(expected)
+    expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain(expected)
+    expect(vi.mocked(llm.generateStream).mock.calls[0][1]?.systemPrompt).toContain('【正文排版要求')
+  })
+
   it('calls llm.generateStream with systemPrompt option', async () => {
     const generateStream = vi.fn().mockResolvedValue('正文')
     const llm = { generateStream } as unknown as LlmService

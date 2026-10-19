@@ -7,7 +7,7 @@ import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import type { GenerateOptions, LlmService } from '../src/main/data/llm-service'
 import type { DeslopResult } from '../src/shared/types'
 
-const prose = (spoken: number, narration: number): string => `“${'我'.repeat(spoken)}”\n${'他'.repeat(narration)}。`
+const prose = (spoken: number, narration: number): string => `“${'我'.repeat(spoken)}。”\n${'他'.repeat(narration)}。`
 const original = prose(65, 35)
 const candidate = prose(70, 30)
 const passed = { passed: true, factsUnchanged: true, issues: [], expressionFindings: [] }

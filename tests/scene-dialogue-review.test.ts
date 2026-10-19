@@ -1,3 +1,4 @@
+import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import { describe, expect, it, vi } from 'vitest'
 import { reviewSceneDialogue } from '../src/main/data/scene-dialogue-review'
 import { ensureDialogueQuality } from '../src/main/data/dialogue-quality'
@@ -19,7 +20,7 @@ describe('独立整场对白复核', () => {
       : JSON.stringify({ text: draft }))
     const output = await ensureDialogueQuality(source, source, llm, { mode: 'write', maxRepairs: 1 })
     expect(output.text).toBe(source)
-    expect(output.report).toMatchObject({ passed: false, pendingDraft: draft })
+    expect(output.report).toMatchObject({ passed: false, pendingDraft: formatChapterProse(draft) })
     expect(output.factsUnchanged).toBeUndefined()
   })
 
@@ -39,7 +40,7 @@ describe('独立整场对白复核', () => {
       return JSON.stringify({ patches: [{ before, after: before === original ? reorganized : accepted }] })
     })
     const output = await ensureDialogueQuality(original, original, llm, { mode: 'write' })
-    expect(output.text).toBe(accepted)
+    expect(output.text).toBe(formatChapterProse(accepted))
     expect(output.report).toMatchObject({ passed: true, attempts: 2, afterRatio: .7 })
   })
 

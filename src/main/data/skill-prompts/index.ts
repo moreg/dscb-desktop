@@ -1,4 +1,4 @@
-import { CHAPTER_RULE_SECTIONS, buildContinueModeRules, normalizeLegacyDialogueOverride } from './chapter-rules'
+import { CHAPTER_RULE_SECTIONS, PROSE_PARAGRAPH_RULES, buildContinueModeRules, normalizeLegacyDialogueOverride, normalizeLegacyParagraphOverride } from './chapter-rules'
 import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
@@ -87,7 +87,7 @@ export function buildSystemPrompt(
     if (!text.trim()) continue
     sections.push('---')
     sections.push(`## ${n}. ${sec.title}`)
-    sections.push(text)
+    sections.push(normalizeLegacyParagraphOverride(text))
     n++
   }
 
@@ -110,6 +110,7 @@ export function buildSystemPrompt(
     sections.push(buildContinueModeRules(continueMode))
   }
 
+  sections.push('---', PROSE_PARAGRAPH_RULES)
   return sections.join('\n\n')
 }
 
@@ -184,7 +185,7 @@ export function buildHumanizerPrompt(
       // 原文是「长短句交替，不要整段同节奏」。没有量纲的定性指令会被模型往极端执行：
       // 实测产出句子平均 11 字，而番茄在榜作品是 17.8 字。改成带区间的表述。
       // 数据见 tests/fixtures/deslop-corpus/FINDINGS.md
-      '8. 句长服从内容，排版优先遵守一句一段、对话引号内不用中文句号；同一行动及直接反馈若是两句话也必须分段，避免机械双联报表句，不为合并句子增加冗词或事实',
+      '8. 句长服从内容，排版优先遵守一句一段、对话中间不用中文句号、陈述台词结尾保留句号；同一行动及直接反馈若是两句话也必须分段，避免机械双联报表句，不为合并句子增加冗词或事实',
       '9. 只修改确有问题的表达，允许直接删去无用动作、修饰或重复解释；无需为了显得改过而整体重写，输出完整修订片段，不新增描写占位'
     ].join('\n')
   )

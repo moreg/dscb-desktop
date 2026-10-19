@@ -6,16 +6,41 @@ import {
 } from '../src/shared/format-chapter-prose'
 
 describe('formatChapterProse', () => {
-  it('保留完整台词内部按语气断开的句号', () => {
-    const dialogue = '大家都等着看预告，结果制片助理连素材都没交齐。明川，先签字，别让全组陪你耗。'
-    for (const [open, close] of [['“', '”'], ['「', '」'], ['"', '"']]) {
-      expect(formatChapterProse(`他把笔递过来。\n${open}${dialogue}${close}`)).toBe(
-        `他把笔递过来。\n${open}${dialogue}${close}`
+  it('陈述台词补齐末尾句号，只允许最后一个字符为中文句号', () => {
+    const source = '“作者来源轨是申请方，无独立主持资格”\n“第一句。第二句。”'
+    const expected = '“作者来源轨是申请方，无独立主持资格。”\n“第一句。”\n“第二句。”'
+    expect(formatChapterProse(source)).toBe(expected)
+    expect(formatChapterProse(expected)).toBe(expected)
+    expect(formatChapterProse('“真的吗？”\n“快走！”')).toBe('“真的吗？”\n“快走！”')
+  })
+  it('多句台词拆成引号完整的独立段落，保留闭合前句号', () => {
+    for (const [open, close] of [['“', '”'], ['「', '」'], ['『', '』'], ['"', '"']]) {
+      expect(formatChapterProse(`${open}先签字。还等什么？快点！${close}`)).toBe(
+        `${open}先签字。${close}\n${open}还等什么？${close}\n${open}快点！${close}`
       )
     }
-    expect(formatChapterProse('“先签字。还等什么？”\n“我不签！”')).toBe('“先签字。还等什么？”\n“我不签！”')
-    expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。他把笔递过来。\n“先签字。')
+    expect(formatChapterProse('他来了。他把笔递过来。')).toBe('他来了。\n他把笔递过来。')
+    expect(formatChapterProse('“先签字。”')).toBe('“先签字。”')
     expect(formatChapterProse('“Hello. World.”')).toBe('“Hello. World.”')
+  })
+
+  it('保留嵌套引文、成组问叹号和未完成的台词', () => {
+    expect(formatChapterProse('“先签字。\n别等了。再见！”')).toBe('“先签字。”\n“别等了。”\n“再见！”')
+    expect(formatChapterProse('"先签字。')).toBe('"先签字。')
+    expect(formatChapterProse('“他说‘别走。’你听见了吗？！我听见了。”')).toBe(
+      '“他说‘别走’你听见了吗？！”\n“我听见了。”'
+    )
+    expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。\n他把笔递过来。\n“先签字。')
+    expect(formatChapterProse('他拿起“钥匙”走了。门关了。')).toBe('他拿起“钥匙”走了。\n门关了。')
+  })
+
+  it('台词和叙述分段，格式化重复执行保持稳定', () => {
+    const source = '他问：“来了吗？到了。”他推开门。屋里没人。\n“等一下。别走！”'
+    const expected = '他问：\n“来了吗？”\n“到了。”\n他推开门。\n屋里没人。\n“等一下。”\n“别走！”'
+    expect(formatChapterProse(source)).toBe(expected)
+    expect(formatChapterProse(expected)).toBe(expected)
+    expect(needsChapterProseFormat(source)).toBe(true)
+    expect(needsChapterProseFormat(expected)).toBe(false)
   })
 
   it('removes half-width spaces but keeps single newlines', () => {
@@ -46,9 +71,9 @@ describe('formatChapterProse', () => {
   it('preserves Latin word boundaries while still removing Chinese spacing', () => {
     expect(formatChapterProse('Hello World')).toBe('Hello World')
     expect(formatChapterProse('用 iPhone 拍照')).toBe('用iPhone拍照')
-    expect(formatChapterProse('他说 “Hello,   World!” 然后走了。')).toBe('他说“Hello, World!”然后走了。')
+    expect(formatChapterProse('他说 “Hello,   World!” 然后走了。')).toBe('他说\n“Hello, World!”\n然后走了。')
     expect(formatChapterProse('Take\t40\u00a0kg to the café.')).toBe('Take 40 kg to the café.')
-    expect(formatChapterProse('“Hello, World!” he said.')).toBe('“Hello, World!” he said.')
+    expect(formatChapterProse('“Hello, World!” he said.')).toBe('“Hello, World!”\nhe said.')
     expect(formatChapterProse('  Hello World  \n\n  下 一 行  ')).toBe('Hello World\n下一行')
   })
 
@@ -69,12 +94,12 @@ describe('formatChapterProse', () => {
   it('重构单行内同一人台词被动作打断的结构为规范排版', () => {
     const raw = '“不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
     expect(formatChapterProse(raw)).toBe(
-      '朴博士把图像放大。\n“不是今晚才沾上的。旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
+      '朴博士把图像放大。\n“不是今晚才沾上的。”\n“旧切片里就有主毒，只是当时没把它从矿物背景里分出来。”'
     )
 
     const questionCase = '“你敢反抗我？”赵执事拔出佩剑，“今日休想走出大殿！”'
     expect(formatChapterProse(questionCase)).toBe(
-      '赵执事拔出佩剑。\n“你敢反抗我？今日休想走出大殿！”'
+      '赵执事拔出佩剑。\n“你敢反抗我？”\n“今日休想走出大殿！”'
     )
   })
 
@@ -91,6 +116,7 @@ describe('formatChapterProse', () => {
 describe('joinContinuation', () => {
   it('原文停在句末时补换行，避免续写内容焊进原文最后一段', () => {
     // 回归：模型被要求「开头不需要承接词」，首 token 不是换行；裸拼会粘连
+    expect(joinContinuation('“别走”', '他停下脚步。')).toBe('“别走”\n他停下脚步。')
     expect(joinContinuation('他推开门。', '屋里没人。')).toBe('他推开门。\n屋里没人。')
     expect(joinContinuation('「你是谁？」', '没人应声。')).toBe('「你是谁？」\n没人应声。')
     expect(joinContinuation('他愣住了……', '风停了。')).toBe('他愣住了……\n风停了。')

@@ -1,6 +1,6 @@
-import { isDeslopStage, deslopProgressLabel } from '../../shared/generation-progress'
+import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { finalizeChapterContinuation, finalizeChapterRewrite } from './chapter-generation-finalize'
+import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
@@ -468,6 +468,17 @@ export default function ChapterEditor({
 
   const [generating, setGenerating] = useState(false)
   const [generationStage, setGenerationStage] = useState<ChapterGenerationStage | null>(null)
+  const [generationElapsed, setGenerationElapsed] = useState(0)
+  const [generationRetry, setGenerationRetry] = useState<{ context?: string; message: string } | null>(null)
+  const generationContextRef = useRef<string | undefined>(undefined)
+  const generationPreviewRef = useRef('')
+  useEffect(() => {
+    if (!generating) return
+    const started = Date.now()
+    setGenerationElapsed(0)
+    const timer = setInterval(() => setGenerationElapsed(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [generating])
   const [autoDeslopResult, setAutoDeslopResult] = useState<AutoDeslopResult | null>(null)
   const [autoDeslopSnapshot, setAutoDeslopSnapshot] = useState<string | null>(null)
   const [autoForeshadowRepair, setAutoForeshadowRepair] = useState<{
@@ -1193,6 +1204,7 @@ export default function ChapterEditor({
     ++genRef.current
     setGenerating(false)
     setGenerationStage(null)
+    setGenerationRetry(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
     setAutoForeshadowRepair(null)
@@ -1916,9 +1928,20 @@ export default function ChapterEditor({
     setComplianceReport(null)
     setComplianceChecking(false)
     const restore = preStreamDraftRef.current
-    // 续写 / 落笔会改正文，取消时回滚；出建议不改正文
+    // 续写停止保留已收到的正文；落笔修改仍回滚；出建议不改正文。
     if (restore != null && (generating || adjusting)) {
-      setDraft(restore)
+      const retained = generating ? interruptedChapterDraft(restore, generationPreviewRef.current, 'LLM_ABORTED') : restore
+      setDraft(retained)
+      if (generating) {
+        setDirty(retained !== data?.content)
+        const stoppedEpoch = sessionEpochRef.current
+        void window.api.saveDraft(projectId, chapterNumber, retained).catch(() => {
+          if (sessionEpochRef.current === stoppedEpoch) {
+            setAlertInfo({ message: '已停止，草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
+          }
+        })
+        setGenerationRetry({ context: generationContextRef.current, message: '已停止，已有草稿已保留。可以从当前草稿继续写。' })
+      }
     }
     setGenerating(false)
     setAdjusting(false)
@@ -1930,7 +1953,7 @@ export default function ChapterEditor({
     streamCompletedRef.current = false
     preStreamDraftRef.current = null
     abortAllTrackedStreams()
-    setUndoToast({ message: '已取消生成', type: 'info' })
+    setUndoToast({ message: generating ? '已停止生成，保留已有草稿' : '已取消生成', type: 'info' })
   }
 
   const isStreamAbortError = (error: string | undefined): boolean => {
@@ -1966,6 +1989,9 @@ export default function ChapterEditor({
     streamBusyRef.current = true
     streamCompletedRef.current = false
     setGenerating(true)
+    setGenerationRetry(null)
+    generationContextRef.current = tempContextVal
+    generationPreviewRef.current = ''
     setGenerationStage('generating')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
@@ -2025,6 +2051,7 @@ export default function ChapterEditor({
           if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
           if (token) {
             finalDraft += token
+            generationPreviewRef.current = finalDraft
             setDraft(joinContinuation(initialDraft, finalDraft), { preserveCaret: false })
           }
         },
@@ -2046,11 +2073,22 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       editorFinalized = true
       if (!result.ok) {
-        // 流式过程中可能已写入错误旁白（如 agent 流程说明），失败时回滚到续写前
-        setDraft(initialDraft)
+        // 超时保留小说预览，其他失败仍回滚错误旁白。
+        const retained = interruptedChapterDraft(initialDraft, finalDraft, result.error ?? '')
+        setDraft(retained)
+        setDirty(retained !== data?.content)
         releaseIfMine()
-        if (!isStreamAbortError(result.error)) {
-          setAlertInfo({ message: friendlyLlmError(result.error) })
+        if (/LLM_TIMEOUT/.test(result.error ?? '')) {
+          setGenerationRetry({ context: tempContextVal, message: finalDraft.trim()
+            ? '生成超时，已有草稿已保留。重试将从当前草稿继续写。'
+            : '等待超时，尚未收到正文。原有草稿已保留，可以重试。' })
+          try {
+            await window.api.saveDraft(targetProjectId, targetChapter, retained)
+          } catch {
+            if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setAlertInfo({ message: '超时草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
+          }
+        } else if (!isStreamAbortError(result.error)) {
+          setGenerationRetry({ context: tempContextVal, message: friendlyLlmError(result.error) })
         }
         return
       }
@@ -2089,9 +2127,18 @@ export default function ChapterEditor({
           pauseMemoryForForeshadowRepair(formatted, result.foreshadowRepair!.message)
         }
       }
-    } catch {
+    } catch (err) {
       if (genRef.current === myGen && sessionEpochRef.current === myEpoch) {
-        setDraft(initialDraft)
+        const error = err instanceof Error ? err.message : String(err)
+        const retained = interruptedChapterDraft(initialDraft, finalDraft, error)
+        setDraft(retained)
+        setDirty(retained !== data?.content)
+        setGenerationRetry({ context: tempContextVal, message: friendlyLlmError(error) })
+        void window.api.saveDraft(targetProjectId, targetChapter, retained).catch(() => {
+          if (sessionEpochRef.current === myEpoch && genRef.current === myGen) {
+            setAlertInfo({ message: '草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
+          }
+        })
         releaseIfMine()
       }
     }
@@ -4790,7 +4837,7 @@ export default function ChapterEditor({
           <button
             className="btn btn-danger btn-sm"
             onClick={cancelActiveStream}
-            title="停止当前 AI 生成，并恢复开始前的正文"
+            title={generating ? '停止当前生成并保留已有草稿' : '停止当前修改，并恢复开始前的正文'}
           >
             {generationStage === 'foreshadowRepair' ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
@@ -4873,6 +4920,15 @@ export default function ChapterEditor({
         </div>
       </div>
 
+      {generating ? <div className="meta" style={{ marginBottom: 8 }}>
+        <span role="status">{generationProgressLabel(generationStage)}</span>
+        {' · '}已用时 {Math.floor(generationElapsed / 60)}分{generationElapsed % 60}秒
+      </div> : null}
+      {generationRetry && !generating && !adjusting && !adjustPlanning ? <div className="meta" style={{ marginBottom: 8 }}>
+        <span role="status">{generationRetry.message}</span>{' '}
+        <button className="btn btn-primary btn-sm" onClick={() => void aiGenerate(generationRetry.context)}>重试续写</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setGenerationRetry(null)}>关闭提示</button>
+      </div> : null}
       {isDeslopStage(generationStage) && (generating || adjusting) ? (
         <div className="meta" role="status" style={{ marginBottom: 8 }}>
           生成原稿已保存 · {deslopProgressLabel(generationStage)}

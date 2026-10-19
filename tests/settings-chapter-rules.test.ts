@@ -90,7 +90,7 @@ describe('saved legacy dialogue rules at prompt time', () => {
     expect(prompt).not.toContain('句号只保留在整段台词最末尾')
     expect(prompt).toContain('普通的“好”“嗯”和直接回答按语境保留')
     expect(prompt).toContain('不把造梗、跑题或自相矛盾作为互动任务')
-    expect(prompt).toContain('包括闭合引号前')
+    expect(prompt).toContain('陈述台词只在闭合引号前保留一个句号')
     expect(prompt).toContain('自定义：保留本书已有方言')
     expect(prompt).toContain('作者自定义：这句不能丢')
     expect(prompt).toContain('整章对话占比目标 70%')

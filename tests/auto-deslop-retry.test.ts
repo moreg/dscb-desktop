@@ -87,7 +87,7 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     const output = await context.run({ formatCandidate: formatChapterProse })
 
     expect(formatted).not.toBe(candidate)
-    expect(formatted).toContain('林远走到东屋前。\n“我先开门。你别跟来。”')
+    expect(formatted).toContain('林远走到东屋前。\n“我先开门。”\n“你别跟来。”')
     expect(context.calls('deslop:verify')[0][0]).toContain(formatted)
     expect(context.calls('deslop:verify')[0][0]).toContain(original)
     expect(output.content).toBe(original)

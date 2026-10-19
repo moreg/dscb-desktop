@@ -650,6 +650,7 @@ export class WriteService {
     onGenerationStage?.('generating')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
+      onStatus: status => onGenerationStage?.(`agy:${status}`),
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }

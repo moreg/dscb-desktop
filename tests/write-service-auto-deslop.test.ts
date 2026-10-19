@@ -153,6 +153,20 @@ describe('自动写作去 AI 味', () => {
     return vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:verify')
   }
 
+  it('正文调用将 AGY 排队和等待状态转发到章节进度', async () => {
+    vi.mocked(llm.generateStream).mockImplementationOnce(async (_prompt, opts = {}) => {
+      opts.onStatus?.('queued')
+      opts.onStatus?.('waiting')
+      opts.onStatus?.('streaming')
+      opts.onToken?.(RAW)
+      return RAW
+    })
+    const onGenerationStage = vi.fn()
+    await service.generateChapterStream(projectId, 1, { onGenerationStage })
+    expect(onGenerationStage.mock.calls.slice(0, 4).map(([stage]) => stage))
+      .toEqual(['generating', 'agy:queued', 'agy:waiting', 'agy:streaming'])
+  })
+
   it('本次临时写作要求必须继续进入自动润色与独立场景复核', async () => {
     await service.generateChapterStream(projectId, 1, { tempContext: '整场重组，不要只改措辞' })
     expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({

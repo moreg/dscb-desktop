@@ -1,3 +1,4 @@
+import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import { describe, expect, it, vi } from 'vitest'
 import { applyDialoguePatches, applyExactDialoguePatches, dialogueRatioPassed, ensureDialogueQuality, measureDialogue } from '../src/main/data/dialogue-quality'
 import { DeslopService } from '../src/main/data/deslop/deslop-service'
@@ -44,7 +45,7 @@ describe('对白计量与自动验收', () => {
     expect(result.dialogueQuality).toMatchObject({ passed: true, beforeRatio: 0.4, afterRatio: 0.7 })
     const prompt = vi.mocked(llm.generateStream).mock.calls[0][0]
     expect(prompt).toContain(`【原稿事实基线】\n\n${source}`)
-    expect(prompt).toContain(`【待审核稿】\n\n${draft.replace(/\n\n/g, '\n')}`)
+    expect(prompt).toContain(`【待审核稿】\n\n${formatChapterProse(draft)}`)
   })
   it('只应用唯一匹配且朝目标改善的局部提案，拒绝伪匹配和反向改坏', () => {
     const source = prose(40, 60)
@@ -132,7 +133,7 @@ describe('对白计量与自动验收', () => {
     const replacement = prose(50, 50)
     const llm = llmWith((_p, o) => o.meta?.feature === 'deslop:dialogue-review' ? passed : JSON.stringify({ text: replacement }))
     const result = await ensureDialogueQuality(source, source, llm, { mode: 'write', existingText: prefix })
-    expect(result.text.replace(/\s/g, '')).toBe(replacement.replace(/\s/g, ''))
+    expect(result.text.replace(/\s/g, '')).toBe(formatChapterProse(replacement).replace(/\s/g, ''))
     expect(measureDialogue(`${prefix}\n${result.text}`).ratio).toBe(0.7)
     expect(result.report.beforeRatio).toBe(0.65)
   })

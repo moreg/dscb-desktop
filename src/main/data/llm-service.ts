@@ -10,6 +10,7 @@ import { runClaude, probeClaude } from './claude-runner'
 import { createHash } from 'crypto'
 
 export interface GenerateOptions {
+  onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   onToken?: (token: string) => void
   signal?: AbortSignal
   /** 调用方上下文，用于用量归属 */
@@ -625,6 +626,7 @@ export class LlmService {
     // 仅传用户 signal；超时由 runner 的 timeoutSec / agy --print-timeout 负责，
     // 以便区分 LLM_ABORTED 与 LLM_TIMEOUT
     const { full, usage } = await runAntigravity(merged, {
+      onStatus: opts.onStatus,
       model: effectiveProvider.model && effectiveProvider.model !== 'default' ? effectiveProvider.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,

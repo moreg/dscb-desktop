@@ -2,9 +2,8 @@
  * 章节正文格式化：
  * - 去掉汉字间与行首尾的多余空白；英文词间空白归一为空格
  * - 去掉空行（连续换行压成单个换行）
- * - **保留**段落换行
- * - 对话动作排版归一：严禁同一人台词中间夹动作打断（“话1”动作，“话2”），自动将动作前置独立成行并合并台词
- * - 保留人物台词内部按语气使用的句号、问号与叹号
+ * - 一句一段，对话独立成段，多句台词拆成引号完整的段落
+ * - 对话中间不用中文句号，陈述台词以句号收尾，保留问号、叹号和英文标点
  *
  * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
@@ -17,7 +16,8 @@ const LATIN_SPACE_NEIGHBOR = /[\p{Script=Latin}\p{M}0-9.,!?;:'"“”‘’–�
  * “不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒……”
  * 转换为：
  * 朴博士把图像放大。
- * “不是今晚才沾上的。旧切片里就有主毒……”
+ * “不是今晚才沾上的。”
+ * “旧切片里就有主毒……”
  */
 export function separateDialogueInterruption(text: string): string {
   if (!text) return text
@@ -35,20 +35,77 @@ export function separateDialogueInterruption(text: string): string {
       let action = m[4].trim().replace(/^[，,：:\s]+|[，,：:\s]+$/g, '')
       if (action && !/[。！？…~～]$/.test(action)) action += '。'
 
-      const sep = rawQ1.match(/[。？！?!~～…]+$/)?.[0] ?? '，'
-      const q1Clean = rawQ1.replace(/[。！？，；、…!?~～]+$/, '')
       const q2 = m[6]
 
       if (action) {
         out.push(action)
       }
-      out.push(`${openQ}${q1Clean}${sep}${q2}${closeQ}`)
+      out.push(`${openQ}${rawQ1}${closeQ}`, `${m[5]}${q2}${m[7]}`)
     } else {
       out.push(line)
     }
   }
 
   return out.join('\n')
+}
+
+/** 只在顶层句末断段，保留嵌套引文、括号与连续问叹号的完整性。 */
+function splitSentences(text: string): string[] {
+  const pairs: Record<string, string> = { '“': '”', '「': '」', '『': '』', '‘': '’', '"': '"', '（': '）', '(': ')' }
+  const stack: string[] = []
+  const sentences: string[] = []
+  let start = 0
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+    if (stack.length && char === stack[stack.length - 1]) stack.pop()
+    else if (pairs[char]) stack.push(pairs[char])
+    if (!stack.length && /[。！？!?]/.test(char)) {
+      while (i + 1 < text.length && /[。！？!?]/.test(text[i + 1])) i++
+      sentences.push(text.slice(start, i + 1).trim())
+      start = i + 1
+    }
+  }
+  if (text.slice(start).trim()) sentences.push(text.slice(start).trim())
+  return sentences.filter(Boolean)
+}
+
+function formatSentenceParagraphs(text: string): string {
+  const paragraphs: string[] = []
+  // 模型可能把一对完整引号跨行输出，先补齐各行引号，再统一断句。
+  const completeLines = text.replace(/“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"/g, (quote) => {
+    if (!quote.includes('\n')) return quote
+    const open = quote[0]
+    const close = quote.slice(-1)
+    return quote.slice(1, -1).split('\n').filter((line) => line.trim())
+      .map((line) => `${open}${line}${close}`).join('\n')
+  })
+  for (const line of completeLines.split('\n')) {
+    // 双引号内是台词；保留单引号嵌套引文。未闭合台词留给续写，不补造结尾。
+    const quotes = /“([^”]*)”|「([^」]*)」|『([^』]*)』|"([^"\n]*)"/g
+    let start = 0
+    for (const match of line.matchAll(quotes)) {
+      const prefix = line.slice(start, match.index)
+      const body = match[1] ?? match[2] ?? match[3] ?? match[4]
+      const suffix = line.slice(match.index! + match[0].length)
+      // 叙述中用引号标出的词语不当作独立发言。
+      if (prefix.trim() && suffix.trim() && !/[。！？!?]/.test(body) &&
+          !/[：:]$/.test(prefix.trim()) && !/(?:说|问|喊|道|答)$/.test(prefix.trim())) continue
+      paragraphs.push(...splitSentences(prefix))
+      const open = match[0][0]
+      const close = match[0].slice(-1)
+      for (const sentence of splitSentences(body)) {
+        let content = sentence.replace(/。/g, '').trim()
+        // 每段陈述台词只在闭合引号前保留一个句号；问叹、英文句末与打断符保留。
+        if (content && !/[！？!?….~～—]$/.test(content)) {
+          content = content.replace(/[，,；;：:]+$/, '') + '。'
+        }
+        if (content) paragraphs.push(`${open}${content}${close}`)
+      }
+      start = match.index! + match[0].length
+    }
+    paragraphs.push(...splitSentences(line.slice(start)))
+  }
+  return paragraphs.join('\n')
 }
 
 export function formatChapterProse(text: string): string {
@@ -71,14 +128,14 @@ export function formatChapterProse(text: string): string {
 
   const proseWithDialogue = separateDialogueInterruption(normalized)
   // 空白收干净之后再认章号：「第 9 章」会先变成「第9章」。
-  return stripPublishedChapterRefs(proseWithDialogue)
+  return formatSentenceParagraphs(stripPublishedChapterRefs(proseWithDialogue))
 }
 
 /**
  * 句末判定：终止标点（可后跟收尾引号/括号）。
  * 用于决定续写接缝处该不该断段。
  */
-const SENTENCE_END_RE = /[。！？!?…～~—.][」』】》〉）)\]"'”’]*$/
+const SENTENCE_END_RE = /(?:[。！？!?…～~—.][」』】》〉）)\]"'”’]*|[」』”"])$/
 
 /**
  * 拼接续写结果。
@@ -86,7 +143,7 @@ const SENTENCE_END_RE = /[。！？!?…～~—.][」』】》〉）)\]"'”’]
  * 两种接缝要区别对待：
  * - 原文停在**句末**（或已换行）：模型是另起一段往下写。此时必须补换行——
  *   prompt 要求它「开头不需要任何承接词」，首 token 一般不是换行，裸拼会把原文
- *   最后一段和新写的第一段焊成一段，而 formatChapterProse 只压空行、不补换行，救不回来。
+ *   最后一段和新写的第一段焊成一段；台词无句号时也要识别闭合引号。
  * - 原文停在**句子中间**（如「他推开」）：模型是在把这句写完。这时补换行反而会把
  *   一句话劈成两段，比焊死更糟。直接拼接才是对的。
  */

@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { finalizeChapterContinuation, finalizeChapterRewrite } from '../src/renderer/src/chapter-generation-finalize'
+import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft } from '../src/renderer/src/chapter-generation-finalize'
+
+describe('中断续写保留草稿', () => {
+  it.each(['LLM_TIMEOUT', 'LLM_ABORTED'])('%s 保留已有正文和新增正文', error => {
+    expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n“你来了。”')
+  })
+  it('没有收到新正文时保留原稿', () => {
+    expect(interruptedChapterDraft('原稿。', '', 'LLM_TIMEOUT')).toBe('原稿。')
+  })
+  it('流程旁白不作为超时草稿保存', () => {
+    expect(interruptedChapterDraft('原稿。', '我会调用 story-long-write 技能来生成正文。', 'LLM_TIMEOUT')).toBe('原稿。')
+  })
+  it('其他失败回滚预览，不把错误消息保留到正文', () => {
+    expect(interruptedChapterDraft('原稿。', 'Error: sign in', 'AGY_AUTH_EXPIRED')).toBe('原稿。')
+  })
+})
 
 describe('正文重写最终稿覆盖流式预览', () => {
   it('精修稿恰好还原为生成前正文时，编辑器仍恢复最终稿', () => {
@@ -19,6 +34,14 @@ describe('正文重写最终稿覆盖流式预览', () => {
 })
 
 describe('续写先采用补写稿再同步记忆', () => {
+  it.each([false, true])('增量与补写整章都在交付时统一排版（整章=%s）', (full) => {
+    const raw = '“先签字。别等了！”他转身。门关了。'
+    const result = finalizeChapterContinuation('已有正文。', '预览', {
+      ok: true, content: raw, ...(full ? { fullContent: '已有正文。' + raw } : {})
+    })
+    expect(result.content).toBe('已有正文。\n“先签字。”\n“别等了！”\n他转身。\n门关了。')
+  })
+
   it('采用补入已有正文中段的整章，前文只出现一次', () => {
     const result = finalizeChapterContinuation('已有正文。', '流式预览。', {
       ok: true, content: '新增结尾。', fullContent: '已有正文。\n补入的伏笔。\n新增结尾。',
