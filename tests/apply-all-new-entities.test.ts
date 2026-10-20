@@ -11,6 +11,8 @@ import { ItemRepo } from '../src/main/data/memory/item-repo'
 import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
 import { writeJsonAtomic } from '../src/main/data/atomic'
 import { readMemoryCandidate } from '../src/main/data/memory/candidate-repository'
+import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
+import { hashProse } from '../src/main/data/memory/prose-memory-index'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 import type { MemoryExtraction } from '../src/shared/types'
@@ -60,9 +62,11 @@ describe('applyAllNewEntities', () => {
     }
 
     const candidateFile = path.join(candidateDir, 'chapter-1.json')
+    const prose = '苏白携斩铁残剑来到问剑峰，听见后山禁地传来神秘低语。'
+    await new ProseRepo(dir).write(1, prose)
     await writeJsonAtomic(candidateFile, {
       chapterNumber: 1,
-      sourceHash: 'hash-1',
+      sourceHash: hashProse(prose),
       extraction,
       status: 'pending',
       updatedAt: new Date().toISOString()

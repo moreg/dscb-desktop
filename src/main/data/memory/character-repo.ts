@@ -12,6 +12,7 @@ import {
   sanitizeForFileName
 } from './entity-helpers'
 import type { Character, CreateCharacterInput, UpdateCharacterInput } from '../../../shared/types'
+import { FIELD_CHAPTERS, observationChapters, observationLabel, normalizeObservationLabels } from './observation-provenance'
 
 /**
  * 人物 repo。一真相源 = 记忆/人物/<name>.md；fallback = 设定/角色/<name>.md。
@@ -184,7 +185,7 @@ export class CharacterRepo {
     source: string
   ): Omit<Character, 'createdAt' | 'updatedAt'> {
     // 合并所有 H2 节体（不区分 section，按出现顺序）
-    const allBody = doc.sections.map((s) => s.body).join('\n')
+    const allBody = normalizeObservationLabels(doc.sections.map((s) => s.body).join('\n'))
     const { fields, order } = parseBoldFields(allBody)
 
     const basicSec = doc.sections.find((s) => s.title.includes('基本信息'))
@@ -194,7 +195,7 @@ export class CharacterRepo {
     let identity: string | undefined
     let role: string | undefined
     if (basicSec) {
-      const { fields: bf } = parseBoldFields(basicSec.body)
+      const { fields: bf } = parseBoldFields(normalizeObservationLabels(basicSec.body))
       identity = fieldToStr(bf.get('身份'))
       // 优先读专用字段「角色定位」（与 serialize 对齐）；否则从身份/阵营关键词推断
       const explicitRole = fieldToStr(bf.get('角色定位'))
@@ -212,7 +213,7 @@ export class CharacterRepo {
 
     let personality: string | undefined
     if (personalitySec) {
-      const { fields: pf } = parseBoldFields(personalitySec.body)
+      const { fields: pf } = parseBoldFields(normalizeObservationLabels(personalitySec.body))
       const explicit = fieldToJoinedString(pf.get('显性性格'))
       const implicit = fieldToJoinedString(pf.get('隐性性格'))
       const parts = [explicit, implicit].filter((v): v is string => Boolean(v))
@@ -225,7 +226,7 @@ export class CharacterRepo {
 
     let abilities: string | undefined
     if (abilitySec) {
-      const { fields: af } = parseBoldFields(abilitySec.body)
+      const { fields: af } = parseBoldFields(normalizeObservationLabels(abilitySec.body))
       abilities = fieldToStr(af.get('金手指'))
         ?? fieldToStr(af.get('当前境界'))
         ?? fieldToStr(af.get('当前修为'))
@@ -309,7 +310,7 @@ export class CharacterRepo {
    * 统一序列化：create（CreateCharacterInput 无 customFields）与 update（Character 有 customFields）共用。
    * 任何含 name/role/identity/personality/abilities/synopsis/tags/customFields 的对象都可传入。
    */
-  private serialize(c: {
+  serialize(c: {
     name: string
     role?: string
     identity?: string
@@ -320,21 +321,24 @@ export class CharacterRepo {
     customFields?: Record<string, string | string[]>
   }): string {
     const lines: string[] = [`# ${c.name}`, '']
+    const dates = observationChapters(c.customFields?.[FIELD_CHAPTERS])
+    const label = (field: string) => observationLabel(field, dates)
+    if (Object.keys(dates).length) lines.push('各字段是标注章节的观察记录，不保证后续仍成立；当前状态以已审正文连续性台账为准。', '')
     if (c.role || c.identity) {
       lines.push('## 基本信息', '')
       // 与 parseFromDoc 对齐：身份 = identity，角色定位 = role
-      if (c.identity) lines.push(`- **身份**：${c.identity}`)
-      if (c.role) lines.push(`- **角色定位**：${c.role}`)
+      if (c.identity) lines.push(`- **${label('身份')}**：${c.identity}`)
+      if (c.role) lines.push(`- **${label('角色定位')}**：${c.role}`)
       lines.push('')
     }
     if (c.personality) {
-      lines.push('## 性格', '', `- **显性性格**：${c.personality}`, '')
+      lines.push('## 性格', '', `- **${label('显性性格')}**：${c.personality}`, '')
     }
     if (c.abilities) {
-      lines.push('## 能力', '', `- **金手指**：${c.abilities}`, '')
+      lines.push('## 能力', '', `- **${label('金手指')}**：${c.abilities}`, '')
     }
     if (c.synopsis) {
-      lines.push('## 当前状态', '', `- **当前状态**：${c.synopsis}`, '')
+      lines.push(dates['当前状态'] ? `## 状态观察（第${dates['当前状态']}章）` : '## 当前状态', '', `- **${label('当前状态')}**：${c.synopsis}`, '')
     }
     if (c.tags && c.tags.length) {
       lines.push('## 标签', '', `- **专属标签**：${c.tags.map((t) => `#${t}#`).join(' ')}`, '')
@@ -342,11 +346,15 @@ export class CharacterRepo {
     if (c.customFields) {
       lines.push('## 自定义', '')
       for (const [k, v] of Object.entries(c.customFields)) {
+        // A previously parsed custom copy must not override a newer first-class value.
+        if ((c.identity && k === '身份') || (c.role && k === '角色定位') ||
+          (c.personality && ['性格', '显性性格'].includes(k)) ||
+          (c.abilities && ['能力', '金手指'].includes(k)) || (c.synopsis && k === '当前状态')) continue
         if (Array.isArray(v)) {
-          lines.push(`- **${k}**：${v[0] ?? ''}`)
+          lines.push(`- **${label(k)}**：${v[0] ?? ''}`)
           for (const sub of v.slice(1)) lines.push(`  - ${sub}`)
         } else {
-          lines.push(`- **${k}**：${v}`)
+          lines.push(`- **${label(k)}**：${v}`)
         }
       }
       lines.push('')

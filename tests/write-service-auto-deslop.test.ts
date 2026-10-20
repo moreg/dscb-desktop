@@ -467,7 +467,7 @@ describe('自动写作去 AI 味', () => {
     expect(onProgress.mock.calls.map(([step]) => step)).toContain('deslop')
   })
 
-  it('批量润色失败仍保存原稿并完成写后流程，不报告保存失败', async () => {
+  it('批量润色失败仍保存原稿，未完成的写后检查必须暂停且不误报保存失败', async () => {
     vi.mocked(deslop.deslop).mockImplementation(async () => {
       expect(await new ProseRepo(dir).read(1)).toBe(RAW)
       throw new Error('LLM_TIMEOUT')
@@ -484,7 +484,8 @@ describe('自动写作去 AI 味', () => {
     })
     const onComplete = vi.fn()
     const progress = await service.generateChaptersBatch(projectId, 1, 1, onComplete)
-    expect(progress.status).toBe('completed')
+    expect(progress.status).toBe('paused')
+    expect(progress.pendingPostProcessChapter).toBe(1)
     expect(progress.completed).toEqual([1])
     expect(progress.error).toBeUndefined()
     expect(await new ProseRepo(dir).read(1)).toBe(RAW)

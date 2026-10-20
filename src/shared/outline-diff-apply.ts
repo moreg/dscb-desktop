@@ -85,6 +85,12 @@ export function sanitizeOutlinePatch(raw: unknown): OutlineDiffPatch | undefined
       patch[key] = v.trim()
     }
   }
+  // Models commonly return a JSON number for this count. Dropping it turns an
+  // otherwise pure word-budget diff into an apparent structural plot change.
+  if (typeof obj.wordEstimate === 'number' && Number.isSafeInteger(obj.wordEstimate) &&
+      obj.wordEstimate > 0 && obj.wordEstimate <= 40_000) {
+    patch.wordEstimate = `${obj.wordEstimate}字`
+  }
   for (const key of PATCH_LIST_KEYS) {
     const v = obj[key]
     if (Array.isArray(v)) {

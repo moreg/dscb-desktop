@@ -4,13 +4,14 @@ import { ProseRepo } from './skill-format/prose-repo'
 import { ChapterSummaryRepo } from './memory/chapter-summary-repo'
 import { hashProse, listProseSources } from './memory/prose-memory-index'
 import { contentRevision } from './chapter-revision'
-import { parseContinuityFacts } from './memory/continuity-context'
+import { parseContinuityFacts, assertSummaryKnowledgeCoverage, buildContinuityContext } from './memory/continuity-context'
 
 export async function regenerateSummariesBatch(
   dir: string, options: ChapterSummaryBatchOptions,
   generate: (chapter: number, content: string, revision: string) => Promise<ChapterSummaryView>,
   onChapterComplete: (result: ChapterSummaryBatchItem) => void,
-  opts: { signal?: AbortSignal; onProgress?: (progress: ChapterSummaryBatchProgress) => void } = {}
+  opts: { signal?: AbortSignal; onProgress?: (progress: ChapterSummaryBatchProgress) => void;
+    validateChapter?: (chapter: number, content: string) => Promise<void> } = {}
 ): Promise<ChapterSummaryBatchResult> {
   const { fromChapter, toChapter } = options
   const results: ChapterSummaryBatchItem[] = []
@@ -33,10 +34,18 @@ export async function regenerateSummariesBatch(
       const sourceHash = hashProse(content)
       if (!content.trim()) result = { chapterNumber: chapter.chapterNumber, status: 'skipped', error: '正文为空，已跳过' }
       else {
+        await opts.validateChapter?.(chapter.chapterNumber, content)
         const current = await repo.readCurrent(chapter.chapterNumber, content)
         let validContinuity = false
         if (current?.continuity !== undefined) {
-          try { parseContinuityFacts(current.continuity, content); validContinuity = true } catch { /* Regenerate invalid records. */ }
+          try {
+            parseContinuityFacts(current.continuity, content)
+            const vocabulary = (await buildContinuityContext(dir, chapter.chapterNumber, {
+              text: content, characters: [], aliases: [], props: []
+            })).filter(line => line.startsWith('- [') && line.includes('最近可核实记录'))
+            assertSummaryKnowledgeCoverage(current, vocabulary)
+            validContinuity = true
+          } catch { /* Regenerate invalid or incomplete records. */ }
         }
         if (current && validContinuity &&
           (options.onlyMissing || completed.get(chapter.chapterNumber) === sourceHash)) {

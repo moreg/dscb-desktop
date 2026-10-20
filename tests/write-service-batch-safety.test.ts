@@ -89,7 +89,8 @@ describe('batch safety and recovery', () => {
       return content
     })
     vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
-    vi.mocked(llm.generateStream).mockResolvedValue(foreshadowPatch)
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] }) : foreshadowPatch)
     const completed = vi.fn()
     const progress = await service.generateChaptersBatch(projectId, 1, 2, completed, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
@@ -101,8 +102,7 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(service.generateChapterSummary).mock.calls[0][2]).toBe(repaired)
     const extractedTexts = vi.mocked(flow.extractMemoryStream).mock.calls.map((call) => call[0])
     expect(extractedTexts).toContain(repaired)
-    expect(llm.generateStream).toHaveBeenCalledOnce()
-    expect(vi.mocked(llm.generateStream).mock.calls[0][1]?.meta?.feature).toBe('batchForeshadowRepair')
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'batchForeshadowRepair')).toHaveLength(1)
     expect(await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')).toContain('原始事件1')
   })
 

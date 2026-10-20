@@ -31,6 +31,43 @@ describe('全书批量重新生成概要', () => {
   const options: ChapterSummaryBatchOptions = { fromChapter: 1, toChapter: 500, onlyMissing: false }
   const run = (input = options, signal?: AbortSignal) => service.regenerateSummariesBatch(id, input, () => {}, { signal })
 
+  it('真实模型遗漏回归：仅补缺和普通复用均重建漏掉逐人知情的概要', async () => {
+    const evidence = '陆宁此时仍在远处的南关，没有收到消息，仍不知道内应是谁。'
+    const early = '陆宁不知道内应是谁。'
+    await new ProseRepo(dir).write(3, early)
+    await new ProseRepo(dir).write(640, evidence)
+    await new ChapterSummaryRepo(dir).write({ schemaVersion: 1, chapterNumber: 3, sourceHash: hashProse(early), generatedAt: '',
+      events: [], stateChanges: [], openThreads: [], continuity: [
+        { kind: 'knowledge', subject: '陆宁', object: '内应身份', aspect: '知情程度', value: '不知内应是谁', evidence: early }
+      ] })
+    const omitted = { events: [{ text: '陆宁仍不知道内应身份。', evidence }], stateChanges: [], openThreads: [], continuity: [] }
+    const correct = { ...omitted, continuity: [{ kind: 'knowledge', subject: '陆宁', object: '内应身份', aspect: '知情程度', value: '仍不知内应是谁', evidence }] }
+    const seedIncomplete = () => new ChapterSummaryRepo(dir).write({ schemaVersion: 1, chapterNumber: 640,
+      sourceHash: hashProse(evidence), generatedAt: '', ...omitted })
+    await seedIncomplete()
+    let extractions = 0
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] })
+      : JSON.stringify(++extractions === 1 ? omitted : correct))
+    const first = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
+    expect(first.results[0].status).toBe('generated')
+    expect(extractions).toBe(2)
+    expect(vi.mocked(llm.generateStream).mock.calls.some(([prompt]) => prompt.includes('陆宁的知情事实缺少对应连续性台账'))).toBe(true)
+    await seedIncomplete()
+    const second = await service.generateChapterSummary(id, 640, evidence)
+    expect(second.reused).not.toBe(true)
+    expect(second.continuity).toEqual(correct.continuity)
+    await seedIncomplete()
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] })
+      : JSON.stringify(omitted))
+    const failed = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
+    expect(failed.results[0]).toMatchObject({ status: 'failed', error: expect.stringContaining('MEMORY_KNOWLEDGE_INCOMPLETE') })
+    const complete = service as unknown as { completeChapterSummary: (id: string, dir: string, chapter: number, content: string) => Promise<unknown> }
+    await expect(complete.completeChapterSummary(id, dir, 640, evidence)).rejects.toThrow('MEMORY_KNOWLEDGE_INCOMPLETE')
+    expect((await new ChapterSummaryRepo(dir).read(640))?.events).toEqual(omitted.events)
+  })
+
   it('覆盖全书及稀疏章号，每章立即保存；单章失败不影响后续，继续时跳过成功且未改正文的章', async () => {
     for (const n of [1, 2, 201]) await new ProseRepo(dir).write(n, prose)
     vi.mocked(llm.generateStream).mockResolvedValueOnce(reply).mockRejectedValueOnce(new Error('临时断网')).mockResolvedValueOnce(reply)

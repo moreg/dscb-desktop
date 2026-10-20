@@ -5,10 +5,22 @@ import { join } from 'path'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { ChapterSummaryRepo } from '../src/main/data/memory/chapter-summary-repo'
 import { hashProse, listProseSources } from '../src/main/data/memory/prose-memory-index'
-import { buildContinuityContext, parseContinuityFacts } from '../src/main/data/memory/continuity-context'
+import { buildContinuityContext, parseContinuityFacts, assertSummaryKnowledgeCoverage } from '../src/main/data/memory/continuity-context'
 import type { ContinuityFact } from '../src/shared/types'
 
 describe('长期连续性记忆', () => {
+  it('真实提取回归：不知情写在未结线索中也必须进入逐人台账', () => {
+    const fact = { text: '陆宁仍在南关，尚未收到消息，仍不知道内应身份。', evidence: '陆宁此时仍在远处的南关，没有收到消息，仍不知道内应是谁。' }
+    const summary = { schemaVersion: 1 as const, chapterNumber: 640, sourceHash: '', generatedAt: '',
+      events: [], stateChanges: [], openThreads: [fact], continuity: [] as ContinuityFact[] }
+    const vocabulary = ['- [人物认知 · 最近可核实记录，不等于完整现状] 陆宁 → 内应身份 · 知情程度：不知']
+    expect(() => assertSummaryKnowledgeCoverage(summary, vocabulary)).toThrow('陆宁的知情事实缺少对应连续性台账')
+    summary.continuity.push({ kind: 'knowledge', subject: '陆宁', object: '内应身份', aspect: '知情程度', value: '仍不知', evidence: fact.evidence })
+    expect(() => assertSummaryKnowledgeCoverage(summary, vocabulary)).not.toThrow()
+    // Merely naming someone in another person's discovery does not assert their knowledge.
+    summary.openThreads = [{ text: '陆安得知陆宁的行踪。', evidence: '陆安得知陆宁的行踪。' }]
+    expect(() => assertSummaryKnowledgeCoverage(summary, vocabulary)).not.toThrow()
+  })
   let dir: string
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'continuity-')) })
   afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
@@ -103,5 +115,45 @@ describe('长期连续性记忆', () => {
     expect(() => parseContinuityFacts([{ ...item('陆宁', prose), object: '陆宁' }], prose)).toThrow('object')
     expect(() => parseContinuityFacts([{ ...item('陆宁', prose), evidence: '钥匙' }], prose)).toThrow('依据')
     expect(() => parseContinuityFacts([{ kind: 'knowledge' }], prose)).toThrow('字段')
+  })
+
+  it('主线核对使用最近实际进展，排除未来、旧版本和伪造引句', async () => {
+    for (const n of [3, 80, 90, 100]) {
+      const prose = `陆安在第${n}站找到母亲留下的信件，继续循线寻找。`
+      await save(n, prose, [])
+      const repo = new ChapterSummaryRepo(dir)
+      const summary = (await repo.read(n))!
+      await repo.write({ ...summary, events: [
+        { text: `第${n}站找到信件`, evidence: prose },
+        { text: '伪造已经放弃寻找', evidence: '陆安宣布不再寻找母亲，转而卖画。' }
+      ] })
+    }
+    const trajectory = (await buildContinuityContext(dir, 100, { ...query, includeTrajectory: true })).join('\n')
+    expect(trajectory).toContain('最近阶段实际进展')
+    expect(trajectory).toContain('第90站找到信件')
+    expect(trajectory).not.toContain('第100站找到信件')
+    expect(trajectory).not.toContain('伪造已经放弃寻找')
+    await new ProseRepo(dir).write(90, '陆安到了驿站，却没有找到任何信件。')
+    expect((await buildContinuityContext(dir, 100, { ...query, includeTrajectory: true })).join('\n')).not.toContain('第90站找到信件')
+  })
+
+  it('知情别名归一后以最近记录为准，独立预算不被主角大量道具挤掉', async () => {
+    const first = '夜鸦误以为内应就是船夫，苏绫却不知道内应是谁。'
+    const known = '陆安读完密信，终于得知赵伯才是内应。'
+    await save(3, first, [
+      { kind: 'knowledge', subject: '夜鸦', object: '内应身份', aspect: '知情程度', value: '误信船夫是内应', evidence: first },
+      { kind: 'knowledge', subject: '苏绫', object: '内应身份', aspect: '知情程度', value: '不知道内应身份', evidence: first }
+    ])
+    await save(70, known, [{ kind: 'knowledge', subject: '陆安', object: '内应身份', aspect: '知情程度', value: '已知赵伯是内应', evidence: known }])
+    for (let n = 80; n < 100; n++) {
+      const prose = `陆安将第${n}件兵器交给守门人保管。`
+      await save(n, prose, [item('守门人保管', prose, `兵器${n}`)])
+    }
+    const text = (await buildContinuityContext(dir, 101, { text: '夜鸦与苏绫谈话', characters: ['陆安', '苏绫'],
+      aliases: [{ name: '陆安', aliases: ['夜鸦'] }], props: [] })).join('\n')
+    const matrix = text.split('## 本章人物知情边界')[1].split('- [')[0]
+    expect(matrix).toContain('已知赵伯是内应')
+    expect(matrix).toContain('苏绫 → 内应身份：不知道内应身份')
+    expect(matrix).not.toContain('误信船夫是内应')
   })
 })

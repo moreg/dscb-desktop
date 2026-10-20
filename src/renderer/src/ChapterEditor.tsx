@@ -2756,7 +2756,7 @@ export default function ChapterEditor({
           projectId: string,
           chapterNumber: number,
           content: string,
-          syncOpts?: { force?: boolean },
+          syncOpts?: { force?: boolean; tempContext?: string },
           onProgress?: (progress: PostWriteProgress) => void
         ) => Promise<{
           memory: import('../../shared/types').MemoryApplyResult
@@ -2819,7 +2819,9 @@ export default function ChapterEditor({
         projectId,
         chapterNumber,
         contentSnapshot,
-        opts?.force ? { force: true } : undefined,
+        { ...(opts?.force ? { force: true } : {}),
+          tempContext: resolveForeshadowCheckContext({ projectId, chapterNumber, content: contentSnapshot },
+            foreshadowCheckContextRef.current, findPendingForChapter(loadPendingSyncQueue(getLocalStorage()), projectId, chapterNumber)).tempContext },
         progress => {
           if (memorySyncPendingRef.current !== syncToken || genRef.current !== myGen || draftRef.current !== contentSnapshot) return
           setPostWriteSync(current => current?.phase === 'syncing' && current.contentForRetry === contentSnapshot
@@ -4424,7 +4426,7 @@ export default function ChapterEditor({
               ) : (
                 <h1
                   className="editor-title-display"
-                  style={{ display: 'inline', fontSize: 17, fontWeight: 700, margin: 0 }}
+                  style={{ fontSize: 17, fontWeight: 700, margin: 0 }}
                 >
                   第 {data.meta.chapterNumber} 章 · {data.meta.title}
                   <button

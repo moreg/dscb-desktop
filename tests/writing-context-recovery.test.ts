@@ -119,11 +119,12 @@ describe('automatic writing context recovery', () => {
     expect(WriteFlowService.prototype.extractEndingState).not.toHaveBeenCalled()
   })
 
-  it('does not truncate an unusually long previous manuscript before provider-specific processing', async () => {
+  it('preserves an unusually long previous manuscript and stops rather than bypassing full-chapter review', async () => {
     await plan(1); await plan(2)
     const long = '开篇事实。' + '林远在门外等候。'.repeat(6000) + '最后的衔接。'
     await new ProseRepo(dir).write(1, long)
-    await service.generateChapterStream(id, 2)
-    expect(chapterPrompt()).toContain(long)
+    await expect(service.generateChapterStream(id, 2)).rejects.toThrow('40000')
+    expect(await new ProseRepo(dir).read(1)).toBe(long)
+    expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapter')).toBe(false)
   })
 })

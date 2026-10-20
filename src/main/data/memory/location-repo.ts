@@ -165,7 +165,7 @@ export class LocationRepo {
     return Object.keys(out).length ? out : undefined
   }
 
-  private serializeEntity(input: { name: string; category?: string; notes?: string; customFields?: Record<string, string | string[]> }, _now: string): string {
+  serializeEntity(input: { name: string; category?: string; notes?: string; customFields?: Record<string, string | string[]> }, _now: string): string {
     const lines: string[] = [`# ${input.name}`, '']
     if (input.notes) lines.push('## 描述', '', input.notes, '')
     lines.push('## 字段', '')

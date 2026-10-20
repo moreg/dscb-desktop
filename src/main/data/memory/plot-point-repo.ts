@@ -9,6 +9,7 @@ import {
 } from '../skill-format/md-parser'
 import { hashProse, listProseSources, splitProsePassages } from './prose-memory-index'
 import { ChapterSummaryRepo, chapterSummaryText } from './chapter-summary-repo'
+import { readLongformReviewState, blockedLongformChapters } from '../longform-review-state'
 import { extractEntityNameFromDoc } from './entity-helpers'
 import type { MemoryEntity } from '../../../shared/types'
 
@@ -68,8 +69,9 @@ export class PlotPointRepo {
     if (chapterNumber <= 1 || limit <= 0) return []
     const onlyWithProse = opts.onlyWithProse !== false
     const maxCh = chapterNumber - 1
+    const pending = blockedLongformChapters(await readLongformReviewState(this.projectDir))
 
-    const proseSources = (await listProseSources(this.projectDir)).filter((s) => s.chapterNumber <= maxCh)
+    const proseSources = (await listProseSources(this.projectDir)).filter((s) => s.chapterNumber <= maxCh && !pending[String(s.chapterNumber)])
     const sourcesByChapter = new Map(proseSources.map((s) => [s.chapterNumber, s]))
     let targetChapters: number[]
     if (onlyWithProse) {
@@ -113,6 +115,7 @@ export class PlotPointRepo {
     const out: PlotChapterSummary[] = []
     const summaryRepo = new ChapterSummaryRepo(this.projectDir)
     for (const n of targetChapters) {
+      if (pending[String(n)]) continue
       const memories = buckets.get(n) ?? []
       const source = sourcesByChapter.get(n)
       const prose = source ? await readText(join(this.projectDir, source.sourcePath)) : null

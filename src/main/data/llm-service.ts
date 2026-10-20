@@ -186,6 +186,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   memoryExtract: 'auxiliary',
   autoMemorySync: 'auxiliary',
   chapterSummary: 'auxiliary',
+  longformGuard: 'auxiliary',
   rhythmEval: 'auxiliary',
   figureGen: 'auxiliary',
   batchMemory: 'auxiliary',

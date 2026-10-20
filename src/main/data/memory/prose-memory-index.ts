@@ -1,4 +1,5 @@
 import { searchProsePassages } from './prose-search'
+import { readLongformReviewState, blockedLongformChapters } from '../longform-review-state'
 import { memoryFileFingerprint } from './repository-cache'
 import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
@@ -148,7 +149,7 @@ export class ProseMemoryIndex {
   }
 
   /** Validated saved prose, also used by long-term continuity recall without another full read. */
-  async readBefore(chapterNumber: number): Promise<IndexedChapter[]> {
+  async readBefore(chapterNumber: number, includePending = false): Promise<IndexedChapter[]> {
     // Share only an in-flight refresh. A later query always rechecks source metadata.
     const refreshKey = `${this.projectDir}|before:${chapterNumber}`
     let pending = refreshes.get(refreshKey)
@@ -161,8 +162,9 @@ export class ProseMemoryIndex {
       if (refreshes.get(refreshKey) === pending) refreshes.delete(refreshKey)
     }
     // Preserve identity for the search corpus cache in the common forward-writing case.
-    return index.chapters.some((chapter) => chapter.chapterNumber >= chapterNumber)
-      ? index.chapters.filter((chapter) => chapter.chapterNumber < chapterNumber) : index.chapters
+    const pendingReviews = includePending ? {} : blockedLongformChapters(await readLongformReviewState(this.projectDir))
+    return index.chapters.some(chapter => chapter.chapterNumber >= chapterNumber || pendingReviews[String(chapter.chapterNumber)])
+      ? index.chapters.filter(chapter => chapter.chapterNumber < chapterNumber && !pendingReviews[String(chapter.chapterNumber)]) : index.chapters
   }
 
   private async refresh(chapterNumber: number): Promise<StoredIndex> {

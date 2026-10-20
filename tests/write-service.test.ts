@@ -943,6 +943,8 @@ describe('WriteService', () => {
 
     it('resumeChaptersBatch carries autoContinue to the rest of the range', async () => {
       const service = new WriteService(ps, mockLlm(''))
+      await new ProseRepo(await ps.resolveDir(projectId)).write(1, '第1章正文')
+      await new ProseRepo(await ps.resolveDir(projectId)).write(2, '第2章正文')
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
@@ -1356,6 +1358,7 @@ describe('WriteService', () => {
 
     it('resume 透传 batchState 时进度按整批统计，不从剩余段重新计数', async () => {
       const service = new WriteService(ps, mockLlm(''))
+      await new ProseRepo(await ps.resolveDir(projectId)).write(1, '第1章正文')
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
@@ -1595,7 +1598,7 @@ describe('WriteService', () => {
       expect(applySetSpy).toHaveBeenCalledWith(
         projectId,
         expect.objectContaining({ chapterNumber: 1 }),
-        { onlyAuto: true }
+        expect.objectContaining({ onlyAuto: true, sourceContent: '林远打开木门走进院子。' })
       )
 
       genSpy.mockRestore()

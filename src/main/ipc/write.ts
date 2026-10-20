@@ -552,6 +552,7 @@ export function registerWriteIpc(service: WriteService): void {
         chapterNumber: number
         content: string
         force?: boolean
+        tempContext?: string
         requestId?: string
       }
     ) => {
@@ -561,6 +562,7 @@ export function registerWriteIpc(service: WriteService): void {
           chapterNumber: chapterNumberSchema,
           content: chapterContentSchema,
           force: z.boolean().optional(),
+          tempContext: z.string().max(10000).optional(),
           requestId: z.string().min(1).max(100).optional()
         }),
         payload
@@ -571,7 +573,7 @@ export function registerWriteIpc(service: WriteService): void {
         validated.chapterNumber,
         validated.content,
         // force：用户手动补跑，忽略 autoMemorySync / pipeline=off
-        { skipIfDisabled: validated.force !== true,
+        { skipIfDisabled: validated.force !== true, tempContext: validated.tempContext,
           onProgress: validated.requestId ? progress => safeSend(win, 'write:postWriteProgress', {
             requestId: validated.requestId, progress
           }) : undefined }

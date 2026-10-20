@@ -11,6 +11,11 @@ import { writeTextAtomic } from './atomic'
 import { withFileLock } from './file-lock'
 import { readText, parseDoc, parseTable } from './skill-format/md-parser'
 import { sanitizeForFileName } from './memory/entity-helpers'
+import { FIELD_CHAPTERS, observationChapters, datedEntityNotes } from './memory/observation-provenance'
+import { ProseRepo } from './skill-format/prose-repo'
+import { readMemoryCandidate, storedChapterIssues } from './memory/candidate-repository'
+import { blockedLongformChapters, readLongformReviewState } from './longform-review-state'
+import { invalidateMemoryProject } from './memory/repository-cache'
 import type {
   Character,
   Foreshadowing,
@@ -29,6 +34,60 @@ import type {
  */
 export class MemoryWriter {
   constructor(private readonly projectDir: string) {}
+
+  private async recordEntityIntent(chapter: number, kind: '人物' | '地点' | '道具', name: string, body: string): Promise<void> {
+    if (!Number.isSafeInteger(chapter) || chapter <= 0) return
+    const file = join(this.projectDir, '追踪', '.automatic-entity-ledger.json')
+    await withFileLock(file, async () => {
+      const raw = await readText(file)
+      const ledger = raw ? JSON.parse(raw) : { version: 1, chapters: {} }
+      if (ledger.version !== 1 || !ledger.chapters) throw new Error('自动实体账本无效')
+      const receipts = ledger.chapters[String(chapter)] ?? []
+      const path = `记忆/${kind}/${sanitizeForFileName(name)}.md`
+      ledger.chapters[String(chapter)] = [...receipts.filter((r: { path: string }) => r.path !== path), { path, hash: hashProse(body), kind, name }]
+      // Write intent before the card: a hard kill after creation cannot orphan the entity.
+      await writeTextAtomic(file, JSON.stringify(ledger, null, 2) + '\n')
+    })
+  }
+
+  async reconcileAutomaticEntities(extraction: MemoryExtraction): Promise<void> {
+    if (extraction.parseError) throw new Error('记忆提取未完成，不能清理自动实体')
+    // Rechecking an old chapter must not remove cards later chapters may use.
+    const laterProse = (await new ProseRepo(this.projectDir).listChapterNumbers()).some(n => n > extraction.chapterNumber)
+    const currentProse = await new ProseRepo(this.projectDir).read(extraction.chapterNumber)
+    const file = join(this.projectDir, '追踪', '.automatic-entity-ledger.json')
+    await withFileLock(file, async () => {
+      const raw = await readText(file)
+      if (!raw) return
+      const ledger = JSON.parse(raw)
+      if (ledger.version !== 1 || !ledger.chapters) throw new Error('自动实体账本无效')
+      const wanted = new Set([
+        ...extraction.newCharacters.map(e => `人物:${e.name}`),
+        ...extraction.newLocations.map(e => `地点:${e.name}`),
+        ...extraction.newItems.map(e => `道具:${e.name}`)
+      ])
+      const kept = []
+      for (const receipt of ledger.chapters[String(extraction.chapterNumber)] ?? []) {
+        const expected = `记忆/${receipt.kind}/${sanitizeForFileName(receipt.name)}.md`
+        if (!['人物', '地点', '道具'].includes(receipt.kind) || receipt.path !== expected) throw new Error('自动实体记录路径无效')
+        // Known characters are intentionally omitted from newCharacters on retry.
+        // Omission from a delta is not deletion when the saved prose still uses the entity.
+        if (laterProse || wanted.has(`${receipt.kind}:${receipt.name}`) || currentProse.includes(receipt.name)) {
+          kept.push(receipt)
+          continue
+        }
+        const absolute = join(this.projectDir, expected)
+        const current = await readText(absolute)
+        if (current && hashProse(current) === receipt.hash) {
+          await fs.unlink(absolute)
+          invalidateMemoryProject(this.projectDir)
+        }
+        else if (current) kept.push(receipt) // Author-edited cards are never deleted.
+      }
+      ledger.chapters[String(extraction.chapterNumber)] = kept
+      await writeTextAtomic(file, JSON.stringify(ledger, null, 2) + '\n')
+    })
+  }
 
   /**
    * 自动应用前预览：读当前人物卡/剧情/伏笔，拼 old→new diff。
@@ -356,7 +415,7 @@ export class MemoryWriter {
 
   /** 用户确认后：应用新增角色（写 记忆/人物/<name>.md），支持同名防重与去重 */
   async applyNewCharacters(
-    chars: MemoryExtraction['newCharacters']
+    chars: MemoryExtraction['newCharacters'], chapter = 0
   ): Promise<number> {
     const repo = new CharacterRepo(this.projectDir)
     const existing = await repo.list().catch(() => [])
@@ -369,20 +428,18 @@ export class MemoryWriter {
         n++
         continue
       }
-      try {
-        const created = await repo.create({
+      const input = {
           name,
           role: c.role,
           identity: c.identity,
           personality: c.personality,
-          abilities: c.abilities
-        })
+          abilities: c.abilities,
+          ...(c.appearance?.trim() ? { customFields: { 外貌: c.appearance.trim() } } : {})
+      }
+      await this.recordEntityIntent(chapter, '人物', name, repo.serialize(input))
+      try {
+        await repo.create(input)
         existingNames.add(name.toLowerCase())
-        if (c.appearance?.trim()) {
-          await repo.update(created.id, {
-            customFields: { 外貌: c.appearance.trim() }
-          })
-        }
         n++
       } catch {
         // skip
@@ -392,7 +449,7 @@ export class MemoryWriter {
   }
 
   /** 用户确认后：应用新增地点（写 记忆/地点/<name>.md），支持同名防重与去重 */
-  async applyNewLocations(locs: MemoryExtraction['newLocations']): Promise<number> {
+  async applyNewLocations(locs: MemoryExtraction['newLocations'], chapter = 0): Promise<number> {
     const repo = new LocationRepo(this.projectDir)
     const existing = await repo.list().catch(() => [])
     const existingNames = new Set(existing.map((l) => l.name.trim().toLowerCase()))
@@ -404,8 +461,10 @@ export class MemoryWriter {
         n++
         continue
       }
+      const input = { name, category: l.category, notes: datedEntityNotes(l.notes, chapter) }
+      await this.recordEntityIntent(chapter, '地点', name, repo.serializeEntity(input, ''))
       try {
-        await repo.create({ name, category: l.category, notes: l.notes })
+        await repo.create(input)
         existingNames.add(name.toLowerCase())
         n++
       } catch {
@@ -416,7 +475,7 @@ export class MemoryWriter {
   }
 
   /** 用户确认后：应用新增道具（写 记忆/道具/<name>.md），支持同名防重与去重 */
-  async applyNewItems(items: MemoryExtraction['newItems']): Promise<number> {
+  async applyNewItems(items: MemoryExtraction['newItems'], chapter = 0): Promise<number> {
     const repo = new ItemRepo(this.projectDir)
     const existing = await repo.list().catch(() => [])
     const existingNames = new Set(existing.map((it) => it.name.trim().toLowerCase()))
@@ -428,8 +487,10 @@ export class MemoryWriter {
         n++
         continue
       }
+      const input = { name, category: it.category, notes: datedEntityNotes(it.notes, chapter) }
+      await this.recordEntityIntent(chapter, '道具', name, repo.serializeEntity(input, ''))
       try {
-        await repo.create({ name, category: it.category, notes: it.notes })
+        await repo.create(input)
         existingNames.add(name.toLowerCase())
         n++
       } catch {
@@ -510,6 +571,7 @@ export class MemoryWriter {
       else delete ledger.chapters[String(chapter)]
       const ordered = Object.entries(ledger.chapters).sort(([a], [b]) => Number(a) - Number(b))
       const latestValues = new Map<string, string>()
+      const latestChapters = new Map<string, number>()
       const changesByCharacter = new Map<string, Array<{ chapter: string; change: LedgerStateChange }>>()
       const fieldsByCharacter = new Map<string, typeof ledger.fields[string][]>()
       for (const record of Object.values(ledger.fields)) {
@@ -520,6 +582,7 @@ export class MemoryWriter {
       for (const [chapter, chapterChanges] of ordered) {
         for (const change of chapterChanges) {
           latestValues.set(`${change.characterId}:${change.key}`, change.value)
+          latestChapters.set(`${change.characterId}:${change.key}`, Number(chapter))
           const entries = changesByCharacter.get(change.characterId) ?? []
           entries.push({ chapter, change })
           changesByCharacter.set(change.characterId, entries)
@@ -530,13 +593,34 @@ export class MemoryWriter {
       for (const char of chars) {
         const patch: UpdateCharacterInput = { customFields: {} }
         let dirty = false
+        const dates = observationChapters(char.customFields?.[FIELD_CHAPTERS])
         for (const record of fieldsByCharacter.get(char.id) ?? []) {
           const desired = latestValues.get(`${char.id}:${record.field}`) ?? record.baseline
-          if (readCharacterField(char, record.field) !== record.lastApplied) continue
+          if (readCharacterField(char, record.field) !== record.lastApplied) {
+            // A legacy duplicate field can expose an older automatic value.
+            // Date that exact observation without overriding possible author edits.
+            const current = readCharacterField(char, record.field)
+            const observed = ordered.flatMap(([number, entries]) => entries
+              .filter(entry => entry.characterId === char.id && entry.key === record.field && entry.value === current)
+              .map(() => Number(number))).pop()
+            if (observed) dates[record.field] = observed
+            else delete dates[record.field]
+            continue
+          }
+          const recorded = latestChapters.get(`${char.id}:${record.field}`)
+          if (recorded) dates[record.field] = recorded
+          else delete dates[record.field]
           accepted.add(`${char.id}:${record.field}`)
           if (desired !== record.lastApplied) {
             Object.assign(patch, buildCharacterFieldPatch(record.field, desired, patch.customFields))
             record.lastApplied = desired
+            dirty = true
+          }
+        }
+        const dated = JSON.stringify(dates)
+        if (Object.keys(dates).length || char.customFields?.[FIELD_CHAPTERS]) {
+          if (dated !== char.customFields?.[FIELD_CHAPTERS]) {
+            patch.customFields![FIELD_CHAPTERS] = dated
             dirty = true
           }
         }
@@ -563,6 +647,46 @@ export class MemoryWriter {
           .map((r) => `${char.name}:${r.field}`)))
       }
     })
+  }
+
+  /** Migrate only unchanged automatic observations corroborated by a current prose-bound candidate. */
+  async dateLegacyObservations(): Promise<void> {
+    const locationRepo = new LocationRepo(this.projectDir)
+    const itemRepo = new ItemRepo(this.projectDir)
+    const locations = await locationRepo.list()
+    const items = await itemRepo.list()
+    const root = join(this.projectDir, '.cache', 'memory-candidates')
+    const blocked = blockedLongformChapters(await readLongformReviewState(this.projectDir))
+    let files: string[]
+    try { files = await fs.readdir(root) } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      files = []
+    }
+    for (const file of files.sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]))) {
+      const match = /^chapter-(\d+)\.json$/.exec(file)
+      if (!match) continue
+      const chapter = Number(match[1])
+      if (blocked[chapter]) continue
+      const candidate = await readMemoryCandidate(this.projectDir, chapter)
+      const source = await new ProseRepo(this.projectDir).read(chapter)
+      if (!candidate || candidate.status !== 'applied' || candidate.extraction.parseError ||
+        storedChapterIssues(candidate).length || !source.trim() || candidate.sourceHash !== hashProse(source)) continue
+      for (const [repo, entities, observations] of [
+        [locationRepo, locations, candidate.extraction.newLocations],
+        [itemRepo, items, candidate.extraction.newItems]
+      ] as const) {
+        for (const observation of observations) {
+          const entity = entities.find(e => e.name === observation.name && e.notes === observation.notes)
+          if (!entity?.notes) continue
+          const notes = datedEntityNotes(entity.notes, chapter)
+          await repo.update(entity.id, { notes })
+          entity.notes = notes
+        }
+      }
+    }
+    if (await readText(join(this.projectDir, '追踪', '.automatic-state-ledger.json'))) {
+      await this.reconcileAutomaticCharacterCards(0, [])
+    }
   }
 
   /**

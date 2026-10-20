@@ -3,6 +3,8 @@ import { writeJsonAtomic } from '../atomic'
 import { hashProse } from './prose-memory-index'
 import type { ChapterSummaryFact, ContinuityFact } from '../../../shared/types'
 import { readMemoryText } from './repository-cache'
+import { readLongformReviewState, blockedLongformChapters } from '../longform-review-state'
+import { locateMemoryEvidence } from '../memory-evidence-validator'
 
 export interface ChapterSummary {
   schemaVersion: 1
@@ -43,8 +45,11 @@ export class ChapterSummaryRepo {
   }
 
   async readCurrent(chapterNumber: number, prose: string): Promise<ChapterSummary | null> {
+    if (blockedLongformChapters(await readLongformReviewState(this.projectDir))[String(chapterNumber)]) return null
     const value = await this.read(chapterNumber)
-    return value && prose.trim() && value.sourceHash === hashProse(prose) ? value : null
+    return value && prose.trim() && value.sourceHash === hashProse(prose) &&
+      [...value.events, ...value.stateChanges, ...value.openThreads].every(f => f.evidence.trim() &&
+        (prose.includes(f.evidence) || locateMemoryEvidence(prose, f.evidence))) ? value : null
   }
 
   async write(summary: ChapterSummary): Promise<void> {
