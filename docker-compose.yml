@@ -1,0 +1,17 @@
+services:
+  dscb:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      WEB_ACCESS_TOKEN: ${WEB_ACCESS_TOKEN:?set WEB_ACCESS_TOKEN in .env}
+      WEB_DATA_KEY: ${WEB_DATA_KEY:-}
+      WEB_PORT: 8787
+      WEB_COOKIE_SECURE: ${WEB_COOKIE_SECURE:-0}
+      WEB_TRUST_PROXY: ${WEB_TRUST_PROXY:-0}
+    volumes:
+      - dscb-data:/data
+    restart: unless-stopped
+
+volumes:
+  dscb-data:

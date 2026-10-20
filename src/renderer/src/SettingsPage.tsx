@@ -16,6 +16,7 @@ import type {
   AuditCategory,
   ProjectMeta
 } from '../../shared/types'
+import { isWebClient } from './web-download'
 import {
   loadPendingSyncQueue,
   savePendingSyncQueue,
@@ -733,19 +734,21 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
               >
                 {projectsRoot || '加载中…'}
               </p>
-              <button className="btn btn-ghost" onClick={selectSavePath} disabled={changingPath}>
-                {changingPath ? '选择中…' : '更改保存位置'}
+              <button className="btn btn-ghost" onClick={selectSavePath} disabled={changingPath || isWebClient()}>
+                {changingPath ? '选择中…' : isWebClient() ? '使用服务器数据目录' : '更改保存位置'}
               </button>
               <p className="meta" style={{ marginTop: 10 }}>
-                新建项目将保存到此位置。已有项目不受影响。
+                {isWebClient()
+                  ? 'Web 版的作品、设置和模型密钥保存在服务器数据目录。更换目录需要修改 WEB_DATA_DIR 后重启。'
+                  : '新建项目将保存到此位置。已有项目不受影响。'}
               </p>
               <h3 className="sub" style={{ marginTop: 24 }}>榜单封面保存位置</h3>
               <p className="muted" style={{ wordBreak: 'break-all', marginBottom: 10, fontSize: 13 }}>
                 {chartCoversRoot || '加载中…'}
               </p>
               <div className="row">
-                <button className="btn btn-ghost" onClick={() => void changeChartCoversPath()} disabled={changingCoversPath}>
-                  {changingCoversPath ? '更新中…' : '更改封面保存位置'}
+                <button className="btn btn-ghost" onClick={() => void changeChartCoversPath()} disabled={changingCoversPath || isWebClient()}>
+                  {changingCoversPath ? '更新中…' : isWebClient() ? '封面保存在服务器数据目录' : '更改封面保存位置'}
                 </button>
                 <button className="btn btn-ghost" onClick={() => void changeChartCoversPath(true)} disabled={changingCoversPath}>
                   恢复默认位置

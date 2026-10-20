@@ -18,6 +18,7 @@ import type {
 import { countPendingConfirms } from '../../shared/post-write-sync'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 import { dedupeForbiddenViolations } from './audit-dedupe'
+import { openServerExport } from './web-download'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 import BatchPolishDialog, { type BatchPolishRange } from './BatchPolishDialog'
 import BatchSummaryDialog from './BatchSummaryDialog'
@@ -306,7 +307,8 @@ export default function ChapterListPage({
     setExportError('')
     setExporting(volumeNumber ?? 'all')
     try {
-      await window.api.exportChapters(projectId, volumeNumber)
+      const exported = await window.api.exportChapters(projectId, volumeNumber)
+      if (!exported.canceled) openServerExport(exported.path)
     } catch (err) {
       console.error('[ChapterListPage] Failed to export chapters:', err)
       setExportError((err as Error).message || '导出失败')

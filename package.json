@@ -15,7 +15,12 @@
     "deslop:corpus": "vitest run tests/deslop-corpus.test.ts",
     "lint": "eslint src tests",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
-    "typecheck:web": "tsc --noEmit -p tsconfig.web.json"
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "web:renderer": "vite build --config vite.web-renderer.config.ts",
+    "web:server": "vite build --config vite.web-server.config.ts",
+    "web:build": "npm run web:renderer && npm run web:server",
+    "web:start": "node out/web-server/server.cjs",
+    "web": "npm run web:build && npm run web:start"
   },
   "build": {
     "appId": "com.aiwriter.desktop",

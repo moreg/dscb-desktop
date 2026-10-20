@@ -4,6 +4,7 @@ import type { StreamHandle } from '../../shared/types'
 import { adoptShortStoryCandidate, shortStoryCandidateSource, type ShortStoryCandidate as Candidate } from './short-story-candidate'
 import ShortStoryCandidateStatus, { friendlyShortStoryGenerationError } from './ShortStoryCandidateStatus'
 import ShortStoryBrainstorm from './ShortStoryBrainstorm'
+import { openServerExport } from './web-download'
 import { transferShortStoryBrainstormRecovery } from './short-story-brainstorm-library'
 import {
   adoptShortStoryCreateIdea,
@@ -651,6 +652,7 @@ export default function ShortStoryPage(): React.ReactElement {
     setExporting(true); setError('')
     try {
       const result = await window.api.exportShortStory(document.id)
+      if (!result.canceled) openServerExport(result.path)
       if (mounted.current) setMessage(result.canceled ? '已取消导出，作品已保存。' : `全文已导出${result.path ? `：${result.path}` : '。'}`)
     } catch (err) { if (mounted.current) setError(`导出失败：${errorText(err)}`) }
     finally { if (mounted.current) setExporting(false) }

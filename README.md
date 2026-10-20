@@ -14,6 +14,16 @@ npm run build    # 构建产物到 out/
 npx electron .   # 运行构建产物
 ```
 
+## Web 版
+
+同一套界面可以部署到服务器，用浏览器写作。数据在服务器磁盘上，登录口令由 `WEB_ACCESS_TOKEN` 指定。构建并启动：
+
+```bash
+npm run web
+```
+
+部署步骤、Docker 和反向代理见 [Web 部署](docs/Web部署.md)。
+
 ## 打包
 
 ```bash

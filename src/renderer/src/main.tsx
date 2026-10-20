@@ -125,12 +125,22 @@ function showCrashScreen(error: unknown) {
 }
 
 try {
-  ReactDOM.createRoot(document.getElementById('root')!).render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
-  )
-  appMounted = true
+  const mount = (node: React.ReactNode): void => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>{node}</React.StrictMode>
+    )
+    appMounted = true
+  }
+  // 页面安全策略会拦住 HTML 里的内联脚本。没有桌面预加载接口时，按网页版启动。
+  const webPage = window.__DSCB_WEB__ === true || !window.api
+  if (webPage) {
+    window.__DSCB_WEB__ = true
+    void import('./web-gate')
+      .then(({ default: WebGate }) => mount(<WebGate />))
+      .catch((error: unknown) => showCrashScreen(error))
+  } else {
+    mount(<App />)
+  }
 } catch (error) {
   showCrashScreen(error)
 }

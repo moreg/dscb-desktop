@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ProjectMeta } from '../../shared/types'
 import type { FanqieIdeaOpeningChapter } from '../../shared/fanqie-chart'
 import { copyLongStoryBrainstormRecovery } from './long-story-brainstorm-library'
+import { isWebClient } from './web-download'
 import './long-story-project.css'
 
 export interface NewProjectDraft {
@@ -149,7 +150,7 @@ export default function NewProjectDialog({ initialDraft, brainstormRecoveryKey, 
             placeholder="一句话概括故事 / 卖点"
           />
         </div>
-        <div className="field">
+        {isWebClient() ? null : <div className="field">
           <label>保存位置（可选）</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
@@ -174,7 +175,7 @@ export default function NewProjectDialog({ initialDraft, brainstormRecoveryKey, 
               将保存到：{customPath}
             </p>
           ) : null}
-        </div>
+        </div>}
         {error ? <p className="project-info-error" role="alert">{error}</p> : null}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button className="btn btn-ghost" onClick={close} disabled={locked}>

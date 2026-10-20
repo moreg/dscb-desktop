@@ -15,6 +15,7 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
+    "src/web/**/*",
     "tests/**/*",
     "*.config.ts"
   ]

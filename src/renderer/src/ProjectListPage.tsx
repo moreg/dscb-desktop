@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
+import { isWebClient } from './web-download'
 import './long-story-project.css'
 
 interface Props {
@@ -307,17 +308,19 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                     >
                       进入 →
                     </button>
-                    <button
-                      type="button"
-                      className="open-window"
-                      title="在新窗口中打开，便于同时写多本书"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onOpenProjectWindow(p.id)
-                      }}
-                    >
-                      新窗口 ↗
-                    </button>
+                    {isWebClient() ? null : (
+                      <button
+                        type="button"
+                        className="open-window"
+                        title="在新窗口中打开，便于同时写多本书"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onOpenProjectWindow(p.id)
+                        }}
+                      >
+                        新窗口 ↗
+                      </button>
+                    )}
                   </div>
                 </div>
               </article>

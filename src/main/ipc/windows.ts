@@ -8,7 +8,7 @@ export interface ProjectWindowResult {
   focusedExisting: boolean
 }
 
-interface ProjectWindowActions {
+export interface ProjectWindowActions {
   open(projectId: string): ProjectWindowResult
   bind(window: BrowserWindow, projectId: string | null): ProjectWindowResult
 }
