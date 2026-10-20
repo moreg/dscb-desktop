@@ -135,6 +135,7 @@ try {
   const webPage = window.__DSCB_WEB__ === true || !window.api
   if (webPage) {
     window.__DSCB_WEB__ = true
+    document.documentElement.classList.add('dscb-web')
     void import('./web-gate')
       .then(({ default: WebGate }) => mount(<WebGate />))
       .catch((error: unknown) => showCrashScreen(error))

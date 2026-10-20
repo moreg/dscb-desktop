@@ -1,7 +1,9 @@
 import { z } from 'zod'
+import { dialog } from 'electron'
 import { safeHandle } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 import { ProjectService } from '../data/project-service'
+import { sanitizeTitle } from '../data/skill-format/prose-repo'
 
 const listProjectsQuerySchema = z.object({
   includeArchived: z.boolean().optional()
@@ -28,4 +30,35 @@ export function registerLibraryIpc(service: ProjectService): void {
     const validated = validateInput(setArchivedSchema, payload)
     return service.setArchived(validated.projectId, validated.archived)
   })
+
+  safeHandle(
+    'library:exportPackage',
+    async (_e, payload: unknown): Promise<{ canceled: boolean; path?: string }> => {
+      const { projectId } = validateInput(z.object({ projectId: projectIdSchema }), payload)
+      const data = await service.getProjectData(projectId)
+      const result = await dialog.showSaveDialog({
+        title: '导出小说包',
+        defaultPath: `${sanitizeTitle(data.name)}.dscb.zip`,
+        filters: [{ name: '大神持笔小说包', extensions: ['zip'] }]
+      })
+      if (result.canceled || !result.filePath) return { canceled: true }
+      const zipPath = result.filePath.toLowerCase().endsWith('.zip') ? result.filePath : `${result.filePath}.zip`
+      await service.exportProjectPackage(projectId, zipPath)
+      return { canceled: false, path: zipPath }
+    }
+  )
+
+  safeHandle(
+    'library:importPackage',
+    async (): Promise<{ canceled: boolean; project?: Awaited<ReturnType<ProjectService['importProjectPackage']>> }> => {
+      const result = await dialog.showOpenDialog({
+        title: '导入小说包',
+        filters: [{ name: '大神持笔小说包', extensions: ['zip'] }],
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+      const project = await service.importProjectPackage(result.filePaths[0])
+      return { canceled: false, project }
+    }
+  )
 }

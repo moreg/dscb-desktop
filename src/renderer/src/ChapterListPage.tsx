@@ -18,7 +18,7 @@ import type {
 import { countPendingConfirms } from '../../shared/post-write-sync'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 import { dedupeForbiddenViolations } from './audit-dedupe'
-import { openServerExport } from './web-download'
+import { isWebClient, openServerExport } from './web-download'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 import BatchPolishDialog, { type BatchPolishRange } from './BatchPolishDialog'
 import BatchSummaryDialog from './BatchSummaryDialog'
@@ -149,6 +149,7 @@ export default function ChapterListPage({
   const [page, setPage] = useState(1)
   // 导出正文：'all' 表示导出全书，number 表示导出该卷；null 表示当前没有导出在进行
   const [exporting, setExporting] = useState<'all' | number | null>(null)
+  const [exportingPackage, setExportingPackage] = useState(false)
   const [exportError, setExportError] = useState('')
 
   /** 请求序号：并发刷新时只认最新一次的回包，防止慢的旧响应覆盖新响应 */
@@ -302,6 +303,22 @@ export default function ChapterListPage({
     }
   }
 
+  /** 导出整本目录为 .dscb.zip，桌面版书案可以导入。 */
+  const exportPackage = async (): Promise<void> => {
+    setExportError('')
+    setExportingPackage(true)
+    try {
+      const exported = await window.api.exportProjectPackage(projectId)
+      if (!exported.canceled) openServerExport(exported.path)
+    } catch (err) {
+      console.error('[ChapterListPage] Failed to export project package:', err)
+      const message = err instanceof Error ? err.message.replace(/^Error:\s*/, '') : ''
+      setExportError(message || '导出小说包失败')
+    } finally {
+      setExportingPackage(false)
+    }
+  }
+
   /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷 */
   const handleExport = async (volumeNumber?: number): Promise<void> => {
     setExportError('')
@@ -388,10 +405,20 @@ export default function ChapterListPage({
                 记忆待核对 {candidateCount} 章
               </button>
             ) : null}
+            {isWebClient() ? (
+              <button
+                className="btn btn-ghost"
+                onClick={() => void exportPackage()}
+                disabled={exportingPackage || exporting !== null}
+                title="下载整本小说包，可在桌面版书案导入"
+              >
+                {exportingPackage ? '打包中…' : '导出小说包'}
+              </button>
+            ) : null}
             <button
               className="btn btn-ghost"
               onClick={() => void handleExport()}
-              disabled={exporting !== null || chapters.length === 0}
+              disabled={exporting !== null || exportingPackage || chapters.length === 0}
               title={chapters.length === 0 ? '需先创建章节' : '导出全书正文为 txt 文件'}
             >
               {exporting === 'all' ? '导出中…' : '导出全书 TXT'}

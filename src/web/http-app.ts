@@ -244,7 +244,14 @@ export function createWebHandler(options: WebHandlerOptions): (request: Incoming
         return
       }
       if (request.method === 'GET' && path.startsWith('/api/exports/')) {
-        const name = path.slice('/api/exports/'.length)
+        // pathname 仍保留百分号编码。先解开，下载名才是书名，而不是 %E9...。
+        let name: string
+        try {
+          name = decodeURIComponent(path.slice('/api/exports/'.length))
+        } catch {
+          sendJson(response, 400, { ok: false, error: '文件名无效' })
+          return
+        }
         if (!name || name.includes('/') || name.includes('\\') || name.includes('..')) {
           sendJson(response, 400, { ok: false, error: '文件名无效' })
           return

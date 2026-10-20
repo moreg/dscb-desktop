@@ -3,6 +3,8 @@ import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 import MobileConnectPanel from './MobileConnectPanel'
 import AppUpdatePanel from './AppUpdatePanel'
+import { isWebClient } from './web-download'
+import './web-mobile.css'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
 import type { Diagnostic, DiagnosticFixKind, MemoryEntityType } from '../../shared/types'
@@ -113,6 +115,59 @@ function replaceProjectInUrl(projectId: string | null): void {
   window.history.replaceState(null, '', url)
 }
 
+function mobileTitle(view: View): string {
+  switch (view.kind) {
+    case 'projects':
+      return '我的项目'
+    case 'shortStories':
+      return '中短篇'
+    case 'brainstorm':
+      return '脑洞'
+    case 'teardown':
+      return '拆文库'
+    case 'scan':
+      return '扫榜'
+    case 'fanqieChart':
+      return '番茄榜单'
+    case 'inspiration':
+      return '灵感抽签'
+    case 'projectInfo':
+      return '作品信息'
+    case 'chapters':
+      return '章节'
+    case 'editor':
+      return '正文'
+    case 'characters':
+      return '人物档案'
+    case 'memoryCenter':
+      return '记忆中心'
+    case 'memoryEntity':
+      return ENTITY_LABELS[view.entityType]
+    case 'foreshadowingBoard':
+      return '伏笔'
+    case 'tracking':
+      return '追踪'
+    case 'relationships':
+      return '人物关系'
+    case 'outline':
+      return '大纲'
+    case 'rhythm':
+      return '节奏图谱'
+    case 'figures':
+      return '关键图解'
+    case 'styles':
+      return '文风库'
+    case 'coverLearningLibrary':
+      return '学习库'
+    case 'covers':
+      return '封面'
+    case 'bookTest':
+      return '书测'
+    case 'settings':
+      return '设置'
+  }
+}
+
 function isNavActive(view: View, kind: string, projectId: string | null): boolean {
   if (kind === 'projects') return view.kind === 'projects'
   if (kind === 'teardown') return view.kind === 'teardown'
@@ -159,6 +214,42 @@ export default function App() {
   /** 侧栏「设置」角标：待同步条数 */
   const [pendingSyncCount, setPendingSyncCount] = useState(0)
   const { open: shortcutOpen, hide: hideShortcut } = useShortcutPanelToggle()
+  const webClient = isWebClient()
+  const [narrow, setNarrow] = useState(
+    () => webClient && window.matchMedia('(max-width: 760px)').matches
+  )
+  const [navOpen, setNavOpen] = useState(false)
+  const mobileShell = webClient && narrow
+
+  useEffect(() => {
+    if (!webClient) return
+    const media = window.matchMedia('(max-width: 760px)')
+    const apply = () => {
+      setNarrow(media.matches)
+      if (!media.matches) setNavOpen(false)
+    }
+    apply()
+    media.addEventListener('change', apply)
+    return () => media.removeEventListener('change', apply)
+  }, [webClient])
+
+  useEffect(() => {
+    setNavOpen(false)
+  }, [view])
+
+  useEffect(() => {
+    if (!navOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setNavOpen(false)
+    }
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [navOpen])
 
   const refreshPendingSyncCount = () => {
     try {
@@ -353,9 +444,34 @@ export default function App() {
   }`
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={`app-shell${mobileShell ? ' web-mobile' : ''}${navOpen ? ' web-nav-open' : ''}`}>
+      {mobileShell ? (
+        <header className="web-mobile-bar">
+          <button
+            type="button"
+            className="web-mobile-menu"
+            aria-expanded={navOpen}
+            aria-controls="app-sidebar"
+            onClick={() => setNavOpen((open) => !open)}
+          >
+            {navOpen ? '关闭' : '菜单'}
+          </button>
+          <div className="web-mobile-title">
+            <strong>{mobileTitle(view)}</strong>
+            {projectName ? <span>{projectName}</span> : null}
+          </div>
+        </header>
+      ) : null}
+      {mobileShell && navOpen ? (
+        <button type="button" className="web-nav-backdrop" aria-label="关闭菜单" onClick={() => setNavOpen(false)} />
+      ) : null}
+      <aside className="sidebar" id="app-sidebar" aria-hidden={mobileShell ? !navOpen : undefined}>
         <div className="sidebar-brand">
+          {mobileShell ? (
+            <button type="button" className="web-mobile-close" onClick={() => setNavOpen(false)}>
+              关闭
+            </button>
+          ) : null}
           <h1 className="title">
             <span className="dot" />
             大神持笔

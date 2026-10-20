@@ -599,6 +599,10 @@ export interface RendererApi {
   }>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
   scanProjects: () => Promise<ProjectMeta[]>
+  /** 把整本小说目录打成 .dscb.zip。网页版随后从返回路径下载。 */
+  exportProjectPackage: (projectId: string) => Promise<{ canceled: boolean; path?: string }>
+  /** 从小说包恢复一本小说到桌面版书架。用户取消选择文件时 canceled 为 true。 */
+  importProjectPackage: () => Promise<{ canceled: boolean; project?: ProjectMeta }>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
   /** 更新小说名称和简介；不改项目目录，避免破坏工作区路径。 */
@@ -913,7 +917,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts?: { force?: boolean },
+    opts?: { force?: boolean; tempContext?: string },
     onProgress?: (progress: PostWriteProgress) => void
   ) => Promise<{
     memory: MemoryApplyResult
@@ -2665,9 +2669,9 @@ export interface ChapterSummaryFact {
 
 /** A dated, evidence-backed continuity update, not a timeless character/world fact. */
 export interface ContinuityFact {
-  kind: 'item' | 'relationship' | 'knowledge'
+  kind: 'item' | 'relationship' | 'knowledge' | 'thread'
   subject: string
-  /** Other character for relationships; stable secret/topic name for knowledge; empty for items. */
+  /** Other character for relationships; stable secret/topic name for knowledge; empty for items/threads. */
   object: string
   /** Stable dimension, e.g. 持有者/所有权/状态/信任/知情程度. */
   aspect: string

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
-import { isWebClient } from './web-download'
+import { isWebClient, openServerExport } from './web-download'
 import './long-story-project.css'
 
 interface Props {
@@ -26,6 +26,8 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [archiveError, setArchiveError] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [exportingId, setExportingId] = useState<string | null>(null)
   const loadSequence = useRef(0)
 
   const loadProjects = async (withSpinner: boolean) => {
@@ -43,6 +45,11 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     }
   }
 
+  const packageErrorText = (error: unknown, fallback: string) => {
+    const message = error instanceof Error ? error.message : ''
+    return message.replace(/^Error:\s*/, '') || fallback
+  }
+
   /** 扫描 projectsRoot，发现含 project.json 或 大纲/大纲.md 的项目 */
   const scan = async () => {
     setScanning(true)
@@ -51,6 +58,34 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
       await loadProjects(true)
     } finally {
       setScanning(false)
+    }
+  }
+
+  const importPackage = async () => {
+    setImporting(true)
+    setArchiveError('')
+    try {
+      const result = await window.api.importProjectPackage()
+      if (result.canceled || !result.project) return
+      setCreationNotice(`已导入《${result.project.name}》，可以在书案打开。`)
+      await loadProjects(false)
+    } catch (error) {
+      setArchiveError(packageErrorText(error, '导入小说包失败'))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const exportPackage = async (project: ProjectMeta) => {
+    setExportingId(project.id)
+    setArchiveError('')
+    try {
+      const result = await window.api.exportProjectPackage(project.id)
+      if (!result.canceled) openServerExport(result.path)
+    } catch (error) {
+      setArchiveError(packageErrorText(error, '导出小说包失败'))
+    } finally {
+      setExportingId(null)
     }
   }
 
@@ -169,6 +204,16 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
             >
               {scanning ? '扫描中…' : '↻ 扫描项目'}
             </button>
+            {isWebClient() ? null : (
+              <button
+                className="btn btn-ghost"
+                onClick={() => void importPackage()}
+                disabled={importing}
+                title="导入网页版下载的 .dscb.zip，导入后出现在书案"
+              >
+                {importing ? '导入中…' : '导入小说包'}
+              </button>
+            )}
             <button className="btn" onClick={onOpenBrainstorm}>
               长篇脑洞
             </button>
@@ -308,7 +353,20 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                     >
                       进入 →
                     </button>
-                    {isWebClient() ? null : (
+                    {isWebClient() ? (
+                      <button
+                        type="button"
+                        className="open"
+                        title="下载整本小说包，可在桌面版书案导入"
+                        disabled={exportingId === p.id}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void exportPackage(p)
+                        }}
+                      >
+                        {exportingId === p.id ? '打包中…' : '导出'}
+                      </button>
+                    ) : (
                       <button
                         type="button"
                         className="open-window"

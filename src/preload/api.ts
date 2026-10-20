@@ -10,6 +10,7 @@ import type {
   DiagnosticFixKind,
   ListProjectsQuery,
   CreateProjectDataInput,
+  ProjectMeta,
   CreateChapterInput,
   UpdateChapterMetaInput,
   CreateCharacterInput,
@@ -204,6 +205,16 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         focusedExisting: boolean
       }>,
     scanProjects: () => ipcRenderer.invoke('library:scan'),
+    exportProjectPackage: (projectId: string) =>
+      ipcRenderer.invoke('library:exportPackage', { projectId }) as Promise<{
+        canceled: boolean
+        path?: string
+      }>,
+    importProjectPackage: () =>
+      ipcRenderer.invoke('library:importPackage') as Promise<{
+        canceled: boolean
+        project?: ProjectMeta
+      }>,
     createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
     getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
     updateProjectInfo: (projectId: string, info: { name: string; description?: string }) =>
@@ -670,14 +681,15 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       projectId: string,
       chapterNumber: number,
       content: string,
-      opts?: { force?: boolean },
+      opts?: { force?: boolean; tempContext?: string },
       onProgress?: (progress: PostWriteProgress) => void
     ) =>
       invokeWithPostWriteProgress<Awaited<ReturnType<import('../shared/types').RendererApi['syncChapterAfterWrite']>>>('write:syncChapterAfterWrite', {
         projectId,
         chapterNumber,
         content,
-        force: opts?.force === true
+        force: opts?.force === true,
+        ...(opts?.tempContext !== undefined ? { tempContext: opts.tempContext } : {})
       }, onProgress),
     getChapterSummary: (projectId: string, chapterNumber: number, content: string) =>
       ipcRenderer.invoke('write:getChapterSummary', { projectId, chapterNumber, content }),

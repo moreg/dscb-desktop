@@ -94,6 +94,9 @@ describe('web http gate', () => {
     })
     expect(file.status).toBe(200)
     expect(await file.text()).toBe('正文')
+    const disposition = file.headers.get('content-disposition') || ''
+    expect(disposition).toContain(`UTF-8''${encodeURIComponent('书.txt')}`)
+    expect(disposition).not.toContain('%25')
     const escaped = await fetch(`${base}/api/exports/${encodeURIComponent('../package.json')}`, {
       headers: { cookie }
     })

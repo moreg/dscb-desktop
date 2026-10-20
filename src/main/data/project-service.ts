@@ -20,6 +20,10 @@ import type {
   ProjectTitleCandidate
 } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
+import { toFolderName } from './folder-name'
+import { extractProjectPackage, writeProjectPackage } from './project-package'
+
+export { toFolderName } from './folder-name'
 
 const MAX_TITLE_CANDIDATES = 50
 
@@ -222,6 +226,21 @@ export class ProjectService {
     return this.library.setArchived(projectId, archived)
   }
 
+  async exportProjectPackage(projectId: string, zipPath: string): Promise<void> {
+    await writeProjectPackage(await this.resolveDir(projectId), zipPath)
+  }
+
+  /** 解压小说包到作品目录并登记进书架。同名文件夹已存在时另起一个目录。 */
+  async importProjectPackage(zipPath: string): Promise<ProjectMeta> {
+    const root = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
+    await fs.mkdir(root, { recursive: true })
+    const dir = await extractProjectPackage(zipPath, root)
+    const listed = await this.scanProjects()
+    const found = listed.find((project) => samePath(project.path, dir))
+    if (!found) throw new Error('导入完成，但书架没有找到这本小说')
+    return found
+  }
+
   async scanProjects(): Promise<ProjectMeta[]> {
     const root = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
     const discovered = await scanProjectsRoot(root)
@@ -259,32 +278,6 @@ export class ProjectService {
     }
     return this.listProjects()
   }
-}
-
-const FOLDER_CHAR: Record<string, string> = {
-  '<': '＜',
-  '>': '＞',
-  ':': '：',
-  '"': '＂',
-  '/': '／',
-  '\\': '＼',
-  '|': '｜',
-  '?': '？',
-  '*': '＊'
-}
-
-/** 书名转成 Windows 能用的文件夹名。非法符号换成全角，返回值就是要保存的书名。 */
-export function toFolderName(name: string): string {
-  const replaced = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, (ch) => FOLDER_CHAR[ch] ?? '')
-  const cleaned = replaced.replace(/[. ]+$/g, '').trim()
-  if (!cleaned || cleaned === '.' || cleaned === '..') return ''
-  if (isReservedWindowsName(cleaned)) return ''
-  return [...cleaned].slice(0, 255).join('')
-}
-
-function isReservedWindowsName(name: string): boolean {
-  const stem = name.split('.')[0]?.toUpperCase() ?? ''
-  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)
 }
 
 function samePath(a: string, b: string): boolean {

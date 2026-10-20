@@ -1,7 +1,9 @@
 .web-gate {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
   background: var(--bg, #f7f4ed);
   color: var(--ink, #2a2620);
   font-family: "Source Han Serif SC", "Noto Serif SC", "Songti SC", serif;
@@ -43,6 +45,8 @@
   border-radius: 10px;
   padding: 12px 14px;
   font: inherit;
+  font-size: 16px;
+  min-height: 44px;
 }
 
 .web-gate-card button {
@@ -51,9 +55,11 @@
   border: 0;
   border-radius: 10px;
   padding: 12px 14px;
+  min-height: 44px;
   background: var(--vermilion, #b8331f);
   color: #fffdf7;
   font: inherit;
+  font-size: 16px;
   cursor: pointer;
 }
 
