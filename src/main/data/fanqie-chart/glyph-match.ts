@@ -3,12 +3,14 @@ import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import path from 'path'
 import frequency from './char-frequency.json'
+import { ensureReferenceFamilies } from './reference-fonts'
 
 /**
  * 番茄榜单把书名、作者、简介编进私用区，页面只给一套打乱过的字体。
- * 把私用区字形和系统黑体渲染成同样大小的点阵再比对，才能把字还原回来。
+ * 把私用区字形和已知黑体渲染成同样大小的点阵再比对，才能把字还原回来。
  * 标准字的点阵按机器缓存一次，之后同一套字体直接复用映射。
  * 雅黑和黑体各存一份，取相似度更高的那份。只留雅黑时，大会认成犬、走会认成定。
+ * 机器上没有这两套字体时，下载思源黑体和文泉驿微米黑再建立点阵。
  */
 
 const CACHE_MAGIC = 'FQGL'
@@ -228,6 +230,28 @@ export function matchGlyph(
   return bestChar
 }
 
+function familyRenders(draw: DrawCanvas, family: string): boolean {
+  const glyphs = new Map<string, Float32Array>()
+  for (const ch of '永大犬走定') {
+    const rendered = renderGlyph(draw, ch, family)
+    if (!rendered) return false
+    glyphs.set(ch, rendered.vec)
+  }
+  // 系统没有汉字时，缺字会画成同一个方框，点积接近 1。常用黑体里这两组形近字的点积低于 0.95。
+  const da = glyphs.get('大')
+  const quan = glyphs.get('犬')
+  const zou = glyphs.get('走')
+  const ding = glyphs.get('定')
+  if (!da || !quan || !zou || !ding) return false
+  return glyphSeparable(da, quan) && glyphSeparable(zou, ding)
+}
+
+function glyphSeparable(left: Float32Array, right: Float32Array): boolean {
+  let dot = 0
+  for (let i = 0; i < left.length; i++) dot += left[i] * right[i]
+  return dot < 0.98
+}
+
 function isCandidate(codepoint: number): boolean {
   if (codepoint >= 0xff10 && codepoint <= 0xff19) return false
   if (codepoint >= 0xff21 && codepoint <= 0xff3a) return false
@@ -322,18 +346,14 @@ async function readOrBuildStandard(
   } catch {
     // 没有缓存或缓存坏了，下面重建。
   }
-  onProgress?.('第一次要建立汉字点阵，大约需要一分钟')
   const draw = await canvasOf()
-  const families = ['"Microsoft YaHei"']
-  if (fontLibrary) {
-    try {
-      await fs.access('C:/Windows/Fonts/simhei.ttf')
-      fontLibrary.use('simhei', ['C:/Windows/Fonts/simhei.ttf'])
-      families.push('simhei')
-    } catch {
-      // 没有黑体时只用微软雅黑。
-    }
-  }
+  const families = await ensureReferenceFamilies(
+    cacheDir,
+    (family) => familyRenders(draw, family),
+    (family, file) => fontLibrary?.use(family, [file]),
+    onProgress
+  )
+  onProgress?.('第一次要建立汉字点阵，大约需要一分钟')
   const codes = candidateCodepoints()
   const items: GlyphCandidate[] = []
   for (const family of families) {
@@ -348,7 +368,7 @@ async function readOrBuildStandard(
       }
     }
   }
-  if (items.length < 1000) throw new Error('系统里没有可用的微软雅黑，无法还原番茄字体')
+  if (items.length < 1000) throw new Error('没有可用的汉字对照字体，无法还原番茄字体')
   await fs.mkdir(cacheDir, { recursive: true })
   const tmp = `${file}.${process.pid}.tmp`
   await fs.writeFile(tmp, encodeGlyphCache(items))
