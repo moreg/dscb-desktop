@@ -208,23 +208,30 @@ function diffText(diff: OutlineDiffItem): string {
 
 function isWordBudgetOnlyDiff(diff: OutlineDiffItem): boolean {
   const actual = diff.actual ?? ''
-  const assertions = actual.replace(/未改变|没有改变|未变动|未变化|保持不变/g, '')
-    .replace(/(?:未发现|未出现|不存在)[^，。；\n]{0,100}(?:替换|变化|改变|提前|遗漏|漏写|跑偏)[^，。；\n]{0,100}/g, '')
+  const assertions = actual.split(/(?<=[，。；\n])/).map(clause => {
+    // A negated change and an affirmative change can coexist across a contrast.
+    // Never erase a whole clause containing "但/却" to make a word patch eligible.
+    if (/但|然而|不过|却/.test(clause)) return clause
+    return clause.replace(/未改变|没有改变|未变动|未变化|保持不变|没有跑偏|未跑偏/g, '')
+      .replace(/(?:没有|并未|未曾|不曾|未)(?:提前|新增|改写|改变|变更|更换|遗漏|漏写|缺失|删除|删掉|删去)[^，。；\n]*/g, '')
+      .replace(/(?:未|没有|并未)(?:发生|出现|产生)[^，。；\n]{0,16}(?:变化|改变|变动|替换)/g, '')
+      .replace(/(?:未发现|未出现|未见|不存在|没有发现|没有出现)[^，。；\n]{0,100}(?:替换|变化|改变|提前|遗漏|漏写|跑偏)[^，。；\n]{0,100}/g, '')
+  }).join('')
   // A word-only patch must not hide an explicitly reported story change.
-  const story = '主线|核心事件|人物|角色|身份|阵营|知情|关系|伏笔|结局|决战'
-  const change = '改变|变更|更换|改为|改成|提前|缺失|遗漏|冲突|跑偏|未落实|未完成|不符|新增|漏写|改写'
+  const story = '主线|支线|剧情|核心事件|人物|角色|身份|阵营|知情|关系|伏笔|结局|决战'
+  const change = '改变|变更|更换|替换|改为|改成|提前|缺失|遗漏|冲突|跑偏|未落实|未完成|未发生|未出现|未兑现|没有兑现|没有完成|不符|新增|漏写|改写|删除|删掉|删去'
   if (new RegExp(`(?:${story})[^。；\\n]{0,24}(?:${change})|(?:${change})[^。；\\n]{0,24}(?:${story})`).test(assertions)) return false
   const keys = Object.keys(diff.outlinePatch ?? {})
   if (keys.length > 0) return keys.every((key) => key === 'wordEstimate')
   const text = diffText(diff)
   const reference = diff.outline ?? ''
-  // A model may omit outlinePatch and explain that all story tasks were met.
-  // Mentions of preserved plot/foreshadowing are not themselves plot changes.
+  // The comparison scope is the word budget. Require no reported story change;
+  // do not require the model to repeat a fixed "all tasks completed" phrase.
   const wordOnlyReference = /字数|篇幅/.test(reference) &&
     !/核心事件|主线|人物|角色|关系|伏笔|结局|决战|身份|知情/.test(reference)
-  const preservedStory = /(?:核心事件|剧情|本章目标|任务)[^。；\n]{0,70}(?:已落实|已实现|已完成|已达成|未改变|未变动|未变化|保持不变|符合细纲)/.test(actual)
-  if (wordOnlyReference && preservedStory && /字数|篇幅/.test(actual) &&
-    !/提前|漏写|新增|改写|改变|变更|更换|缺失|遗漏|未落实|未完成|未实现|未达成|未满足|不符|违背|冲突|跑偏|放弃/.test(assertions)) return true
+  if (wordOnlyReference && /字数|篇幅/.test(actual) &&
+    !/提前|漏写|新增|改写|缺失|遗漏|未落实|未完成|未实现|未达成|未满足|不符|违背|冲突|跑偏|放弃|删除|删掉|删去/.test(assertions) &&
+    !/(?:未|没有|尚未|并未)(?:完成|落实|实现|兑现|交代|回应|写出|写明|发生|出现)/.test(assertions)) return true
   return /字数|篇幅/.test(text) && !/核心事件|主线|人物|关系|伏笔|结局|决战/.test(text)
 }
 
