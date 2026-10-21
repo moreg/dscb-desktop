@@ -5,9 +5,23 @@ import { isEarlyAgentNarration } from '../../main/data/agent-meta-detect'
 
 /** 中断稿仅保留小说预览；流程旁白和其他错误仍回滚，且不触发写后记忆。 */
 export function interruptedChapterDraft(initial: string, preview: string, error: string): string {
-  if (!/LLM_TIMEOUT|LLM_ABORTED/.test(error) || isEarlyAgentNarration(preview)) return initial
+  if (!/LLM_TIMEOUT|LLM_ABORTED|LLM_OUTPUT_TRUNCATED/.test(error) || isEarlyAgentNarration(preview)) return initial
   const prose = parseForeshadowReceipt(preview).stripped
   return prose.trim() ? formatChapterProse(joinContinuation(initial, prose)) : initial
+}
+
+export function interruptedChapterRetryMessage(error: string, hasRetainedProse: boolean): string | undefined {
+  if (/LLM_OUTPUT_TRUNCATED/.test(error)) {
+    return hasRetainedProse
+      ? '模型输出中断，已生成的正文已保留。重试将从当前草稿继续写。'
+      : '模型输出中断，未保留新的正文。原有草稿已保留，可以重试。'
+  }
+  if (/LLM_TIMEOUT/.test(error)) {
+    return hasRetainedProse
+      ? '生成超时，已有草稿已保留。重试将从当前草稿继续写。'
+      : '生成超时，未保留新的正文。原有草稿已保留，可以重试。'
+  }
+  return undefined
 }
 
 /** 补写整章是权威稿，不能再次拼上已有正文；失败稿暂停自动记忆同步。 */

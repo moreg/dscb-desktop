@@ -1,6 +1,6 @@
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft } from './chapter-generation-finalize'
+import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
@@ -2088,19 +2088,18 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       editorFinalized = true
       if (!result.ok) {
-        // 超时保留小说预览，其他失败仍回滚错误旁白。
+        // 超时或输出截断保留小说预览，其他失败仍回滚错误旁白。
         const retained = interruptedChapterDraft(initialDraft, finalDraft, result.error ?? '')
         setDraft(retained)
         setDirty(retained !== data?.content)
         releaseIfMine()
-        if (/LLM_TIMEOUT/.test(result.error ?? '')) {
-          setGenerationRetry({ context: tempContextVal, message: finalDraft.trim()
-            ? '生成超时，已有草稿已保留。重试将从当前草稿继续写。'
-            : '等待超时，尚未收到正文。原有草稿已保留，可以重试。' })
+        const interruptionMessage = interruptedChapterRetryMessage(result.error ?? '', retained !== initialDraft)
+        if (interruptionMessage) {
+          setGenerationRetry({ context: tempContextVal, message: interruptionMessage })
           try {
             await window.api.saveDraft(targetProjectId, targetChapter, retained)
           } catch {
-            if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setAlertInfo({ message: '超时草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
+            if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setAlertInfo({ message: '中断草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
           }
         } else if (!isStreamAbortError(result.error)) {
           setGenerationRetry({ context: tempContextVal, message: friendlyLlmError(result.error) })
@@ -2148,7 +2147,7 @@ export default function ChapterEditor({
         const retained = interruptedChapterDraft(initialDraft, finalDraft, error)
         setDraft(retained)
         setDirty(retained !== data?.content)
-        setGenerationRetry({ context: tempContextVal, message: friendlyLlmError(error) })
+        setGenerationRetry({ context: tempContextVal, message: interruptedChapterRetryMessage(error, retained !== initialDraft) ?? friendlyLlmError(error) })
         void window.api.saveDraft(targetProjectId, targetChapter, retained).catch(() => {
           if (sessionEpochRef.current === myEpoch && genRef.current === myGen) {
             setAlertInfo({ message: '草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })

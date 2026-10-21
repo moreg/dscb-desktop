@@ -1,18 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft } from '../src/renderer/src/chapter-generation-finalize'
+import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from '../src/renderer/src/chapter-generation-finalize'
 
 describe('中断续写保留草稿', () => {
-  it.each(['LLM_TIMEOUT', 'LLM_ABORTED'])('%s 保留已有正文和新增正文', error => {
+  it.each(['LLM_TIMEOUT', 'LLM_ABORTED', 'LLM_OUTPUT_TRUNCATED'])('%s 保留已有正文和新增正文', error => {
     expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n“你来了”')
   })
-  it('没有收到新正文时保留原稿', () => {
-    expect(interruptedChapterDraft('原稿。', '', 'LLM_TIMEOUT')).toBe('原稿。')
+  it.each(['LLM_TIMEOUT', 'LLM_OUTPUT_TRUNCATED'])('%s 没有收到新正文时保留原稿', error => {
+    expect(interruptedChapterDraft('原稿。', '', error)).toBe('原稿。')
   })
-  it('流程旁白不作为超时草稿保存', () => {
-    expect(interruptedChapterDraft('原稿。', '我会调用 story-long-write 技能来生成正文。', 'LLM_TIMEOUT')).toBe('原稿。')
+  it.each(['LLM_TIMEOUT', 'LLM_OUTPUT_TRUNCATED'])('%s 流程旁白不作为中断草稿保存', error => {
+    expect(interruptedChapterDraft('原稿。', '我会调用 story-long-write 技能来生成正文。', error)).toBe('原稿。')
   })
   it('其他失败回滚预览，不把错误消息保留到正文', () => {
     expect(interruptedChapterDraft('原稿。', 'Error: sign in', 'AGY_AUTH_EXPIRED')).toBe('原稿。')
+  })
+  it('截断提示根据实际保留的正文说明重试落点', () => {
+    expect(interruptedChapterRetryMessage('LLM_OUTPUT_TRUNCATED', true)).toContain('从当前草稿继续写')
+    expect(interruptedChapterRetryMessage('LLM_OUTPUT_TRUNCATED', false)).toContain('未保留新的正文')
+    expect(interruptedChapterRetryMessage('LLM_AUTH_FAILED', false)).toBeUndefined()
   })
 })
 
