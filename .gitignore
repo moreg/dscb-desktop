@@ -12,8 +12,8 @@ invoke_calls.txt
 missing_methods.js
 restore_preload.js
 .tmp-deslop-validation/
-scratch/longform-live/
-scratch/tenchapter-live/
+scratch/
+.story-deployed
 
 # 本地 agent 技能配置（含绝对路径，勿提交）
 .agents/
