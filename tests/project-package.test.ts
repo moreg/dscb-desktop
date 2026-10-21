@@ -43,7 +43,7 @@ describe('小说包', () => {
     await writeFile(path.join(meta.path, '资料', '封面.bin'), binary)
     await writeFile(path.join(root, 'providers.enc'), Buffer.from('secret-key'))
 
-    let linked = false
+    let linked: boolean
     try {
       await symlink(path.join(root, 'providers.enc'), path.join(meta.path, '外链.md'))
       linked = true
