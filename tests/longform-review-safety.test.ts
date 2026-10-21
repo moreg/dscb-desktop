@@ -23,8 +23,8 @@ import { acceptedDeslop } from './helpers/accepted-deslop'
 const goal = '陆安必须寻找失踪的母亲，不能无故放弃这个全书目标。'
 const bad = '陆安宣布永久放弃寻找母亲，从此只在街边卖画谋生。'
 const good = '陆安向船夫询问母亲的下落，随后沿着河岸继续寻找。'
-const cleared = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] })
-const rejected = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [
+const cleared = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
+const rejected = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [
   { kind: 'mainline', message: '无转变依据直接放弃全书目标。', snippet: bad, reference: goal }
 ] })
 const check: ChapterSelfCheckReport = { schemaVersion: 1, chapterNumber: 1, generatedAt: '', ok: true, summary: '通过',
@@ -59,6 +59,36 @@ describe('长篇核对绕过与记忆污染回归', () => {
         { kind: 'thread', subject: '寻找母亲', object: '', aspect: '进展', value: '已放弃', evidence: prose }
       ] })
   }
+
+  it('恢复稿的旧道具名在润色及记忆提取前即被拦住，批次重试仍复用原稿且不能推进', async () => {
+    const previous='陆安把原信装入绸布封套，收入衣内保管。'
+    const stale='陆安从衣内取出青布封套，将原信递给陆宁。'
+    await new ProseRepo(dir).write(1,previous)
+    await new ProseRepo(dir).write(2,stale)
+    await new ChapterSummaryRepo(dir).write({schemaVersion:1,chapterNumber:1,sourceHash:hashProse(previous),generatedAt:'',
+      events:[],stateChanges:[],openThreads:[],continuity:[{kind:'item',subject:'原信',object:'',aspect:'持有者',value:'陆安，装在绸布封套内',evidence:previous}]})
+    verdict=JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[
+      {kind:'item',message:'封套没有更换依据却恢复旧名',snippet:stale,reference:previous}
+    ]})
+    generate.mockImplementation(async (_prompt,opts)=>opts?.meta?.feature==='longformGuard'
+      ? opts.meta.chapterNumber===1 ? cleared : verdict : bad)
+    const deslop=vi.spyOn(acceptedDeslop,'deslop')
+    const flow=(service as unknown as {flow:WriteFlowService}).flow
+    const extract=vi.spyOn(flow,'extractMemoryStream')
+    const saved=vi.fn()
+    await expect(service.runFullFlowForChapter(id,2,()=>{}, {contentOverride:stale,onContentGenerated:saved,proseFirst:true}))
+      .rejects.toThrow('跨章道具')
+    expect(deslop).not.toHaveBeenCalled()
+    expect(extract).not.toHaveBeenCalled()
+    expect(saved).not.toHaveBeenCalled()
+    const resumed=await service.generateChaptersBatch(id,2,2,()=>{},null,{},
+      {fromChapter:1,total:2,completed:[1,2],pendingPostProcessChapter:2},{autoContinue:true})
+    expect(resumed,JSON.stringify(resumed)).toMatchObject({status:'paused',pendingPostProcessChapter:2})
+    expect(resumed.pauseReason).toContain('跨章道具')
+    expect(await new ProseRepo(dir).read(2)).toBe(stale)
+    expect(await new ChapterSummaryRepo(dir).read(2)).toBeNull()
+    expect(generate.mock.calls.some(([,opts])=>opts?.meta?.feature==='chapter')).toBe(false)
+  })
 
   it('已落盘的拒绝稿从热原文索引、近期摘要和连续性台账中隔离，重启仍阻止后章', async () => {
     await new ProseRepo(dir).write(1, bad)

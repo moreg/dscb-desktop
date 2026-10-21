@@ -19,6 +19,11 @@ app.whenReady().then(async () => {
   const p = JSON.parse(await fs.readFile(join(root, 'project.json'), 'utf8'))
   const config = await fs.readFile(join(root, 'run-config.json'), 'utf8').then(JSON.parse).catch(() => ({}))
   const entityScenario = config.scenario === 'entity-write'
+  const retryPlan = await fs.readFile(join(root,'entity-retry-plan.json'),'utf8').then(JSON.parse).catch(()=>null)
+  const entityTargets: string[] = retryPlan?.targetNames || ['松木信匣','青布封套']
+  const obsoleteName = retryPlan?.obsoleteName || '松木信匣'
+  const protectedName = retryPlan?.protectedName || '青布封套'
+  const replacements: [string,string][] = retryPlan?.replacements || [['松木信匣','桐木信匣'],['青布封套','棉布封套']]
   const events = (await fs.readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l))
   const processes: { event: string; pid: number; time: string }[] = JSON.parse(await fs.readFile(join(root, 'processes.json'), 'utf8'))
   const requests = await Promise.all((await fs.readdir(join(root, 'calls'))).filter(f => f.endsWith('-request.json'))
@@ -75,8 +80,8 @@ app.whenReady().then(async () => {
       const edits = JSON.parse(await fs.readFile(join(root, 'author-edits.json'), 'utf8'))
       assert.equal(hashProse(body), hashProse(edits.oldProse))
       const final = await new ProseRepo(p.path).read(4)
-      assert(final.includes('桐木信匣') && final.includes('棉布封套'))
-      assert(!final.includes('松木信匣') && !final.includes('青布封套'), '恢复使用了作者修改前的旧正文')
+      assert(replacements.every(([,name])=>final.includes(name)))
+      assert(replacements.every(([name])=>!final.includes(name)), '恢复使用了作者修改前的旧正文')
     } else assert.equal(hashProse(await new ProseRepo(p.path).read(4)), hashProse(body), '第4章恢复后覆盖了原保存正文')
     assert((await readLongformReviewState(snapshot)).batchPending?.['4'])
     assert(!(await new ProseMemoryIndex(snapshot).readBefore(5)).some(c => c.chapterNumber === 4))
@@ -90,8 +95,12 @@ app.whenReady().then(async () => {
     assert(requests.some(r => r.kind === 'longform' && r.chapter === 4 && r.pid === restartedPid))
     for (let n = 2; n <= 10; n++) {
       const generated = events.findIndex(e => e.event === 'model-start' && e.kind === 'chapter' && e.chapter === n)
-      const completed = events.findIndex(e => e.event === 'chapter-complete' && e.number === n - 1)
-      assert(completed >= 0 && generated > completed, `第${n}章生成早于前章完成检查`)
+      const sourceHash=hashProse(await new ProseRepo(p.path).read(n-1))
+      const completed=events.slice(0,generated).find(e=>e.event==='chapter-complete' && e.number===n-1 &&
+        e.result?.outlineDiff?.checked===true && e.result.outlineDiff.passed===true &&
+        e.result?.memoryApply?.entitiesReviewed===true && e.result?.chapterSummary?.sourceHash===sourceHash &&
+        e.result.chapterSummary.stale===false)
+      assert(generated>=0 && completed, `第${n}章生成前没有前章当前稿的完整检查、记忆审核和概要通过记录`)
     }
   })
   if (!entityScenario) await check('第7章记忆已提交后的真实关闭恢复不重复追加历史', async () => {
@@ -120,12 +129,51 @@ app.whenReady().then(async () => {
     assert((states.match(/## 自动历史快照（第 7 章）/g) || []).length <= 1)
   })
   if (entityScenario) {
+    if (retryPlan?.requireItemConflictCheck) await check('旧细纲道具回流被真实恢复入口拦截，修复后十章均按四项闸门复核', async () => {
+      const before=JSON.parse(await fs.readFile(join(root,'item-guard-before-result.json'),'utf8'))
+      const after=JSON.parse(await fs.readFile(join(root,'item-guard-after-result.json'),'utf8'))
+      assert.equal(before.blocked,false)
+      assert.equal(after.blocked,true)
+      const blocked=JSON.parse(await fs.readFile(join(root,'item-blocked-live-result.json'),'utf8'))
+      assert.equal(blocked.progress.pendingPostProcessChapter,7)
+      assert(blocked.progress.pauseReason.includes('跨章道具'))
+      const event=events.find(e=>e.event==='batch-result' && e.result?.progress?.pauseReason?.includes('跨章道具'))
+      assert(event)
+      assert(!requests.some(r=>r.pid===event.pid && r.chapter===7 && r.kind==='memory' &&
+        // The later repaired retry may legitimately extract chapter seven.
+        events.find(e=>e.event==='model-start' && e.id===r.file.replace('-request.json',''))?.time < event.time))
+      const repaired=JSON.parse(await fs.readFile(join(root,'item-prose-repair-through-ipc.json'),'utf8'))
+      assert(repaired.oldProse.includes('青布封套') && !repaired.editedProse.includes('青布封套'))
+      for(let n=1;n<=10;n++) {
+        const current=hashProse(await new ProseRepo(p.path).read(n))
+        let passed=false
+        for(const request of requests.filter(r=>r.kind==='longform' && r.chapter===n)) {
+          const text=request.body.messages.map((m:{content:string})=>m.content).join('\n')
+          const body=text.split('【本章实际正文】\n\n')[1]
+          if(!body || hashProse(body)!==current) continue
+          const raw=await fs.readFile(join(root,'calls',request.file.replace('-request.json','-response.txt')),'utf8').catch(()=>'')
+          let output=''
+          for(const line of raw.split('\n')) try {
+            if(line.startsWith('data: ')) output+=JSON.parse(line.slice(6)).choices?.[0]?.delta?.content||''
+          } catch { /* SSE terminator */ }
+          const result=findJsonObject(output)
+          if(result?.completed===true && result.checked?.includes('item') && result.findings?.length===0) passed=true
+        }
+        assert(passed,`第${n}章当前稿没有四项真实闸门通过记录`)
+      }
+    })
     await check('确实在新增实体文件提交后、写入函数返回前关闭，归属记录先于卡片存在', async () => {
       const flag = JSON.parse(await fs.readFile(join(root, 'crash-ready-entity.json'), 'utf8'))
       assert.equal(flag.phase, 'entity committed, writer not returned')
       const snapshot = join(root, 'before-force-kill-entity')
       const ledger = JSON.parse(await fs.readFile(join(snapshot, '追踪', '.automatic-entity-ledger.json'), 'utf8'))
-      for (const name of ['松木信匣', '青布封套']) {
+      if (retryPlan) {
+        const before = JSON.parse(await fs.readFile(join(root,'before-target-creation.json'),'utf8'))
+        assert(new Date(before.time).getTime() < flag.time)
+        assert(entityTargets.every(name=>!before.itemFiles.includes(name+'.md')), '目标在实际关闭测试前已经存在，未覆盖新增创建')
+        assert(events.some(e=>e.event==='entity-fixture-revised-through-app-ipc'))
+      }
+      for (const name of entityTargets) {
         const receipt = ledger.chapters['4'].find((r: {name:string}) => r.name === name)
         assert(receipt, `${name}没有提前写入归属记录`)
         assert.equal(hashProse(await fs.readFile(join(snapshot, receipt.path), 'utf8')), receipt.hash)
@@ -137,11 +185,11 @@ app.whenReady().then(async () => {
     await check('作者修订后旧自动实体清理，手改卡片保留，新实体使用当前正文', async () => {
       const edits = JSON.parse(await fs.readFile(join(root, 'author-edits.json'), 'utf8'))
       assert(events.some(e => e.event === 'author-edits-through-app-ipc'))
-      assert.equal(await fs.access(join(p.path,'记忆','道具','松木信匣.md')).then(()=>true,()=>false),false)
-      const protectedCard = await fs.readFile(join(p.path,'记忆','道具','青布封套.md'),'utf8')
+      assert.equal(await fs.access(join(p.path,'记忆','道具',obsoleteName+'.md')).then(()=>true,()=>false),false)
+      const protectedCard = await fs.readFile(join(p.path,'记忆','道具',protectedName+'.md'),'utf8')
       assert(protectedCard.includes(edits.protectedNotes), '作者手改卡片被覆盖或删除')
       assert.equal(hashProse(protectedCard),edits.protectedFileHash,'作者手改卡片文件在恢复后被改变')
-      for (const name of ['桐木信匣', '棉布封套']) {
+      for (const name of replacements.map(([,name])=>name)) {
         const text = await fs.readFile(join(p.path,'记忆','道具',`${name}.md`),'utf8')
         assert(text.includes('第4章观察快照'), `${name}缺少当前提取来源`)
       }
@@ -151,7 +199,7 @@ app.whenReady().then(async () => {
         if (currentProse.includes(receipt.name)) await fs.access(join(p.path,receipt.path))
       }
       const candidate = JSON.parse(await fs.readFile(join(p.path,'.cache','memory-candidates','chapter-4.json'),'utf8'))
-      assert(!candidate.extraction.newItems.some((e:{name:string})=>['松木信匣','青布封套'].includes(e.name)))
+      assert(!candidate.extraction.newItems.some((e:{name:string})=>replacements.some(([name])=>name===e.name)))
     })
     await check('人物手改字段保留，模型确实尝试更新该字段，标准状态不被旧副本覆盖', async () => {
       const edits = JSON.parse(await fs.readFile(join(root,'author-edits.json'),'utf8'))

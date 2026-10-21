@@ -6,9 +6,6 @@ import { formatChapterProse } from '../../shared/format-chapter-prose'
 import type { DialogueQualityReport, DeslopFinding } from '../../shared/types'
 export type { DialogueQualityReport } from '../../shared/types'
 
-export const DIALOGUE_TARGET = 0.7
-export const DIALOGUE_TOLERANCE = 0.01
-
 /** 闭合台词在句尾被下一句/动作打断时保留语义标点，由语义审核确认用途。 */
 export function dialogueExpressionFindings(text: string, findings: DeslopFinding[]): DeslopFinding[] {
   const lines = text.split('\n')
@@ -35,11 +32,7 @@ export function measureDialogue(text: string): { total: number; dialogue: number
   return { total, dialogue, ratio: total ? dialogue / total : 0 }
 }
 
-export function dialogueRatioPassed(ratio: number): boolean {
-  return Math.abs(ratio - DIALOGUE_TARGET) <= DIALOGUE_TOLERANCE + 1e-9
-}
-
-/** 事实修复必须完整应用唯一匹配的局部提案，不能为追比例跳过其中某个问题。 */
+/** 事实修复必须完整应用唯一匹配的局部提案，不能跳过其中某个已确认问题。 */
 export function applyExactDialoguePatches(text: string, patches: unknown): string | null {
   if (!Array.isArray(patches) || !patches.length || patches.length > 16) return null
   const selected: Array<{ start: number; before: string; after: string }> = []
@@ -56,41 +49,6 @@ export function applyExactDialoguePatches(text: string, patches: unknown): strin
   return result
 }
 
-/** 局部提案必须唯一命中原文；用实测选择靠近目标的修改，绝不按模型自报比例应用。 */
-export function applyDialoguePatches(text: string, patches: unknown, prefix = '', bounds?: { min: number; max: number; preferCoverage?: boolean }): string {
-  if (!Array.isArray(patches)) return text
-  const proposals: Array<{ start: number; before: string; after: string }> = []
-  for (const patch of patches.slice(0, 8)) {
-    if (!patch || typeof patch.before !== 'string' || typeof patch.after !== 'string' || !patch.before.trim()) continue
-    const start = text.indexOf(patch.before)
-    if (start < 0 || start !== text.lastIndexOf(patch.before)) continue
-    proposals.push({ start, before: patch.before, after: patch.after })
-  }
-  let result = text
-  let distance = Math.abs(measureDialogue(`${prefix}\n${text}`).ratio - DIALOGUE_TARGET)
-  let coverage = 0
-  // 最多8项、256种组合：同时满足篇幅与比例，不能把全套超预算提案一并应用。
-  for (let mask = 1; mask < 1 << proposals.length; mask++) {
-    const selected = proposals.filter((_p, i) => mask & (1 << i)).sort((a, b) => b.start - a.start)
-    if (selected.some((p, i) => i && p.start + p.before.length > selected[i - 1].start)) continue
-    let candidate = text
-    for (const p of selected) candidate = candidate.slice(0, p.start) + p.after + candidate.slice(p.start + p.before.length)
-    const measured = measureDialogue(`${prefix}\n${candidate}`)
-    const length = measureDialogue(candidate).total
-    if (bounds && (length < bounds.min || length > bounds.max)) continue
-    const nextDistance = Math.abs(measured.ratio - DIALOGUE_TARGET)
-    const better = bounds?.preferCoverage
-      ? dialogueRatioPassed(measured.ratio) && (selected.length > coverage || (selected.length === coverage && nextDistance < distance))
-      : nextDistance < distance || (distance <= DIALOGUE_TOLERANCE && nextDistance <= DIALOGUE_TOLERANCE && result === text)
-    if (better) {
-      result = candidate
-      distance = nextDistance
-      coverage = selected.length
-    }
-  }
-  return result
-}
-
 export interface DialogueCompositionOptions {
   existingText?: string
   context?: string
@@ -100,7 +58,7 @@ export interface DialogueCompositionOptions {
   allowSceneRewrite?: boolean
 }
 
-/** 原稿是事实基线，前部只读；比例与语义审核全部通过才交付。 */
+/** 原稿是事实基线，前部只读；事实与语义审核全部通过才交付。 */
 export async function ensureDialogueQuality(
   original: string,
   candidate: string,
@@ -138,16 +96,15 @@ export async function ensureDialogueQuality(
   for (let attempt = 0; attempt <= maxRepairs; attempt++) {
     abort()
     const measured = measureDialogue(whole(current))
-    options.onProgress?.(`对白检查：已修复 ${attempts}/${maxRepairs} 次，实测占比 ${(measured.ratio * 100).toFixed(2)}%`)
+    options.onProgress?.(`表达检查：已修复 ${attempts}/${maxRepairs} 次`)
     const expressionIssues = await options.validate?.(current) ?? []
-    let repairingSemantics = dialogueRatioPassed(measured.ratio) && expressionIssues.length === 0
-    if (!dialogueRatioPassed(measured.ratio) || expressionIssues.length) {
-      // 比例不合格也先辨认整场问题，避免把修复预算全用于凑引号字数。
+
+    if (expressionIssues.length) {
+      // 扫描已发现表达问题时先核对场景；候选采用前仍需完整事实对照。
       const scene = await reviewScene()
       if (!scene.valid) return { text: original, report: { passed: false, beforeRatio: before.ratio,
         afterRatio: before.ratio, attempts, ...pending(), issues: scene.issues } }
-      repairingSemantics = !scene.passed
-      issues = [...(!dialogueRatioPassed(measured.ratio) ? [`整章直接对白占比 ${(measured.ratio * 100).toFixed(2)}%，要求 69%—71%（目标70%）。`] : []), ...expressionIssues, ...scene.issues, ...repairFeedback]
+      issues = [...expressionIssues, ...scene.issues, ...repairFeedback]
       if (attempts >= maxRepairs) break
     } else {
       const cachedIssues = rejectedReviews.get(current)
@@ -156,15 +113,19 @@ export async function ensureDialogueQuality(
         options.onProgress?.('候选稿未变，复用已发现的事实与表达问题')
       } else {
         options.onProgress?.('正在联合核对事实、人物互动与场景表达')
-        // 即使比例已达标，也必须检查鲜活度、旁白套引号以及事实/说话人漂移。
+        // 对话占比仅供展示；所有候选均核对事实、场景表达与说话人。
         const raw = await llm.generateStream([
           '审核小说整章改写稿，联合核对事实保真、人物互动与场景表达，不能只看引号或比例。只返回JSON：{"passed":true或false,"factsUnchanged":true或false,"issues":["原稿具体事实→候选稿差异"],"expressionFindings":[{"excerpt":"待审核稿逐字存在的原句","reason":"结合相邻段落说明具体表达问题"}]}。事实差异放 issues，文风、重复和人物互动问题放 expressionFindings。passed 为 true 必须事实一致且两个数组都为空；factsUnchanged 只表示事实是否一致，不能代替表达检查。',
           DIALOGUE_VITALITY_RULES,
           '对白重写保留剧情事实与人物认知、立场、情绪和关键决定，不要求逐句保留原来的提问、回答或澄清；无剧情用途的发言组织可以重写。不要把每一句原台词都升级成不可改变的事件。',
-          '作者的对白排版要求：陈述台词必须在闭合引号前以句号结束，同一对引号内的中间不能使用中文句号。已有末尾句号必须保留，缺少时补齐，问号和感叹号按语气保留；不能擅自以另一套标点习惯否定本稿。',
+          '区分剧情事实与表达载体：同一状态已被明确建立并仍保留时，可以合并重复提醒、重复确认及没有新增结果的小动作，不要求每次看一眼、点头或再摸一下逐项保留。叮嘱仅重复已保留的规则、没有增加责任或条件时也可合并。',
+          '若省略会改变物品去向、首次发现、谁获知信息、人物立场、承诺或后续因果，就属于事实变化；唯一出现的关键警告、约定、未决调查方向及结尾决定不得删去。不要将保留同一事实误判为必须保留每次重复表达。',
+          '作者的对白排版要求：同一对引号内不使用中文句号（包括闭合引号前），陈述台词以闭合引号收尾；多句按语意拆为引号完整的独立段落，问号和感叹号按语气保留；不能擅自以另一套标点习惯否定本稿。',
+          '精简表达时保留仍有效的并行线索、未完成事项和后续决定，不能将多条核查方向改成只有一条；省掉反复说明不等于省掉决定本身。',
           '一次完整对照全章，列出所有明确的事实差异与无用途的重复，而不是每轮只挑一处。复核修复稿时仍检查全文，但不把措辞喜好当成新的硬性问题。',
+          '表达修订必须能与事实保真同时成立：不能要求删除独立证据限制、遗漏人物知情或重排实际调查次序。多个不同事项的限定或保留原有先后本身不等于重复；结合相邻回合指出无用途的重复信息或逐轮搬运的交流组织，不能把必须保留的事实本身作为拒绝原因。保留事实也不豁免其生硬表达。',
           '通过必须同时满足：原稿的事实、说话者、人物认知、立场、动机、因果、数量、伤势、道具、伏笔和结尾不变；对白按身份和关系接话、有各自关注点；没有轮流播报、复问填充、机械金句、无用途的寒暄、长篇说明书或把无声行动/全知旁白套上引号。',
-          '允许在同一已发生场景内，把原稿明确记载的交流内容换成直接台词，把人物已知且此刻确有必要交流的信息说出来；不把这种表达转换本身认定为新增剧情。不允许泄露角色未知信息、新增承诺或结果，也不允许说话人替作者讲解设定。',
+          '允许在同一已发生场景内双向调整表达：必要交流可换成直接台词，重复的记录复盘、提醒与说明也可合并为凝练叙述。保留谁说过、谁获知了什么、实际结果与关键决定，不要求每条资料都逐句说出口；表达转换本身不算增删剧情。不允许泄露角色未知信息、新增承诺或结果，也不允许说话人替作者讲解设定。',
           '将原有计划说清楚、对既定目标作出自然回应，不因措辞改为陈述句就认定为新增承诺；新增具体日期、额外责任、不可撤回保证或新的交换条件才属于事实变化。原稿已经约定共同选择双方空闲日期时，仍未定日期的共同安排不算新剧情。不得新增原稿未给出的具体数量或比例。',
           '区分客观事件与人物说法：符合原有立场的夸张、抱怨、威吓、推责、试探和害怕时的口头反应，可以自然生成，不能把每句台词都当成旁白确认的事实。例如“我赔不起”可以表达恐慌，并不自动确立资产数额；但新增具体财产、过往约定、签约原因、真实经历，或由旁白证实新事实，仍须拒绝。不得借此改变人物原有真实动机或已知信息。',
           '对白的用途也包括讨价还价、回避、试探、关系推进和情绪变化，不要求每句台词提供新事实。同一关键信息被双方提到不自动算填充；须核对回应是否改变当前态度、诉求或下一步行动。连续复述同一结论且没有这些变化，才作为重复填充指出。',
@@ -207,23 +168,20 @@ export async function ensureDialogueQuality(
       if (attempts >= maxRepairs) break
     }
     attempts++
-    options.onProgress?.(`对白${repairingSemantics ? '语义' : '比例与表达'}修复 ${attempts}/${maxRepairs}`)
-    const desiredDialogue = Math.round(measured.total * DIALOGUE_TARGET)
+    options.onProgress?.(`表达修复 ${attempts}/${maxRepairs}`)
     const raw = await llm.generateStream([
-      '自动修复小说对白比例与鲜活度，只返回 JSON：{"patches":[{"before":"本次正文中逐字存在、唯一出现的完整段落或连续几段","after":"对应的替换段落"}]}。提供最多8处互不重叠的替换；整场交谈组织有问题时，一处可覆盖完整的连续场景，不以小修措辞代替重组。只返回上述JSON替换对象，不另输出裸正文、标题、统计或自检过程。before必须逐字匹配【本次正文】，包含原有换行；after的台词独立成段、引号完整。',
+      '修复已确认的小说表达与事实问题，只返回 JSON：{"patches":[{"before":"本次正文中逐字存在、唯一出现的完整段落或连续几段","after":"对应的替换段落"}]}。提供最多8处互不重叠的替换；整场交谈组织有问题时，一处可覆盖完整的连续场景，不以小修措辞代替重组。只返回上述JSON替换对象，不另输出裸正文、标题、统计或自检过程。before必须逐字匹配【本次正文】，包含原有换行；after的台词独立成段、引号完整。',
       options.mode === 'edit' ? '本次是已有正文润色，只整理原文已有的交流与已知信息，不增删剧情。' : '本次是新章或续写的成稿修复，细纲只提供约束，不能把尚未发生的细纲事件提前塞入原稿。',
-      `实测整章有效字数${measured.total}，直接对白${measured.dialogue}字，占比${(measured.ratio * 100).toFixed(2)}%；目标70%，验收69%—71%。按当前篇幅约需${desiredDialogue}字直接对白，当前差额${desiredDialogue - measured.dialogue}字。字数不含标点空白，不按段数计。`,
-      ...(measured.ratio < DIALOGUE_TARGET ? [`注意追加对白也会增加总字数：若只追加台词，需要约${Math.ceil((measured.total * DIALOGUE_TARGET - measured.dialogue) / (1 - DIALOGUE_TARGET))}有效字才能到70%；把已有必要交流从旁白转为台词则约转换${Math.ceil(measured.total * DIALOGUE_TARGET - measured.dialogue)}字即可，不增加总字数。追加量超过篇幅预算时必须转换表达，不能用重复确认和说明凑字数。`] : []),
       `只读前部有${measureDialogue(prefix).total}有效字、${measureDialogue(prefix).dialogue}字对白，不能重写或输出前部。输出只替换【本次正文】，程序会与前部合计验收。`,
-      `本次正文有效字数保持在${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}字，不能删掉必要事件或靠无限续写补占比。`,
-      '先落实【必须修复的问题】中的整场交谈诊断，比例调整不能留下已发现的机械组织；必要时一并重写相关连续回合。比例偏低时优先把已记载的必要交流写成有来回的台词，减少重复旁白；偏高时收紧冗余对白，用必要动作交代结果。所有剧情事实、角色已知范围、说话者、立场、数量与结尾保持原稿，不制造新事件，不泄露底牌。',
+      `本次正文有效字数保持在${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}字，不能删掉必要事件或无限扩写。`,
+      '只修复【必须修复的问题】中有原句依据的事实差异、重复、机械组织和表达问题。整章对白目标 70%，本次修复仅在事实与篇幅保真范围内改善表达；片段不验收整章比例，不为占比增删问答或有效交流。所有剧情事实、角色已知范围、说话者、立场、数量、未决线索与结尾决定保持原稿。',
       '原稿明确写了未回答、未发生或尚未确认的事，修复时仍须保持这一状态，不能为增加对白改成有人回答、事情发生或确认了归属。删除违规新增台词时可将after设为空字符串，不要用另一段新增交流补回相同问题。',
       '不把旁白套上引号，不让人物解说自己的动作，不增加虚构发言者，不让系统通知、文件名或心声冒充人物直接对白。避免一问一答的说明书、人人同腔、连续金句和捧哏。',
-      '把必要信息交给对白后，删除旁白中对同一消息的重复解释，保留实际动作与结果。不要保留一遍旁白播报，再让人物完整复述一遍；围绕该消息写人物此刻不同的诉求、抵赖、犹豫或选择，让对方真正接话。',
+      '按本场用途选择对白或叙述。需要直接交锋的有效互动保留，重复的资料核对与条件说明可归并为凝练叙述，保留已发生的交流、信息来源、实际结果和关键决定；不要让旁白与对白把同一内容各讲一遍，也不要把原有逐项问答改成逐项动作播报。',
       DIALOGUE_VITALITY_RULES,
-      '本次明确授权改善表达载体：可由在场且已经知道该消息的人说出必要信息，也可围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
-      repairingSemantics ? '本轮修复整场交谈问题，不以对白字数差额作为修改目标。对照问题涉及的连续回合重写，保留仍有效的对白与必要剧情；不能只改措辞、补某人的发言、换话题、删除对白或添动作来掩盖原组织。原稿中的无效问答形式不属于必须保留的事实。' : '每个提案应带来可测量的有效台词变化，合计至少覆盖当前差额；不要连续几轮只删旁白，关键动作、结果、因果与伏笔不可删。引用原稿中的通知时，必须让当下正在处理它的人作出反应或选择，不能只把文件原文移入引号。',
-      '排版一句一段，直接对白独立成段，引号内的中间不使用中文句号，陈述台词在闭合引号前保留句号，问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
+      '本次明确授权双向改善表达载体：可由在场且已知该消息的人说出必要信息，也可把无用途的重复对白说明合并为叙述，保留有效直接对白，必要时围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
+      '对照问题涉及的连续回合修订，保留有效交流、必要动作和原有调查方向。精简重复时保留其承载的事实、否定边界、未完成事项和后续决定；不能将多条仍有效的线索压成只有一条。事实差异优先最小局部修复，不为重组表达另写剧情。',
+      '排版按语意分段，直接对白独立成段，引号内不使用中文句号（包括闭合前），问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
       '破折号和省略号按功能处理，不能机械变句号。原稿闭合台词末尾被下一句或动作打断的“——”可以保留，用来保留尚未说完的请求；其他修辞停顿应改短句或动作。不能补全尚未说出的消息、删除原有请求，不能留下“需要您。”这样的缺谓语整句。',
       '【本次作者修订要求（必须落实）】', options.revisionInstruction ?? '',
       '【修订前正文（核对旧问题是否仍在，不是新剧情来源）】', options.previousDraft ?? '',
@@ -234,20 +192,17 @@ export async function ensureDialogueQuality(
       maxTokens: Math.min(32768, Math.max(8192, Math.ceil(original.length * 2.8))), meta: { ...options.meta, feature: 'deslop:dialogue-repair' } })
     abort()
     const parsed = findJsonObject(raw)
-    // 整场语义修复须完整应用，不能为更接近70%只挑其中几句；最终仍重新验收比例。
+    // 已确认的问题作为一组修复，不再按对白占比挑选提案。
     const proposed = Array.isArray(parsed?.patches)
-      ? repairingSemantics ? applyExactDialoguePatches(current, parsed.patches)
-        : applyDialoguePatches(current, parsed.patches, prefix,
-          { min: originalLength * (1 - budget), max: originalLength * (1 + budget) })
-      : parsed?.text
+      ? applyExactDialoguePatches(current, parsed.patches) : parsed?.text
     if (typeof proposed !== 'string' || !proposed.trim() || proposed === current) {
-      repairFeedback = [repairingSemantics ? '上轮提案没有应用，原问题仍在。可用一处唯一匹配的连续场景替换，实质重组问题回合，保留事实及有效交流，不为保持局部句式而续接旧的机械结构。' : '上轮提案没有可唯一匹配、符合篇幅预算并改善比例的组合。不要只增加长篇发言，优先把已有交流对应的旁白转成直接台词，并精简重复解释；不要删关键动作或结果。']
+      repairFeedback = ['上轮提案没有应用，原问题仍在。before须唯一逐字匹配，可用一处连续场景替换；只修复明确问题，保留事实与有效交流，不添加无依据的对话。']
       issues = repairFeedback; continue
     }
     const repaired = options.prepare?.(proposed) ?? formatChapterProse(proposed)
     const length = measureDialogue(repaired).total
     if (length < originalLength * (1 - budget) || length > originalLength * (1 + budget) || /\[(?:需复核|需确认|已拒绝)\]/u.test(repaired)) {
-      repairFeedback = [`上轮修复后${length}字，违反篇幅或正文完整性约束。必须保留${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}有效字；优先转换表达而非扩写。`]
+      repairFeedback = [`上轮修复后${length}字，违反篇幅或正文完整性约束。必须保留${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}有效字；只修改已确认的问题，不以扩写补足对白。`]
       issues = repairFeedback; continue
     }
     current = repaired

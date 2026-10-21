@@ -49,7 +49,8 @@ describe('batch safety and recovery', () => {
     const ps = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), settings)
     projectId = (await ps.create({ name: '测试小说', genre: '玄幻' })).id
     dir = await ps.resolveDir(projectId)
-    llm = { generateStream: vi.fn().mockResolvedValue('[]') } as unknown as LlmService
+    llm = { generateStream: vi.fn().mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]}) : '[]') } as unknown as LlmService
     service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
     vi.spyOn(service, 'generateChapterSummary').mockImplementation(async (_pid, ch) => ({
       chapterNumber: ch, sourceHash: 'test', generatedAt: '', events: [], stateChanges: [], openThreads: [], stale: false
@@ -90,7 +91,7 @@ describe('batch safety and recovery', () => {
     })
     vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] }) : foreshadowPatch)
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] }) : foreshadowPatch)
     const completed = vi.fn()
     const progress = await service.generateChaptersBatch(projectId, 1, 2, completed, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
@@ -463,6 +464,7 @@ describe('batch safety and recovery', () => {
   const continuityPatch = JSON.stringify({ replacements: [{ before: '守门人核对印章后放他进门。', after: '守门人核对印章后，让他留在门外等候。' }] })
   function stubContinuityModel(): void {
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: true, issues: [] })
       return '[]'
@@ -517,6 +519,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     let verification = 0
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') {
         expect(await new ProseRepo(dir).read(1)).toBe(content)
@@ -554,6 +557,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     const authorEdit = content + '作者新加的台词。'
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') {
         const file = (await readdir(path.join(dir, '正文'))).find(name => name.endsWith('.md'))!
@@ -574,6 +578,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     const controller = new AbortController()
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') { controller.abort(); return continuityPatch }
       return '[]'
     })

@@ -1,6 +1,6 @@
 import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtemp } from 'fs/promises'
+import { mkdtemp, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -271,14 +271,20 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进屋核对账册' })
   })
 
-  it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行一句一段', async () => {
+  it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行技能排版', async () => {
+    await writeFile(path.join(await ps.resolveDir(projectId), '设定', '平台配置.md'), '# 平台配置\n- 平台：番茄\n')
     const raw = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
-    const expected = '林远推开门。\n屋里没人。\n“先签字。”\n“还等什么？”\n“快点！”'
+    const expected = '林远推开门。屋里没人。\n“先签字”\n“还等什么？”\n“快点！”'
     const llm = mockLlm(raw)
     const service = new WriteService(ps, llm)
     expect(await service.generateChapterStream(projectId, 1)).toBe(expected)
     expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain(expected)
-    expect(vi.mocked(llm.generateStream).mock.calls[0][1]?.systemPrompt).toContain('【正文排版要求')
+    const sent = vi.mocked(llm.generateStream).mock.calls[0][1]?.systemPrompt ?? ''
+    expect(sent).toContain('【正文排版要求')
+    expect(sent).toContain('整章对话占比目标 70%')
+    expect(sent).toContain('说话方式服从人设')
+    expect(sent).toContain('已生效的新增利益')
+    expect(sent).not.toContain('不设对话占比目标')
   })
 
   it('calls llm.generateStream with systemPrompt option', async () => {

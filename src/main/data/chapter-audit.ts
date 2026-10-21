@@ -991,7 +991,7 @@ function pushQualityViolations(
             snippet: truncate(s, 80),
             offset: idx,
             ruleId: 'long_sentence',
-            suggestion: '仅在语意不清时自然断句；台词按独立对话段处理，中间不用句号，陈述台词在闭合引号前保留句号'
+            suggestion: '仅在语意不清时自然断句；台词按独立对话段处理，引号内不使用中文句号（包括闭合前），多句按语意拆为完整引号段落'
           })
           scanFrom = idx + s.length
           reported++

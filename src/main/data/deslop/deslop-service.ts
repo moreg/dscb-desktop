@@ -51,7 +51,7 @@ export interface DeslopOptions {
   /** 事实修复后的复核仍使用最初原稿；不能将修复稿当成新事实。 */
   factBaseline?: string
   onProgress?: (message: string) => void
-  /** 整章/续写验收；片段改写不设置。前部只读，比例按完整章节计算。 */
+  /** 整章/续写验收；片段改写不设置。前部只读，对话占比仅作参考。 */
   dialogueComposition?: DialogueCompositionOptions
   /** 内部恢复自动修复检查点；text仍是唯一事实基线，恢复稿必须完整重新验收。 */
   initialDialogueDraft?: string
@@ -301,7 +301,7 @@ export class DeslopService {
    */
   async deslop(text: string, opts: DeslopOptions = {}): Promise<DeslopResult> {
     if (opts.dialogueComposition) {
-      opts.onToken?.('\n正在实测对白比例、自动修复并复核人物互动…\n')
+      opts.onToken?.('\n正在核对事实、自动修复表达并复核人物互动…\n')
       const scans = new Map<string, DeslopScanReport>()
       const scanOnce = async (value: string): Promise<DeslopScanReport> => {
         const cached = scans.get(value)
@@ -322,7 +322,7 @@ export class DeslopService {
         },
         context: [opts.dialogueComposition.context ?? '',
           opts.styleContext ? `【项目题材与文风】\n${JSON.stringify(opts.styleContext)}` : '',
-          opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真与实测对白比例）】\n${JSON.stringify(opts.textOverrides)}` : ''
+          opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真）】\n${JSON.stringify(opts.textOverrides)}` : ''
         ].filter(Boolean).join('\n\n'),
         maxChangeRatio: opts.dialogueComposition.allowSceneRewrite ? 0.35 : level === 'severe' ? 0.35 : level === 'moderate' ? 0.25 : 0.15,
         // 整章对白修复按功能处理停顿/打断，不能先机械变句号再让审核追认。

@@ -14,7 +14,7 @@ describe('独立整场对白复核', () => {
   it('预算耗尽保留原稿并单独返回待复核候选，不能丢掉修稿成果或颁发通过', async () => {
     const source = `“${'我'.repeat(40)}”\n${'他'.repeat(60)}。`
     const draft = source.replace('我', '你')
-    const llm = mock((prompt, opts) => opts.meta?.feature === 'deslop:scene-dialogue-review'
+    const llm = mock((prompt, opts) => opts.meta?.feature === 'deslop:dialogue-review' ? JSON.stringify({passed:true,factsUnchanged:true,issues:[],expressionFindings:[]}) : opts.meta?.feature === 'deslop:scene-dialogue-review'
       ? JSON.stringify({ passed: false, assessment: '仍须整场修订', reviewedPassages: [{ excerpt: source, reason: '测试定位的问题' }],
         findings: [{ excerpt: source, reason: '测试定位的问题' }] })
       : JSON.stringify({ text: draft }))
@@ -24,7 +24,7 @@ describe('独立整场对白复核', () => {
     expect(output.factsUnchanged).toBeUndefined()
   })
 
-  it('整场语义替换不被数字筛选拆散，中间比例暂时偏离仍重新修复后验收', async () => {
+  it('整场修复完整应用，表达通过后不为占比再改一轮', async () => {
     const original = `“${'我'.repeat(70)}”\n${'他'.repeat(30)}。`
     const reorganized = `“${'你'.repeat(65)}”\n${'她'.repeat(35)}。`
     const accepted = `“${'你'.repeat(70)}”\n${'她'.repeat(30)}。`
@@ -40,13 +40,14 @@ describe('独立整场对白复核', () => {
       return JSON.stringify({ patches: [{ before, after: before === original ? reorganized : accepted }] })
     })
     const output = await ensureDialogueQuality(original, original, llm, { mode: 'write' })
-    expect(output.text).toBe(formatChapterProse(accepted))
-    expect(output.report).toMatchObject({ passed: true, attempts: 2, afterRatio: .7 })
+    expect(output.text).toBe(formatChapterProse(reorganized))
+    expect(output.report).toMatchObject({ passed: true, attempts: 1, afterRatio: .65 })
   })
 
   it('比例不足时也先诊断整场，并将问题交给同一次修复而非先凑字数', async () => {
     const source = `“${'我'.repeat(40)}”\n${'他'.repeat(60)}。`
     const llm = mock((prompt, opts) => {
+      if (opts?.meta?.feature === 'deslop:dialogue-review') return JSON.stringify({passed:true,factsUnchanged:true,issues:[],expressionFindings:[]})
       if (opts?.meta?.feature === 'deslop:scene-dialogue-review') return JSON.stringify({ passed: false,
         assessment: '必须重组整场重复接话', reviewedPassages: [{ excerpt: source, reason: '多个回合重复同一功能' }],
         findings: [{ excerpt: source, reason: '多个回合重复同一功能' }] })
@@ -57,7 +58,7 @@ describe('独立整场对白复核', () => {
     const result = await ensureDialogueQuality(source, source, llm, { mode: 'write', maxRepairs: 1 })
     expect(result.report.passed).toBe(false)
     expect(vi.mocked(llm.generateStream).mock.calls.map(([,opts]) => opts?.meta?.feature))
-      .toEqual(['deslop:scene-dialogue-review', 'deslop:dialogue-repair'])
+      .toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review', 'deslop:dialogue-repair'])
   })
 
   it.each([

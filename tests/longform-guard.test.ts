@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { LongformGuard, parseLongformGuard, type LongformGuardInput } from '../src/main/data/longform-guard'
 import type { LlmService } from '../src/main/data/llm-service'
 
-const cleared = { completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] }
+const cleared = { completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] }
 const input: LongformGuardInput = {
   chapterNumber: 800,
   content: '陆宁直接揭穿赵伯就是内应，并宣布永远放弃寻找母亲。',
@@ -87,5 +87,23 @@ describe('长篇写作交稿闸门', () => {
     await guard.check({ ...input, plan: '', history: '缺少旧章记录，无法判定知情范围。' })
     expect(llm.generateStream).not.toHaveBeenCalled()
     await expect(guard.check({ ...input, content: '甲'.repeat(40001) })).rejects.toThrow('40000')
+  })
+
+  it('只有道具历史也必须检查，旧三项检查结果不能绕过新增道具核对', async () => {
+    const llm = mock(JSON.stringify({completed:true,checked:['mainline','knowledge','thread'],findings:[]}))
+    const source = {...input,plan:'',history:'[道具 · 最近可核实记录] 原信装入绸布封套后由陆安随身保管。'}
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow('LONGFORM_REVIEW_INCOMPLETE')
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('作者修订后的封套不能因旧细纲或历史卡而换回旧名称，道具冲突必须有双重证据', async () => {
+    const source = {...input,plan:'',content:'陆安从衣内取出青布封套，将里面的原信递给弟弟。',
+      history:'[道具 · 最近可核实记录] 原信连同信封装入绸布封套后随身携带。'}
+    const f = {kind:'item',message:'没有更换过程，却将绸布封套写回青布封套。',
+      snippet:'陆安从衣内取出青布封套',reference:'原信连同信封装入绸布封套后随身携带。'}
+    const llm = mock(JSON.stringify({...cleared,findings:[f]}))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow('跨章道具')
+    expect(llm.generateStream.mock.calls[0][0]).toContain('未来细纲仍写旧名')
+    expect(()=>parseLongformGuard(JSON.stringify({...cleared,findings:[{...f,reference:'原信早已装在青布封套内。'}]}),source)).toThrow('依据')
   })
 })

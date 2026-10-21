@@ -1,6 +1,6 @@
 import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import { describe, expect, it, vi } from 'vitest'
-import { applyDialoguePatches, applyExactDialoguePatches, dialogueRatioPassed, ensureDialogueQuality, measureDialogue } from '../src/main/data/dialogue-quality'
+import { applyExactDialoguePatches, ensureDialogueQuality, measureDialogue } from '../src/main/data/dialogue-quality'
 import { DeslopService } from '../src/main/data/deslop/deslop-service'
 import type { GenerateOptions, LlmService } from '../src/main/data/llm-service'
 
@@ -20,7 +20,7 @@ describe('对白计量与自动验收', () => {
   })
   it('整章修复保留被打断台词的原始语义，先交模型按功能改写而非机械改句号', async () => {
     const source = '“申会长，这份卷宗需要您——”\n金锡勋看见了车道贤，后半句没说出来。'
-    const llm = llmWith(() => '{}')
+    const llm = llmWith((_p,o) => o.meta?.feature==='deslop:dialogue-review' ? JSON.stringify({passed:false,factsUnchanged:true,issues:['需核对打断台词的表达'],expressionFindings:[]}) : '{}')
     await new DeslopService(llm).deslop(source, { dialogueComposition: { mode: 'edit' } })
     const prompt = vi.mocked(llm.generateStream).mock.calls.find(([,opts]) => opts?.meta?.feature === 'deslop:dialogue-repair')![0]
     expect(prompt.split('【本次正文】').at(-1)).toContain('“申会长，这份卷宗需要您——”')
@@ -47,21 +47,22 @@ describe('对白计量与自动验收', () => {
     expect(prompt).toContain(`【原稿事实基线】\n\n${source}`)
     expect(prompt).toContain(`【待审核稿】\n\n${formatChapterProse(draft)}`)
   })
-  it('只应用唯一匹配且朝目标改善的局部提案，拒绝伪匹配和反向改坏', () => {
-    const source = prose(40, 60)
-    expect(applyDialoguePatches(source, [{ before: source, after: prose(70, 30) }])).toBe(prose(70, 30))
-    expect(applyDialoguePatches(source, [{ before: '没有这句话', after: prose(70, 30) }])).toBe(source)
-    expect(applyDialoguePatches(source, [{ before: source, after: prose(20, 80) }])).toBe(source)
-    expect(applyDialoguePatches(source, [{ before: '我', after: '他说' }])).toBe(source)
-    expect(applyDialoguePatches(source, [{ before: source, after: prose(140, 60) }], '', { min: 85, max: 115 })).toBe(source)
-    expect(applyDialoguePatches(source, [{ before: source, after: prose(70, 30) }], '', { min: 85, max: 115 })).toBe(prose(70, 30))
+  it.each([0, 0.4, 0.9, 1])('占比%s仅为统计，表达与事实通过时不触发修复', async ratio => {
+    const source=prose(ratio*100,100-ratio*100)
+    const llm=llmWith(()=>passed)
+    const result=await ensureDialogueQuality(source,source,llm,{mode:'write'})
+    expect(result.text).toBe(source)
+    expect(result.report).toMatchObject({passed:true,attempts:0,beforeRatio:ratio,afterRatio:ratio})
+    expect(vi.mocked(llm.generateStream).mock.calls.some(([,o])=>o?.meta?.feature==='deslop:dialogue-repair')).toBe(false)
   })
-  it('语义修复在比例合格范围内优先解决所有问题，不能只挑最靠近70%的修改', () => {
-    const source = prose(70, 30)
-    const patches = [{ before: `“${'我'.repeat(70)}”`, after: `“${'我'.repeat(69)}”` },
-      { before: `${'他'.repeat(30)}。`, after: `${'他'.repeat(31)}。` }]
-    const result = applyDialoguePatches(source, patches, '', { min: 85, max: 115, preferCoverage: true })
-    expect(measureDialogue(result).ratio).toBe(0.69)
+  it('低对白占比的事实漂移仍须拒绝，不因取消比例要求而放行',async()=>{
+    const source='陆安继续调查六号船，并去柳湾埠核账。'
+    const draft='陆安只去柳湾埠核账，不再调查六号船。'
+    const llm=llmWith(()=>JSON.stringify({passed:false,factsUnchanged:false,issues:['仍要调查六号船被改为不再调查'],expressionFindings:[]}))
+    const result=await ensureDialogueQuality(source,draft,llm,{mode:'edit',maxRepairs:0})
+    expect(result.text).toBe(source)
+    expect(result.report.passed).toBe(false)
+    expect(result.factsUnchanged).toBeUndefined()
   })
   it('只算直接台词，不把文件名、心声、通知或标题当成对白', () => {
     const measured = measureDialogue('“别走！”\n他问：“去哪？”\n封面写着“加急”。\n【系统：“到账”】\n她心想：“回来”。')
@@ -72,22 +73,21 @@ describe('对白计量与自动验收', () => {
     expect(measureDialogue('「你好」\n"回来"\n“我\n们走”').dialogue).toBe(7)
     expect(measureDialogue('“还没说完').dialogue).toBe(0)
   })
-  it('按字数而非段数验收，边界固定为69%到71%', () => {
-    expect(measureDialogue(prose(70, 30)).ratio).toBe(0.7)
-    expect(dialogueRatioPassed(0.69)).toBe(true)
-    expect(dialogueRatioPassed(0.71)).toBe(true)
-    expect(dialogueRatioPassed(0.6899)).toBe(false)
-    expect(dialogueRatioPassed(0.7101)).toBe(false)
+  it('计量仅作展示，仍按实际台词字数统计',()=>{
+    expect(measureDialogue(prose(40,60)).ratio).toBe(0.4)
+    expect(measureDialogue(prose(90,10)).ratio).toBe(0.9)
   })
-  it('不足或过多均自动重写后实测，不相信模型宣称达标', async () => {
-    for (const spoken of [40, 90]) {
-      const source = prose(spoken, 100 - spoken)
-      const llm = llmWith((_p, o) => o.meta?.feature === 'deslop:dialogue-review' ? passed : JSON.stringify({ text: prose(70, 30) }))
-      const result = await ensureDialogueQuality(source, source, llm, { mode: 'write' })
-      expect(result.report.passed).toBe(true)
-      expect(measureDialogue(result.text).ratio).toBe(0.7)
-      expect(result.report.attempts).toBe(1)
-    }
+  it('修复提示不要求补足对白字数，也不以占比筛掉必要修复',async()=>{
+    const source=prose(40,60),revised=source.replace('我','你')
+    let reviews=0
+    const llm=llmWith((_p,o)=>o.meta?.feature==='deslop:dialogue-review'
+      ? ++reviews===1?JSON.stringify({passed:false,factsUnchanged:true,issues:['复述无用途'],expressionFindings:[]}):passed
+      :JSON.stringify({patches:[{before:source,after:revised}]}))
+    const result=await ensureDialogueQuality(source,source,llm,{mode:'write'})
+    expect(result.report).toMatchObject({passed:true,attempts:1,afterRatio:0.4})
+    const prompt=vi.mocked(llm.generateStream).mock.calls.find(([,o])=>o?.meta?.feature==='deslop:dialogue-repair')![0]
+    expect(prompt).toContain('本次修复仅在事实与篇幅保真范围内改善表达')
+    expect(prompt).not.toMatch(/目标70%|69%—71%|当前差额|合计至少覆盖/)
   })
   it('比例已达标但机械同腔时仍自动修复并重新审稿', async () => {
     let reviews = 0
@@ -100,18 +100,14 @@ describe('对白计量与自动验收', () => {
     expect(reviews).toBe(2)
     expect(result.report.attempts).toBe(1)
   })
-  it('两次修复预算耗尽仍未达标时保留原稿', async () => {
-    const source = prose(40, 60)
-    const drafts = [prose(50, 50), prose(60, 40), prose(70, 30), prose(70, 30).replace('我', '你')]
-    let reviewCount = 0
-    const llm = llmWith((_p, o) => o.meta?.feature === 'deslop:dialogue-review'
-      ? ++reviewCount === 1 ? JSON.stringify({ passed: false, factsUnchanged: true, expressionFindings: [], issues: ['新增了原稿未确定的人数比例。'] }) : passed
-      : JSON.stringify({ text: drafts.shift() }))
-    const result = await ensureDialogueQuality(source, source, llm, { mode: 'write' })
-    expect(result.report.passed).toBe(false)
+  it('两次修复仍未解决具体表达问题时保留原稿',async()=>{
+    const source=prose(40,60)
+    const llm=llmWith((_p,o)=>o.meta?.feature==='deslop:dialogue-review'
+      ? JSON.stringify({passed:false,factsUnchanged:true,issues:['场景重复播报'],expressionFindings:[]})
+      :JSON.stringify({text:source}))
+    const result=await ensureDialogueQuality(source,source,llm,{mode:'write'})
+    expect(result.report).toMatchObject({passed:false,attempts:2})
     expect(result.text).toBe(source)
-    expect(result.report.attempts).toBe(2)
-    expect(reviewCount).toBe(0)
   })
   it('事实审核不通过、无法解析或一直不达标时有界失败，保留原文', async () => {
     for (const review of [JSON.stringify({ passed: false, factsUnchanged: true, expressionFindings: [], issues: ['把妹妹获奖改成本人获奖。'] }), '不确定', JSON.stringify({ passed: true, factsUnchanged: false, expressionFindings: [], issues: ['还有事实差异'] })]) {
@@ -125,7 +121,7 @@ describe('对白计量与自动验收', () => {
     const source = prose(40, 60)
     const llm = llmWith(() => JSON.stringify({ text: source, ratio: 0.7 }))
     expect((await ensureDialogueQuality(source, source, llm, { mode: 'write' })).report.passed).toBe(false)
-    expect(vi.mocked(llm.generateStream).mock.calls.filter(([,opts]) => opts?.meta?.feature === 'deslop:dialogue-repair')).toHaveLength(2)
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(([,opts]) => opts?.meta?.feature === 'deslop:dialogue-repair')).toHaveLength(0)
   })
   it('续写以完整章节验收，前部不进入替换正文', async () => {
     const prefix = prose(90, 10)
@@ -133,8 +129,8 @@ describe('对白计量与自动验收', () => {
     const replacement = prose(50, 50)
     const llm = llmWith((_p, o) => o.meta?.feature === 'deslop:dialogue-review' ? passed : JSON.stringify({ text: replacement }))
     const result = await ensureDialogueQuality(source, source, llm, { mode: 'write', existingText: prefix })
-    expect(result.text.replace(/\s/g, '')).toBe(formatChapterProse(replacement).replace(/\s/g, ''))
-    expect(measureDialogue(`${prefix}\n${result.text}`).ratio).toBe(0.7)
+    expect(result.text).toBe(source)
+    expect(measureDialogue(`${prefix}\n${result.text}`).ratio).toBe(0.65)
     expect(result.report.beforeRatio).toBe(0.65)
   })
   it('排版和复扫之后再验收，复扫残留不能算通过', async () => {

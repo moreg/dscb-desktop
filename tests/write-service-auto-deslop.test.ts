@@ -200,7 +200,7 @@ describe('自动写作去 AI 味', () => {
     expect(content).toBe(POLISHED)
     expect(events).toEqual(['raw', 'deslop'])
     expect(onToken.mock.calls.flat().join('')).toBe(RAW)
-    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['generating', 'deslop', 'deslop:正在扫描表达与对白比例', 'deslop:事实核对 1/2'])
+    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['generating', 'deslop', 'deslop:正在扫描表达与人物互动', 'deslop:独立事实核对 1'])
     expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({ levelOverride: 'mild', isTail: true }))
     expect(verificationCalls()).toHaveLength(1)
     expect(verificationCalls()[0][0]).toContain(RAW)
@@ -264,14 +264,14 @@ describe('自动写作去 AI 味', () => {
     expect(reports[0].status).toBe('unchanged')
   })
 
-  it('只有标点调整时可直接采用，不额外调用事实核验', async () => {
+  it('只有标点调整也核对事实，通过后采用', async () => {
     const candidate = RAW.replace('，', '；')
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult(candidate))
     const { reports, onAutoDeslopResult } = results()
 
     expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(candidate)
 
-    expect(verificationCalls()).toHaveLength(0)
+    expect(verificationCalls()).toHaveLength(1)
     expect(reports[0].status).toBe('applied')
   })
 
@@ -344,8 +344,8 @@ describe('自动写作去 AI 味', () => {
   })
 
   it.each([
-    [JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }), 2],
-    [JSON.stringify({ unchanged: true, issues: ['新增了道具'] }), 2],
+    [JSON.stringify({ unchanged: false, issues: ['人物行为发生变化'] }), 1],
+    [JSON.stringify({ unchanged: true, issues: ['新增了道具'] }), 1],
     [JSON.stringify({ unchanged: true }), 2],
     ['无法确定是否保持原文事实', 2]
   ])('事实对比经自动修复或格式重试仍未通过时保留原稿：%s', async (reply, expectedVerifications) => {

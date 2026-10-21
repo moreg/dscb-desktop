@@ -235,6 +235,38 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
     expect(service.generateChapterStream).not.toHaveBeenCalled()
   })
 
+  it('重试同一版本从待复核试稿继续，启动检查时也保留恢复稿', async () => {
+    vi.mocked((service as unknown as PolishHarness).autoDeslopGeneratedProse).mockRestore()
+    await chapters.setAutoDeslopReport(projectId, 1, RAW, {
+      status:'review_required',message:'待复核',remainingIssues:1,
+      dialogueQuality:{passed:false,beforeRatio:0,afterRatio:0,attempts:3,issues:['表达仍需修订'],pendingDraft:POLISHED}
+    })
+    const implementation=vi.mocked(deslop.deslop).getMockImplementation()!
+    vi.mocked(deslop.deslop).mockImplementationOnce(async(text,opts)=>{
+      expect(opts?.initialDialogueDraft).toBe(POLISHED)
+      expect((await chapters.getChapter(projectId,1)).meta.autoDeslop?.dialogueQuality?.pendingDraft).toBe(POLISHED)
+      return implementation(text,opts)
+    })
+    await run({},1,1).task
+    expect((await chapters.getChapter(projectId,1)).content).toBe(RAW)
+    expect(service.generateChapterSummary).not.toHaveBeenCalled()
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
+  it('作者修改正文后不复用旧版本待复核试稿', async () => {
+    vi.mocked((service as unknown as PolishHarness).autoDeslopGeneratedProse).mockRestore()
+    await chapters.setAutoDeslopReport(projectId, 1, RAW, {
+      status:'review_required',message:'待复核',remainingIssues:1,
+      dialogueQuality:{passed:false,beforeRatio:0,afterRatio:0,attempts:3,issues:['表达仍需修订'],pendingDraft:POLISHED}
+    })
+    const edited=RAW+'作者留下了新的批注。'
+    await chapters.updateContent(projectId,1,edited)
+    expect((await chapters.getChapter(projectId,1)).meta.autoDeslop).toBeUndefined()
+    await run({},1,1).task
+    expect(vi.mocked(deslop.deslop).mock.calls[0][1]?.initialDialogueDraft).toBeUndefined()
+    expect((await chapters.getChapter(projectId,1)).content).toBe(edited)
+  })
+
   it('实际链核验排版动作顺序不通过时保留原正文全部字节，不写概要或记忆', async () => {
     vi.mocked((service as unknown as PolishHarness).autoDeslopGeneratedProse).mockRestore()
     const before = '“先核对印章。”林远把账册摊开，“再打开院门。”\r\n\r\n' + RAW
@@ -244,7 +276,9 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
         ? JSON.stringify({ text: before })
         : JSON.stringify({ unchanged: false, issues: ['原稿先说核对印章再摊开账册，排版稿将摊开动作前移'] }))
     const result = await run({}, 1, 1).task
-    expect(result.results[0]).toMatchObject({ changed: false, autoDeslop: { status: 'review_required', repairAttempts: 1 } })
+    expect(result.results[0]).toMatchObject({ changed: false, autoDeslop: { status: 'review_required', repairAttempts: 0 } })
+    expect(llm.generateStream).toHaveBeenCalledWith(expect.stringContaining('建立保真清单'),
+      expect.objectContaining({meta:expect.objectContaining({feature:'deslop:repair-plan'})}))
     expect((await chapters.getChapter(projectId, 1)).content).toBe(before)
     expect(service.generateChapterSummary).not.toHaveBeenCalled()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()

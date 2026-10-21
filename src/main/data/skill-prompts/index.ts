@@ -1,3 +1,4 @@
+import { FANQIE_OPENING_RULES, DIALOGUE_TARGET_RULES } from './skill-contracts'
 import { CHAPTER_RULE_SECTIONS, PROSE_PARAGRAPH_RULES, buildContinueModeRules, normalizeLegacyDialogueOverride, normalizeLegacyParagraphOverride } from './chapter-rules'
 import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
@@ -101,7 +102,8 @@ export function buildSystemPrompt(
   }
 
   // 共用质量要求独立于可编辑旧规则，续写与批量整章都要保留人物来回。
-  sections.push('---', DIALOGUE_VITALITY_RULES)
+  sections.push('---', DIALOGUE_VITALITY_RULES, DIALOGUE_TARGET_RULES)
+  if (platformConfig?.platform === 'fanqie') sections.push('---', FANQIE_OPENING_RULES)
 
   // 续写覆盖声明放最后：位置最靠后、措辞最具体，冲突时压过上面的通用守则
   if (continueMode) {
@@ -185,7 +187,7 @@ export function buildHumanizerPrompt(
       // 原文是「长短句交替，不要整段同节奏」。没有量纲的定性指令会被模型往极端执行：
       // 实测产出句子平均 11 字，而番茄在榜作品是 17.8 字。改成带区间的表述。
       // 数据见 tests/fixtures/deslop-corpus/FINDINGS.md
-      '8. 句长服从内容，排版优先遵守一句一段、对话中间不用中文句号、陈述台词结尾保留句号；同一行动及直接反馈若是两句话也必须分段，避免机械双联报表句，不为合并句子增加冗词或事实',
+      '8. 句长服从内容，排版优先遵守按语意分段、对话独立成段、引号内不使用中文句号（含闭合前）；同一行动及直接反馈可以放在一段，信息转折时再分段，避免机械双联报表句，不为合并句子增加冗词或事实',
       '9. 只修改确有问题的表达，允许直接删去无用动作、修饰或重复解释；无需为了显得改过而整体重写，输出完整修订片段，不新增描写占位'
     ].join('\n')
   )

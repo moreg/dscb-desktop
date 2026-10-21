@@ -46,6 +46,8 @@ function setup({
     return reply
   }
   const generateStream = vi.fn(async (_prompt: string, options: GenerateOptions = {}) => {
+    if(options.meta?.feature === 'deslop:repair-plan')return JSON.stringify({facts:[{quote:original.split('\n')[0],keep:'钥匙数量从一把变成两把，恢复一把钥匙'}],scenePlan:'保留交接，压缩重复'})
+    if(options.meta?.feature === 'deslop:scene-repair')return JSON.stringify({text:FIXED,coverage:[{id:1,quote:FIXED.split('\n')[0]}]})
     if (options.meta?.feature === 'deslop:verify') {
       return respond(verificationQueue, verifyReplies.at(-1) ?? PASSED)
     }
@@ -87,7 +89,7 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     const output = await context.run({ formatCandidate: formatChapterProse })
 
     expect(formatted).not.toBe(candidate)
-    expect(formatted).toContain('林远走到东屋前。\n“我先开门。”\n“你别跟来。”')
+    expect(formatted).toContain('林远走到东屋前。\n“我先开门”\n“你别跟来”')
     expect(context.calls('deslop:verify')[0][0]).toContain(formatted)
     expect(context.calls('deslop:verify')[0][0]).toContain(original)
     expect(output.content).toBe(original)
@@ -140,16 +142,16 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.deslop).toHaveBeenNthCalledWith(2, FIXED, expect.any(Object))
   })
 
-  it('事实修复后的比例检查携带已修复问题，避免补台词时重新引入', async () => {
+  it('协同事实修复的表达复核携带已修复问题，不能重新引入', async () => {
     const context = setup({ verifyReplies: [DIFFERENCE, PASSED] })
-    // 此处验证复扫上下文传递，独立对白测试覆盖实际比例与语义验收。
+    // 验证协同修订仍沿用最初事实基线并传递已发现差异。
     context.deslop.mockReset().mockImplementation(async text => result(text, { dialogueQuality: {
       passed: true, beforeRatio: .7, afterRatio: .7, attempts: 2, issues: []
     } })).mockResolvedValueOnce(result(CANDIDATE, { dialogueQuality: {
       passed: true, beforeRatio: .7, afterRatio: .7, attempts: 1, issues: []
     } }))
     const output = await context.run({ dialogueComposition: { mode: 'edit', context: '章节事实上下文' }, formatCandidate: formatChapterProse })
-    expect(output.report.dialogueQuality?.attempts).toBe(3)
+    expect(output.report.dialogueQuality?.attempts).toBe(4)
     const options = context.deslop.mock.calls[1][1]
     expect(options?.dialogueComposition?.context).toContain('章节事实上下文')
     expect(options?.dialogueComposition?.context).toContain('钥匙数量从一把变成两把')

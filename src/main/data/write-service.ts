@@ -943,13 +943,30 @@ export class WriteService {
     opts: Pick<ChapterGenerateOptions, 'signal' | 'existingText' | 'onGenerationStage' | 'onAutoDeslopResult'> & { isTail: boolean; reviewInstruction?: string; previousDraft?: string; allowSceneRewrite?: boolean }
   ): Promise<string> {
     throwIfAborted(opts.signal)
+    let initialDialogueDraft: string | undefined
+    let resumableQuality: AutoDeslopResult['dialogueQuality']
+    if (!opts.existingText) {
+      try {
+        // getChapter 只返回与当前正文指纹一致的报告；作者修改后不复用旧试稿。
+        const saved = await this.chapterService.getChapter(projectId, chapterNumber)
+        const prior = saved.meta.autoDeslop
+        if (saved.content === prose && (prior?.status === 'review_required' || prior?.status === 'failed') &&
+            prior.dialogueQuality?.passed === false && prior.dialogueQuality.pendingDraft?.trim()) {
+          initialDialogueDraft = prior.dialogueQuality.pendingDraft
+          resumableQuality = prior.dialogueQuality
+        }
+      } catch { /* 没有可恢复报告时从原稿重新诊断。 */ }
+    }
+    throwIfAborted(opts.signal)
     await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
       opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, prose)) : prose, {
-        status: 'review_required', message: '生成原稿已保存，自动润色尚未完成，待复核。', remainingIssues: 0
+        status: 'review_required', message: '生成原稿已保存，自动润色尚未完成，待复核。', remainingIssues: 0,
+        ...(resumableQuality ? { dialogueQuality: { ...resumableQuality, passed: false } } : {})
       })
     if (!this.deslopService || !prose.trim()) {
       const report: AutoDeslopResult = { status: prose.trim() ? 'failed' : 'unchanged',
-        message: prose.trim() ? '待复核：自动去 AI 味服务未启用，已保留生成稿。' : '本次没有新增正文，无需润色。', remainingIssues: 0 }
+        message: prose.trim() ? '待复核：自动去 AI 味服务未启用，已保留生成稿。' : '本次没有新增正文，无需润色。', remainingIssues: 0,
+        ...(resumableQuality ? {dialogueQuality:{...resumableQuality,passed:false}} : {}) }
       await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
         opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, prose)) : prose, report)
       opts.onAutoDeslopResult?.(report)
@@ -967,8 +984,9 @@ export class WriteService {
       ])
       result = await autoDeslopProse(prose, {
         service: this.deslopService, llm: this.llm, ...rules, whitelist,
+        initialDialogueDraft,
         dialogueComposition: { mode: 'write', existingText: opts.existingText,
-          context: outlineText, revisionInstruction: opts.reviewInstruction, previousDraft: opts.previousDraft, allowSceneRewrite: opts.allowSceneRewrite },
+          context: `细纲仅作计划背景，原稿是本次润色的事实基线；不补写尚未发生的细纲事件，不为旧计划中的篇幅或对白要求改动原稿。\n${outlineText}`, revisionInstruction: opts.reviewInstruction, previousDraft: opts.previousDraft, allowSceneRewrite: opts.allowSceneRewrite },
         signal: opts.signal, isTail: opts.isTail,
         onProgress: message => opts.onGenerationStage?.(`deslop:${message}`),
         formatCandidate: formatChapterProse,
@@ -989,6 +1007,10 @@ export class WriteService {
     if (result.report.dialogueQuality?.passed === false || result.report.status === 'failed' || result.report.status === 'review_required') {
       result.content = prose
       result.report = { ...result.report, message: `待复核：${result.report.message}` }
+      if (resumableQuality && !result.report.dialogueQuality?.pendingDraft) {
+        result.report.dialogueQuality = { ...(result.report.dialogueQuality ?? resumableQuality),
+          passed:false,pendingDraft:resumableQuality.pendingDraft }
+      }
     }
     await this.chapterService.setAutoDeslopReport(projectId, chapterNumber,
       opts.existingText ? formatChapterProse(joinContinuation(opts.existingText, result.content)) : result.content, result.report)
@@ -2729,7 +2751,15 @@ export class WriteService {
     throwIfAborted(opts.signal)
     if (contentOverride === undefined) onProgress('generating')
     let autoDeslop: AutoDeslopResult | undefined
-    if (contentOverride !== undefined) await this.prepareWritingContext(projectId, chapterNumber, opts.signal)
+    if (contentOverride !== undefined) {
+      await this.prepareWritingContext(projectId, chapterNumber, opts.signal)
+      // Reject stale recovered facts before polishing them or extracting candidates.
+      // Final checks still run again if later stages change the saved manuscript.
+      await this.assertLongformConsistency(projectId, chapterNumber, contentOverride, {
+        signal: opts.signal, instruction: opts.tempContext,
+        onStart: () => onProgress('continuity:正在核对恢复稿的长期记忆、人物知情与道具')
+      })
+    }
     let content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
       ...generateOpts,
       onGenerationStage: (stage) => {
@@ -2741,7 +2771,7 @@ export class WriteService {
         opts.onAutoDeslopResult?.(report)
       }
     })
-    // 恢复旧批次的已保存正文也要过新验收，不能从“补跑检查”入口绕过比例要求。
+    // 恢复旧批次的已保存正文也要过新验收，不能从“补跑检查”入口绕过事实与表达检查。
     if (contentOverride !== undefined && this.deslopService) {
       content = await this.autoDeslopGeneratedProse(projectId, chapterNumber, content, opts.styleProfileId ?? null, {
         signal: opts.signal, isTail: true, reviewInstruction: opts.tempContext, onGenerationStage: stage => onProgress(stage),
@@ -3744,7 +3774,7 @@ export class WriteService {
       `- **"改写"成品必须自身去 AI 味**，按叙事用途处理套路，不把一种微动作替换成另一种。`,
       `- 仿佛、缓缓、眼中闪过、嘴角勾起、不是A，而是B 等用于定位具体问题，不按词频逐词禁用；必要心理判断可直接保留，不强制外化。`,
       `- 改写必须保持说话人、事件顺序、视角、已知信息、情绪、关系和结果；不新增提问、承诺、反转或情节。少写无用途环境、重复心理和发声解说，不删掉关键行动与因果。`,
-      `- 正文整章对白目标 70%，但短片段不为比例扩写。缺整章或可靠统计时说明未评估；不压直接对白成旁白摘要，也不把旁白套引号凑比例。`,
+      `- 整章对白目标 70%，仅完整章按有效字数观察；润色保持事实与篇幅，不为占比新增问答、删掉必要台词或把旁白套引号。`,
       `- 不要客套话、不要总评/前言/标题、不要打分、不要 Markdown 标记。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
@@ -4886,6 +4916,7 @@ function renderUserPrompt(input: RenderInput): string {
   // 2. 本章细纲
   parts.push('---')
   parts.push(`# 第 ${input.chapterNumber} 章 写作任务`)
+  parts.push('事实承接优先级：已审正文原文及其最新连续性记录高于细纲中的历史描述。作者修订后，未来细纲可能仍保留旧道具名称或旧状态；沿用正文已确认的新名称、材质、持有者与知情边界，不能为迁就旧计划改回旧稿，或编造一次换装、转交、重新获知。明确保留的草稿历史卡只供留档，不是当前事实。作者本次明确要求调整的内容另按临时要求执行。')
   if (input.tempContext) {
     parts.push(`**【本章临时写作要求（临时上下文）】**（最高优先级，覆盖本章细纲、硬性写作要求、节奏标注等一切既有约束；冲突时以此为准）：`)
     parts.push(input.tempContext)
@@ -5106,7 +5137,7 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】（在不违背临时写作要求的前提下）。如果没有，先补足再输出。`)
   }
   parts.push('只输出小说正文，不附记忆回执、规划表或自检报告。')
-  parts.push('【本次对白篇幅与推进方式】\n整章直接台词字数占比目标70%，按不含标点空白的正文字数计算，约每1000有效字应有700字人物直接对白与300字必要旁白。前文即使旁白偏多，本次也不要沿袭其对白密度。把当前场景的消息、条件、争执、试探、选择写成各有立场的接话，旁白只补动作、结果和必要因果，不先用旁白讲完再让人物总结。续写按已有正文与新增片段合计考虑整章，不能重写前部。不要靠长篇独白、复述设定、轮流捧场或给旁白套引号凑比例。')
+  parts.push('【本次表达与推进方式】\n整章直接对白字数目标 70%，续写合并只读前部观察整章，短片段不单独验收比例；按人物处境安排有效对白、行动与叙述。保留有效交锋和必要因果，避免重复解释、机械确认或让角色解说自己的动作。续写保留只读前部，不为调整占比重写或扩写。')
   return parts.join('\n\n')
 }
 

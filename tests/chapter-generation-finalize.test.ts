@@ -3,7 +3,7 @@ import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapter
 
 describe('中断续写保留草稿', () => {
   it.each(['LLM_TIMEOUT', 'LLM_ABORTED'])('%s 保留已有正文和新增正文', error => {
-    expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n“你来了。”')
+    expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n“你来了”')
   })
   it('没有收到新正文时保留原稿', () => {
     expect(interruptedChapterDraft('原稿。', '', 'LLM_TIMEOUT')).toBe('原稿。')
@@ -39,7 +39,7 @@ describe('续写先采用补写稿再同步记忆', () => {
     const result = finalizeChapterContinuation('已有正文。', '预览', {
       ok: true, content: raw, ...(full ? { fullContent: '已有正文。' + raw } : {})
     })
-    expect(result.content).toBe('已有正文。\n“先签字。”\n“别等了！”\n他转身。\n门关了。')
+    expect(result.content).toBe('已有正文。\n“先签字”\n“别等了！”\n他转身。门关了。')
   })
 
   it('采用补入已有正文中段的整章，前文只出现一次', () => {

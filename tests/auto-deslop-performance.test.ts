@@ -7,7 +7,7 @@ import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import type { GenerateOptions, LlmService } from '../src/main/data/llm-service'
 import type { DeslopResult } from '../src/shared/types'
 
-const prose = (spoken: number, narration: number): string => `“${'我'.repeat(spoken)}。”\n${'他'.repeat(narration)}。`
+const prose = (spoken: number, narration: number): string => `“${'我'.repeat(spoken)}”\n${'他'.repeat(narration)}。`
 const original = prose(65, 35)
 const candidate = prose(70, 30)
 const passed = { passed: true, factsUnchanged: true, issues: [], expressionFindings: [] }
@@ -15,9 +15,63 @@ const mockLlm = (reply: (prompt: string, opts: GenerateOptions) => string): LlmS
   ({ generateStream: vi.fn((prompt: string, opts: GenerateOptions) => opts.meta?.feature === 'deslop:scene-dialogue-review' ? JSON.stringify({ passed: true, assessment: '测试替身仅用于验证编排', reviewedPassages: [{ excerpt: prompt.split('【待审核稿】\n\n').at(-1), reason: '本次候选的连续段落已由测试替身明确确认' }], findings: [] }) : reply(prompt, opts)) }) as unknown as LlmService
 
 describe('自动润色性能与核验复用', () => {
+  it('缺少整章表达验收结果时不能仅凭正文护栏和事实检查采用',async()=>{
+    const llm=mockLlm(()=>JSON.stringify({unchanged:true,issues:[]}))
+    const output=await autoDeslopProse(original,{llm,validateCandidate:async()=>{},dialogueComposition:{mode:'write'},
+      service:{deslop:async()=>({rewritten:candidate,beforeWords:100,afterWords:100,deleteRatio:0,
+        processedGates:[],remainingFindings:[],changeSummary:[]})} as unknown as DeslopService})
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+    expect(llm.generateStream).not.toHaveBeenCalled()
+  })
+  it('对白归并叙述只减少标点时不误判篇幅超限，仍独立核对事实',async()=>{
+    const source=Array(10).fill('“我记住了。”').join('\n')
+    const draft=Array(10).fill('我记住了。').join('\n')
+    const llm=mockLlm(()=>JSON.stringify({unchanged:true,issues:[]}))
+    const output=await autoDeslopProse(source,{llm,validateCandidate:async()=>{},dialogueComposition:{mode:'write'},
+      service:{deslop:async()=>({rewritten:draft,beforeWords:70,afterWords:50,deleteRatio:0,
+        processedGates:[],remainingFindings:[],changeSummary:[],
+        dialogueQuality:{passed:true,beforeRatio:1,afterRatio:0,attempts:0,issues:[]}})} as unknown as DeslopService})
+    expect(output.report.status).toBe('applied')
+    expect(output.content).toBe(draft)
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+  })
+  it('只改小数点也必须核对事实，不能当纯标点放行数值变化', async () => {
+    const baseline='他交出1.5两银子。', rewritten='他交出15两银子。'
+    const llm=mockLlm((_prompt,opts)=>JSON.stringify(opts.meta?.feature==='deslop:verify'
+      ? {unchanged:false,issues:['原稿1.5两，候选15两，金额改变']} : {patches:[]}))
+    const output=await autoDeslopProse(baseline,{
+      service:{deslop:async()=>({rewritten,beforeWords:10,afterWords:10,deleteRatio:0,
+        processedGates:[],remainingFindings:[],changeSummary:[]})} as unknown as DeslopService,
+      llm,validateCandidate:async()=>{}
+    })
+    expect(output.content).toBe(baseline)
+    expect(output.report.status).toBe('review_required')
+    expect(output.report.verificationAttempts).toBe(1)
+  })
+  it('结构化验收失败不能靠遗漏提示文字或空复扫冒充通过', async () => {
+    const rejected: DeslopResult={rewritten:candidate,beforeWords:100,afterWords:100,deleteRatio:0,
+      processedGates:[],remainingFindings:[],changeSummary:[],
+      dialogueQuality:{passed:false,beforeRatio:.65,afterRatio:.7,attempts:1,issues:['调查方向被删改']}}
+    const llm=mockLlm(()=>JSON.stringify({unchanged:true,issues:[]}))
+    const output=await autoDeslopProse(original,{service:{deslop:async()=>rejected} as unknown as DeslopService,
+      llm,validateCandidate:async()=>{},dialogueComposition:{mode:'write'}})
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+    expect(output.report.issues).toContain('调查方向被删改')
+    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(vi.mocked(llm.generateStream).mock.calls[0][1]?.meta?.feature).toBe('deslop:repair-plan')
+  })
   it('真实编排中一次修复、事实对照与独立场景复核后交稿，扫描与正文护栏不重复', async () => {
-    const llm = mockLlm((_prompt, opts) => opts.meta?.feature === 'deslop:dialogue-repair'
-      ? JSON.stringify({ patches: [{ before: original, after: candidate }] }) : JSON.stringify(passed))
+    let reviews=0
+    const llm = mockLlm((_prompt, opts) => opts.meta?.feature === 'deslop:repair-plan'
+      ? JSON.stringify({facts:[{quote:original.split('\n')[0],keep:'保留原有发言'}],scenePlan:'合并重复表达'})
+      : opts.meta?.feature === 'deslop:scene-repair'
+      ? JSON.stringify({text:candidate,coverage:[{id:1,quote:candidate.split('\n')[0]}]})
+      : opts.meta?.feature === 'deslop:dialogue-repair'
+      ? JSON.stringify({ patches: [{ before: original, after: candidate }] })
+      : opts.meta?.feature === 'deslop:verify' ? JSON.stringify({ unchanged: true, issues: [] })
+      : JSON.stringify(++reviews===1 ? {passed:false,factsUnchanged:true,issues:['原稿重复说明，应整理表达'],expressionFindings:[]} : passed))
     const service = new DeslopService(llm)
     const scan = vi.spyOn(service, 'scan')
     const validateCandidate = vi.fn(async () => {})
@@ -28,11 +82,11 @@ describe('自动润色性能与核验复用', () => {
     expect(output.content).toBe(candidate)
     expect(output.report.status).toBe('applied')
     expect(vi.mocked(llm.generateStream).mock.calls.map(([, opts]) => opts?.meta?.feature))
-      .toEqual(['deslop:scene-dialogue-review', 'deslop:dialogue-repair', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
+      .toEqual(['deslop:dialogue-review', 'deslop:repair-plan', 'deslop:scene-repair', 'deslop:verify', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
     expect(scan.mock.calls.map(([text]) => text)).toEqual([original, candidate])
     expect(validateCandidate).toHaveBeenCalledOnce()
     expect(validateCandidate).toHaveBeenCalledWith(candidate)
-    const prompt = vi.mocked(llm.generateStream).mock.calls[2][0]
+    const prompt = vi.mocked(llm.generateStream).mock.calls[4][0]
     expect(prompt).toContain('操作流水账')
     expect(prompt).toContain('配角轮流同义震惊')
     expect(prompt).toContain('必须给待审核稿逐字存在的原句及原因')
@@ -49,7 +103,7 @@ describe('自动润色性能与核验复用', () => {
     })
     expect(output.report.status).toBe('review_required')
     expect(output.report.dialogueQuality?.passed).toBe(false)
-    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+    expect(llm.generateStream).toHaveBeenCalledTimes(1)
   })
 
   it('无效修复未改变稿件时只审核一次，并将匹配失败反馈交给下一次修复', async () => {
@@ -110,6 +164,20 @@ describe('自动润色性能与核验复用', () => {
     }
   })
 
+  it('联合事实凭据完整匹配也不能绕过独立事实审核', async () => {
+    const llm = mockLlm((_prompt, opts) => opts.meta?.feature === 'deslop:verify'
+      ? JSON.stringify({ unchanged: false, issues: ['原稿保留推断边界，候选省去该限制'] })
+      : JSON.stringify({ patches: [] }))
+    const output = await autoDeslopProse(original, {
+      service: { deslop: async () => receipt(candidate) } as unknown as DeslopService, llm,
+      validateCandidate: async () => {}, dialogueComposition: { mode: 'write' }
+    })
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+    expect(output.report.verificationAttempts).toBe(1)
+    expect(output.report.issues).toContain('原稿保留推断边界，候选省去该限制')
+  })
+
   it.each(['originalRevision', 'candidateRevision', 'prefixRevision'] as const)(
     '凭据的 %s 与本次文本不一致时必须重新核验', async key => {
       const result = receipt(candidate)
@@ -156,14 +224,28 @@ describe('自动润色性能与核验复用', () => {
     expect(prompt).toContain('仍须检查表达')
   })
 
-  it('复用核验仍响应停止信号，不因命中缓存采用半成品', async () => {
+  it('独立核验前响应停止信号，不采用半成品', async () => {
     const controller = new AbortController()
     const llm = mockLlm(() => { throw new Error('不应新增模型调用') })
     await expect(autoDeslopProse(original, {
       service: { deslop: async () => receipt(candidate) } as unknown as DeslopService, llm,
       validateCandidate: async () => {}, dialogueComposition: { mode: 'write' }, signal: controller.signal,
-      onProgress: message => { if (message.includes('复用当前稿件')) controller.abort() }
+      onProgress: message => { if (message.includes('事实核对')) controller.abort() }
     })).rejects.toThrow('LLM_ABORTED')
+    expect(llm.generateStream).not.toHaveBeenCalled()
+  })
+
+  it('场景审核缺少有效证据时不把格式失败当作正文缺陷盲目改写', async () => {
+    const llm=mockLlm(()=>{throw new Error('不应盲目改写')})
+    const rejected=receipt(candidate)
+    rejected.dialogueQuality={passed:false,beforeRatio:0,afterRatio:0,attempts:0,
+      issues:['整场对白复核缺少有效的连续回合证据或结论，保留待复核。']}
+    const output=await autoDeslopProse(original,{
+      service:{deslop:async()=>rejected} as unknown as DeslopService,llm,
+      validateCandidate:async()=>{},dialogueComposition:{mode:'write'}
+    })
+    expect(output.report.status).toBe('review_required')
+    expect(output.content).toBe(original)
     expect(llm.generateStream).not.toHaveBeenCalled()
   })
 })

@@ -18,13 +18,17 @@ const reply = JSON.stringify({ events: [{ text: '账册交接', evidence: prose 
 
 describe('全书批量重新生成概要', () => {
   let root: string, dir: string, id: string, service: WriteService, llm: LlmService
+  let summaryModel: ReturnType<typeof vi.fn>
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'summary-batch-'))
     const settings = { getProjectsRoot: async (fallback: string) => fallback } as SettingsRepository
     const projects = new ProjectService(join(root, 'projects'), new LibraryRepository(join(root, 'library.json')), settings)
     id = (await projects.create({ name: '全书补齐', genre: '玄幻' })).id
     dir = await projects.resolveDir(id)
-    llm = { generateStream: vi.fn().mockResolvedValue(reply) } as unknown as LlmService
+    summaryModel = vi.fn().mockResolvedValue(reply)
+    llm = { generateStream: vi.fn().mockImplementation((prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      : summaryModel(prompt, opts)) } as unknown as LlmService
     service = new WriteService(projects, llm)
   })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
@@ -46,20 +50,20 @@ describe('全书批量重新生成概要', () => {
       sourceHash: hashProse(evidence), generatedAt: '', ...omitted })
     await seedIncomplete()
     let extractions = 0
-    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] })
+    summaryModel.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
       : JSON.stringify(++extractions === 1 ? omitted : correct))
     const first = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
     expect(first.results[0].status).toBe('generated')
     expect(extractions).toBe(2)
-    expect(vi.mocked(llm.generateStream).mock.calls.some(([prompt]) => prompt.includes('陆宁的知情事实缺少对应连续性台账'))).toBe(true)
+    expect(summaryModel.mock.calls.some(([prompt]) => prompt.includes('陆宁的知情事实缺少对应连续性台账'))).toBe(true)
     await seedIncomplete()
     const second = await service.generateChapterSummary(id, 640, evidence)
     expect(second.reused).not.toBe(true)
     expect(second.continuity).toEqual(correct.continuity)
     await seedIncomplete()
-    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread'], findings: [] })
+    summaryModel.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
       : JSON.stringify(omitted))
     const failed = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
     expect(failed.results[0]).toMatchObject({ status: 'failed', error: expect.stringContaining('MEMORY_KNOWLEDGE_INCOMPLETE') })
@@ -70,7 +74,7 @@ describe('全书批量重新生成概要', () => {
 
   it('覆盖全书及稀疏章号，每章立即保存；单章失败不影响后续，继续时跳过成功且未改正文的章', async () => {
     for (const n of [1, 2, 201]) await new ProseRepo(dir).write(n, prose)
-    vi.mocked(llm.generateStream).mockResolvedValueOnce(reply).mockRejectedValueOnce(new Error('临时断网')).mockResolvedValueOnce(reply)
+    summaryModel.mockResolvedValueOnce(reply).mockRejectedValueOnce(new Error('临时断网')).mockResolvedValueOnce(reply)
     const complete = vi.fn<(result: ChapterSummaryBatchItem) => void>()
     const progress = vi.fn()
     const first = await service.regenerateSummariesBatch(id, options, complete, { onProgress: progress })
@@ -84,7 +88,7 @@ describe('全书批量重新生成概要', () => {
     const completed = first.results.filter((r) => r.sourceHash).map((r) => ({ chapterNumber: r.chapterNumber, sourceHash: r.sourceHash! }))
     const second = await run({ ...options, completed })
     expect(second.results.map((r) => r.status)).toEqual(['reused', 'generated', 'reused'])
-    expect(llm.generateStream).toHaveBeenCalledTimes(4)
+    expect(summaryModel).toHaveBeenCalledTimes(4)
     expect(await new ProseRepo(dir).read(1)).toBe(prose)
   })
 
@@ -107,36 +111,36 @@ describe('全书批量重新生成概要', () => {
   it('停止中断当前模型请求，已保存概要保留，尚未开始的章节不调用模型', async () => {
     for (const n of [1, 2, 3]) await new ProseRepo(dir).write(n, prose)
     const controller = new AbortController()
-    vi.mocked(llm.generateStream).mockImplementation(async (_text, opts) => {
+    summaryModel.mockImplementation(async (_text, opts) => {
       if (opts?.meta?.chapterNumber === 1) return reply
       return new Promise((_resolve, reject) => opts?.signal?.addEventListener('abort', () => reject(new Error('LLM_ABORTED')), { once: true }))
     })
     const task = run(options, controller.signal)
-    await vi.waitFor(() => expect(llm.generateStream).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(summaryModel).toHaveBeenCalledTimes(2))
     controller.abort()
     const result = await task
     expect(result.stopped).toBe(true)
     expect(result.results.map((r) => r.chapterNumber)).toEqual([1])
     expect(await new ChapterSummaryRepo(dir).read(1)).not.toBeNull()
     expect(await new ChapterSummaryRepo(dir).read(2)).toBeNull()
-    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+    expect(summaryModel).toHaveBeenCalledTimes(2)
   })
 
   it('缺少连续性数组时自动重新提取，原概要仅在新稿验证通过后替换', async () => {
     await new ProseRepo(dir).write(1, prose)
     await service.generateChapterSummary(id, 1, prose)
-    vi.mocked(llm.generateStream).mockResolvedValueOnce(JSON.stringify({ events: [{ text: '交接', evidence: prose }], stateChanges: [], openThreads: [] }))
+    summaryModel.mockResolvedValueOnce(JSON.stringify({ events: [{ text: '交接', evidence: prose }], stateChanges: [], openThreads: [] }))
     const result = await run()
     expect(result.results[0].status).toBe('generated')
     expect(result.ok).toBe(true)
     expect((await new ChapterSummaryRepo(dir).read(1))?.continuity?.[0].value).toBe('守门人')
-    expect(llm.generateStream).toHaveBeenCalledTimes(3)
-    expect(vi.mocked(llm.generateStream).mock.calls[2][0]).toContain('自动修复并重新提取')
+    expect(summaryModel).toHaveBeenCalledTimes(3)
+    expect(summaryModel.mock.calls[2][0]).toContain('自动修复并重新提取')
   })
 
   it('生成期间正文改变时拒绝提交旧稿概要', async () => {
     await new ProseRepo(dir).write(1, prose)
-    vi.mocked(llm.generateStream).mockImplementationOnce(async () => {
+    summaryModel.mockImplementationOnce(async () => {
       await new ProseRepo(dir).write(1, '林远转身离去，账册仍在原处。')
       return reply
     })
@@ -151,6 +155,6 @@ describe('全书批量重新生成概要', () => {
     expect((await run()).error).toContain('没有已保存正文')
     const controller = new AbortController(); controller.abort()
     expect((await run(options, controller.signal)).stopped).toBe(true)
-    expect(llm.generateStream).not.toHaveBeenCalled()
+    expect(summaryModel).not.toHaveBeenCalled()
   })
 })

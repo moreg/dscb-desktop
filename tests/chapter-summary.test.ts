@@ -29,7 +29,8 @@ describe('章节概要', () => {
     const projects = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), settings)
     projectId = (await projects.create({ name: '概要测试', genre: '玄幻' })).id
     dir = await projects.resolveDir(projectId)
-    llm = { generateStream: vi.fn().mockResolvedValue(reply('林远交出账册并进门')) } as unknown as LlmService
+    llm = { generateStream: vi.fn().mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]}) : reply('林远交出账册并进门')) } as unknown as LlmService
     service = new WriteService(projects, llm)
   })
 

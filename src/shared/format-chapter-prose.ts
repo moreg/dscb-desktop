@@ -2,8 +2,8 @@
  * 章节正文格式化：
  * - 去掉汉字间与行首尾的多余空白；英文词间空白归一为空格
  * - 去掉空行（连续换行压成单个换行）
- * - 一句一段，对话独立成段，多句台词拆成引号完整的段落
- * - 对话中间不用中文句号，陈述台词以句号收尾，保留问号、叹号和英文标点
+ * - 保留叙述的语意分段，对话独立成段，多句台词拆成引号完整的段落
+ * - 对话引号内不用中文句号（含闭合前），保留问号、叹号和英文标点
  *
  * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
  */
@@ -88,22 +88,19 @@ function formatSentenceParagraphs(text: string): string {
       const body = match[1] ?? match[2] ?? match[3] ?? match[4]
       const suffix = line.slice(match.index! + match[0].length)
       // 叙述中用引号标出的词语不当作独立发言。
+      if (!/[。！？!?]/.test(body) && /^(?:字|词|[一二三四五六七八九十两几]+个?字|一词|这(?:个词|[一二三四五六七八九十两几]+个字))/.test(suffix.trim())) continue
       if (prefix.trim() && suffix.trim() && !/[。！？!?]/.test(body) &&
           !/[：:]$/.test(prefix.trim()) && !/(?:说|问|喊|道|答)$/.test(prefix.trim())) continue
-      paragraphs.push(...splitSentences(prefix))
+      if (prefix.trim()) paragraphs.push(prefix.trim())
       const open = match[0][0]
       const close = match[0].slice(-1)
       for (const sentence of splitSentences(body)) {
-        let content = sentence.replace(/。/g, '').trim()
-        // 每段陈述台词只在闭合引号前保留一个句号；问叹、英文句末与打断符保留。
-        if (content && !/[！？!?….~～—]$/.test(content)) {
-          content = content.replace(/[，,；;：:]+$/, '') + '。'
-        }
+        const content = sentence.replace(/。/g, '').trim()
         if (content) paragraphs.push(`${open}${content}${close}`)
       }
       start = match.index! + match[0].length
     }
-    paragraphs.push(...splitSentences(line.slice(start)))
+    if (line.slice(start).trim()) paragraphs.push(line.slice(start).trim())
   }
   return paragraphs.join('\n')
 }

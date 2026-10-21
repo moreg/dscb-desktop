@@ -7,6 +7,11 @@ if (!root) throw new Error('Explicit isolated test root required')
 app.setPath('userData', path.join(root, 'profile'))
 const pid = process.pid
 const entityScenario = process.env.TENCHAPTER_SCENARIO === 'entity-write'
+// An explicit retry fixture may use a different genuinely extracted prop. Never
+// synthesize extraction results or create cards from the test driver.
+const retryPlanFile = path.join(root, 'entity-retry-plan.json')
+const retryPlan = fs.existsSync(retryPlanFile) ? JSON.parse(fs.readFileSync(retryPlanFile, 'utf8')) : null
+const entityTargets = retryPlan?.targetNames || ['松木信匣', '青布封套']
 let chapter = 1, stage = '', sequence = 0, windowRef
 const log = (event, extra = {}) => {
   fs.appendFileSync(path.join(root, 'events.jsonl'), JSON.stringify({ event, pid, chapter, stage, time: new Date().toISOString(), ...extra }) + '\n')
@@ -22,9 +27,9 @@ fs.promises.rename = async (from, to) => {
     if (fs.existsSync(projectFile)) {
       const p = JSON.parse(fs.readFileSync(projectFile, 'utf8'))
       const dir = path.join(p.path, '记忆', '道具')
-      if ([path.join(dir, '松木信匣.md'), path.join(dir, '青布封套.md')].includes(String(to))) {
+      if (entityTargets.map(name => path.join(dir, name + '.md')).includes(String(to))) {
         log('actual-entity-atomic-commit', { file: path.relative(p.path, String(to)) })
-        if (['松木信匣.md', '青布封套.md'].every(file => fs.existsSync(path.join(dir, file)))) {
+        if (entityTargets.every(name => fs.existsSync(path.join(dir, name + '.md')))) {
           fs.writeFileSync(path.join(root, 'crash-ready-entity.json'), JSON.stringify({ pid, chapter, file: String(to), time: Date.now(), phase: 'entity committed, writer not returned' }))
           await new Promise(() => {})
         }
@@ -103,21 +108,44 @@ app.on('web-contents-created', (_event, wc) => {
     const poll = setInterval(async () => {
       if (wc.isDestroyed()) { clearInterval(poll); return }
       try {
+        if (entityScenario && retryPlan && !restarting && !fs.existsSync(path.join(root, 'entity-retry-prepared.json'))) {
+          if (editing) return
+          editing = true
+          const prepared = await wc.executeJavaScript(`(async () => {
+            const id=${JSON.stringify(p.id)}, plan=${JSON.stringify(retryPlan)};
+            const chapter=await window.api.getChapter(id,4);
+            const item=(await window.api.listMemoryEntities(id,'item')).find(x=>x.name===plan.protectedName);
+            if(!item) throw new Error('缺少真实提取的待保护实体');
+            await window.api.updateMemoryEntity(id,'item',item.id,{notes:plan.prepareProtectedNotes});
+            const replace=value=>typeof value==='string'?plan.prepareReplacements.reduce((s,[a,b])=>s.replaceAll(a,b),value):Array.isArray(value)?value.map(replace):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,replace(v)])):value;
+            const outline=(await window.api.listDetailedOutline(id)).find(x=>x.chapterNumber===4);
+            await window.api.updateDetailedOutline(id,4,replace(outline));
+            const content=replace(chapter.content);
+            if(content===chapter.content) throw new Error('准备修订未改变真实正文');
+            await window.api.updateChapterContent(id,4,content);
+            return {oldProse:chapter.content,editedProse:content,protectedItemId:item.id};
+          })()`)
+          fs.writeFileSync(path.join(root,'entity-retry-prepared.json'),JSON.stringify({pid,time:new Date().toISOString(),...prepared},null,2))
+          log('entity-fixture-revised-through-app-ipc')
+          editing = false
+        }
         if (entityScenario && restarting && !fs.existsSync(path.join(root, 'author-edits.json'))) {
           if (editing) return
           editing = true
           const edited = await wc.executeJavaScript(`(async () => {
             const id = ${JSON.stringify(p.id)};
-            const replace = value => typeof value === 'string' ? value.replaceAll('松木信匣','桐木信匣').replaceAll('青布封套','棉布封套')
+            const replacements=${JSON.stringify(retryPlan?.replacements || [['松木信匣','桐木信匣'],['青布封套','棉布封套']])};
+            const obsoleteName=${JSON.stringify(retryPlan?.obsoleteName || '松木信匣')}, protectedName=${JSON.stringify(retryPlan?.protectedName || '青布封套')};
+            const replace = value => typeof value === 'string' ? replacements.reduce((s,[a,b])=>s.replaceAll(a,b),value)
               : Array.isArray(value) ? value.map(replace) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k,v])=>[k,replace(v)])) : value;
             const chapter = await window.api.getChapter(id,4);
-            if (!chapter.content.includes('松木信匣') || !chapter.content.includes('青布封套')) throw new Error('作者修订前缺少两件实物');
+            if (!replacements.every(([a])=>chapter.content.includes(a))) throw new Error('作者修订前缺少实际道具');
             const content = replace(chapter.content);
             const items = await window.api.listMemoryEntities(id,'item');
-            const protectedItem = items.find(x=>x.name==='青布封套');
-            const obsoleteItem = items.find(x=>x.name==='松木信匣');
+            const protectedItem = items.find(x=>x.name===protectedName);
+            const obsoleteItem = items.find(x=>x.name===obsoleteName);
             if (!protectedItem || !obsoleteItem) throw new Error('两张实际新增卡片尚未落盘');
-            const protectedNotes = '作者手动保留资料：第4章初稿曾使用青布封套；修订稿已改为棉布封套。此卡作为创作历史留档，不作为当前正文事实。';
+            const protectedNotes = ${JSON.stringify(retryPlan?.protectedNotes || '作者手动保留资料：第4章初稿曾使用青布封套；修订稿已改为棉布封套。此卡作为创作历史留档，不作为当前正文事实。')};
             await window.api.updateMemoryEntity(id,'item',protectedItem.id,{notes:protectedNotes});
             const chars = await window.api.listCharacters(id);
             const character = chars.find(x=>x.name==='陆安');
@@ -130,12 +158,13 @@ app.on('web-contents-created', (_event, wc) => {
             if (!outline) throw new Error('缺少实际第4章细纲');
             await window.api.updateDetailedOutline(id,4,replace(outline));
             await window.api.updateChapterContent(id,4,content);
-            return {chapterNumber:4,oldProse:chapter.content,editedProse:content,protectedItemId:protectedItem.id,
+            return {chapterNumber:4,replacements,obsoleteName,protectedName,oldProse:chapter.content,editedProse:content,protectedItemId:protectedItem.id,
               obsoleteItemId:obsoleteItem.id,protectedNotes,characterId:character.id,beforePosition,protectedPosition,
               itemsAfter:await window.api.listMemoryEntities(id,'item'),charactersAfter:await window.api.listCharacters(id)};
           })()`)
           const protectedFileHash = createHash('sha256').update(fs.readFileSync(path.join(p.path,'记忆','道具','青布封套.md'))).digest('hex')
-          fs.writeFileSync(path.join(root, 'author-edits.json'), JSON.stringify({pid,time:new Date().toISOString(),...edited,protectedFileHash},null,2))
+          const fixturePreparation = fs.existsSync(path.join(root,'entity-retry-prepared.json')) ? JSON.parse(fs.readFileSync(path.join(root,'entity-retry-prepared.json'),'utf8')) : undefined
+          fs.writeFileSync(path.join(root, 'author-edits.json'), JSON.stringify({pid,time:new Date().toISOString(),...edited,protectedFileHash,fixturePreparation},null,2))
           log('author-edits-through-app-ipc', { chapter:4 })
           editing = false
         }
