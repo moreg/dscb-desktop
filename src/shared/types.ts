@@ -568,6 +568,7 @@ export interface RendererApi {
   getAppUpdateState(): Promise<AppUpdateState>
   checkAppUpdate(): Promise<AppUpdateState>
   downloadAppUpdate(): Promise<AppUpdateState>
+  restartAppUpdate(): Promise<AppUpdateState>
   setAppUpdateAutoCheck(enabled: boolean): Promise<AppUpdateState>
   onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
   listShortStories(): Promise<ShortStorySummary[]>

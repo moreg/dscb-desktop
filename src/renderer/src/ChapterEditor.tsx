@@ -1816,14 +1816,14 @@ export default function ChapterEditor({
   // P19-A：离开页面/切章前提醒未保存内容
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (dirty) {
+      if (dirty || saving || generating || adjusting || adjustPlanning) {
         e.preventDefault()
         e.returnValue = '' // 触发浏览器原生确认弹窗
       }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [dirty])
+  }, [dirty, saving, generating, adjusting, adjustPlanning])
 
   /**
    * 切章/返回前把未保存输入立即落盘为草稿。

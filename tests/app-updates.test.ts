@@ -1,22 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { app } from 'electron'
+import { app, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { registerAppUpdates } from '../src/main/app-updates'
 import { readJson, writeJsonAtomic } from '../src/main/data/atomic'
 import type { AppUpdateState } from '../src/shared/app-update'
+import { beginStream, clearAllStreams } from '../src/main/data/stream-abort-registry'
+import { activeBatchProjects } from '../src/main/data/write-batch-lock'
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
-  send: vi.fn()
+  send: vi.fn(),
+  windows: [] as Array<{ isDestroyed: () => boolean; webContents: import('node:events').EventEmitter & { isDestroyed: () => boolean } }>
 }))
-vi.mock('electron', () => ({
-  app: { getPath: () => '/user-data', getVersion: () => '0.1.0', isPackaged: true },
-  BrowserWindow: { getAllWindows: () => [{}] }
-}))
+vi.mock('electron', async () => {
+  const { EventEmitter } = await import('node:events')
+  return {
+    app: Object.assign(new EventEmitter(), { getPath: () => '/user-data', getVersion: () => '0.1.0', isPackaged: true, quit: vi.fn() }),
+    BrowserWindow: { getAllWindows: () => mocks.windows },
+    dialog: { showMessageBox: vi.fn() }
+  }
+})
 vi.mock('electron-updater', async () => {
   const { EventEmitter } = await import('node:events')
   return { autoUpdater: Object.assign(new EventEmitter(), {
-    checkForUpdates: vi.fn(), downloadUpdate: vi.fn(),
+    checkForUpdates: vi.fn(), downloadUpdate: vi.fn(), quitAndInstall: vi.fn(),
     autoDownload: true, autoInstallOnAppQuit: false,
     allowPrerelease: true, allowDowngrade: true
   }) }
@@ -37,10 +44,16 @@ const updateInfo = {
 describe('GitHub app updates', () => {
   let dispose: (() => void) | undefined
   let originalPlatform: string
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers()
     vi.clearAllMocks()
     mocks.handlers.clear()
+    const { EventEmitter } = await import('node:events')
+    mocks.windows = [{ isDestroyed: () => false, webContents: Object.assign(new EventEmitter(), { isDestroyed: () => false }) }]
+    vi.mocked(dialog.showMessageBox).mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(autoUpdater.quitAndInstall).mockReset()
+    clearAllStreams()
+    activeBatchProjects.clear()
     originalPlatform = process.platform
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
     Object.assign(app, { isPackaged: true })
@@ -55,6 +68,9 @@ describe('GitHub app updates', () => {
   afterEach(() => {
     dispose?.()
     autoUpdater.removeAllListeners()
+    app.removeAllListeners()
+    clearAllStreams()
+    activeBatchProjects.clear()
     dispose = undefined
     Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
     vi.useRealTimers()
@@ -138,7 +154,7 @@ describe('GitHub app updates', () => {
     const releaseNotes = '<p>更新内容</p>\n<ul><li>支持后台下载</li><li>修复重试</li></ul>'
     autoUpdater.emit('update-available', { ...updateInfo, releaseNotes: `\n${releaseNotes}\n` })
     expect(await invoke('updates:getState')).toMatchObject({ status: 'available', releaseNotes })
-    expect(mocks.send).toHaveBeenLastCalledWith({}, 'updates:state', expect.objectContaining({ releaseNotes }))
+    expect(mocks.send).toHaveBeenLastCalledWith(mocks.windows[0], 'updates:state', expect.objectContaining({ releaseNotes }))
     expect((await invoke('updates:download')).releaseNotes).toBe(releaseNotes)
     autoUpdater.emit('download-progress', { percent: 67, total: 100, delta: 67, transferred: 67, bytesPerSecond: 67 })
     expect(await invoke('updates:getState')).toMatchObject({ status: 'downloading', percent: 67, releaseNotes })
@@ -219,12 +235,93 @@ describe('GitHub app updates', () => {
     expect((await invoke('updates:getState')).supported).toBe(false)
     await invoke('updates:check')
     await invoke('updates:download')
+    await invoke('updates:restart')
     await vi.advanceTimersByTimeAsync(4 * 60 * 60 * 1000)
     expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
     expect(autoUpdater.downloadUpdate).not.toHaveBeenCalled()
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
     dispose()
     dispose = undefined
     expect(vi.getTimerCount()).toBe(0)
     expect(autoUpdater.listenerCount('update-available')).toBe(0)
+  })
+
+  it('prompts once per downloaded version and later does not quit or install', async () => {
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ buttons: ['立即重启', '稍后'], cancelId: 1 }))
+    expect(app.quit).not.toHaveBeenCalled()
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+    expect((await invoke('updates:getState')).status).toBe('downloaded')
+  })
+
+  it('confirmed restart waits for graceful shutdown and installs silently with relaunch', async () => {
+    vi.mocked(dialog.showMessageBox).mockResolvedValue({ response: 0, checkboxChecked: false })
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(app.quit).toHaveBeenCalledTimes(1)
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+    expect((await invoke('updates:restart')).status).toBe('restarting')
+    await invoke('updates:check')
+    expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
+    const event = { preventDefault: vi.fn() }
+    mocks.windows[0].isDestroyed = () => true
+    app.emit('will-quit', event)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledWith(true, true)
+    app.emit('will-quit', { preventDefault: vi.fn() })
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
+  })
+
+  it('an unsaved window cancels restart without starting the installer and permits retry', async () => {
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    await invoke('updates:restart')
+    mocks.windows[0].webContents.emit('will-prevent-unload', {})
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'downloaded', error: expect.stringContaining('保存') })
+    expect(app.listenerCount('will-quit')).toBe(0)
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+    await invoke('updates:restart')
+    app.emit('will-quit', { preventDefault: vi.fn() })
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledWith(true, true)
+  })
+
+  it.each(['stream', 'batch'])('does not interrupt an active %s task', async kind => {
+    dispose = await registerAppUpdates()
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    if (kind === 'stream') beginStream('writing')
+    else activeBatchProjects.add('project')
+    expect(await invoke('updates:restart')).toMatchObject({ status: 'downloaded', error: expect.stringContaining('任务') })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(app.quit).not.toHaveBeenCalled()
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+  })
+
+  it('rejects restart before download completion', async () => {
+    dispose = await registerAppUpdates()
+    await invoke('updates:restart')
+    autoUpdater.emit('update-available', updateInfo)
+    await invoke('updates:restart')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(app.quit).not.toHaveBeenCalled()
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+  })
+
+  it('restores a usable window if installer startup fails after windows closed', async () => {
+    const restore = vi.fn()
+    dispose = await registerAppUpdates(restore)
+    autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
+    await invoke('updates:restart')
+    mocks.windows = []
+    vi.mocked(autoUpdater.quitAndInstall).mockImplementation(() => { autoUpdater.emit('error', new Error('installer failed')) })
+    app.emit('will-quit', { preventDefault: vi.fn() })
+    expect(restore).toHaveBeenCalledOnce()
+    expect(await invoke('updates:getState')).toMatchObject({ status: 'downloaded', error: expect.stringContaining('安装更新未能启动') })
   })
 })

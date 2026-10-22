@@ -177,6 +177,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     getAppUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<AppUpdateState>,
     checkAppUpdate: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateState>,
     downloadAppUpdate: () => ipcRenderer.invoke('updates:download') as Promise<AppUpdateState>,
+    restartAppUpdate: () => ipcRenderer.invoke('updates:restart') as Promise<AppUpdateState>,
     setAppUpdateAutoCheck: (enabled: boolean) => ipcRenderer.invoke('updates:setAutoCheck', enabled) as Promise<AppUpdateState>,
     onAppUpdateState: (callback: (state: AppUpdateState) => void) => {
       const handler = (_event: unknown, state: AppUpdateState) => callback(state)

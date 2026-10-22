@@ -43,22 +43,23 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
     finally { setPending(false) }
   }
   async function startDownload() {
-    if (!window.confirm('更新将在后台下载，可继续写作或最小化应用。下载完成后会在正常退出应用时安装，请在退出前保存内容并结束任务。是否下载？')) return
+    if (!window.confirm('更新将在后台下载，可继续写作或最小化应用。下载完成后会询问是否立即重启，安装完成后自动重新打开。是否下载？')) return
     const next = await run(() => window.api.downloadAppUpdate())
     if (next?.status === 'downloading') window.dispatchEvent(new Event(BACKGROUND_DOWNLOAD_EVENT))
   }
   if (!state) return compact ? null : <p className="muted">{error || '加载更新信息…'}</p>
   const noticeKey = `${state.version}:${state.status}`
-  const visibleNotice = ['available', 'downloading', 'downloaded'].includes(state.status)
+  const visibleNotice = ['available', 'downloading', 'downloaded', 'restarting'].includes(state.status)
     || (state.status === 'error' && Boolean(state.version))
   if (compact && (!visibleNotice || dismissed === noticeKey)) return null
-  const busy = pending || state.status === 'checking' || state.status === 'downloading'
+  const busy = pending || state.status === 'checking' || state.status === 'downloading' || state.status === 'restarting'
   const message = !state.supported ? '自动更新仅在安装后的 Windows 应用中启用。'
     : state.status === 'checking' ? '正在检查更新…'
     : state.status === 'available' ? `发现新版本 ${state.version}`
     : state.status === 'current' ? '当前已是最新版本'
     : state.status === 'downloading' ? `正在下载 ${state.version} · ${Math.round(state.percent ?? 0)}%`
-    : state.status === 'downloaded' ? `版本 ${state.version} 已下载，正常退出应用后安装。请先保存内容并结束正在进行的任务。`
+    : state.status === 'downloaded' ? `版本 ${state.version} 已下载，是否立即重启？请先保存内容并结束任务；重启后将安装更新并自动重新打开。`
+    : state.status === 'restarting' ? '正在关闭应用并安装更新，完成后将自动重新打开。'
     : state.status === 'error' ? state.error
     : '更新来自 GitHub Releases'
 
@@ -84,13 +85,16 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
           onClick={() => { void run(() => window.api.checkAppUpdate()) }}>检查更新</button>}
         {(state.status === 'available' || (state.status === 'error' && state.version)) &&
           <button className="btn" disabled={busy} onClick={() => { void startDownload() }}>后台下载</button>}
+        {state.status === 'downloaded' && <button className="btn" disabled={!state.supported || busy}
+          onClick={() => { void run(() => window.api.restartAppUpdate()) }}>立即重启</button>}
         {compact && state.status === 'downloading' && <button className="btn btn-ghost"
           onClick={() => setBackground(true)}>转入后台</button>}
-        {compact && <button className="btn btn-ghost" onClick={() => setDismissed(noticeKey)}>收起</button>}
+        {compact && <button className="btn btn-ghost" disabled={busy && state.status === 'restarting'} onClick={() => setDismissed(noticeKey)}>{state.status === 'downloaded' ? '稍后' : '收起'}</button>}
       </div>
       {state.status === 'downloading' && <progress aria-label="更新下载进度" value={state.percent ?? 0} max={100} style={{ width: '100%', marginTop: 12 }} />}
       {!compact && state.status === 'downloading' && <p className="muted" style={{ fontSize: 13 }}>可以离开设置页面继续写作，或最小化应用；下载会继续进行。</p>}
       {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
+      {state.error && state.status !== 'error' && <p role="alert" style={{ color: 'var(--danger)' }}>{state.error}</p>}
     </section>
   )
 }

@@ -100,7 +100,7 @@ if (!hasSingleInstanceLock) {
     })
   }
 
-  disposeAppUpdates = await registerAppUpdates()
+  disposeAppUpdates = await registerAppUpdates(() => { createWindow() })
   createWindow()
 
   app.on('activate', () => {
@@ -113,7 +113,6 @@ let mobileQuitReady = false
 let mobileQuitPending = false
 app.on('before-quit', (event) => {
   if (mobileQuitReady || !mobileServer) {
-    disposeProjectWatchers?.()
     return
   }
   event.preventDefault()
@@ -128,7 +127,10 @@ app.on('before-quit', (event) => {
   })
 })
 
-app.on('will-quit', () => { disposeAppUpdates?.() })
+app.on('quit', () => {
+  disposeProjectWatchers?.()
+  disposeAppUpdates?.()
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
