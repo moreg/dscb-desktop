@@ -3,12 +3,14 @@ import { DIALOGUE_RULES } from './skill-prompts/chapter-rules'
 import { postWriteProgressLabel } from '../../shared/generation-progress'
 import { join, dirname } from 'path'
 import { promises as fs } from 'fs'
+import { AsyncLocalStorage } from 'async_hooks'
 import type { ProjectService } from './project-service'
 import type { LlmService, GenerateOptions } from './llm-service'
 import { OutlineRepository } from './outline-repository'
 import { CharacterRepository } from './character-repository'
 import { ForeshadowingRepository } from './foreshadowing-repository'
 import { ChapterService } from './chapter-service'
+import { ChapterRewriteReviewError } from './chapter-rewrite-review-error'
 import { ChapterVersionRepository } from './chapter-version-repository'
 import { contentRevision } from './chapter-revision'
 import { DetailedOutlineMdRepo, sumPlotPointWords } from './skill-format/detailed-outline-md-repo'
@@ -370,6 +372,8 @@ function tokensForWords(words: number): number {
 export class WriteService {
   private readonly observationMigrations = new Map<string, Promise<void>>()
   private longformGuard?: LongformGuard
+  /** Successful checks belong to one full-flow invocation, never another run/project. */
+  private readonly longformOperation = new AsyncLocalStorage<Set<string>>()
   private readonly memoryCoordinator = new ChapterMemoryCoordinator()
   private readonly summaryInFlight = new Map<string, Promise<ChapterSummaryView>>()
   private readonly summaryEpoch = new Map<string, number>()
@@ -408,13 +412,25 @@ export class WriteService {
     content: string,
     opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean } = {}
   ): Promise<ChapterSummaryView> {
+    return this.generateChapterSummaryChecked(projectId, chapterNumber, content, opts)
+  }
+
+  /** Only internal callers may carry a just-completed review into summary extraction.
+   * The receipt re-reads prose, plans and historical sources before use and commit. */
+  private async generateChapterSummaryChecked(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean },
+    reviewed?: () => Promise<void>
+  ): Promise<ChapterSummaryView> {
     if (!content.trim()) throw new Error('正文为空，无法生成章节概要')
     if (content.length > EXISTING_TEXT_MAX_CHARS) throw new Error('正文超过4万字符，请先分章后生成概要')
     const dir = await this.projectService.resolveDir(projectId)
     const repo = new ChapterSummaryRepo(dir)
     const sourceHash = hashProse(content)
     const key = `${dir}:${chapterNumber}`
-    const runningKey = `${key}:${sourceHash}:${Boolean(opts.requireContinuity)}:${Boolean(opts.force)}:${opts.expectedRevision ?? ''}:${opts.signal ? ++this.summaryRequestSequence : ''}`
+    const runningKey = `${key}:${sourceHash}:${Boolean(opts.requireContinuity)}:${Boolean(opts.force)}:${opts.expectedRevision ?? ''}:${opts.signal || reviewed ? ++this.summaryRequestSequence : ''}`
     const running = this.summaryInFlight.get(runningKey)
     if (running) return running
     const epoch = (this.summaryEpoch.get(key) ?? 0) + 1
@@ -426,7 +442,8 @@ export class WriteService {
       }
       throwIfAborted(opts.signal)
       // Neither reuse nor regeneration can approve a rejected manuscript. Share only non-cancellable identical requests.
-      const confirmLongform = await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: opts.signal })
+      const confirmLongform = reviewed ?? await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: opts.signal })
+      if (reviewed) await reviewed()
       const vocabulary = (await buildContinuityContext(dir, chapterNumber, {
         text: content, characters: [], aliases: [], props: []
       })).filter(line => line.startsWith('- [') && line.includes('最近可核实记录'))
@@ -820,9 +837,18 @@ export class WriteService {
     }
     const before = await readContext()
     const instruction = options.instruction ?? await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(before.plan))
-    if (needsLongformGuard(before.plan, before.history)) options.onStart?.()
+    const operation = this.longformOperation.getStore()
+    const identity = async (): Promise<string | null> => {
+      try { return this.llm.getOperationIdentity ? await this.llm.getOperationIdentity('longformGuard') : 'operation-local' }
+      catch { return null }
+    }
+    const routing = operation ? await identity() : null
+    const key = routing ? hashProse(JSON.stringify([dir, projectId, chapterNumber, content, savedBefore,
+      before, instruction, options.continuationStart, routing])) : undefined
+    const reused = Boolean(key && operation?.has(key))
+    if (!reused && needsLongformGuard(before.plan, before.history)) options.onStart?.()
     this.longformGuard ??= new LongformGuard(this.llm)
-    await this.longformGuard.check({ chapterNumber, content, ...before,
+    if (!reused) await this.longformGuard.check({ chapterNumber, content, ...before,
       instruction, continuationStart: options.continuationStart }, {
       signal: options.signal, meta: { feature: 'longformGuard', projectId, chapterNumber }
     })
@@ -833,6 +859,8 @@ export class WriteService {
         await this.assertLongformHistoryReady(dir, chapterNumber)
         const after = await readContext()
         if (before.plan !== after.plan || before.history !== after.history || before.sources !== after.sources ||
+          (routing !== null && routing !== await identity()) ||
+          (options.instruction === undefined && instruction !== await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(after.plan))) ||
           await new ProseRepo(dir).read(chapterNumber) !== savedBefore) {
           throw new Error('LONGFORM_CONTEXT_CHANGED: 核对期间正文、主线计划或历史记忆已变化，请基于新资料重新核对；本次不推进章节或同步记忆。')
         }
@@ -847,6 +875,7 @@ export class WriteService {
     await confirm()
     if (token) await clearLongformPending(dir, chapterNumber, token, options.instruction !== undefined
       ? { sourceHash: hashProse(content), planHash: hashProse(before.plan), instruction: options.instruction } : undefined)
+    if (key && routing === await identity()) operation?.add(key)
     return async () => {
       await confirm()
       if ((await readLongformReviewState(dir)).pending[String(chapterNumber)]) {
@@ -1133,6 +1162,10 @@ export class WriteService {
     onGenerationStage?.('generating')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
+      onStatus: status => {
+        llmOpts.onStatus?.(status)
+        onGenerationStage?.(`agy:${status}`)
+      },
       systemPrompt: prompt.system,
       maxTokens:
         opts.maxTokens ??
@@ -1154,8 +1187,13 @@ export class WriteService {
     }
     if (!onProseGenerated && polished !== prose) await this.chapterService.updateContent(projectId, chapterNumber,
       polished, contentRevision(prose), { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
-    await this.assertLongformConsistency(projectId, chapterNumber, polished, { signal: opts.signal, instruction,
-      onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线') })
+    try {
+      await this.assertLongformConsistency(projectId, chapterNumber, polished, { signal: opts.signal, instruction,
+        onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线') })
+    } catch (error) {
+      throwIfAborted(opts.signal)
+      throw new ChapterRewriteReviewError(polished, error)
+    }
     return polished
   }
 
@@ -2734,6 +2772,13 @@ export class WriteService {
     onProgress: (step: string, detail?: string) => void,
     opts: ChapterFlowOptions = {}
   ): Promise<ChapterFlowResult> {
+    return this.longformOperation.run(new Set(), () => this.runFullFlowForChapterInOperation(projectId, chapterNumber, onProgress, opts))
+  }
+
+  private async runFullFlowForChapterInOperation(
+    projectId: string, chapterNumber: number,
+    onProgress: (step: string, detail?: string) => void, opts: ChapterFlowOptions
+  ): Promise<ChapterFlowResult> {
     const dir = await this.projectService.resolveDir(projectId)
     /**
      * 步骤 3-7 的 LLM 调用同样要吃「停止」信号，否则用户在正文写完、流程跑到一半时
@@ -4151,7 +4196,19 @@ export class WriteService {
         }
       }
       if (previous.trim()) {
-        const summary = await this.completeChapterSummary(projectId, dir, chapterNumber - 1, previous, signal)
+        // Both operations read the same saved prose; neither consumes the other's
+        // output. Do not serialize two model calls before the first prose token.
+        const prevTail = tail(previous, PREV_TAIL_CHARS)
+        const [summary, endingState] = await Promise.all([
+          this.completeChapterSummary(projectId, dir, chapterNumber - 1, previous, signal),
+          this.getEndingStateCached(dir, chapterNumber, prevTail, signal)
+        ])
+        throwIfAborted(signal)
+        if (!endingState) {
+          // Match strict context loading: keep the original prose as fallback,
+          // without launching another three extraction retries immediately.
+          this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), emptyEndingState(chapterNumber - 1))
+        }
         if (!(await outlines.readChapter(chapterNumber - 1))) {
           await new OutlineRepository(dir).upsertDetailed({ chapterNumber: chapterNumber - 1,
             plotSummary: chapterSummaryText(summary), charactersAppearing: [], foreshadowings: [] })
@@ -4183,7 +4240,8 @@ export class WriteService {
     }
     for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS; attempt++) {
       try {
-        const summary = await this.generateChapterSummary(projectId, chapterNumber, content, { signal, requireContinuity: true })
+        const summary = await this.generateChapterSummaryChecked(projectId, chapterNumber, content,
+          { signal, requireContinuity: true }, confirmLongform)
         return { ...summary, schemaVersion: 1 }
       } catch (error) {
         throwIfAborted(signal)

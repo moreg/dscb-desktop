@@ -19,6 +19,7 @@ import type { SettingsRepository } from '../src/main/data/settings-repository'
 import type { ChapterSelfCheckReport, MemoryExtraction } from '../src/shared/types'
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
+import type { AsyncLocalStorage } from 'async_hooks'
 
 const goal = '陆安必须寻找失踪的母亲，不能无故放弃这个全书目标。'
 const bad = '陆安宣布永久放弃寻找母亲，从此只在街边卖画谋生。'
@@ -59,6 +60,50 @@ describe('长篇核对绕过与记忆污染回归', () => {
         { kind: 'thread', subject: '寻找母亲', object: '', aspect: '进展', value: '已放弃', evidence: prose }
       ] })
   }
+
+  it('CLI 同一流程复用成功核对，下一流程重新核对',async()=>{
+    verdict=cleared
+    await new ProseRepo(dir).write(1,good)
+    const internal=service as unknown as {longformOperation:AsyncLocalStorage<Set<string>>;assertLongformConsistency:(id:string,n:number,text:string,opts?:object)=>Promise<()=>Promise<void>>}
+    await internal.longformOperation.run(new Set(),async()=>{
+      for(let i=0;i<3;i++)await (await internal.assertLongformConsistency(id,1,good))()
+    })
+    expect(generate.mock.calls.filter(([,o])=>o?.meta?.feature==='longformGuard')).toHaveLength(1)
+    await internal.longformOperation.run(new Set(),()=>internal.assertLongformConsistency(id,1,good))
+    expect(generate.mock.calls.filter(([,o])=>o?.meta?.feature==='longformGuard')).toHaveLength(2)
+  })
+
+  it.each(['plan','prose','instruction','routing','history'] as const)('流程中 %s 改变后不能复用旧核对',async change=>{
+    verdict=cleared
+    let routing='model-a'
+    Object.assign((service as unknown as {llm:LlmService}).llm,{getOperationIdentity:async()=>routing})
+    await new ProseRepo(dir).write(1,good)
+    const n=change==='history'?2:1
+    if(n===2)await new ProseRepo(dir).write(2,good)
+    const internal=service as unknown as {longformOperation:AsyncLocalStorage<Set<string>>;assertLongformConsistency:(id:string,n:number,text:string,opts?:object)=>Promise<()=>Promise<void>>}
+    await internal.longformOperation.run(new Set(),async()=>{
+      await internal.assertLongformConsistency(id,n,good)
+      if(change==='plan')await writeFile(join(dir,'大纲','大纲.md'),`# 寻母\n\n## 主线剧情走向\n\n${goal}必须核实渡船。`)
+      if(change==='prose')await new ProseRepo(dir).write(1,good+'船夫点头。')
+      if(change==='routing')routing='model-b'
+      if(change==='history')await new ProseRepo(dir).write(1,good+'船夫已经离开。')
+      await internal.assertLongformConsistency(id,n,good,change==='instruction'?{instruction:'先核实渡船'}:{})
+    })
+    expect(generate.mock.calls.filter(([,o])=>o?.meta?.feature==='longformGuard')).toHaveLength(2)
+  })
+
+  it('同一流程不复用冲突或取消结果，命中成功记录仍响应取消',async()=>{
+    await new ProseRepo(dir).write(1,bad)
+    const internal=service as unknown as {longformOperation:AsyncLocalStorage<Set<string>>;assertLongformConsistency:(id:string,n:number,text:string,opts?:object)=>Promise<()=>Promise<void>>}
+    await internal.longformOperation.run(new Set(),async()=>{
+      await expect(internal.assertLongformConsistency(id,1,bad)).rejects.toThrow('LONGFORM_CONFLICT')
+      verdict=cleared
+      await internal.assertLongformConsistency(id,1,bad)
+      const controller=new AbortController();controller.abort()
+      await expect(internal.assertLongformConsistency(id,1,bad,{signal:controller.signal})).rejects.toThrow('LLM_ABORTED')
+    })
+    expect(generate.mock.calls.filter(([,o])=>o?.meta?.feature==='longformGuard')).toHaveLength(2)
+  })
 
   it('恢复稿的旧道具名在润色及记忆提取前即被拦住，批次重试仍复用原稿且不能推进', async () => {
     const previous='陆安把原信装入绸布封套，收入衣内保管。'

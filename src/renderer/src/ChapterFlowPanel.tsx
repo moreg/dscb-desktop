@@ -61,6 +61,9 @@ function friendlyFlowError(err: string): string {
   if (e === 'LLM_AUTH_FAILED' || e === 'NO_KEY' || e === 'LLM_NOT_CONFIGURED') {
     return '模型未配置或鉴权失败，请到设置检查 API Key / 功能模型分配（审稿质检）'
   }
+  if (e.startsWith('AGY_ERROR:') && /模型输出额度超限|生成流中断/.test(e)) {
+    return e.replace(/^AGY_ERROR:\s*/, '')
+  }
   if (e.startsWith('AGY_ERROR:') || /Agent execution terminated/i.test(e)) {
     return 'agy 执行出错（超时/限流/网络）。可改用 Kimi 等 HTTP 模型，或检查 agy 登录与网络后重试'
   }

@@ -10,6 +10,7 @@ import { runClaude, probeClaude } from './claude-runner'
 import { createHash } from 'crypto'
 
 export interface GenerateOptions {
+  onDiagnostic?: (event: Record<string, unknown>) => void
   onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   onToken?: (token: string) => void
   signal?: AbortSignal
@@ -240,6 +241,8 @@ const LONG_TIMEOUT_FEATURES = new Set([
   'chapter',
   'chapter-adjust',
   'chapter-adjust-plan',
+  // 重写/续写交稿前核对整章与长期记忆，不能按 3000 输出 token 当成短请求。
+  'longformGuard',
   'outlineCheck',
   'review',
   'deepReview',
@@ -360,6 +363,13 @@ export class LlmService {
   }
 
   /** Opaque in-process cache identity; never exposes provider credentials or endpoint details. */
+  /** Routing identity for an in-flight operation only; not a persistent CLI cache identity. */
+  async getOperationIdentity(feature?: string): Promise<string | null> {
+    const provider = await this.resolveProvider(feature)
+    if (!provider?.model.trim() || /^(?:default|auto)$/i.test(provider.model.trim())) return null
+    return createHash('sha256').update(JSON.stringify(provider)).digest('hex')
+  }
+
   async getCacheIdentity(feature?: string): Promise<string | null> {
     const provider = await this.resolveProvider(feature)
     if (!provider) return null
@@ -632,6 +642,7 @@ export class LlmService {
     // 以便区分 LLM_ABORTED 与 LLM_TIMEOUT
     const { full, usage } = await runAntigravity(merged, {
       onStatus: opts.onStatus,
+      onDiagnostic: opts.onDiagnostic,
       model: effectiveProvider.model && effectiveProvider.model !== 'default' ? effectiveProvider.model : undefined,
       timeoutSec: Math.ceil(timeoutMs / 1000),
       onToken: opts.onToken,

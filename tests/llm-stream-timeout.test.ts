@@ -5,6 +5,9 @@ const TWO_MIN = 120_000
 const TEN_MIN = 600_000
 
 describe('resolveStreamTimeoutMs', () => {
+  it('重写后长篇核对虽然只输出 3000 token，仍给整章检查 10 分钟', () => {
+    expect(resolveStreamTimeoutMs({ meta: { feature: 'longformGuard' }, maxTokens: 3000 })).toBe(TEN_MIN)
+  })
   it('正文 feature 一律 10 分钟（含默认 maxTokens=8192 场景）', () => {
     expect(resolveStreamTimeoutMs({ meta: { feature: 'chapter' } })).toBe(TEN_MIN)
     expect(

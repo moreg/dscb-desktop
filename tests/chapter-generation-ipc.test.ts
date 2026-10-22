@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WriteService } from '../src/main/data/write-service'
 import type { AutoDeslopResult, ChapterStreamResult } from '../src/shared/types'
 import { activeStreamCount, clearAllStreams } from '../src/main/data/stream-abort-registry'
+import { ChapterRewriteReviewError } from '../src/main/data/chapter-rewrite-review-error'
 
 type Handler = (event: { sender: object }, payload: unknown) => Promise<ChapterStreamResult>
 const { handlers, send } = vi.hoisted(() => ({
@@ -35,6 +36,15 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     repair.mockReset().mockImplementation(async (_pid, _ch, content) => ({ content, report: { status: 'unchanged', message: '无遗漏' } }))
     registerWriteIpc({ generateChapterStream: generate, adjustChapterStream: adjust, repairChapterForeshadowings: repair,
       syncChapterAfterWrite: sync } as unknown as WriteService)
+  })
+
+  it('重写检查超时仍返回失败和完整待复核稿，不发送成功完成事件', async () => {
+    adjust.mockRejectedValue(new ChapterRewriteReviewError('已完整生成的新稿。', new Error('LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT')))
+    expect(await handlers.get('write:adjustChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, content: '原稿', instruction: '调整', requestId: 'adjust-timeout'
+    })).toEqual({ ok: false, error: 'LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT', retainedContent: '已完整生成的新稿。' })
+    expect(send).not.toHaveBeenCalledWith('llm:token', expect.objectContaining({ done: true }))
+    expect(activeStreamCount()).toBe(0)
   })
 
   it('补跑伏笔和更新记忆均将真实进度绑定到本次请求', async () => {

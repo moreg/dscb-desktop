@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // mock child_process.spawn，模拟 agy 子进程行为
 import { EventEmitter } from 'events'
+import { readFileSync, existsSync } from 'fs'
+import { join } from 'path'
 
 interface FakeChild extends EventEmitter {
   stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> }
@@ -11,12 +13,12 @@ interface FakeChild extends EventEmitter {
   kill: ReturnType<typeof vi.fn>
 }
 
-let lastSpawnArgs: { bin: string; args: string[] } | null = null
+let lastSpawnArgs: { bin: string; args: string[]; cwd?: string } | null = null
 let fakeChildFactory: (() => FakeChild) | null = null
 
 vi.mock('child_process', () => ({
-  spawn: vi.fn((bin: string, args: string[]) => {
-    lastSpawnArgs = { bin, args }
+  spawn: vi.fn((bin: string, args: string[], opts?: {cwd?: string}) => {
+    lastSpawnArgs = { bin, args, cwd: opts?.cwd }
     const child = fakeChildFactory
       ? fakeChildFactory()
       : createFakeChild({ stdout: '默认回复', exitCode: 0 })
@@ -65,12 +67,16 @@ function createFakeChild(opts: {
 }
 
 import {
-  runAntigravity,
+  runAntigravity as runStructuredAntigravity,
   probeAntigravity,
   listAntigravityModels,
   sanitizeAgyModel,
   parseAgyModelLine
 } from '../src/main/data/antigravity-runner'
+
+// Existing fixtures exercise the explicit legacy text compatibility path.
+const runAntigravity: typeof runStructuredAntigravity = (prompt, opts) =>
+  runStructuredAntigravity(prompt, { ...opts, outputFormat: 'text' })
 
 beforeEach(() => {
   lastSpawnArgs = null
@@ -556,5 +562,127 @@ describe('sanitizeAgyModel & parseAgyModelLine', () => {
       'Gemini 3.8 Flash (High)'
     )
     expect(parseAgyModelLine('Gemini 3.8 Flash (High)')).toBe('Gemini 3.8 Flash (High)')
+  })
+})
+
+
+describe('structured Antigravity completion', () => {
+  const result = (response = '完整正文') => JSON.stringify({event:'result',result:{status:'SUCCESS',response}})+'\n'
+  function pendingChild(): FakeChild {
+    const child = new EventEmitter() as FakeChild
+    child.stdin = {write:vi.fn(),end:vi.fn()}
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter()
+    child.kill = vi.fn(() => { child.emit('close', 1) })
+    fakeChildFactory = () => child
+    return child
+  }
+  it('完整 SUCCESS 后 CLI 不退出，收尾宽限后清理并返回完整结果', async () => {
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout']})
+    try {
+      const child=pendingChild(), diagnostic=vi.fn()
+      const task=runStructuredAntigravity('test',{onDiagnostic:diagnostic})
+      await Promise.resolve()
+      child.stdout.emit('data',Buffer.from(result()))
+      await vi.advanceTimersByTimeAsync(1500)
+      expect((await task).full).toBe('完整正文')
+      expect(child.kill).toHaveBeenCalledOnce()
+      expect(lastSpawnArgs!.args).toContain('stream-json')
+      expect(diagnostic.mock.calls.some(([e])=>e.event==='cleanup_stalled')).toBe(true)
+    } finally {vi.useRealTimers()}
+  })
+  it('退出码 0 但只有正文 delta，不能冒充生成完成', async () => {
+    fakeChildFactory=()=>createFakeChild({stdout:JSON.stringify({event:'step_update',step_update:{step_type:'agent_response',text_delta:'{"text":"正文"}'}})+'\n',exitCode:0})
+    await expect(runStructuredAntigravity('test')).rejects.toThrow('缺少完整成功结果')
+  })
+  it('非 SUCCESS、损坏事件、重复结果及完整结果后的异常退出都失败关闭', async () => {
+    for (const stdout of [JSON.stringify({event:'result',result:{status:'ERROR',response:'正文'}})+'\n','bad\n'+result(),result()+result()]) {
+      fakeChildFactory=()=>createFakeChild({stdout,exitCode:0})
+      await expect(runStructuredAntigravity('test')).rejects.toThrow('AGY_ERROR')
+    }
+    fakeChildFactory=()=>createFakeChild({stdout:result(),exitCode:1})
+    await expect(runStructuredAntigravity('test')).rejects.toThrow('AGY_ERROR')
+  })
+  it('UTF-8 与 NDJSON 跨任意字节边界，final response 保持权威且不重复发送 delta', async () => {
+    const delta=JSON.stringify({event:'step_update',step_update:{step_type:'agent_response',text_delta:'完整正文'}})+'\n'
+    const bytes=Buffer.from(delta+result()),tokens:string[]=[]
+    fakeChildFactory=()=>createFakeChild({stdout:'',exitCode:0,stdoutChunks:Array.from(bytes,byte=>Buffer.from([byte]))})
+    const answer=await runStructuredAntigravity('test',{onToken:t=>tokens.push(t)})
+    expect(answer.full).toBe('完整正文');expect(tokens.join('')).toBe('完整正文')
+  })
+  it.each([
+    ['Your previous response was cut off because it exceeded the output token limit','模型输出额度超限'],
+    ['The stream was interrupted. Please continue the task you were working on.','生成流中断']
+  ])('明确区分生成失败原因：%s',async(error,expected)=>{
+    fakeChildFactory=()=>createFakeChild({stdout:JSON.stringify({event:'result',result:{status:'ERROR',response:'',error}})+'\n',exitCode:1})
+    await expect(runStructuredAntigravity('test')).rejects.toThrow(expected)
+  })
+  it('CLI 内部恢复成功时以成功终态为准，不把已恢复的错误当失败',async()=>{
+    const error=JSON.stringify({event:'step_update',step_update:{state:'DONE',step_type:'error_message',error:'The stream was interrupted'}})+'\n'
+    fakeChildFactory=()=>createFakeChild({stdout:error+result(),exitCode:0})
+    expect((await runStructuredAntigravity('test')).full).toBe('完整正文')
+  })
+  it('结构化结果提供真实用量时不再按正文字数低估推理消耗',async()=>{
+    fakeChildFactory=()=>createFakeChild({stdout:JSON.stringify({event:'result',result:{status:'SUCCESS',response:'正文',usage:{input_tokens:1200,output_tokens:6400,total_tokens:7600,thinking_tokens:6300}}})+'\n',exitCode:0})
+    const answer=await runStructuredAntigravity('test')
+    expect(answer.usage).toEqual({inputTokens:1200,outputTokens:6400,totalTokens:7600})
+  })
+  it('独立临时工作目录不继承项目 hooks，且显式选择纯文本主配置和原模型',async()=>{
+    fakeChildFactory=()=>{
+      const profile=readFileSync(join(lastSpawnArgs!.cwd!,'.agents','agents','dscb-text-transport','agent.md'),'utf8')
+      expect(profile).toContain('tools: []')
+      expect(profile).toContain('model: inherit')
+      expect(existsSync(join(lastSpawnArgs!.cwd!,'.agents','hooks.json'))).toBe(false)
+      return createFakeChild({stdout:result(),exitCode:0})
+    }
+    await runStructuredAntigravity('test',{model:'Gemini 3.8 Flash (High)'})
+    expect(lastSpawnArgs!.cwd).toContain('dscb-agy-')
+    expect(lastSpawnArgs!.cwd).not.toBe(process.cwd())
+    expect(lastSpawnArgs!.args).toContain('dscb-text-transport')
+    expect(lastSpawnArgs!.args[lastSpawnArgs!.args.indexOf('--model')+1]).toBe('Gemini 3.8 Flash (High)')
+    expect(existsSync(lastSpawnArgs!.cwd!)).toBe(false)
+  })
+  it('成功结果和正常退出直接完成，不触发清理', async () => {
+    fakeChildFactory=()=>createFakeChild({stdout:result(),exitCode:0})
+    const diagnostic=vi.fn()
+    expect((await runStructuredAntigravity('test',{onDiagnostic:diagnostic})).full).toBe('完整正文')
+    expect(diagnostic.mock.calls.some(([e])=>e.event==='cleanup_stalled')).toBe(false)
+  })
+  it('未收到成功结果时仍按原超时失败，不接受完整 JSON 正文', async () => {
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout']})
+    try {
+      const child=pendingChild()
+      const task=runStructuredAntigravity('test',{timeoutSec:1})
+      const rejected=expect(task).rejects.toThrow('LLM_TIMEOUT')
+      await Promise.resolve()
+      child.stdout.emit('data',Buffer.from(JSON.stringify({event:'step_update',step_update:{step_type:'agent_response',text_delta:'{"text":"完整"}'}})+'\n'))
+      await vi.advanceTimersByTimeAsync(1000);await rejected
+    } finally {vi.useRealTimers()}
+  })
+  it('流中断后内部恢复超时，保留具体原因且不接受残稿',async()=>{
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout']})
+    try {
+      const child=pendingChild()
+      const task=runStructuredAntigravity('test',{timeoutSec:1})
+      const rejected=expect(task).rejects.toThrow('生成流中断，内部恢复仍未完成，已超时')
+      await Promise.resolve()
+      child.stdout.emit('data',Buffer.from(JSON.stringify({event:'step_update',step_update:{state:'DONE',step_type:'error_message',error:'The stream was interrupted'}})+'\n'))
+      await vi.advanceTimersByTimeAsync(1000);await rejected
+    } finally {vi.useRealTimers()}
+  })
+  it('结果成功但清理未能回收进程时拒绝，不冒充任务成功', async () => {
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout']})
+    try {
+      const child=pendingChild();child.kill=vi.fn()
+      const task=runStructuredAntigravity('test')
+      const rejected=expect(task).rejects.toThrow('CLI 清理未完成')
+      await Promise.resolve();child.stdout.emit('data',Buffer.from(result()))
+      await vi.advanceTimersByTimeAsync(6500);await rejected
+    } finally {vi.useRealTimers()}
+  })
+  it('成功结果后收尾期间取消仍然抛出取消错误', async () => {
+    const child=pendingChild(),controller=new AbortController()
+    const task=runStructuredAntigravity('test',{signal:controller.signal})
+    await Promise.resolve();child.stdout.emit('data',Buffer.from(result()));controller.abort()
+    await expect(task).rejects.toThrow('LLM_ABORTED')
   })
 })

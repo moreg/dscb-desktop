@@ -1,6 +1,6 @@
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
@@ -184,6 +184,8 @@ interface Props {
  */
 function friendlyLlmError(err: string | undefined): string {
   if (!err) return '生成失败，请重试'
+  const reviewError = chapterReviewFailureMessage(err)
+  if (reviewError) return reviewError
   const map: Record<string, string> = {
     LLM_NOT_CONFIGURED: '请先在「⚙ 设置 -> 模型服务」中配置 provider',
     LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
@@ -2420,10 +2422,16 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       editorFinalized = true
       if (!result.ok) {
-        setDraft(sourceDraft)
+        const retained = failedChapterRewriteDraft(sourceDraft, result)
+        setDraft(retained)
+        if (result.retainedContent?.trim()) {
+          if (retained !== sourceDraft) pushRewrite(sourceDraft, retained, ADJUST_REWRITE_KEY)
+          setDirty(true)
+        }
         releaseIfMine()
         if (!isStreamAbortError(result.error)) {
-          setAlertInfo({ message: friendlyLlmError(result.error) })
+          setAlertInfo({ message: (result.retainedContent?.trim()
+            ? '重写正文已保留，后续检查未通过，尚未同步记忆。\n' : '') + friendlyLlmError(result.error) })
         }
         return
       }

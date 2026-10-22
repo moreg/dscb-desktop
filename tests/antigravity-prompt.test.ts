@@ -26,6 +26,13 @@ const longPrompt = [
 ].join('\n')
 
 describe('agy prompt budget', () => {
+  it('将长篇检查的 10 分钟预算传给实际 AGY runner', async () => {
+    const service = new LlmService({ read: async () => ({ activeId: 'agy', providers: [
+      { id: 'agy', label: 'agy', protocol: 'antigravity', model: '', baseUrl: '', apiKey: '' }
+    ] }) } as unknown as SecretStore)
+    await service.generateStream('核对完整章节与历史记忆', { maxTokens: 3000, meta: { feature: 'longformGuard' } })
+    expect(vi.mocked(runAntigravity).mock.calls.at(-1)![1]?.timeoutSec).toBe(600)
+  })
   it('leaves short requests unchanged and caps long review inputs', () => {
     expect(buildAntigravityPrompt('任务', '规则', '前缀')).toBe('前缀规则\n\n---\n\n任务')
     const source = '审核原文，不可遗漏：' + '文'.repeat(40000)

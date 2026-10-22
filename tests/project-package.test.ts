@@ -51,7 +51,7 @@ describe('小说包', () => {
       linked = false
     }
 
-    const zipPath = path.join(root, '雨落瓦上.dscb.zip')
+    const zipPath = path.join(root, '雨落瓦上.zip')
     await writeProjectPackage(meta.path, zipPath)
     const zip = await readFile(zipPath)
     const entries = readZipEntries(zip)
@@ -95,7 +95,7 @@ describe('小说包', () => {
     const chapter = '# 第一章\n\n雨落在瓦上。\n'
     await writeFile(path.join(meta.path, '正文', '第001章.md'), chapter, 'utf8')
     const originalJson = await readFile(path.join(meta.path, 'project.json'), 'utf8')
-    const zipPath = path.join(root, '示范小说.dscb.zip')
+    const zipPath = path.join(root, '示范小说.zip')
     await service.exportProjectPackage(meta.id, zipPath)
 
     const imported = await service.importProjectPackage(zipPath)
@@ -116,7 +116,7 @@ describe('小说包', () => {
     const source = path.join(root, 'loose')
     await mkdir(path.join(source, '大纲'), { recursive: true })
     await writeFile(path.join(source, '大纲', '大纲.md'), '# 《旧大纲书》大纲\n\n## 主线\n雨。\n', 'utf8')
-    const zipPath = path.join(root, '旧大纲书.dscb.zip')
+    const zipPath = path.join(root, '旧大纲书.zip')
     await writeProjectPackage(source, zipPath)
 
     const imported = await service.importProjectPackage(zipPath)

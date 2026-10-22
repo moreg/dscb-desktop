@@ -67,20 +67,20 @@ describe('buildSystemPrompt', () => {
   })
   it.each([undefined, 'extend', 'finish'] as const)('%s 模式按技能统一分段和对白标点', (mode) => {
     const defaults = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(defaults).toContain('同一行动与其直接反馈可以放在一段')
+    expect(defaults).toContain('两句话也必须分段')
     expect(defaults).toContain('整章对话占比目标 70%')
     const prompt = buildSystemPrompt(undefined, null, { dialogue: '' }, null, mode)
     const finalRules = prompt.slice(prompt.lastIndexOf('【正文排版要求'))
-    expect(finalRules).toContain('段落按语意组织')
+    expect(finalRules).toContain('一句一段')
     expect(finalRules).toContain('包括闭合引号前')
     expect(finalRules).toContain('多个引号完整的独立段落')
   })
 
-  it('旧内置一句一段迁移为语意分段，保留作者其他自定义要求', () => {
+  it('旧内置一句一段保留并更新对白标点，保留作者其他自定义要求', () => {
     const oldRule = '- **一句一段**：每段只写一句完整的话，同一行动与其直接反馈若是两句话也必须分段，不把独立句子的句号改成逗号规避分段。对话独立成段，引号内中间不用中文句号，陈述台词结尾保留句号；多句台词拆成引号完整的独立段落，问号、感叹号按语气保留。'
     const prompt = buildSystemPrompt(undefined, null, { style_targets: oldRule + '\n保留作者自己的语气要求。' })
-    expect(prompt).not.toContain('两句话也必须分段')
-    expect(prompt).toContain('**段落按语意组织**')
+    expect(prompt).toContain('两句话也必须分段')
+    expect(prompt).toContain('**一句一段**')
     expect(prompt).toContain('保留作者自己的语气要求。')
   })
 

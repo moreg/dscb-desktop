@@ -3,6 +3,7 @@ import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
 import { isWebClient, openServerExport } from './web-download'
+import { uploadProjectPackage } from './web-import'
 import './long-story-project.css'
 
 interface Props {
@@ -29,6 +30,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [importing, setImporting] = useState(false)
   const [exportingId, setExportingId] = useState<string | null>(null)
   const loadSequence = useRef(0)
+  const packageInput = useRef<HTMLInputElement>(null)
 
   const loadProjects = async (withSpinner: boolean) => {
     const sequence = ++loadSequence.current
@@ -61,12 +63,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     }
   }
 
-  const importPackage = async () => {
+  const importPackage = async (file?: File) => {
+    if (importing) return
     setImporting(true)
     setArchiveError('')
     try {
-      const result = await window.api.importProjectPackage()
+      const result = file ? await uploadProjectPackage(file) : await window.api.importProjectPackage()
       if (result.canceled || !result.project) return
+      setShelf('active')
+      setKeyword('')
       setCreationNotice(`已导入《${result.project.name}》，可以在书案打开。`)
       await loadProjects(false)
     } catch (error) {
@@ -204,16 +209,28 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
             >
               {scanning ? '扫描中…' : '↻ 扫描项目'}
             </button>
-            {isWebClient() ? null : (
-              <button
-                className="btn btn-ghost"
-                onClick={() => void importPackage()}
-                disabled={importing}
-                title="导入网页版下载的 .dscb.zip，导入后出现在书案"
-              >
-                {importing ? '导入中…' : '导入小说包'}
-              </button>
-            )}
+            {isWebClient() ? (
+              <input
+                ref={packageInput}
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                hidden
+                aria-label="选择小说包"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  if (file) void importPackage(file)
+                }}
+              />
+            ) : null}
+            <button
+              className="btn btn-ghost"
+              onClick={() => isWebClient() ? packageInput.current?.click() : void importPackage()}
+              disabled={importing}
+              title="导入 .zip 小说包，导入后出现在书案"
+            >
+              {importing ? '导入中…' : '导入小说包'}
+            </button>
             <button className="btn" onClick={onOpenBrainstorm}>
               长篇脑洞
             </button>
@@ -353,20 +370,19 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                     >
                       进入 →
                     </button>
-                    {isWebClient() ? (
-                      <button
-                        type="button"
-                        className="open"
-                        title="下载整本小说包，可在桌面版书案导入"
-                        disabled={exportingId === p.id}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          void exportPackage(p)
-                        }}
-                      >
-                        {exportingId === p.id ? '打包中…' : '导出'}
-                      </button>
-                    ) : (
+                    <button
+                      type="button"
+                      className="open"
+                      title="导出整本小说包，可在网页版或桌面版书案导入"
+                      disabled={exportingId !== null}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void exportPackage(p)
+                      }}
+                    >
+                      {exportingId === p.id ? '打包中…' : '导出'}
+                    </button>
+                    {isWebClient() ? null : (
                       <button
                         type="button"
                         className="open-window"

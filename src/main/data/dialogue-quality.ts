@@ -80,14 +80,15 @@ export async function ensureDialogueQuality(
   const rejectedReviews = new Map<string, string[]>()
   const sceneReviews = new Map<string, Awaited<ReturnType<typeof reviewSceneDialogue>>>()
   const reviewScene = async () => {
-    const cached = sceneReviews.get(current)
+    const snapshot = current
+    const cached = sceneReviews.get(snapshot)
     if (cached) return cached
     options.onProgress?.('正在独立复核整场连续对白')
-    const result = await reviewSceneDialogue(current, llm, { context: options.context, prefix, signal: options.signal, meta: options.meta,
+    const result = await reviewSceneDialogue(snapshot, llm, { context: options.context, prefix, signal: options.signal, meta: options.meta,
       instruction: options.revisionInstruction, previousText: options.previousDraft ?? original,
       priorFindings: [...rejectedReviews.values()].flat() })
     abort()
-    sceneReviews.set(current, result)
+    sceneReviews.set(snapshot, result)
     return result
   }
   const maxRepairs = Math.max(0, Math.min(2, options.maxRepairs ?? 2))
@@ -114,7 +115,7 @@ export async function ensureDialogueQuality(
       } else {
         options.onProgress?.('正在联合核对事实、人物互动与场景表达')
         // 对话占比仅供展示；所有候选均核对事实、场景表达与说话人。
-        const raw = await llm.generateStream([
+        const jointReview = llm.generateStream([
           '审核小说整章改写稿，联合核对事实保真、人物互动与场景表达，不能只看引号或比例。只返回JSON：{"passed":true或false,"factsUnchanged":true或false,"issues":["原稿具体事实→候选稿差异"],"expressionFindings":[{"excerpt":"待审核稿逐字存在的原句","reason":"结合相邻段落说明具体表达问题"}]}。事实差异放 issues，文风、重复和人物互动问题放 expressionFindings。passed 为 true 必须事实一致且两个数组都为空；factsUnchanged 只表示事实是否一致，不能代替表达检查。',
           DIALOGUE_VITALITY_RULES,
           '对白重写保留剧情事实与人物认知、立场、情绪和关键决定，不要求逐句保留原来的提问、回答或澄清；无剧情用途的发言组织可以重写。不要把每一句原台词都升级成不可改变的事件。',
@@ -136,7 +137,14 @@ export async function ensureDialogueQuality(
           '【待审核稿】', current
         ].join('\n\n'), { systemPrompt: '你是小说编辑，严格审核事实保真和对白质量。', signal: options.signal,
           maxTokens: 2400, meta: { ...options.meta, feature: 'deslop:dialogue-review' } })
+        // Both reviewers receive the same immutable candidate. Join both even on
+        // failure: no orphan rejection, repair, or adoption while an audit is pending.
+        const results = await Promise.allSettled([jointReview, reviewScene()])
         abort()
+        if (results[0].status === 'rejected') throw results[0].reason
+        if (results[1].status === 'rejected') throw results[1].reason
+        const raw = results[0].value
+        const independentScene = results[1].value
         const verdict = findJsonObject(raw)
         const expressionFindings = verdict?.expressionFindings
         const validExpressionFindings = Array.isArray(expressionFindings) &&
@@ -148,7 +156,7 @@ export async function ensureDialogueQuality(
           Array.isArray(verdict.issues) && verdict.issues.every((issue: unknown) => typeof issue === 'string') && validExpressionFindings
         if (validVerdict && verdict!.passed === true && verdict!.factsUnchanged !== false && verdict!.issues.length === 0 &&
           (!expressionFindings || expressionFindings.length === 0)) {
-          const scene = await reviewScene()
+          const scene = independentScene
           if (scene.passed) return { text: current,
             report: { passed: true, beforeRatio: before.ratio, afterRatio: measured.ratio, attempts, issues: [] },
             factsUnchanged: true }
@@ -181,7 +189,7 @@ export async function ensureDialogueQuality(
       DIALOGUE_VITALITY_RULES,
       '本次明确授权双向改善表达载体：可由在场且已知该消息的人说出必要信息，也可把无用途的重复对白说明合并为叙述，保留有效直接对白，必要时围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
       '对照问题涉及的连续回合修订，保留有效交流、必要动作和原有调查方向。精简重复时保留其承载的事实、否定边界、未完成事项和后续决定；不能将多条仍有效的线索压成只有一条。事实差异优先最小局部修复，不为重组表达另写剧情。',
-      '排版按语意分段，直接对白独立成段，引号内不使用中文句号（包括闭合前），问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
+      '排版一句一段，直接对白独立成段，引号内不使用中文句号（包括闭合前），问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
       '破折号和省略号按功能处理，不能机械变句号。原稿闭合台词末尾被下一句或动作打断的“——”可以保留，用来保留尚未说完的请求；其他修辞停顿应改短句或动作。不能补全尚未说出的消息、删除原有请求，不能留下“需要您。”这样的缺谓语整句。',
       '【本次作者修订要求（必须落实）】', options.revisionInstruction ?? '',
       '【修订前正文（核对旧问题是否仍在，不是新剧情来源）】', options.previousDraft ?? '',

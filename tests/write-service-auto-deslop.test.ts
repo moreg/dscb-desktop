@@ -434,6 +434,32 @@ describe('自动写作去 AI 味', () => {
     expect(reports[0].status).toBe('applied')
   })
 
+  it('重写透传 AGY 排队、等待和输出进度', async () => {
+    vi.spyOn(service, 'buildAdjustChapterPrompt').mockResolvedValue({ system: '规则', user: '改写' })
+    vi.mocked(llm.generateStream).mockImplementationOnce(async (_prompt, opts = {}) => {
+      opts.onStatus?.('queued')
+      opts.onStatus?.('waiting')
+      opts.onStatus?.('streaming')
+      return RAW
+    })
+    const onGenerationStage = vi.fn()
+    const onStatus = vi.fn()
+    await service.adjustChapterStream(projectId, 1, RAW, '调整', { onGenerationStage, onStatus })
+    expect(onGenerationStage.mock.calls.slice(0, 4).map(([stage]) => stage))
+      .toEqual(['generating', 'agy:queued', 'agy:waiting', 'agy:streaming'])
+    expect(onStatus.mock.calls.flat()).toEqual(['queued', 'waiting', 'streaming'])
+  })
+
+  it('重写后检查超时保留已落盘的完整稿，继续抛错而不是宣告成功', async () => {
+    vi.spyOn(service, 'buildAdjustChapterPrompt').mockResolvedValue({ system: '规则', user: '改写' })
+    const internal = service as unknown as { assertLongformConsistency: () => Promise<void> }
+    vi.spyOn(internal, 'assertLongformConsistency').mockRejectedValue(new Error('LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT'))
+    await expect(service.adjustChapterStream(projectId, 1, RAW, '调整')).rejects.toMatchObject({
+      name: 'ChapterRewriteReviewError', message: 'LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT', retainedContent: POLISHED
+    })
+    expect(await new ProseRepo(dir).read(1)).toBe(POLISHED)
+  })
+
   it('批量完整流程在质检、细纲对照和记忆同步中使用最终正文并返回精修报告', async () => {
     await mkdir(path.join(dir, '细纲'), { recursive: true })
     await writeFile(path.join(dir, '细纲', '第01卷.md'),

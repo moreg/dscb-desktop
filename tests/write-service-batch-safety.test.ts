@@ -38,6 +38,7 @@ describe('batch safety and recovery', () => {
   let dir: string
   let projectId: string
   let llm: LlmService
+  let summaryService: { generateChapterSummaryChecked: WriteService['generateChapterSummary'] }
 
   beforeEach(async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'batch-safety-'))
@@ -52,7 +53,8 @@ describe('batch safety and recovery', () => {
     llm = { generateStream: vi.fn().mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
       ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]}) : '[]') } as unknown as LlmService
     service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
-    vi.spyOn(service, 'generateChapterSummary').mockImplementation(async (_pid, ch) => ({
+    summaryService = service as unknown as typeof summaryService
+    vi.spyOn(summaryService, 'generateChapterSummaryChecked').mockImplementation(async (_pid, ch) => ({
       chapterNumber: ch, sourceHash: 'test', generatedAt: '', events: [], stateChanges: [], openThreads: [], stale: false
     }))
     flow = (service as unknown as { flow: WriteFlowService }).flow
@@ -66,6 +68,9 @@ describe('batch safety and recovery', () => {
   afterEach(() => vi.restoreAllMocks())
 
   function stubPostProcess(): void {
+    // Summary preparation now overlaps the independent ending-state extraction.
+    vi.spyOn(flow, 'extractEndingState').mockResolvedValue({ chapterNumber: 1,
+      characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
     vi.spyOn(flow, 'verifyForeshadowingRepair').mockResolvedValue(undefined)
     vi.spyOn(service, 'selfCheckChapter').mockResolvedValue(passedCheck)
     vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
@@ -100,7 +105,7 @@ describe('batch safety and recovery', () => {
     expect(repaired).toBe(foreshadowAddition + '\n' + content)
     expect(await new ProseRepo(dir).read(1)).toBe(repaired)
     expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(repaired)
-    expect(vi.mocked(service.generateChapterSummary).mock.calls[0][2]).toBe(repaired)
+    expect(vi.mocked(summaryService.generateChapterSummaryChecked).mock.calls[0][2]).toBe(repaired)
     const extractedTexts = vi.mocked(flow.extractMemoryStream).mock.calls.map((call) => call[0])
     expect(extractedTexts).toContain(repaired)
     expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'batchForeshadowRepair')).toHaveLength(1)
@@ -334,18 +339,18 @@ describe('batch safety and recovery', () => {
   it('automatically retries missing summaries before the next chapter without regenerating prose', async () => {
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
-    vi.mocked(service.generateChapterSummary).mockRejectedValueOnce(new Error('概要请求失败'))
+    vi.mocked(summaryService.generateChapterSummaryChecked).mockRejectedValueOnce(new Error('概要请求失败'))
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
     expect(await new ProseRepo(dir).read(1)).toBe(content)
     expect(generate).toHaveBeenCalledTimes(2)
-    expect(service.generateChapterSummary).toHaveBeenCalledTimes(3)
+    expect(summaryService.generateChapterSummaryChecked).toHaveBeenCalledTimes(3)
   })
 
   it('falls back to dated source quotes when summary generation remains unavailable and keeps writing', async () => {
     stubPostProcess()
     vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
-    vi.mocked(service.generateChapterSummary).mockRejectedValue(new Error('概要请求失败'))
+    vi.mocked(summaryService.generateChapterSummaryChecked).mockRejectedValue(new Error('概要请求失败'))
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
     const summary = await new ChapterSummaryRepo(dir).readCurrent(1, content)
@@ -482,7 +487,7 @@ describe('batch safety and recovery', () => {
       if (chapter === 3) {
         expect(await new ProseRepo(dir).read(2)).toBe(corrected)
         expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(corrected)
-        expect(vi.mocked(service.generateChapterSummary).mock.calls[0][2]).toBe(corrected)
+        expect(vi.mocked(summaryService.generateChapterSummaryChecked).mock.calls[0][2]).toBe(corrected)
       }
       return content
     })

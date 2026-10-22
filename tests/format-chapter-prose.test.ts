@@ -6,6 +6,15 @@ import {
 } from '../src/shared/format-chapter-prose'
 
 describe('formatChapterProse', () => {
+  it('截图中的叙述逐句分段，只改换行且重复执行稳定', () => {
+    const source = '崔敏秀从申宅调取实验室存样记录，指导留守实验人员将样本置于安全观察位。申采恩离开会议厅，沿专梯上楼，事务席将附件副本一并送到。\n生化嗅觉开启。\n隔着规定的观察距离，她依次辨认外包装、同批辅料及旧药留样。消毒剂的味道先被排除，旧药中残留的一股特殊溶剂气味，与新物料留样重合。'
+    const result = formatChapterProse(source)
+    expect(result.split('\n')).toHaveLength(5)
+    expect(result.replaceAll('\n', '')).toBe(source.replaceAll('\n', ''))
+    expect(formatChapterProse(result)).toBe(result)
+    expect(formatChapterProse('浓度是3.5%，记录为v1.2。结果（待定。需要复查）仍未确认！下一步呢？')).toBe(
+      '浓度是3.5%，记录为v1.2。\n结果（待定。需要复查）仍未确认！\n下一步呢？')
+  })
   it('句首引述字词仍是叙述，不凭空变成无人说出的台词', () => {
     for (const source of ['“辰”字下方一小块纸薄于四周。', '“日清”二字写在纸角。', '「已验」这个词留在原处。']) {
       expect(formatChapterProse(source)).toBe(source)
@@ -26,7 +35,7 @@ describe('formatChapterProse', () => {
         `${open}先签字${close}\n${open}还等什么？${close}\n${open}快点！${close}`
       )
     }
-    expect(formatChapterProse('他来了。他把笔递过来。')).toBe('他来了。他把笔递过来。')
+    expect(formatChapterProse('他来了。他把笔递过来。')).toBe('他来了。\n他把笔递过来。')
     expect(formatChapterProse('“先签字。”')).toBe('“先签字”')
     expect(formatChapterProse('“Hello. World.”')).toBe('“Hello. World.”')
   })
@@ -37,13 +46,13 @@ describe('formatChapterProse', () => {
     expect(formatChapterProse('“他说‘别走。’你听见了吗？！我听见了。”')).toBe(
       '“他说‘别走’你听见了吗？！”\n“我听见了”'
     )
-    expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。他把笔递过来。\n“先签字。')
-    expect(formatChapterProse('他拿起“钥匙”走了。门关了。')).toBe('他拿起“钥匙”走了。门关了。')
+    expect(formatChapterProse('他来了。他把笔递过来。\n“先签字。')).toBe('他来了。\n他把笔递过来。\n“先签字。')
+    expect(formatChapterProse('他拿起“钥匙”走了。门关了。')).toBe('他拿起“钥匙”走了。\n门关了。')
   })
 
   it('台词和叙述分段，格式化重复执行保持稳定', () => {
     const source = '他问：“来了吗？到了。”他推开门。屋里没人。\n“等一下。别走！”'
-    const expected = '他问：\n“来了吗？”\n“到了”\n他推开门。屋里没人。\n“等一下”\n“别走！”'
+    const expected = '他问：\n“来了吗？”\n“到了”\n他推开门。\n屋里没人。\n“等一下”\n“别走！”'
     expect(formatChapterProse(source)).toBe(expected)
     expect(formatChapterProse(expected)).toBe(expected)
     expect(needsChapterProseFormat(source)).toBe(true)

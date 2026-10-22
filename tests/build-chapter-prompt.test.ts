@@ -274,7 +274,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
   it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行技能排版', async () => {
     await writeFile(path.join(await ps.resolveDir(projectId), '设定', '平台配置.md'), '# 平台配置\n- 平台：番茄\n')
     const raw = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
-    const expected = '林远推开门。屋里没人。\n“先签字”\n“还等什么？”\n“快点！”'
+    const expected = '林远推开门。\n屋里没人。\n“先签字”\n“还等什么？”\n“快点！”'
     const llm = mockLlm(raw)
     const service = new WriteService(ps, llm)
     expect(await service.generateChapterStream(projectId, 1)).toBe(expected)

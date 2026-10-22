@@ -9,6 +9,8 @@ export interface LongformGuardInput {
   /** Author's main/volume plan, never rewritten from this draft. */
   plan: string
   history: string
+  /** Full historical source fingerprint, including sources outside the rendered excerpt. */
+  sources?: string
   instruction?: string
   /** Existing prose is immutable during a continuation. */
   continuationStart?: number
@@ -76,7 +78,7 @@ export class LongformGuard {
       '【本章实际正文】', input.content
     ].filter(Boolean).join('\n\n')
     const identity = await this.cacheIdentity()
-    const key = identity ? hashProse(JSON.stringify([prompt, identity])) : undefined
+    const key = identity ? hashProse(JSON.stringify([prompt, input.sources, opts.meta?.projectId, identity])) : undefined
     for (const [k, until] of this.passed) if (until <= Date.now()) this.passed.delete(k)
     if (key && this.passed.has(key)) { abort(); return }
     let findings: Finding[] | undefined

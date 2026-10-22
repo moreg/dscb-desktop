@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { autoDeslopProse } from '../src/main/data/auto-deslop'
+import { repairDeslopScene } from '../src/main/data/deslop/scene-repair'
 import type { DeslopService } from '../src/main/data/deslop/deslop-service'
 import type { GenerateOptions, LlmService } from '../src/main/data/llm-service'
 import type { DeslopResult } from '../src/shared/types'
@@ -22,13 +23,14 @@ const result=(text:string,passed:boolean,issues:string[]=[]):DeslopResult=>({rew
   beforeWords:150,afterWords:150,deleteRatio:0,processedGates:[],remainingFindings:[],changeSummary:[],
   dialogueQuality:{passed,beforeRatio:0,afterRatio:0,attempts:0,issues,...(!passed?{pendingDraft:text}:{})}})
 
-function setup(input:{drafts?:string[];plan?:string;allFactsFail?:boolean;changeAfterCheck?:boolean;formatCandidate?:(text:string)=>string;initialDialogueDraft?:string;unconfirmedFacts?:boolean;unconfirmedScene?:boolean;initialIssues?:string[]}={}){
+function setup(input:{drafts?:string[];plan?:string;allFactsFail?:boolean;changeAfterCheck?:boolean;formatCandidate?:(text:string)=>string;initialDialogueDraft?:string;unconfirmedFacts?:boolean;unconfirmedScene?:boolean;initialIssues?:string[];factWait?:Promise<void>;expressionWait?:Promise<void>;expressionIssue?:string}={}){
   const requests:{prompt:string;feature:unknown}[]=[]
   let rewrites=0,checks=0
   const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
     const feature=opts.meta?.feature;requests.push({prompt,feature})
     if(feature==='deslop:repair-plan')return input.plan??plan
     if(feature==='deslop:scene-repair')return input.drafts?.[rewrites++]??payload(final)
+    if(feature==='deslop:verify')await input.factWait
     if(feature==='deslop:verify')return input.unconfirmedFacts?'not JSON':JSON.stringify(prompt.split('【润色稿】').at(-1)!.includes('两把钥匙')||input.allFactsFail
       ? {unchanged:false,issues:['钥匙数量改变，须恢复一把']} : {unchanged:true,issues:[]})
     throw Error('意外调用')
@@ -36,6 +38,8 @@ function setup(input:{drafts?:string[];plan?:string;allFactsFail?:boolean;change
   const deslop=vi.fn(async(text:string)=>{
     checks++
     if(checks===1)return result(first,false,input.initialIssues??['对话和旁白重复解释证据边界'])
+    await input.expressionWait
+    if(input.expressionIssue)return result(text,false,[input.expressionIssue])
     if(input.unconfirmedScene)return result(text,false,['整场对白复核缺少有效的连续回合证据或结论，保留待复核。'])
     if(text===second)return result(text,false,['结尾仍反复总结同一证据'])
     return result(input.changeAfterCheck?drift:text,true)
@@ -50,6 +54,115 @@ function setup(input:{drafts?:string[];plan?:string;allFactsFail?:boolean;change
 }
 
 describe('自动去 AI 味协同整场修订',()=>{
+  it('清单漏掉中间原句时补回引文，仍完整独立验收修订稿',async()=>{
+    const lines=original.split('\n')
+    const x=setup({plan:JSON.stringify({facts:[{quote:[lines[0],lines[2]].join('\n'),keep:'读账的证据限制与并行调查均保留'}],scenePlan:'准确表达边界'})})
+    const output=await x.run()
+    expect(output.report.status).toBe('applied')
+    expect(x.requests.filter(r=>r.feature==='deslop:verify')).toHaveLength(1)
+    expect(x.deslop).toHaveBeenCalledTimes(2)
+    expect(x.requests.find(r=>r.feature==='deslop:scene-repair')!.prompt).toContain(JSON.stringify(lines.slice(0,3).join('\n')))
+    expect(x.requests.some(r=>r.feature==='deslop:repair-plan-quotes')).toBe(false)
+  })
+  it('大幅超预算的后续轮直接输出完整正文，程序仍逐稿验收',async()=>{
+    const long=first.repeat(3),prompts:string[]=[]
+    let calls=0
+    const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
+      if(opts.meta?.feature==='deslop:repair-plan')return plan
+      prompts.push(prompt);return payload(calls++===0?long:final)
+    })} as unknown as LlmService
+    const check=vi.fn(async(text:string)=>text===final?{accepted:text,issues:[]}:{issues:['篇幅超限']})
+    const out=await repairDeslopScene(original,first,{llm,issues:['接话不自然'],minWords:100,maxWords:200,onAttempt:()=>{},check})
+    expect(out.accepted).toBe(final)
+    expect(prompts[1]).toContain('禁止输出before/after补丁')
+    expect(prompts[1]).toContain('不需要逐字计数')
+    expect(check.mock.calls.map(([text])=>text)).toEqual([long,final])
+  })
+  it('首轮精确补丁只输出改动，完整候选仍经过事实与表达验收',async()=>{
+    const response=JSON.stringify({patches:[{before:'绕过院中',after:'走过院中'},{before:'轻轻收好',after:'收好'}],
+      coverage:[{id:1,quote:anchor}]})
+    const x=setup({drafts:[response]})
+    const output=await x.run()
+    expect(output.content).toBe(final)
+    expect(output.report.status).toBe('applied')
+    expect(output.report.repairAttempts).toBe(1)
+    expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,final])
+    expect(x.requests.find(r=>r.feature==='deslop:verify')?.prompt).toContain(`【润色稿】\n\n${final}`)
+    expect(response.length).toBeLessThan(payload(final).length)
+  })
+  it('首轮补丁改坏事实仍保留原稿，不能用输出更短绕过全章核验',async()=>{
+    const x=setup({drafts:[patch('一把钥匙','两把钥匙'),patch('绕过院中','走过院中'),
+      patch('轻轻收好','慢慢收好'),patch('慢慢收好','认真收好')],allFactsFail:true})
+    const output=await x.run()
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+    expect(output.report.issues).toContain('钥匙数量改变，须恢复一把')
+  })
+  it.each([
+    {patches:[{before:'原文没有这段',after:'新增事实'}]},
+    {patches:[{before:'林远',after:'另一个人'}]},
+    {patches:[{before:'轻轻收好钥匙',after:'收好钥匙'},{before:'收好钥匙',after:'交出钥匙'}]},
+    {text:final,patches:[{before:'轻轻收好',after:'收好'}]}
+  ])('无效、歧义或重叠的首轮补丁不能送入验收：%j',async body=>{
+    const response=JSON.stringify({...body,coverage:[{id:1,quote:anchor}]})
+    const x=setup({drafts:Array(4).fill(response)})
+    const output=await x.run()
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+    expect(x.requests.filter(r=>r.feature==='deslop:verify')).toHaveLength(0)
+    expect(x.deslop).toHaveBeenCalledOnce()
+  })
+  it('待修订稿与原稿完全相同时只发送一份全文，补丁仍匹配完整原稿',async()=>{
+    const prompts:string[]=[]
+    const draft=original.replace('缓缓推开','推开')
+    const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
+      prompts.push(prompt)
+      return opts.meta?.feature==='deslop:repair-plan'?plan:patch('缓缓推开','推开')
+    })} as unknown as LlmService
+    const check=vi.fn(async(text:string)=>({accepted:text,issues:[]}))
+    const output=await repairDeslopScene(original,original,{llm,issues:['冗词'],minWords:1,maxWords:1000,onAttempt:()=>{},check})
+    expect(output.accepted).toBe(draft)
+    expect(prompts[1].split(original)).toHaveLength(2)
+    expect(check).toHaveBeenCalledWith(draft,expect.stringContaining(anchor))
+  })
+  it.each(['facts','expression'] as const)('事实与表达同时开始，%s 先完成也不能提前采用',async firstFinished=>{
+    let releaseFacts!:()=>void,releaseExpression!:()=>void
+    const x=setup({factWait:new Promise<void>(resolve=>{releaseFacts=resolve}),
+      expressionWait:new Promise<void>(resolve=>{releaseExpression=resolve})})
+    let finished=false
+    const running=x.run().then(value=>{finished=true;return value})
+    try {
+      await vi.waitFor(()=>{
+        expect(x.requests.some(r=>r.feature==='deslop:verify')).toBe(true)
+        expect(x.deslop).toHaveBeenCalledTimes(2)
+      })
+      if(firstFinished==='facts')releaseFacts();else releaseExpression()
+      await new Promise(resolve=>setTimeout(resolve,0))
+      expect(finished).toBe(false)
+    } finally {releaseFacts();releaseExpression()}
+    expect((await running).content).toBe(final)
+    expect(x.requests.filter(r=>r.feature==='deslop:verify')).toHaveLength(1)
+  })
+  it('同轮汇总事实与表达问题，供下一轮一起修复',async()=>{
+    const x=setup({allFactsFail:true,expressionIssue:'重复解释证据边界',drafts:[payload(drift),patch('走过院中','绕过院中')]})
+    const output=await x.run()
+    const next=x.requests.filter(r=>r.feature==='deslop:scene-repair')[1].prompt
+    expect(next).toContain('钥匙数量改变，须恢复一把')
+    expect(next).toContain('重复解释证据边界')
+    expect(output.content).toBe(original)
+    expect(output.report.status).toBe('review_required')
+  })
+  it('并行审核中取消，等待收束后不采用候选或继续修订',async()=>{
+    let release!:()=>void
+    const controller=new AbortController()
+    const x=setup({expressionWait:new Promise<void>(resolve=>{release=resolve})})
+    const running=x.run(controller.signal)
+    const rejected=expect(running).rejects.toThrow('LLM_ABORTED')
+    try {await vi.waitFor(()=>expect(x.deslop).toHaveBeenCalledTimes(2));controller.abort()}
+    finally {release()}
+    await rejected
+    expect(x.requests.filter(r=>r.feature==='deslop:scene-repair')).toHaveLength(1)
+  })
   it('事实丢失与重复讲解均须修复，历轮约束累积且最终再验收',async()=>{
     const x=setup({drafts:[payload(drift),patch('两把钥匙','一把钥匙'),patch('轻轻收好','收好')]})
     const output=await x.run()
@@ -61,8 +174,8 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(revisions[2].prompt).toContain('结尾仍反复总结同一证据')
     expect(revisions[1].prompt).toContain('唯一匹配的局部替换')
     for(const p of revisions)expect(p.prompt).toContain(`【原稿】\n\n${original}`)
-    // 有事实变化的第一份不得进入表达复核；同字节的最终独立事实结论无需重复请求。
-    expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,second,final])
+    // 两种审核并行，但事实有变化的稿件仍不能采用；最终同稿事实结论不重复请求。
+    expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,drift,second,final])
     expect(output.report.dialogueQuality?.passed).toBe(true)
     expect(output.report.dialogueQuality?.attempts).toBe(3)
     expect(output.report.dialogueQuality?.afterRatio).toBe(0)
@@ -73,7 +186,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(output.content).toBe(original)
     expect(output.report.status).toBe('review_required')
     expect(output.report.repairAttempts).toBe(4)
-    expect(x.deslop).toHaveBeenCalledOnce()
+    expect(x.deslop).toHaveBeenCalledTimes(5)
     expect(output.report.issues).toContain('钥匙数量改变，须恢复一把')
     expect(output.report.dialogueQuality?.pendingDraft).toBe(drift.replace('走过院中','绕到院中'))
   })
@@ -95,7 +208,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,final])
   })
   it('同一问题下原样返回候选不能靠反复审核碰运气通过',async()=>{
-    const x=setup({drafts:[payload(first),payload(first),payload(first)]})
+    const x=setup({drafts:Array(4).fill(payload(first))})
     const output=await x.run()
     expect(output.content).toBe(original)
     expect(output.report.status).toBe('review_required')
@@ -103,7 +216,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(x.requests.filter(x=>x.feature==='deslop:verify')).toHaveLength(0)
   })
   it('仅增加被排版去掉的空白不能重新审核已拒绝稿',async()=>{
-    const x=setup({drafts:[payload(first+'\n  ')],formatCandidate:text=>text.trim()})
+    const x=setup({drafts:Array(4).fill(payload(first+'\n  ')),formatCandidate:text=>text.trim()})
     const output=await x.run()
     expect(output.report.status).toBe('review_required')
     expect(output.content).toBe(original)
@@ -159,7 +272,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     JSON.stringify({text:final,coverage:[{id:1,quote:'稿中没有这句话'}]}),
     JSON.stringify({text:final,coverage:[{id:2,quote:anchor}]})
   ])('修订清单落点无效不能进入采用检查：%s',async invalid=>{
-    const x=setup({drafts:[invalid,invalid,invalid]})
+    const x=setup({drafts:[invalid,invalid,invalid,invalid]})
     const output=await x.run()
     expect(output.content).toBe(original)
     expect(output.report.status).toBe('review_required')

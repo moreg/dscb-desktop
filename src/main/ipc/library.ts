@@ -38,7 +38,7 @@ export function registerLibraryIpc(service: ProjectService): void {
       const data = await service.getProjectData(projectId)
       const result = await dialog.showSaveDialog({
         title: '导出小说包',
-        defaultPath: `${sanitizeTitle(data.name)}.dscb.zip`,
+        defaultPath: `${sanitizeTitle(data.name)}.zip`,
         filters: [{ name: '大神持笔小说包', extensions: ['zip'] }]
       })
       if (result.canceled || !result.filePath) return { canceled: true }

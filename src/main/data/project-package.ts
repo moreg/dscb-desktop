@@ -6,9 +6,10 @@ import { readAppProjectIdentity } from './skill-format/library-scanner'
 import { parseDoc, readText } from './skill-format/md-parser'
 import { extractBookName } from './skill-format/project-skill-repo'
 import { toFolderName } from './folder-name'
+import { MAX_PROJECT_PACKAGE_BYTES } from '../../shared/project-package'
 
 const MAX_FILE_BYTES = 80 * 1024 * 1024
-const MAX_PACKAGE_BYTES = 512 * 1024 * 1024
+const MAX_PACKAGE_BYTES = MAX_PROJECT_PACKAGE_BYTES
 const MAX_ENTRIES = 10_000
 
 interface ZipEntry {

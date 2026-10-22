@@ -3867,6 +3867,21 @@ pre.body {
   align-items: center;
   gap: 8px;
 }
+/* 章节操作较多：空间不足时换行，避免将标题和统计挤成竖排。 */
+.chapter-list-head .page-head-row {
+  flex-wrap: wrap;
+}
+.chapter-list-heading {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.chapter-list-head .page-head-actions {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .field-row {
   display: flex;
   gap: 12px;

@@ -1,8 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { open, rm, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { tmpdir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
+import { MAX_PROJECT_PACKAGE_BYTES } from '../shared/project-package'
+import type { ProjectMeta } from '../shared/types'
 
 const SESSION_COOKIE = 'dscb_session'
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -31,6 +34,7 @@ export interface WebHandlerOptions {
   accessToken: string
   staticRoot: string
   exportsDir: string
+  importProjectPackage(zipPath: string): Promise<ProjectMeta>
   invoke(tabId: string, channel: string, args: unknown[]): Promise<unknown>
   subscribeTab(tabId: string, subscriber: (channel: string, args: unknown[]) => void): () => void
   retainTab(tabId: string): void
@@ -204,6 +208,45 @@ export function createWebHandler(options: WebHandlerOptions): (request: Incoming
       }
       if (path.startsWith('/api/') && !authorized(request)) {
         sendJson(response, 401, { ok: false, error: '请先登录' })
+        return
+      }
+      if (request.method === 'POST' && path === '/api/import-package') {
+        const contentType = request.headers['content-type']?.split(';')[0].trim().toLowerCase()
+        if (contentType !== 'application/zip' && contentType !== 'application/octet-stream') {
+          throw new HttpError(415, '请选择 ZIP 格式的小说包')
+        }
+        if (Number(request.headers['content-length']) > MAX_PROJECT_PACKAGE_BYTES) {
+          throw new HttpError(413, '小说包过大，最大支持 512 MB')
+        }
+        // 使用服务器生成的临时路径；不接受客户端传入服务器文件路径。
+        const zipPath = join(tmpdir(), `dscb-import-${randomUUID()}.zip`)
+        const file = await open(zipPath, 'wx')
+        let project: ProjectMeta
+        try {
+          let size = 0
+          try {
+            // 超限时保留连接，让客户端能收到明确的 413 响应。
+            for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+              const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+              size += bytes.length
+              if (size > MAX_PROJECT_PACKAGE_BYTES) {
+                throw new HttpError(413, '小说包过大，最大支持 512 MB')
+              }
+              await file.writeFile(bytes)
+            }
+          } finally {
+            await file.close()
+          }
+          if (size === 0) throw new HttpError(400, '小说包为空，请重新选择文件')
+          try {
+            project = await options.importProjectPackage(zipPath)
+          } catch (error) {
+            throw new HttpError(400, error instanceof Error ? error.message : '导入小说包失败')
+          }
+        } finally {
+          await rm(zipPath, { force: true })
+        }
+        sendJson(response, 200, { ok: true, result: { canceled: false, project } })
         return
       }
       if (request.method === 'POST' && path === '/api/rpc') {

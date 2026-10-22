@@ -82,11 +82,11 @@ describe('自动润色性能与核验复用', () => {
     expect(output.content).toBe(candidate)
     expect(output.report.status).toBe('applied')
     expect(vi.mocked(llm.generateStream).mock.calls.map(([, opts]) => opts?.meta?.feature))
-      .toEqual(['deslop:dialogue-review', 'deslop:repair-plan', 'deslop:scene-repair', 'deslop:verify', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
+      .toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review', 'deslop:repair-plan', 'deslop:scene-repair', 'deslop:verify', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
     expect(scan.mock.calls.map(([text]) => text)).toEqual([original, candidate])
     expect(validateCandidate).toHaveBeenCalledOnce()
     expect(validateCandidate).toHaveBeenCalledWith(candidate)
-    const prompt = vi.mocked(llm.generateStream).mock.calls[4][0]
+    const prompt = vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:dialogue-review').at(-1)![0]
     expect(prompt).toContain('操作流水账')
     expect(prompt).toContain('配角轮流同义震惊')
     expect(prompt).toContain('必须给待审核稿逐字存在的原句及原因')
@@ -103,7 +103,7 @@ describe('自动润色性能与核验复用', () => {
     })
     expect(output.report.status).toBe('review_required')
     expect(output.report.dialogueQuality?.passed).toBe(false)
-    expect(llm.generateStream).toHaveBeenCalledTimes(1)
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
   })
 
   it('无效修复未改变稿件时只审核一次，并将匹配失败反馈交给下一次修复', async () => {
@@ -133,7 +133,7 @@ describe('自动润色性能与核验复用', () => {
     expect(output.text).toBe(repaired)
     expect(output.report).toMatchObject({ passed: true, attempts: 1 })
     expect(output.factsUnchanged).toBe(true)
-    const repair = vi.mocked(llm.generateStream).mock.calls[1][0]
+    const repair = vi.mocked(llm.generateStream).mock.calls.find(([, opts]) => opts?.meta?.feature === 'deslop:dialogue-repair')![0]
     expect(repair).toContain('同义复述没有改变当前诉求')
     expect(reviews).toBe(2)
   })
@@ -151,7 +151,8 @@ describe('自动润色性能与核验复用', () => {
     const output = await ensureDialogueQuality(candidate, candidate, llm, { mode: 'write' })
     expect(output).toMatchObject({ text: candidate, report: { passed: false, attempts: 0 } })
     expect(output.factsUnchanged).toBeUndefined()
-    expect(llm.generateStream).toHaveBeenCalledOnce()
+    expect(vi.mocked(llm.generateStream).mock.calls.map(([, opts]) => opts?.meta?.feature))
+      .toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review'])
   })
 
   const receipt = (text: string): DeslopResult => ({

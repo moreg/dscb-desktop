@@ -523,6 +523,8 @@ export interface SavedChapterPolishResult {
 export interface ChapterStreamResult {
   ok: boolean
   error?: string
+  /** 重写已完成但后续核对失败的整章稿，仅供复核；不得自动同步记忆。 */
+  retainedContent?: string
   /** 自动精修后的最终新生成片段，不含续写前已有正文。 */
   content?: string
   /** 伏笔可能补入已有正文中段；有此字段时直接采用整章，不再拼接旧稿。 */
@@ -599,7 +601,7 @@ export interface RendererApi {
   }>
   /** 扫描 projectsRoot，将含 大纲/大纲.md 的子目录登记进 library.json */
   scanProjects: () => Promise<ProjectMeta[]>
-  /** 把整本小说目录打成 .dscb.zip。网页版随后从返回路径下载。 */
+  /** 把整本小说目录打成 .zip。网页版随后从返回路径下载。 */
   exportProjectPackage: (projectId: string) => Promise<{ canceled: boolean; path?: string }>
   /** 从小说包恢复一本小说到桌面版书架。用户取消选择文件时 canceled 为 true。 */
   importProjectPackage: () => Promise<{ canceled: boolean; project?: ProjectMeta }>

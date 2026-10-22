@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProjectService } from '../src/main/data/project-service'
@@ -26,6 +26,7 @@ beforeEach(async () => {
   const projects = new ProjectService(join(root, 'projects'), new LibraryRepository(join(root, 'library.json')), settings)
   id = (await projects.create({ name: '自动补齐', genre: '玄幻' })).id
   dir = await projects.resolveDir(id)
+  await mkdir(join(dir, '大纲'), { recursive: true })
   generate = vi.fn(async (_prompt, opts) => {
     if (opts?.meta?.feature === 'outline-generate') return JSON.stringify({ plotSummary: '林远依照师父嘱咐守门，核对来客的身份。', charactersAppearing: [], foreshadowings: [] })
     if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
@@ -43,6 +44,61 @@ async function plan(number: number, summary = '林远核对来客') {
 function chapterPrompt(): string { return generate.mock.calls.find(call => call[1]?.meta?.feature === 'chapter')![0] }
 
 describe('automatic writing context recovery', () => {
+  it('reviews the previous chapter only once when rebuilding its summary, including CLI routes without cache identity', async () => {
+    await plan(1)
+    await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    await writeFile(join(dir, '大纲', '大纲.md'), '# 守门\n\n## 主线剧情走向\n\n林远守住山门，查清来客身份。')
+    await service.buildChapterPrompt(id, 2, null, undefined, undefined, true)
+    expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'longformGuard')).toHaveLength(1)
+    expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'chapterSummary')).toHaveLength(1)
+    expect(await new ChapterSummaryRepo(dir).readCurrent(1, previous)).not.toBeNull()
+  })
+
+  it('starts ending extraction while the previous summary is still waiting and reuses its result', async () => {
+    await plan(1)
+    await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const original = generate.getMockImplementation()!
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapterSummary') await blocked
+      return original(prompt, opts)
+    })
+    const preparation = service.buildChapterPrompt(id, 2, null, undefined, undefined, true)
+    try {
+      await vi.waitFor(() => {
+        expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapterSummary')).toBe(true)
+        expect(WriteFlowService.prototype.extractEndingState).toHaveBeenCalledTimes(1)
+      })
+    } finally { release() }
+    await preparation
+    expect(WriteFlowService.prototype.extractEndingState).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['plan', 'prose', 'cancel'] as const)('does not commit a summary using a reused review after %s changes during extraction', async change => {
+    await plan(1)
+    await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    const file = join(dir, '大纲', '大纲.md')
+    await writeFile(file, '# 守门\n\n## 主线剧情走向\n\n林远守住山门，查清来客身份。')
+    const controller = new AbortController()
+    const original = generate.getMockImplementation()!
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapterSummary') {
+        if (change === 'plan') await writeFile(file, '# 守门\n\n## 主线剧情走向\n\n作者修改主线：林远离开山门去寻找师父。')
+        if (change === 'prose') await new ProseRepo(dir).write(1, previous + '师父又取回钥匙。')
+        if (change === 'cancel') controller.abort()
+      }
+      return original(prompt, opts)
+    })
+    await expect(service.buildChapterPrompt(id, 2, null, undefined, undefined, true, controller.signal))
+      .rejects.toThrow(change === 'cancel' ? 'LLM_ABORTED' : 'LONGFORM_CONTEXT_CHANGED')
+    expect(await new ChapterSummaryRepo(dir).read(1)).toBeNull()
+    expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapter')).toBe(false)
+  })
+
   it('creates a missing outline and continues writing without a manual resume', async () => {
     await service.generateChapterStream(id, 1)
     expect((await new DetailedOutlineMdRepo(dir).readChapter(1))?.plotSummary).toContain('守门')

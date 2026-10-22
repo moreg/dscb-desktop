@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from '../src/renderer/src/chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from '../src/renderer/src/chapter-generation-finalize'
+
+describe('重写后检查失败', () => {
+  it('保留后端确认完整的稿件，未完成生成仍退回原稿', () => {
+    expect(failedChapterRewriteDraft('原稿。', { ok: false, error: 'LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT', retainedContent: '新稿。' })).toBe('新稿。')
+    expect(failedChapterRewriteDraft('原稿。', { ok: false, error: 'LLM_TIMEOUT' })).toBe('原稿。')
+    expect(failedChapterRewriteDraft('原稿。', { ok: false, retainedContent: '  ' })).toBe('原稿。')
+  })
+  it('内层超时不吞掉外层检查失败原因', () => {
+    const error = 'LONGFORM_REVIEW_INCOMPLETE: 长篇一致性核对未完成，已暂停推进。LLM_TIMEOUT'
+    expect(chapterReviewFailureMessage(error)).toContain('长篇一致性检查超时')
+    expect(interruptedChapterRetryMessage(error, true)).not.toContain('生成超时')
+    expect(chapterReviewFailureMessage('LLM_TIMEOUT')).toBeUndefined()
+  })
+})
 
 describe('中断续写保留草稿', () => {
   it.each(['LLM_TIMEOUT', 'LLM_ABORTED', 'LLM_OUTPUT_TRUNCATED'])('%s 保留已有正文和新增正文', error => {
@@ -44,7 +58,7 @@ describe('续写先采用补写稿再同步记忆', () => {
     const result = finalizeChapterContinuation('已有正文。', '预览', {
       ok: true, content: raw, ...(full ? { fullContent: '已有正文。' + raw } : {})
     })
-    expect(result.content).toBe('已有正文。\n“先签字”\n“别等了！”\n他转身。门关了。')
+    expect(result.content).toBe('已有正文。\n“先签字”\n“别等了！”\n他转身。\n门关了。')
   })
 
   it('采用补入已有正文中段的整章，前文只出现一次', () => {

@@ -163,3 +163,60 @@ describe('对白计量与自动验收', () => {
     expect(result.rewritten).toBe(source)
   })
 })
+
+
+describe('并行语义审核的完成屏障', () => {
+  const source = '“你拿着账册”\n\n他把账册递了过去。'
+  const sceneVerdict = (passed: boolean) => JSON.stringify({ passed, assessment: '核对交付与回应的连续场景',
+    reviewedPassages: [{ excerpt: source, reason: '包含台词与实际交付动作' }],
+    findings: passed ? [] : [{ excerpt: source, reason: '需要核对交谈用途' }] })
+  const deferred = () => {
+    let resolve!: (value: string) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<string>((ok, fail) => { resolve = ok; reject = fail })
+    return { promise, resolve, reject }
+  }
+  it.each([true, false])('同时启动两个审核，独立审核通过=%s 时仍等待双方', async (scenePassed) => {
+    const joint = deferred(), scene = deferred()
+    const features: unknown[] = []
+    const llm = { generateStream: vi.fn((_prompt, opts) => {
+      features.push(opts.meta.feature)
+      return opts.meta.feature === 'deslop:dialogue-review' ? joint.promise : scene.promise
+    }) } as unknown as LlmService
+    let completed = false
+    const work = ensureDialogueQuality(source, source, llm, { mode: 'write', maxRepairs: 0 })
+      .then(result => { completed = true; return result })
+    await vi.waitFor(() => expect(features).toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review']))
+    scene.resolve(sceneVerdict(scenePassed))
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    joint.resolve(passed)
+    expect((await work).report.passed).toBe(scenePassed)
+  })
+  it('一方抛错也收齐另一审核，不能提前修复或遗留拒绝', async () => {
+    const joint = deferred(), scene = deferred()
+    const llm = { generateStream: vi.fn((_prompt, opts) =>
+      opts.meta.feature === 'deslop:dialogue-review' ? joint.promise : scene.promise) } as unknown as LlmService
+    let settled = false
+    const work = ensureDialogueQuality(source, source, llm, { mode: 'write' })
+      .catch(error => { settled = true; return error })
+    await vi.waitFor(() => expect(llm.generateStream).toHaveBeenCalledTimes(2))
+    joint.reject(new Error('joint unavailable'))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    scene.reject(new Error('scene unavailable'))
+    expect((await work).message).toBe('joint unavailable')
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+  })
+  it('审核运行期间取消，即使两方最终返回通过也不采用', async () => {
+    const joint = deferred(), scene = deferred(), controller = new AbortController()
+    const llm = { generateStream: vi.fn((_prompt, opts) =>
+      opts.meta.feature === 'deslop:dialogue-review' ? joint.promise : scene.promise) } as unknown as LlmService
+    const work = ensureDialogueQuality(source, source, llm, { mode: 'write', signal: controller.signal })
+      .catch(error => error)
+    await vi.waitFor(() => expect(llm.generateStream).toHaveBeenCalledTimes(2))
+    controller.abort()
+    joint.resolve(passed); scene.resolve(sceneVerdict(true))
+    expect((await work).message).toBe('LLM_ABORTED')
+  })
+})

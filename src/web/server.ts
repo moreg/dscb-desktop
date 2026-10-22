@@ -57,6 +57,7 @@ async function main(): Promise<void> {
     accessToken: token,
     staticRoot,
     exportsDir,
+    importProjectPackage: backend.importProjectPackage,
     invoke: invokeTab,
     subscribeTab,
     retainTab,

@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
+import { ChapterRewriteReviewError } from '../data/chapter-rewrite-review-error'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import { activeBatchProjects } from '../data/write-batch-lock'
 import { safeHandle, safeSend } from './safe-handle'
@@ -311,6 +312,9 @@ export function registerWriteIpc(service: WriteService): void {
           endStream(validated.requestId)
         }
       } catch (err) {
+        if (err instanceof ChapterRewriteReviewError) {
+          return { ok: false, error: err.message, retainedContent: err.retainedContent }
+        }
         return { ok: false, error: (err as Error).message }
       }
     }

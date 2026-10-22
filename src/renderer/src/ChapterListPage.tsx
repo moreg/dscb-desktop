@@ -18,7 +18,7 @@ import type {
 import { countPendingConfirms } from '../../shared/post-write-sync'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
 import { dedupeForbiddenViolations } from './audit-dedupe'
-import { isWebClient, openServerExport } from './web-download'
+import { openServerExport } from './web-download'
 import { useProjectStyleData } from './style-profile/hooks/useProjectStyleData'
 import BatchPolishDialog, { type BatchPolishRange } from './BatchPolishDialog'
 import BatchSummaryDialog from './BatchSummaryDialog'
@@ -303,7 +303,7 @@ export default function ChapterListPage({
     }
   }
 
-  /** 导出整本目录为 .dscb.zip，桌面版书案可以导入。 */
+  /** 导出整本目录为 .zip，网页版和桌面版书案均可导入。 */
   const exportPackage = async (): Promise<void> => {
     setExportError('')
     setExportingPackage(true)
@@ -336,9 +336,9 @@ export default function ChapterListPage({
 
   return (
     <div>
-      <div className="page-head">
+      <div className="page-head chapter-list-head">
         <div className="page-head-row">
-          <div>
+          <div className="chapter-list-heading">
             <h1>章节</h1>
             <p className="desc">
               {chapters.length} 章 · {totalWords.toLocaleString()} 字
@@ -405,16 +405,14 @@ export default function ChapterListPage({
                 记忆待核对 {candidateCount} 章
               </button>
             ) : null}
-            {isWebClient() ? (
-              <button
-                className="btn btn-ghost"
-                onClick={() => void exportPackage()}
-                disabled={exportingPackage || exporting !== null}
-                title="下载整本小说包，可在桌面版书案导入"
-              >
-                {exportingPackage ? '打包中…' : '导出小说包'}
-              </button>
-            ) : null}
+            <button
+              className="btn btn-ghost"
+              onClick={() => void exportPackage()}
+              disabled={exportingPackage || exporting !== null}
+              title="导出整本小说包，可在网页版或桌面版书案导入"
+            >
+              {exportingPackage ? '打包中…' : '导出小说包'}
+            </button>
             <button
               className="btn btn-ghost"
               onClick={() => void handleExport()}

@@ -1,7 +1,8 @@
 import { spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'fs'
+import { rm } from 'fs/promises'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import type { UsageInfo } from './llm-service'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
 import { killProcessTree } from './kill-process-tree'
@@ -22,9 +23,11 @@ import { killProcessTree } from './kill-process-tree'
  *
  * 注意：不要加 `--sandbox`。该标志会让 agy 在受限沙箱里运行（无当前 workspace），
  * 触发 agy 内置的"是否创建 sandbox 目录"引导话术，被当成模型输出返回。
- * `--dangerously-skip-permissions` 已自动批准所有工具权限，无需额外沙箱隔离。
+ * 每次使用独立临时目录，不继承软件仓库规则/钩子；主 agent 不开放工具。
  *
- * 实测行为（agy 1.1.1）：
+ * 当前默认使用 agy 1.4.5 的 stream-json：仅 result.status=SUCCESS 是生成完成凭据。
+ * 完成后等待进程正常关闭；收尾卡住则清理进程树，close 后才释放队列。
+ * 旧版 text 兼容路径行为（agy 1.1.1）：
  * - stdout 是纯净响应文本，无 agent 思考日志混入
  * - 正常生成：exit 0，stdout=模型输出，stderr 空
  * - 超时/错误：exit 1，stdout 部分内容或空，stderr="Error: ..."（错误在 stderr，不是 stdout）
@@ -33,7 +36,44 @@ import { killProcessTree } from './kill-process-tree'
  * - 并发不安全：多个 agy -p 同时跑会互相干扰（共享 brain 目录），需串行化
  * - `-p` 是单轮模式，不支持 sessionId 续聊
  */
+/** 只分类 CLI 错误事件，不把正文中的网络/额度措辞当成运行错误。 */
+export function classifyAntigravityFailure(message: string): 'output_limit' | 'stream_interrupted' | 'unknown' {
+  if (/exceeded.{0,30}output.{0,20}token|output.{0,20}token.{0,20}limit|max(?:imum)?[_ ]output[_ ]tokens/i.test(message)) return 'output_limit'
+  if (/stream.{0,30}interrupt|stream.{0,30}disconnect|connection.{0,20}(?:reset|lost|abort)|broken pipe|network is down|socket disconnect/i.test(message)) return 'stream_interrupted'
+  return 'unknown'
+}
+
+function generationFailureMessage(kind: ReturnType<typeof classifyAntigravityFailure>, timedOut = false): string {
+  if (kind === 'output_limit') return `AGY_ERROR: 模型输出额度超限，${timedOut ? '内部恢复仍未完成，已超时' : '未取得完整成功结果'}`
+  if (kind === 'stream_interrupted') return `AGY_ERROR: 生成流中断，${timedOut ? '内部恢复仍未完成，已超时' : '未取得完整成功结果'}`
+  return timedOut ? 'LLM_TIMEOUT' : 'AGY_ERROR: CLI 未成功完成生成'
+}
+
+const TEXT_AGENT_NAME = 'dscb-text-transport'
+const TEXT_AGENT_PROFILE = `---
+name: dscb-text-transport
+description: Text generation and review engine for the desktop writing application.
+mainAgent: true
+subagent: false
+model: inherit
+tools: []
+commandExecutionPolicy: off
+---
+The user prompt contains all required story facts, memory context, style preferences, constraints, and output format. Complete the requested writing or review directly from that supplied context. Do not create files, run scripts, delegate, or consult unrelated projects. Mechanical word counting, exact quote matching and JSON validation are performed by the application; focus on semantic accuracy, narrative quality, and the requested format. Preserve all specified facts, causal boundaries, character knowledge and unresolved details. Return only the requested final text or JSON, without process commentary.
+`
+
+function createTextWorkspace(): string {
+  const workspace = mkdtempSync(join(tmpdir(), 'dscb-agy-'))
+  const agentDir = join(workspace, '.agents', 'agents', TEXT_AGENT_NAME)
+  mkdirSync(agentDir, { recursive: true })
+  writeFileSync(join(agentDir, 'agent.md'), TEXT_AGENT_PROFILE, 'utf8')
+  return workspace
+}
+
 export interface AntigravityOptions {
+  /** 仅旧版 CLI 兼容使用；默认要求明确的结构化完成事件。 */
+  outputFormat?: 'text' | 'stream-json'
+  onDiagnostic?: (event: Record<string, unknown>) => void
   onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   /** 模型显示名（如 "Gemini 3.1 Pro (High)"）；空则走 agy 默认模型 */
   model?: string
@@ -178,13 +218,17 @@ async function runAntigravityOnce(
     )
   }
 
+  const structured = opts.outputFormat !== 'text'
+  const workspace = createTextWorkspace()
   const args: string[] = [
     '-p',
     prompt,
+    '--agent', TEXT_AGENT_NAME,
     '--dangerously-skip-permissions',
     '--print-timeout',
     `${timeoutSec}s`
   ]
+  if (structured) args.push('--output-format', 'stream-json', '--disable-slash-commands')
   const sanitizedModel = sanitizeAgyModel(opts.model)
   if (sanitizedModel) {
     args.push('--model', sanitizedModel)
@@ -192,11 +236,29 @@ async function runAntigravityOnce(
 
   return new Promise<AntigravityResult>((resolve, reject) => {
     const child = spawn(AGY_BIN, args, {
+      cwd: workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32'
     })
 
+      const startedAt = Date.now()
+      let lastOutputMs: number | null = null
+      let resultReceived = false
+      let forcedCleanup = false
+      let jsonBuffer = ''
+      let protocolError = ''
+      let resultStatus = ''
+      let cliUsage: UsageInfo | null = null
+      let failureKind: ReturnType<typeof classifyAntigravityFailure> = 'unknown'
+      let closeTimer: ReturnType<typeof setTimeout> | undefined
+      let reapTimer: ReturnType<typeof setTimeout> | undefined
+      const diagnostic = (event: string, extra: Record<string, unknown> = {}): void => {
+        const detail = { event, elapsedMs: Date.now() - startedAt, lastOutputMs, resultReceived, resultStatus, failureKind, pid: child.pid, ...extra }
+        opts.onDiagnostic?.(detail)
+        if (event === 'timeout' || event === 'cleanup_stalled') console.warn('[antigravity]', detail)
+      }
+      diagnostic('spawn')
       let stdoutBuf = ''
       let stderrBuf = ''
       let stdoutPending = Buffer.alloc(0) // 跨 chunk 的不完整 UTF-8 尾部字节
@@ -206,10 +268,11 @@ async function runAntigravityOnce(
       // CLI 自身可能在会话结束后仍不退出，不能只依赖 --print-timeout。
       const timeout = setTimeout(() => {
         if (settled) return
+        diagnostic('timeout', { stdoutChars: stdoutBuf.length, resultStatus })
         settled = true
         cleanup()
         killProcessTree(child)
-        reject(new Error('LLM_TIMEOUT'))
+        reject(new Error(generationFailureMessage(failureKind, true)))
       }, timeoutSec * 1000)
 
       // 中止信号：杀整棵进程树（Windows 上 SIGTERM 常杀不干净孙进程）
@@ -223,6 +286,8 @@ async function runAntigravityOnce(
       // 即使取消或超时后 CLI 不发送 close，也要释放串行队列。
       const cleanup = (): void => {
         clearTimeout(timeout)
+        clearTimeout(closeTimer)
+        clearTimeout(reapTimer)
         opts.signal?.removeEventListener('abort', onAbort)
       }
       if (opts.signal) {
@@ -241,13 +306,72 @@ async function runAntigravityOnce(
         const completeLen = utf8CompleteLength(combined)
         const decoded = combined.subarray(0, completeLen).toString('utf8')
         stdoutPending = combined.subarray(completeLen)
-        stdoutBuf += decoded
-        if (decoded && !streaming) {
-          streaming = true
-          opts.onStatus?.('streaming')
+        if (lastOutputMs === null) diagnostic('first_stdout')
+        lastOutputMs = Date.now() - startedAt
+        if (!structured) {
+          stdoutBuf += decoded
+          if (decoded && !streaming) { streaming = true; opts.onStatus?.('streaming') }
+          opts.onToken?.(decoded)
+          return
         }
-        opts.onToken?.(decoded)
+        jsonBuffer += decoded
+        let newline: number
+        while ((newline = jsonBuffer.indexOf('\n')) >= 0) {
+          const line = jsonBuffer.slice(0, newline).trim()
+          jsonBuffer = jsonBuffer.slice(newline + 1)
+          if (!line) continue
+          try {
+            const message = JSON.parse(line)
+            if (message.event === 'step_update') {
+              const step = message.step_update
+              if (step?.step_type === 'error_message') {
+                const kind = classifyAntigravityFailure(JSON.stringify(step))
+                if (kind !== 'unknown') failureKind = kind
+                diagnostic('generation_error', { failureKind, fields: Object.keys(step) })
+              }
+              if (step?.state === 'DONE') diagnostic('step_done', { stepType: step.step_type, stepIndex: step.step_index })
+              if (step?.step_type === 'agent_response' && typeof step.text_delta === 'string' && !resultReceived) {
+                if (!streaming && step.text_delta) { streaming = true; opts.onStatus?.('streaming') }
+                opts.onToken?.(step.text_delta)
+              }
+            } else if (message.event === 'result') {
+              if (resultReceived) throw new Error('duplicate result')
+              resultReceived = true
+              resultStatus = message.result?.status
+              if (resultStatus !== 'SUCCESS' || typeof message.result?.response !== 'string' || !message.result.response.trim()) {
+                const kind = classifyAntigravityFailure(typeof message.result?.error === 'string' ? message.result.error : '')
+                if (kind !== 'unknown') failureKind = kind
+                protocolError = generationFailureMessage(failureKind)
+              } else {
+                stdoutBuf = message.result.response
+              }
+              const usage = message.result?.usage
+              if (usage && [usage.input_tokens, usage.output_tokens, usage.total_tokens].every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0)) {
+                cliUsage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens }
+              }
+              diagnostic('result', { status: resultStatus, responseChars: stdoutBuf.length, usage: cliUsage,
+                thinkingTokens: typeof usage?.thinking_tokens === 'number' ? usage.thinking_tokens : undefined })
+              // 官方 result 是生成完成边界。只给 CLI 收尾宽限，不再等待模型超时。
+              clearTimeout(timeout)
+              closeTimer = setTimeout(() => {
+                diagnostic('cleanup_stalled')
+                forcedCleanup = true
+                reapTimer = setTimeout(() => {
+                  if (settled) return
+                  settled = true
+                  cleanup()
+                  reject(new Error('AGY_ERROR: CLI 清理未完成'))
+                }, 5000)
+                killProcessTree(child)
+              }, 1500)
+            }
+          } catch {
+            protocolError = 'AGY_ERROR: CLI 结构化输出损坏'
+          }
+        }
       })
+      child.on('exit', (code, signal) => diagnostic('exit', { code, signal }))
+      child.stdout.on('end', () => diagnostic('stdout_end'))
 
       child.stderr.on('data', (chunk: Buffer) => {
         if (settled) return
@@ -270,6 +394,7 @@ async function runAntigravityOnce(
       })
 
       child.on('close', (code) => {
+        diagnostic('close', { code, forcedCleanup })
         if (settled) return
         settled = true
         cleanup()
@@ -277,8 +402,8 @@ async function runAntigravityOnce(
         // flush 残留的不完整 UTF-8 尾部字节（正常情况应为空，防御性处理）
         if (stdoutPending.length > 0) {
           const rest = stdoutPending.toString('utf8')
-          stdoutBuf += rest
-          opts.onToken?.(rest)
+          if (structured) jsonBuffer += rest
+          else { stdoutBuf += rest; opts.onToken?.(rest) }
           stdoutPending = Buffer.alloc(0)
         }
 
@@ -288,6 +413,13 @@ async function runAntigravityOnce(
           return
         }
 
+        if (structured && (protocolError || !resultReceived || jsonBuffer.trim() || stdoutPending.length)) {
+          // 非零退出仍交由下面的 stderr 分类（认证/限流等）。
+          if (code === 0 || resultReceived) {
+            reject(new Error(protocolError || 'AGY_ERROR: CLI 缺少完整成功结果'))
+            return
+          }
+        }
         const full = stdoutBuf
         const trimmed = full.trim()
 
@@ -299,7 +431,7 @@ async function runAntigravityOnce(
         // exit 非 0 即为错误：即使 stdout 有部分内容，也是 agent 的思考过程而非正文。
         const stderrTrimmed = stderrBuf.trim()
         const hasError =
-          /^Error:/i.test(trimmed) || /^Error:/i.test(stderrTrimmed) || code !== 0
+          /^Error:/i.test(trimmed) || /^Error:/i.test(stderrTrimmed) || (code !== 0 && !(forcedCleanup && resultReceived && !protocolError))
 
         if (hasError) {
           // 优先取 stderr 的 Error 行，其次 stdout
@@ -352,9 +484,9 @@ async function runAntigravityOnce(
           console.warn('[antigravity] stderr:', stderrTrimmed.slice(0, 200))
         }
 
-        // 用量估算：agy 不返回 token 数，按 1 字 ≈ 1.5 token 估算（与 llm-service fallback 一致）
+        // 优先使用 CLI 真实用量（含思考消耗）；旧版缺失时才按字数估算。
         const outputTokens = Math.ceil(full.length / 1.5)
-        const usage: UsageInfo = {
+        const usage: UsageInfo = cliUsage ?? {
           inputTokens: 0,
           outputTokens,
           totalTokens: outputTokens
@@ -364,6 +496,9 @@ async function runAntigravityOnce(
 
       // stdin 立即关闭（prompt 已作为 -p 参数传入，不再走 stdin）
       child.stdin.end()
+    }).finally(async () => {
+      // Only the fresh directory created above is removed; no novel or user CLI configuration is touched.
+      await rm(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {})
     })
 }
 

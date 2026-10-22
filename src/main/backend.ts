@@ -60,6 +60,7 @@ import { registerShortStoryBrainstormIpc } from './ipc/short-story-brainstorm'
 import { registerLongStoryBrainstormIpc } from './ipc/long-story-brainstorm'
 
 export interface WritingBackend {
+  importProjectPackage: ProjectService['importProjectPackage']
   mobileServer: MobileServer
   disposeProjectWatchers: () => void
   stop(): Promise<void>
@@ -188,6 +189,7 @@ export async function startBackend(userData: string, windows: ProjectWindowActio
   registerFanqieChartIpc(fanqieChartService)
 
   return {
+    importProjectPackage: (zipPath) => projectService.importProjectPackage(zipPath),
     mobileServer,
     disposeProjectWatchers,
     async stop() {

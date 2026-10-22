@@ -69,6 +69,15 @@ describe('长篇写作交稿闸门', () => {
     expect(llm.generateStream).toHaveBeenCalledTimes(3)
   })
 
+  it('历史来源指纹或项目改变，即使展示片段相同也重新审核',async()=>{
+    const llm=mock()
+    const guard=new LongformGuard(llm as unknown as LlmService)
+    await guard.check({...input,sources:'history-a'},{meta:{feature:'longformGuard',projectId:'a'}})
+    await guard.check({...input,sources:'history-b'},{meta:{feature:'longformGuard',projectId:'a'}})
+    await guard.check({...input,sources:'history-b'},{meta:{feature:'longformGuard',projectId:'b'}})
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
+  })
+
   it('缓存身份读取失败仍实际核对，模型取消立即退出且不重试', async () => {
     const llm = mock()
     llm.getCacheIdentity.mockRejectedValue(new Error('无法读取身份'))
