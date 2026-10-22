@@ -1,7 +1,8 @@
+import { DIALOGUE_FACT_PRESERVATION_RULES } from '../src/main/data/skill-prompts/scene-naturalness'
 import { describe, expect, it, vi } from 'vitest'
 import { autoDeslopProse } from '../src/main/data/auto-deslop'
 import { repairDeslopScene } from '../src/main/data/deslop/scene-repair'
-import type { DeslopService } from '../src/main/data/deslop/deslop-service'
+import type { DeslopOptions, DeslopService } from '../src/main/data/deslop/deslop-service'
 import type { GenerateOptions, LlmService } from '../src/main/data/llm-service'
 import type { DeslopResult } from '../src/shared/types'
 
@@ -29,13 +30,13 @@ function setup(input:{drafts?:string[];plan?:string;allFactsFail?:boolean;change
   const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
     const feature=opts.meta?.feature;requests.push({prompt,feature})
     if(feature==='deslop:repair-plan')return input.plan??plan
-    if(feature==='deslop:scene-repair')return input.drafts?.[rewrites++]??payload(final)
+    if(feature==='deslop:scene-repair'||feature==='chapter-scene-repair')return input.drafts?.[rewrites++]??payload(final)
     if(feature==='deslop:verify')await input.factWait
     if(feature==='deslop:verify')return input.unconfirmedFacts?'not JSON':JSON.stringify(prompt.split('【润色稿】').at(-1)!.includes('两把钥匙')||input.allFactsFail
       ? {unchanged:false,issues:['钥匙数量改变，须恢复一把']} : {unchanged:true,issues:[]})
     throw Error('意外调用')
   })} as unknown as LlmService
-  const deslop=vi.fn(async(text:string)=>{
+  const deslop=vi.fn(async(text:string,_opts?:DeslopOptions)=>{
     checks++
     if(checks===1)return result(first,false,input.initialIssues??['对话和旁白重复解释证据边界'])
     await input.expressionWait
@@ -123,7 +124,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     const output=await repairDeslopScene(original,original,{llm,issues:['冗词'],minWords:1,maxWords:1000,onAttempt:()=>{},check})
     expect(output.accepted).toBe(draft)
     expect(prompts[1].split(original)).toHaveLength(2)
-    expect(check).toHaveBeenCalledWith(draft,expect.stringContaining(anchor))
+    expect(check).toHaveBeenCalledWith(draft,expect.stringContaining(anchor),{draft:original,issues:['冗词']})
   })
   it.each(['facts','expression'] as const)('事实与表达同时开始，%s 先完成也不能提前采用',async firstFinished=>{
     let releaseFacts!:()=>void,releaseExpression!:()=>void
@@ -204,7 +205,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(output.content).toBe(final)
     expect(output.report.repairAttempts).toBe(2)
     expect(x.requests.filter(x=>x.feature==='deslop:verify')).toHaveLength(1)
-    expect(x.requests.filter(x=>x.feature==='deslop:scene-repair')[1].prompt).toContain(final)
+    expect(x.requests.filter(x=>['deslop:scene-repair','chapter-scene-repair'].includes(String(x.feature)))[1].prompt).toContain(final)
     expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,final])
   })
   it('同一问题下原样返回候选不能靠反复审核碰运气通过',async()=>{
@@ -222,7 +223,7 @@ describe('自动去 AI 味协同整场修订',()=>{
     expect(output.content).toBe(original)
     expect(x.deslop).toHaveBeenCalledOnce()
     expect(x.requests.filter(x=>x.feature==='deslop:verify')).toHaveLength(0)
-    expect(x.requests.filter(x=>x.feature==='deslop:scene-repair')[1].prompt)
+    expect(x.requests.filter(x=>['deslop:scene-repair','chapter-scene-repair'].includes(String(x.feature)))[1].prompt)
       .toContain('当前稿排版后与此前未通过的稿件逐字相同，不能重新审核碰运气。')
   })
   it('恢复已有试稿时从局部修订继续，仍以原稿独立核对事实',async()=>{
@@ -290,4 +291,71 @@ describe('自动去 AI 味协同整场修订',()=>{
     await expect(x.run(controller.signal,s=>{if(s.includes('整场保真修订'))controller.abort()})).rejects.toThrow('LLM_ABORTED')
     expect(x.requests.map(x=>x.feature)).toEqual(['deslop:repair-plan'])
   })
+})
+
+
+describe('修订反馈绑定与方案隔离',()=>{
+  it('有新增动作的编辑建议仅给修订器，不能污染独立审核的验收依据',async()=>{
+    const unsafePlan='在新增流转单上划掉默认归档项'
+    const x=setup({plan:JSON.stringify({facts:[{quote:anchor,keep:'次数日期未知，仍查渡船'}],scenePlan:unsafePlan})})
+    const out=await x.run()
+    expect(out.report.status).toBe('applied')
+    expect(x.requests.find(r=>r.feature==='deslop:scene-repair')!.prompt).toContain(unsafePlan)
+    const opts=x.deslop.mock.calls[1][1]!
+    expect(opts.dialogueComposition?.context).not.toContain(unsafePlan)
+    expect(opts.dialogueComposition?.context).not.toContain('scenePlan')
+    expect(opts.dialogueComposition?.context).toContain(anchor)
+    expect(opts.dialogueComposition?.previousDraft).toBe(first)
+    expect(opts.dialogueComposition?.priorFindings).toEqual(['对话和旁白重复解释证据边界'])
+    expect(x.requests.filter(r=>r.feature==='deslop:verify')).toHaveLength(1)
+  })
+  it('解决过的事实差异留在历史，当前问题绑定最新稿；回退拒绝不覆盖当前修订成果',async()=>{
+    const prompts:string[]=[]
+    const responses=[payload(drift),patch('两把钥匙','一把钥匙'),patch('走过院中','绕过院中'),patch('轻轻收好','收好')]
+    const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
+      if(opts.meta?.feature==='deslop:repair-plan')return plan
+      prompts.push(prompt);return responses[prompts.length-1]
+    })} as unknown as LlmService
+    const check=vi.fn(async(text:string)=>text===final?{accepted:text,issues:[]}:
+      {issues:text===drift?['钥匙数量改变，须恢复一把']:['结尾仍重复']})
+    const out=await repairDeslopScene(original,first,{llm,issues:['初稿重复'],minWords:1,maxWords:1000,onAttempt:()=>{},check})
+    expect(out.accepted).toBe(final)
+    expect(check.mock.calls.map(([text])=>text)).toEqual([drift,second,final])
+    const current=prompts[2].split('【当前稿必须解决的问题】')[1].split('【历史失败')[0]
+    expect(current).toContain('结尾仍重复')
+    expect(current).not.toContain('钥匙数量改变')
+    expect(prompts[2]).toContain('钥匙数量改变')
+    expect(prompts[3].split('【上一份待修订稿（不是事实来源）】')[1].trim()).toBe(second)
+    expect(prompts[3]).toContain('保留上一份待修订稿')
+  })
+})
+
+
+it('清单、修订与独立事实核验共用同一表达转换边界，数量漂移仍拒绝',async()=>{
+  const x=setup({drafts:[payload(drift),patch('两把钥匙','一把钥匙'),patch('轻轻收好','收好')]})
+  const output=await x.run()
+  expect(output.content).toBe(final)
+  for(const feature of ['deslop:repair-plan','deslop:scene-repair','deslop:verify']){
+    const requests=x.requests.filter(r=>r.feature===feature)
+    expect(requests.length).toBeGreaterThan(0)
+    for(const request of requests)expect(request.prompt).toContain(DIALOGUE_FACT_PRESERVATION_RULES)
+  }
+  expect(output.report.repairAttempts).toBe(3)
+  expect(x.requests.find(r=>r.feature==='deslop:scene-repair')!.prompt).toContain('指责谁')
+})
+
+
+it('回退已拒绝稿后才使用正文模型兜底，仍完整核验且不增加四轮上限',async()=>{
+  const x=setup({drafts:[payload(second),patch('走过院中','绕过院中'),patch('轻轻收好','收好')]})
+  const out=await x.run()
+  expect(out.report).toMatchObject({status:'applied',repairAttempts:3})
+  expect(x.requests.filter(r=>['deslop:scene-repair','chapter-scene-repair'].includes(String(r.feature))).map(r=>r.feature))
+    .toEqual(['deslop:scene-repair','deslop:scene-repair','chapter-scene-repair'])
+  expect(x.deslop.mock.calls.map(([text])=>text)).toEqual([original,second,final])
+  expect(x.requests.filter(r=>r.feature==='deslop:verify')).toHaveLength(2)
+  const failed=setup({drafts:[payload(second),patch('走过院中','绕过院中'),patch('一把钥匙','两把钥匙'),patch('轻轻收好','收好')],allFactsFail:true})
+  const rejected=await failed.run()
+  expect(rejected.report).toMatchObject({status:'review_required',repairAttempts:4})
+  expect(rejected.content).toBe(original)
+  expect(failed.requests.filter(r=>r.feature==='chapter-scene-repair')).toHaveLength(2)
 })

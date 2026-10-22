@@ -161,6 +161,8 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   chapterForeshadowRepair: 'chapter',
   // 按要求重写 · 先出方案（与改写同属正文类）
   'chapter-adjust-plan': 'chapter',
+  // Only after an exact rejected-draft cycle; retain the user's chapter route and all acceptance gates.
+  'chapter-scene-repair': 'chapter',
   // 审稿质检
   review: 'review',
   'deslop:scene-dialogue-review': 'review',

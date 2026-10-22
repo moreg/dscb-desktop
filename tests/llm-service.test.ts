@@ -643,7 +643,7 @@ describe('LlmService feature routing', () => {
     fetchSpy.mockRestore()
   })
 
-  it('category aggregates multiple features (chapter-adjust -> chapter routing)', async () => {
+  it.each(['chapter-adjust','chapter-scene-repair'])('routes %s through the configured chapter provider', async (feature) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-agg-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
     await s.write({
@@ -660,7 +660,7 @@ describe('LlmService feature routing', () => {
       body: sseBody(['data: [DONE]\n\n'])
     } as never)
     // chapter-adjust 归入 chapter 大类
-    await svc.generateStream('hi', { meta: { feature: 'chapter-adjust' } })
+    await svc.generateStream('hi', { meta: { feature } })
     const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://chapter.example.com/v1/chat/completions')
     fetchSpy.mockRestore()

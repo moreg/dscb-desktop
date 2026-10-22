@@ -220,3 +220,20 @@ describe('并行语义审核的完成屏障', () => {
     expect((await work).message).toBe('LLM_ABORTED')
   })
 })
+
+
+describe('双审核反馈不得互相遮蔽',()=>{
+  it('联合审核与独立场景审核均拒绝时，下一轮修复收到双方的具体证据',async()=>{
+    const source='“账册交给你”\n\n他把账册递过去。'
+    const llm={generateStream:vi.fn(async(_prompt:string,opts:GenerateOptions)=>
+      opts.meta?.feature==='deslop:dialogue-review'
+        ? JSON.stringify({passed:false,factsUnchanged:false,issues:['交付对象被改变'],expressionFindings:[]})
+        : JSON.stringify({passed:false,assessment:'连续回合重复',reviewedPassages:[{excerpt:source,reason:'全场已核对'}],
+          findings:[{excerpt:source,reason:'换了发言人仍重复纠偏'}]})
+    )} as unknown as LlmService
+    const out=await ensureDialogueQuality(source,source,llm,{mode:'write',maxRepairs:0})
+    expect(out.report.passed).toBe(false)
+    expect(out.report.issues).toContain('交付对象被改变')
+    expect(out.report.issues.some(x=>x.includes('换了发言人仍重复纠偏'))).toBe(true)
+  })
+})

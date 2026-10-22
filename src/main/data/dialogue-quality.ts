@@ -1,6 +1,6 @@
 import { findJsonObject } from '../../shared/json-extract'
 import type { LlmService } from './llm-service'
-import { DIALOGUE_VITALITY_RULES } from './skill-prompts/scene-naturalness'
+import { DIALOGUE_VITALITY_RULES, DIALOGUE_FACT_PRESERVATION_RULES } from './skill-prompts/scene-naturalness'
 import { reviewSceneDialogue } from './scene-dialogue-review'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
 import type { DialogueQualityReport, DeslopFinding } from '../../shared/types'
@@ -55,6 +55,7 @@ export interface DialogueCompositionOptions {
   mode: 'write' | 'edit'
   revisionInstruction?: string
   previousDraft?: string
+  priorFindings?: string[]
   allowSceneRewrite?: boolean
 }
 
@@ -86,7 +87,7 @@ export async function ensureDialogueQuality(
     options.onProgress?.('正在独立复核整场连续对白')
     const result = await reviewSceneDialogue(snapshot, llm, { context: options.context, prefix, signal: options.signal, meta: options.meta,
       instruction: options.revisionInstruction, previousText: options.previousDraft ?? original,
-      priorFindings: [...rejectedReviews.values()].flat() })
+      priorFindings: [...(options.priorFindings ?? []), ...rejectedReviews.values()].flat() })
     abort()
     sceneReviews.set(snapshot, result)
     return result
@@ -118,7 +119,7 @@ export async function ensureDialogueQuality(
         const jointReview = llm.generateStream([
           '审核小说整章改写稿，联合核对事实保真、人物互动与场景表达，不能只看引号或比例。只返回JSON：{"passed":true或false,"factsUnchanged":true或false,"issues":["原稿具体事实→候选稿差异"],"expressionFindings":[{"excerpt":"待审核稿逐字存在的原句","reason":"结合相邻段落说明具体表达问题"}]}。事实差异放 issues，文风、重复和人物互动问题放 expressionFindings。passed 为 true 必须事实一致且两个数组都为空；factsUnchanged 只表示事实是否一致，不能代替表达检查。',
           DIALOGUE_VITALITY_RULES,
-          '对白重写保留剧情事实与人物认知、立场、情绪和关键决定，不要求逐句保留原来的提问、回答或澄清；无剧情用途的发言组织可以重写。不要把每一句原台词都升级成不可改变的事件。',
+          DIALOGUE_FACT_PRESERVATION_RULES,
           '区分剧情事实与表达载体：同一状态已被明确建立并仍保留时，可以合并重复提醒、重复确认及没有新增结果的小动作，不要求每次看一眼、点头或再摸一下逐项保留。叮嘱仅重复已保留的规则、没有增加责任或条件时也可合并。',
           '若省略会改变物品去向、首次发现、谁获知信息、人物立场、承诺或后续因果，就属于事实变化；唯一出现的关键警告、约定、未决调查方向及结尾决定不得删去。不要将保留同一事实误判为必须保留每次重复表达。',
           '作者的对白排版要求：同一对引号内不使用中文句号（包括闭合引号前），陈述台词以闭合引号收尾；多句按语意拆为引号完整的独立段落，问号和感叹号按语气保留；不能擅自以另一套标点习惯否定本稿。',
@@ -171,6 +172,11 @@ export async function ensureDialogueQuality(
           return { text: original, report: { passed: false, beforeRatio: before.ratio,
             afterRatio: before.ratio, attempts, ...pending(), issues: ['联合核验未返回有效结论或具体问题，已保留原稿待复核。'] } }
         }
+        // Both independently found problems must reach the next repair. A joint
+        // rejection must not hide the scene review that already ran in parallel.
+        if (!independentScene.valid) return { text: original, report: { passed: false,
+          beforeRatio: before.ratio, afterRatio: before.ratio, attempts, ...pending(), issues: independentScene.issues } }
+        issues = [...new Set([...issues, ...independentScene.issues])]
         rejectedReviews.set(current, issues)
       }
       if (attempts >= maxRepairs) break
