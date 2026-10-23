@@ -111,7 +111,7 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
       return '本轮收尾。'
     })
     repair.mockImplementation(async (_pid, _ch, content, opts) => {
-      expect(content).toBe('已有正文。\n本轮收尾。')
+      expect(content).toBe('已有正文。\n\n本轮收尾。')
       opts?.onStart?.()
       events.push('checking')
       await new Promise<void>((resolve) => { finish = resolve })

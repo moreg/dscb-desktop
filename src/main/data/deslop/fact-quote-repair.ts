@@ -3,6 +3,26 @@ import type { LlmService } from '../llm-service'
 
 export interface FactAnchor { quote: string; keep: string }
 
+/** Match layout-only line joining, then return the exact original span.
+ * Inline spaces, punctuation, words and order remain significant. Ambiguity fails closed. */
+export function restoreQuoteLineBreaks(original: string, quote: string): string | undefined {
+  const flatten = (text: string): { text: string; positions: number[] } => {
+    const ignored = new Set<number>()
+    for (const match of text.matchAll(/[ \t]*\r?\n[ \t]*/g)) {
+      for (let i = match.index!; i < match.index! + match[0].length; i++) ignored.add(i)
+    }
+    const positions: number[] = []
+    let flat = ''
+    for (let i = 0; i < text.length; i++) if (!ignored.has(i)) { positions.push(i); flat += text[i] }
+    return { text: flat, positions }
+  }
+  const source = flatten(original), needle = flatten(quote.trim()).text
+  if (needle.length < 4) return
+  const at = source.text.indexOf(needle)
+  if (at < 0 || source.text.indexOf(needle, at + 1) >= 0) return
+  return original.slice(source.positions[at], source.positions[at + needle.length - 1] + 1)
+}
+
 /** Restore omitted intervening lines only. Never fuzzy-match words, reorder or infer facts. */
 export function restoreOmittedQuoteLines(original: string, quote: string): string | undefined {
   const lines=quote.split('\n').filter(line=>line.trim())
@@ -27,7 +47,7 @@ export async function repairFactQuotes(original: string, facts: FactAnchor[], op
 }): Promise<FactAnchor[] | undefined> {
   const abort=()=>{if(options.signal?.aborted)throw new Error('LLM_ABORTED')}
   abort()
-  const repaired=facts.map(f=>({...f,quote:original.includes(f.quote)?f.quote:restoreOmittedQuoteLines(original,f.quote)??f.quote}))
+  const repaired=facts.map(f=>({...f,quote:original.includes(f.quote)?f.quote:restoreQuoteLineBreaks(original,f.quote)??restoreOmittedQuoteLines(original,f.quote)??f.quote}))
   const bad=repaired.map((f,i)=>({id:i+1,...f})).filter(f=>!original.includes(f.quote))
   if(!bad.length)return repaired
   // An entirely unsupported plan is not a citation typo. Do not rescue it blindly.

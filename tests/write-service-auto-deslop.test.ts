@@ -162,9 +162,28 @@ describe('自动写作去 AI 味', () => {
       return RAW
     })
     const onGenerationStage = vi.fn()
-    await service.generateChapterStream(projectId, 1, { onGenerationStage })
-    expect(onGenerationStage.mock.calls.slice(0, 4).map(([stage]) => stage))
-      .toEqual(['generating', 'agy:queued', 'agy:waiting', 'agy:streaming'])
+    const onStatus = vi.fn()
+    await service.generateChapterStream(projectId, 1, { onGenerationStage, onStatus })
+    expect(onGenerationStage.mock.calls.slice(0, 6).map(([stage]) => stage))
+      .toEqual(['preparing:等待项目记忆同步完成', 'waiting', 'agy:queued', 'agy:waiting', 'agy:streaming', 'generating'])
+    expect(onStatus.mock.calls.flat()).toEqual(['queued', 'waiting', 'streaming'])
+  })
+
+  it('取消后的迟到状态和正文 token 不会重新宣告开始生成', async () => {
+    const controller = new AbortController()
+    const onGenerationStage = vi.fn()
+    vi.mocked(llm.generateStream).mockImplementationOnce(async (_prompt, opts = {}) => {
+      controller.abort()
+      opts.onStatus?.('streaming')
+      opts.onToken?.(RAW)
+      throw new Error('LLM_ABORTED')
+    })
+    await expect(service.generateChapterStream(projectId, 1, {
+      signal: controller.signal, onGenerationStage
+    })).rejects.toThrow('LLM_ABORTED')
+    expect(onGenerationStage.mock.calls.map(([stage]) => stage))
+      .toEqual(['preparing:等待项目记忆同步完成', 'waiting'])
+    expect(deslop.deslop).not.toHaveBeenCalled()
   })
 
   it('本次临时写作要求必须继续进入自动润色与独立场景复核', async () => {
@@ -200,7 +219,7 @@ describe('自动写作去 AI 味', () => {
     expect(content).toBe(POLISHED)
     expect(events).toEqual(['raw', 'deslop'])
     expect(onToken.mock.calls.flat().join('')).toBe(RAW)
-    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['generating', 'deslop', 'deslop:正在扫描表达与人物互动', 'deslop:独立事实核对 1'])
+    expect(onGenerationStage.mock.calls.map(([stage]) => stage)).toEqual(['preparing:等待项目记忆同步完成', 'waiting', 'generating', 'deslop', 'deslop:正在扫描表达与人物互动', 'deslop:独立事实核对 1'])
     expect(deslop.deslop).toHaveBeenCalledWith(RAW, expect.objectContaining({ levelOverride: 'mild', isTail: true }))
     expect(verificationCalls()).toHaveLength(1)
     expect(verificationCalls()[0][0]).toContain(RAW)
@@ -288,11 +307,11 @@ describe('自动写作去 AI 味', () => {
     expect(verificationCalls()).toHaveLength(0)
   })
 
-  it('仍有检测残留时保留原稿并报告残留数', async () => {
+  it('仍有阻断问题时保留原稿并报告残留数', async () => {
     vi.mocked(deslop.deslop).mockResolvedValue(deslopResult(POLISHED, {
       remainingFindings: [{
         gate: 'A', type: 'banned-word', line: 1, column: 3,
-        severity: 'advisory', excerpt: '缓缓', message: '程度副词重复'
+        severity: 'blocking', excerpt: '事实丢失', message: '关键信息缺失'
       }]
     }))
     const { reports, onAutoDeslopResult } = results()
@@ -440,13 +459,14 @@ describe('自动写作去 AI 味', () => {
       opts.onStatus?.('queued')
       opts.onStatus?.('waiting')
       opts.onStatus?.('streaming')
+      opts.onToken?.(RAW)
       return RAW
     })
     const onGenerationStage = vi.fn()
     const onStatus = vi.fn()
     await service.adjustChapterStream(projectId, 1, RAW, '调整', { onGenerationStage, onStatus })
-    expect(onGenerationStage.mock.calls.slice(0, 4).map(([stage]) => stage))
-      .toEqual(['generating', 'agy:queued', 'agy:waiting', 'agy:streaming'])
+    expect(onGenerationStage.mock.calls.slice(0, 7).map(([stage]) => stage))
+      .toEqual(['preparing:等待项目记忆同步完成', 'preparing:正在读取正文、细纲与修改要求', 'waiting', 'agy:queued', 'agy:waiting', 'agy:streaming', 'generating'])
     expect(onStatus.mock.calls.flat()).toEqual(['queued', 'waiting', 'streaming'])
   })
 

@@ -587,35 +587,16 @@ function checkMetaNarration(content: string): SelfCheckItemResult {
   }
 }
 
-/**
- * 标点守则自检：正文里的破折号 / 省略号。
- *
- * **这不是 AI 味判断，是指令遵守检查。** 写作守则第 9 条明写禁用这两样，
- * 出现即模型没照做。而且它是确定性可修的——deslop 的 normalize-punctuation
- * 会把 ——/— 和 ……/… 直接替换成句号/逗号，不需要走 LLM 改写。
- *
- * 顺带一提，语料实测它同时也是最强的单一 AI 信号（AUC 0.639，真人稿中位 0 处，
- * 自产 AI 稿中位 6.3 处/万字）。但对自己的稿子，「像不像 AI」这个信息没有用，
- * 「哪几行要改」才有用，所以这条按守则违规呈现，不按痕迹检测呈现。
- */
+/** 标点密度是语境复核提示，不把合法标点当作违规或 AI 概率。 */
 function checkPunctuationRule(content: string): SelfCheckItemResult {
-  const id = 'punctuation_rule'
-  const label = '标点守则（破折号/省略号）'
-  const lines: number[] = []
-  content.split(/\r?\n/).forEach((line, i) => {
-    if (/——|—|--|……|…/.test(line)) lines.push(i + 1)
-  })
-  if (lines.length === 0) {
-    return { id, category: 'ban', label, verdict: 'pass', detail: '正文无破折号/省略号' }
-  }
+  const lines = content.split(/\r?\n/).flatMap((line, i) =>
+    (line.match(/——|……/g)?.length ?? 0) >= 3 ? [i + 1] : [])
   return {
-    id,
-    category: 'ban',
-    label,
-    verdict: 'warn',
-    detail:
-      `${lines.length} 处（第 ${formatLines(lines)} 行）。守则第 9 条禁用；` +
-      '改成句号、逗号或动作断句。这是确定性替换，「去 AI 味」的标点兜底可直接改掉，不必调 LLM'
+    id: 'punctuation_rule', category: 'ban', label: '标点语境复核',
+    verdict: lines.length ? 'warn' : 'pass',
+    detail: lines.length
+      ? `第 ${formatLines(lines)} 行停顿符号较密，请结合语意复核；真实省略与中断保留，不机械替换。`
+      : '未见密集停顿符号；合法省略号、破折号及台词句号保留。'
   }
 }
 

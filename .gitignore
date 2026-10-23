@@ -8,6 +8,7 @@ release/
 .DS_Store
 
 # 临时调试脚本/输出，勿提交
+.cache-*
 invoke_calls.txt
 missing_methods.js
 restore_preload.js

@@ -87,12 +87,12 @@ describe('character position fix', () => {
     expect(applyCharacterPositionFix(content, 'not json', [0, 2]).content).toBe(content)
   })
 
-  it('修补文字里的破折号/省略号按项目规则归一', () => {
+  it('位置修补不机械删除合法省略号', () => {
     const raw = JSON.stringify({
       paragraphs: [{ index: 2, text: '车道贤还站在实验室里……把那只试管放回架上，看着屏幕上的绿色曲线。' }]
     })
     const r = applyCharacterPositionFix(content, raw, [0, 2])
-    expect(r.content).not.toContain('…')
+    expect(r.content).toContain('……')
   })
 })
 

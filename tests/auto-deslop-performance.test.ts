@@ -193,7 +193,7 @@ describe('自动润色性能与核验复用', () => {
     })
 
   it('凭据生成后排版改变文本时重新核验最终稿，不能用旧字节凭据放行', async () => {
-    const unformatted = candidate.replace('\n', '\n\n')
+    const unformatted = candidate.replace('\n', '\r\n')
     const llm = mockLlm(() => JSON.stringify({ unchanged: true, issues: [] }))
     const output = await autoDeslopProse(original, {
       service: { deslop: async () => receipt(unformatted) } as unknown as DeslopService, llm,

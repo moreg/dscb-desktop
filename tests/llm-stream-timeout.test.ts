@@ -5,6 +5,10 @@ const TWO_MIN = 120_000
 const TEN_MIN = 600_000
 
 describe('resolveStreamTimeoutMs', () => {
+  it('allows ending state extraction to finish rather than restarting after two minutes', () => {
+    expect(resolveStreamTimeoutMs({ meta: { feature: 'endingState' } })).toBe(TEN_MIN)
+    expect(resolveStreamTimeoutMs({ meta: { feature: 'endingState' }, maxTokens: 2048 })).toBe(TEN_MIN)
+  })
   it('重写后长篇核对虽然只输出 3000 token，仍给整章检查 10 分钟', () => {
     expect(resolveStreamTimeoutMs({ meta: { feature: 'longformGuard' }, maxTokens: 3000 })).toBe(TEN_MIN)
   })

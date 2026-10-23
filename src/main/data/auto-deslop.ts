@@ -110,7 +110,8 @@ export async function autoDeslopProse(
       lastIssues = result.dialogueQuality?.issues ?? result.changeSummary.filter(item => /\[(?:需复核|需确认|已拒绝)\]/.test(item))
       return '自动去 AI 味结果需要复核。'
     }
-    if (result.remainingFindings.length > 0) return `自动去 AI 味复扫仍有 ${result.remainingFindings.length} 处提示。`
+    const blocking = result.remainingFindings.filter(finding => finding.severity === 'blocking')
+    if (blocking.length > 0) return `自动去 AI 味复扫仍有 ${blocking.length} 处阻断问题。`
     return guardCandidate(result.rewritten)
   }
   const verifyFacts = async (candidate: string): Promise<FactVerdict> => {
@@ -168,7 +169,14 @@ export async function autoDeslopProse(
     throwIfAborted(options.signal)
     const budget=options.dialogueComposition.allowSceneRewrite?0.35:0.15
     const words=measureDialogue(original).total
-    const recovery=await repairDeslopScene(original,result.dialogueQuality?.pendingDraft??result.rewritten,{
+    const rejectedDraft=result.dialogueQuality?.pendingDraft??result.rewritten
+    // Keep the initial scene diagnosis after factual repairs replace the current feedback.
+    // Facts are checked separately; only scene findings belong to this ledger.
+    const repairBaseline=result.dialogueQuality?.sceneIssues?.length ? {
+      text:formatCandidate?formatCandidate(rejectedDraft):rejectedDraft,
+      issues:[...result.dialogueQuality.sceneIssues]
+    } : options.dialogueComposition.repairBaseline
+    const recovery=await repairDeslopScene(original,rejectedDraft,{
       llm,issues:lastIssues,context:[options.dialogueComposition.context??'',
         ...(options.styleContext?[`【项目题材与文风】\n${JSON.stringify(options.styleContext)}`]:[]),
         ...(options.textOverrides?[`【作者润色偏好：不覆盖原稿事实】\n${JSON.stringify(options.textOverrides)}`]:[]),
@@ -177,7 +185,7 @@ export async function autoDeslopProse(
       signal:options.signal,meta:options.meta,
       normalizeDraft:formatCandidate,
       fallbackFeature:'chapter-scene-repair',
-      onFallback:()=>onProgress?.('检测到修订回退，由正文模型接手剩余修订；事实与表达审核保持不变'),
+      onFallback:()=>onProgress?.('修订出现事实偏移或退回旧稿，由正文模型接手剩余修订；事实与表达审核保持不变'),
       startWithPatches:options.initialDialogueDraft!==undefined,
       minWords:Math.ceil(words*(1-budget)),maxWords:Math.floor(words*(1+budget)),
       onAttempt:attempt=>{repairAttempts++;onProgress?.(`整场保真修订 ${attempt}/${MAX_SCENE_REPAIR_ATTEMPTS}`)},
@@ -197,8 +205,8 @@ export async function autoDeslopProse(
           verifyFacts(prepared),
           service.deslop(prepared,{...polishOptions,initialDialogueDraft:undefined,dialogueRepairLimit:0,
           onProgress: message => onProgress?.(`整场修订：${message}（事实核对并行）`),
-          dialogueComposition:{...options.dialogueComposition!,previousDraft:previous.draft,priorFindings:previous.issues,context:[options.dialogueComposition!.context??'',
-            '以下清单只是原稿事实索引，概括可能有误，以原稿引句为准；不是表达方案或验收模板。逐项核对事实，不得要求按清单措辞写正文，也不得要求新增原稿没有的处置动作来改善表达。',constraints].join('\n')}})
+          dialogueComposition:{...options.dialogueComposition!,previousDraft:previous.draft,priorFindings:previous.issues,repairBaseline,context:[options.dialogueComposition!.context??'',
+            '以下清单只含原稿逐字引句与编号，用于定位，不是表达方案或验收模板。结合完整原稿核对事实、说话归属与实际先后，不得要求按清单措辞写正文，也不得要求新增原稿没有的处置动作来改善表达。',constraints].join('\n')}})
         ])
         throwIfAborted(options.signal)
         const [factReview, expressionReview]=reviews
@@ -215,7 +223,8 @@ export async function autoDeslopProse(
             : refusal ? [refusal,...checked.remainingFindings.map(finding=>finding.message)] : [])
         ])]
         if(facts.kind!=='passed'||checked.dialogueQuality?.passed!==true||refusal) {
-          return {...reject(issues),unconfirmed:facts.kind==='unconfirmed'||unconfirmedReview(issues)}
+          return {...reject(issues),unconfirmed:facts.kind==='unconfirmed'||unconfirmedReview(issues),
+            preferFallback:facts.kind==='different'}
         }
         const final=prepareResult(checked)
         refusal=await guardResult(final)
@@ -313,7 +322,7 @@ export async function autoDeslopProse(
     return { content: result.rewritten, report: report(result.rewritten === original ? 'unchanged' : 'applied',
       result.rewritten === original ? '自动检查未检出需修改项；整场交谈仍须通读验收。' :
         `已自动完成轻度去 AI 味${repairAttempts ? `（自动修复 ${repairAttempts} 次）` : ''}及复扫。` +
-        (dialogueQuality?.passed ? `整章对白占比 ${(dialogueQuality.afterRatio * 100).toFixed(2)}%，表达修订 ${dialogueRepairAttempts+repairAttempts} 次；自动场景检查未检出问题，仍须通读验收。` : '')) }
+        (dialogueQuality?.passed ? `整章对白占比 ${(dialogueQuality.afterRatio * 100).toFixed(2)}%，表达修订 ${dialogueRepairAttempts+repairAttempts} 次；自动场景检查未检出问题，仍须通读验收。` : ''), result.remainingFindings.length, result.remainingFindings.map(finding => finding.message)) }
   } catch (err) {
     throwIfAborted(options.signal)
     if (isAbortError(err)) throw err

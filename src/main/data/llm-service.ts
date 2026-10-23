@@ -161,7 +161,7 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   chapterForeshadowRepair: 'chapter',
   // 按要求重写 · 先出方案（与改写同属正文类）
   'chapter-adjust-plan': 'chapter',
-  // Only after an exact rejected-draft cycle; retain the user's chapter route and all acceptance gates.
+    // After verified factual drift or a rejected-draft cycle; retain the chapter route and all acceptance gates.
   'chapter-scene-repair': 'chapter',
   // 审稿质检
   review: 'review',
@@ -238,6 +238,9 @@ const LLM_STREAM_TIMEOUT_MS = 120_000
  * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
  */
 const LONG_TIMEOUT_FEATURES = new Set([
+  // Structured ending extraction can still be streaming after two minutes.
+  // Do not discard that work and restart the whole prewriting task.
+  'endingState',
   'continuityRepair',
   'continuityRepairVerify',
   'chapter',
@@ -696,6 +699,7 @@ export class LlmService {
 
     const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runCodex(merged, {
+      isolatedTextTask: opts.meta?.feature === 'longformGuard' || opts.meta?.feature === 'endingState',
       model: p.model && p.model !== 'default' ? p.model : undefined,
       reasoningEffort: opts.strengthOverride?.reasoningEffort,
       timeoutSec: Math.ceil(timeoutMs / 1000),

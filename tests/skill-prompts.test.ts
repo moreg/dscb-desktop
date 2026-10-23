@@ -48,40 +48,48 @@ describe('buildSystemPrompt', () => {
     expect(prompt(null)).not.toContain('【番茄开篇冲突与首次兑现')
   })
 
-  it('已保存的旧内置无比例默认条款迁移，未知自定义内容保留', () => {
+  it('已有无比例条款和未知自定义内容保留', () => {
     const old = '- **对白与叙述按场景需要安排，不设强制比例**。需要交锋、试探或交流时直接写出，行动、独处与场景因果用必要叙述交代，不为凑对白增删情节。'
     const custom = '作者自定义：此次独处场景保留必要的沉默。'
     const prompt = buildSystemPrompt('悬疑', null, { style_targets: old + '\n' + custom })
-    expect(prompt).not.toContain(old)
-    expect(prompt).toContain('整章对白占比目标 70%')
+    expect(prompt).toContain(old)
+    expect(prompt).toContain('不设强制比例')
     expect(prompt).toContain(custom)
   })
 
-  it('旧内置末尾句号规则迁移为技能的无句号规则，配置对象不变', () => {
+  it('旧内置限制句号规则迁移为规范标点，配置对象不变', () => {
     const old = '同一对引号内的中间不能出现中文句号「。」，陈述台词只在闭合引号前保留一个句号；陈述台词以句号加闭合引号收尾'
     const overrides = { dialogue: old }
     const prompt = buildSystemPrompt(undefined, null, overrides)
-    expect(prompt).toContain('包括闭合引号前')
+    expect(prompt).toContain('独立陈述台词的句号放在后引号前')
     expect(prompt).not.toContain('陈述台词只在闭合引号前保留一个句号')
     expect(overrides.dialogue).toBe(old)
   })
   it.each([undefined, 'extend', 'finish'] as const)('%s 模式按技能统一分段和对白标点', (mode) => {
     const defaults = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(defaults).toContain('两句话也必须分段')
-    expect(defaults).toContain('整章对话占比目标 70%')
+    expect(defaults).toContain('默认以一句一段为主，段间空一行')
+    expect(defaults).toContain('不设强制比例')
     const prompt = buildSystemPrompt(undefined, null, { dialogue: '' }, null, mode)
-    const finalRules = prompt.slice(prompt.lastIndexOf('【正文排版要求'))
+    const finalRules = prompt.slice(prompt.lastIndexOf('【正文保真共享规则'))
     expect(finalRules).toContain('一句一段')
-    expect(finalRules).toContain('包括闭合引号前')
-    expect(finalRules).toContain('多个引号完整的独立段落')
+    expect(finalRules).toContain('独立陈述台词的句号放在后引号前')
+    expect(finalRules).toContain('不按句号机械拆分多句发言')
   })
 
-  it('旧内置一句一段保留并更新对白标点，保留作者其他自定义要求', () => {
+  it('旧内置强制拆段迁移为短段优先且允许自然合段，保留作者其他自定义要求', () => {
     const oldRule = '- **一句一段**：每段只写一句完整的话，同一行动与其直接反馈若是两句话也必须分段，不把独立句子的句号改成逗号规避分段。对话独立成段，引号内中间不用中文句号，陈述台词结尾保留句号；多句台词拆成引号完整的独立段落，问号、感叹号按语气保留。'
     const prompt = buildSystemPrompt(undefined, null, { style_targets: oldRule + '\n保留作者自己的语气要求。' })
-    expect(prompt).toContain('两句话也必须分段')
-    expect(prompt).toContain('**一句一段**')
+    expect(prompt).toContain('默认以一句一段为主，段间空一行')
+    expect(prompt).toContain('需要连贯时可自然合段')
     expect(prompt).toContain('保留作者自己的语气要求。')
+  })
+
+  it('明确自定义比例和其他作者条款保留，默认不施加70%门槛', () => {
+    const custom = '作者自定义：本书对白约70%，保留方言，不按段数统计。'
+    const prompt = buildSystemPrompt('都市', null, { style_targets: custom })
+    expect(prompt).toContain(custom)
+    expect(buildSystemPrompt('都市')).not.toContain('目标 70%')
+    expect(prompt).toContain('作者明确指定的项目比例')
   })
 
   it('embeds 12 forbidden word categories with hints', () => {
@@ -124,12 +132,12 @@ describe('buildSystemPrompt', () => {
   it('embeds dialogue rules', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('真人对话特征')
-    expect(prompt).toContain('同一人台词中间禁止插入动作打断')
+    expect(prompt).toContain('动作位置服从事件顺序')
   })
 
   it.each([undefined, 'extend', 'finish'] as const)('%s 模式允许台词按语气断句', (mode) => {
     const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(prompt).toContain('台词按语气断句')
+    expect(prompt).toContain('问句和感叹句按语气')
     expect(prompt).not.toContain('台词中间严禁使用句号')
   })
 
@@ -137,7 +145,7 @@ describe('buildSystemPrompt', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('严格禁止与写作负向限制')
     expect(prompt).toContain('工具人/背景板路人')
-    expect(prompt).toContain('对话中夹杂长神态描写')
+    expect(prompt).toContain('不以无用途动作拖延交流')
     expect(prompt).toContain('事件-反应-结果')
   })
 
@@ -319,7 +327,7 @@ describe('题材语感不强制机关式对白', () => {
     expect(prompt).not.toContain('内心吐槽多')
     expect(prompt).not.toContain('4. 标准化收尾')
     expect(prompt).toContain('普通的“好”“嗯”和直接回答按语境保留')
-    expect(prompt).toContain('整章对话占比目标 70%')
+    expect(prompt).toContain('不设强制比例')
   })
   it('语感示例须核对原意，不能把普通词和动作机械替换', () => {
     expect(buildSystemPrompt('都市')).toContain('不是逐词替换表；先核对原意与场景')

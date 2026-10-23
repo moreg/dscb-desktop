@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
+import ProseImportDialog from './ProseImportDialog'
 import { isWebClient, openServerExport } from './web-download'
 import { uploadProjectPackage } from './web-import'
 import './long-story-project.css'
@@ -21,6 +22,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [showNew, setShowNew] = useState(false)
+  const [showProseImport, setShowProseImport] = useState(false)
   const [creationNotice, setCreationNotice] = useState('')
   const [keyword, setKeyword] = useState('')
   const [shelf, setShelf] = useState<Shelf>('active')
@@ -231,6 +233,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
             >
               {importing ? '导入中…' : '导入小说包'}
             </button>
+            {!isWebClient() && <button className="btn btn-ghost" onClick={() => setShowProseImport(true)}>导入正文</button>}
             <button className="btn" onClick={onOpenBrainstorm}>
               长篇脑洞
             </button>
@@ -415,6 +418,16 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
           onConfirm={() => void applyArchived(pendingArchive, true)}
         />
       ) : null}
+      {showProseImport && <ProseImportDialog
+        onClose={() => { setShowProseImport(false); void loadProjects(false) }}
+        onImported={(result) => {
+          setShowProseImport(false)
+          setShelf('active')
+          setKeyword('')
+          setCreationNotice(`已导入《${result.project.name}》的 ${result.importedCount} 章正文。${result.pendingCount ? `另有 ${result.pendingCount} 项问题未处理，源文件保留在原处。` : ''}`)
+          void loadProjects(false)
+        }}
+      />}
       {showNew ? (
         <NewProjectDialog
           onClose={() => setShowNew(false)}

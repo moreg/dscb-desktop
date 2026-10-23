@@ -1,3 +1,5 @@
+import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from '../shared/prose-import'
+import type { DetectionResultInput } from '../shared/chapter-detection'
 import type { AppUpdateState } from '../shared/app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from '../shared/long-story-brainstorm'
 import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryCreateInput, ShortStoryDocument, ShortStoryGenerationInput, ShortStoryStorageSelectionResult, ShortStorySummary } from '../shared/short-story'
@@ -206,6 +208,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         focusedExisting: boolean
       }>,
     scanProjects: () => ipcRenderer.invoke('library:scan'),
+    previewProseImport: (request: ProseImportRequest) => ipcRenderer.invoke('library:previewProse', request) as Promise<ProseImportPreview | null>,
+    commitProseImport: (token: string, name: string) => ipcRenderer.invoke('library:commitProse', { token, name }) as Promise<ProseImportResult>,
+    cancelProseImport: () => ipcRenderer.invoke('library:cancelProse') as Promise<void>,
     exportProjectPackage: (projectId: string) =>
       ipcRenderer.invoke('library:exportPackage', { projectId }) as Promise<{
         canceled: boolean
@@ -242,6 +247,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     /** 选择本地文本文件用于文风提取 */
     selectTextFile: () =>
       ipcRenderer.invoke('dialog:selectTextFile'),
+    listChapterDetections: (id: string, n: number) => ipcRenderer.invoke('chapters:detectionList', id, n),
+    captureChapterDetection: (id: string, n: number, content: string) => ipcRenderer.invoke('chapters:detectionCapture', id, n, content),
+    recordChapterDetection: (id: string, n: number, recordId: string, input: DetectionResultInput) => ipcRenderer.invoke('chapters:detectionResult', id, n, recordId, input),
     listChapters: (id: string) => ipcRenderer.invoke('chapters:list', id),
     getChapter: (id: string, n: number) => ipcRenderer.invoke('chapters:get', id, n),
     createChapter: (id: string, input: CreateChapterInput) =>

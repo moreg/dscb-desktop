@@ -28,7 +28,7 @@ describe('self-check panel rendered state', () => {
     expect(html).toContain('重新检查后才能应用自检要求')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>按自检改正文<\/button>/)
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>填入续写临时要求<\/button>/)
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>⚡ 一键替换标点<\/button>/)
+    expect(html).not.toContain('一键替换标点')
   })
 
   it('does not show all-passed claims for legacy reports with skipped checks', () => {

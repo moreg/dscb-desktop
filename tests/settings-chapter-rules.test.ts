@@ -40,16 +40,16 @@ describe('SettingsRepository chapter rule overrides', () => {
 
 
 describe('saved legacy dialogue rules at prompt time', () => {
-  it('已保存的70%规则按同步技能保留，自定义及配置原文不变', async () => {
+  it('旧内置70%规则迁移为按场景安排，自定义及配置原文不变', async () => {
     const dir=await mkdtemp(path.join(tmpdir(),'aw-dialogue-ratio-retired-'))
     const file=path.join(dir,'settings.json'),repo=new SettingsRepository(file)
     const legacy='- **整章对白占比目标 70%**。优先通过人物交谈、争执、试探与交锋推进剧情，本该说出口的话直接写出，不转述成叙述；旁白约占 30%，只补必要动作、场景变化与因果，不为凑占比添加无意义交谈。续写按已有正文与新增内容合计观察整章，批量生成逐章落实。\n作者自定义：保留本书方言。'
     await repo.setChapterRuleOverrides({dialogue:legacy})
     const before=await readFile(file,'utf8')
     const prompt=buildSystemPrompt('悬疑',null,await repo.getChapterRuleOverrides())
-    expect(prompt).toContain('整章对话占比目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(prompt).toContain('保留本书方言')
-    expect(prompt).toContain('整章对白占比目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(await readFile(file,'utf8')).toBe(before)
   })
   it('retires stock recipes while keeping custom lines and saved settings unchanged', async () => {
@@ -77,7 +77,7 @@ describe('saved legacy dialogue rules at prompt time', () => {
     expect(prompt).toContain('保留角色已有粗口，不新增口头禅')
     expect(prompt).toContain('【自定义章末】以当前事件结束')
     expect(prompt).toContain('自检要求不进入故事')
-    expect(prompt).toContain('整章对话占比目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(await readFile(file, 'utf8')).toBe(before)
     expect((await repo.getChapterRuleOverrides()).dialogue).toBe(legacy)
   })
@@ -102,10 +102,10 @@ describe('saved legacy dialogue rules at prompt time', () => {
     expect(prompt).not.toContain('句号只保留在整段台词最末尾')
     expect(prompt).toContain('普通的“好”“嗯”和直接回答按语境保留')
     expect(prompt).toContain('不把造梗、跑题或自相矛盾作为互动任务')
-    expect(prompt).toContain('陈述台词以闭合引号收尾')
+    expect(prompt).toContain('独立陈述台词的句号放在后引号前')
     expect(prompt).toContain('自定义：保留本书已有方言')
     expect(prompt).toContain('作者自定义：这句不能丢')
-    expect(prompt).toContain('整章对话占比目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(await readFile(file, 'utf8')).toBe(before)
   })
 

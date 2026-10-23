@@ -22,15 +22,19 @@ export function postWriteProgressLabel(progress: PostWriteProgress): string {
 }
 
 export function generationProgressLabel(stage: ChapterGenerationStage | null): string {
+  if (stage?.startsWith('preparing:')) return stage.slice('preparing:'.length) || '正在准备写作上下文'
   if (stage?.startsWith('continuity:')) return stage.slice('continuity:'.length)
   if (stage?.startsWith('foreshadow:')) return stage.slice('foreshadow:'.length)
   switch (stage) {
+    case 'preparing': return '正在准备写作上下文'
+    case 'waiting': return '上下文已就绪，等待正文首字'
+    case 'generating': return '正在生成正文'
     case 'agy:queued': return 'AGY 排队中，等待前一个任务结束'
     case 'agy:waiting': return '等待 AGY 返回正文'
     case 'agy:streaming': return 'AGY 正在生成正文'
     case 'agy:retrying': return 'AGY 正在刷新登录状态并重试'
     case 'foreshadowRepair': return '正在检查并补写伏笔'
-    default: return isDeslopStage(stage) ? deslopProgressLabel(stage) : '正在准备并生成正文'
+    default: return isDeslopStage(stage) ? deslopProgressLabel(stage) : '正在准备写作上下文'
   }
 }
 

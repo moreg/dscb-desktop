@@ -56,6 +56,7 @@ export interface DialogueCompositionOptions {
   revisionInstruction?: string
   previousDraft?: string
   priorFindings?: string[]
+  repairBaseline?: { text: string; issues: string[] }
   allowSceneRewrite?: boolean
 }
 
@@ -77,18 +78,21 @@ export async function ensureDialogueQuality(
   let issues: string[] = []
   let repairFeedback: string[] = []
   let attempts = 0
+  let sceneIssues: string[] = []
   // 仅在本次调用内复用；未应用有效提案时，不重复审核完全相同的稿件。
   const rejectedReviews = new Map<string, string[]>()
   const sceneReviews = new Map<string, Awaited<ReturnType<typeof reviewSceneDialogue>>>()
   const reviewScene = async () => {
     const snapshot = current
     const cached = sceneReviews.get(snapshot)
-    if (cached) return cached
+    if (cached) { sceneIssues = cached.valid ? cached.issues : []; return cached }
     options.onProgress?.('正在独立复核整场连续对白')
     const result = await reviewSceneDialogue(snapshot, llm, { context: options.context, prefix, signal: options.signal, meta: options.meta,
       instruction: options.revisionInstruction, previousText: options.previousDraft ?? original,
+      repairBaseline: options.repairBaseline,
       priorFindings: [...(options.priorFindings ?? []), ...rejectedReviews.values()].flat() })
     abort()
+    sceneIssues = result.valid ? result.issues : []
     sceneReviews.set(snapshot, result)
     return result
   }
@@ -112,6 +116,8 @@ export async function ensureDialogueQuality(
       const cachedIssues = rejectedReviews.get(current)
       if (cachedIssues) {
         issues = [...cachedIssues, ...repairFeedback]
+        const cachedScene = sceneReviews.get(current)
+        sceneIssues = cachedScene?.valid ? cachedScene.issues : []
         options.onProgress?.('候选稿未变，复用已发现的事实与表达问题')
       } else {
         options.onProgress?.('正在联合核对事实、人物互动与场景表达')
@@ -188,7 +194,7 @@ export async function ensureDialogueQuality(
       options.mode === 'edit' ? '本次是已有正文润色，只整理原文已有的交流与已知信息，不增删剧情。' : '本次是新章或续写的成稿修复，细纲只提供约束，不能把尚未发生的细纲事件提前塞入原稿。',
       `只读前部有${measureDialogue(prefix).total}有效字、${measureDialogue(prefix).dialogue}字对白，不能重写或输出前部。输出只替换【本次正文】，程序会与前部合计验收。`,
       `本次正文有效字数保持在${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}字，不能删掉必要事件或无限扩写。`,
-      '只修复【必须修复的问题】中有原句依据的事实差异、重复、机械组织和表达问题。整章对白目标 70%，本次修复仅在事实与篇幅保真范围内改善表达；片段不验收整章比例，不为占比增删问答或有效交流。所有剧情事实、角色已知范围、说话者、立场、数量、未决线索与结尾决定保持原稿。',
+      '只修复【必须修复的问题】中有原句依据的事实差异、重复、机械组织和表达问题。对白不设强制比例，本次修复仅在事实与篇幅保真范围内改善表达；片段不验收整章比例，不为占比增删问答或有效交流。所有剧情事实、角色已知范围、说话者、立场、数量、未决线索与结尾决定保持原稿。',
       '原稿明确写了未回答、未发生或尚未确认的事，修复时仍须保持这一状态，不能为增加对白改成有人回答、事情发生或确认了归属。删除违规新增台词时可将after设为空字符串，不要用另一段新增交流补回相同问题。',
       '不把旁白套上引号，不让人物解说自己的动作，不增加虚构发言者，不让系统通知、文件名或心声冒充人物直接对白。避免一问一答的说明书、人人同腔、连续金句和捧哏。',
       '按本场用途选择对白或叙述。需要直接交锋的有效互动保留，重复的资料核对与条件说明可归并为凝练叙述，保留已发生的交流、信息来源、实际结果和关键决定；不要让旁白与对白把同一内容各讲一遍，也不要把原有逐项问答改成逐项动作播报。',
@@ -223,5 +229,6 @@ export async function ensureDialogueQuality(
     repairFeedback = []
   }
   return { text: original, report: { passed: false, beforeRatio: before.ratio,
-    afterRatio: measureDialogue(whole(original)).ratio, attempts, ...pending(), issues } }
+    afterRatio: measureDialogue(whole(original)).ratio, attempts, ...pending(), issues,
+    ...(sceneIssues.length ? { sceneIssues } : {}) } }
 }

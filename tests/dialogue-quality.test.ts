@@ -223,6 +223,29 @@ describe('并行语义审核的完成屏障', () => {
 
 
 describe('双审核反馈不得互相遮蔽',()=>{
+  it('修回已拒稿并复用审核时，场景问题必须重新绑定该稿，不能带入上一稿问题',async()=>{
+    const original='“账册交给他”\n他把账册递过去。'
+    const first=original.replace('交给他','交给你')
+    const second=original.replace('交给他','交给我')
+    const issue=(current:string)=>current===first?'第一稿仍在重复解释交付对象':'第二稿换人后仍在复述'
+    const llm={generateStream:vi.fn(async(prompt:string,opts:GenerateOptions)=>{
+      if(opts.meta?.feature==='deslop:dialogue-review')return passed
+      if(opts.meta?.feature==='deslop:scene-dialogue-review'){
+        const current=prompt.split('【待审核稿】\n\n').at(-1)!
+        const passage={excerpt:current,reason:issue(current)}
+        return JSON.stringify({passed:false,assessment:passage.reason,reviewedPassages:[passage],findings:[passage]})
+      }
+      const current=prompt.split('【本次正文】\n\n').at(-1)!
+      return JSON.stringify({patches:[{before:current,after:current===first?second:first}]})
+    })} as unknown as LlmService
+    const out=await ensureDialogueQuality(original,first,llm,{mode:'edit',maxRepairs:2})
+    expect(out.report).toMatchObject({passed:false,attempts:2,pendingDraft:first,
+      issues:[`${first}：${issue(first)}`],sceneIssues:[`${first}：${issue(first)}`]})
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(([,opts])=>opts?.meta?.feature==='deslop:scene-dialogue-review'))
+      .toHaveLength(2)
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(([,opts])=>opts?.meta?.feature==='deslop:dialogue-review'))
+      .toHaveLength(2)
+  })
   it('联合审核与独立场景审核均拒绝时，下一轮修复收到双方的具体证据',async()=>{
     const source='“账册交给你”\n\n他把账册递过去。'
     const llm={generateStream:vi.fn(async(_prompt:string,opts:GenerateOptions)=>
@@ -235,5 +258,7 @@ describe('双审核反馈不得互相遮蔽',()=>{
     expect(out.report.passed).toBe(false)
     expect(out.report.issues).toContain('交付对象被改变')
     expect(out.report.issues.some(x=>x.includes('换了发言人仍重复纠偏'))).toBe(true)
+    expect(out.report.sceneIssues).toEqual([`${source}：换了发言人仍重复纠偏`])
+    expect(out.report.sceneIssues).not.toContain('交付对象被改变')
   })
 })

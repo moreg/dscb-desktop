@@ -122,6 +122,11 @@ describe('MobileBatchService: 电脑执行、可信恢复与写入安全', () =>
   it('正文检查点落盘后才返回给写后流程，并完整透传连续模式', async () => {
     generate.mockImplementation(async (_id, _from, _to, onChapter, _style, options, _state, run, onRetry) => {
       expect(run).toEqual({ autoContinue: true, autoStrength: true })
+      for (const stage of ['preparing', 'preparing:核对历史记忆', 'waiting'] as const) {
+        options!.onGenerationStage!(stage, 1)
+        expect((await service.get(projectId))?.stage).toBe('generating')
+        expect((await service.get(projectId))?.progress.completed).toEqual([])
+      }
       options!.onGenerationStage!('generating', 1)
       options!.onToken!('甲'.repeat(5_000))
       expect((await service.get(projectId))?.streamText).toHaveLength(4_000)

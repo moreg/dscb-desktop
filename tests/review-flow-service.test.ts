@@ -141,7 +141,7 @@ describe('ReviewFlowService.runDeepReview', () => {
     expect(prompt).toContain('第 2 章末才揭晓身份')
     expect(prompt).toContain('前章读者尚不知道他的真实身份')
     expect(prompt).toContain('资料缺失列未评估')
-    expect(prompt).toContain('整章直接对白字数目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(prompt).toContain('不因读到关联规则自动写正文')
     expect(out[0]).toMatchObject({ ruleId: 'spoiler', severity: 'error', offset: 0 })
   })

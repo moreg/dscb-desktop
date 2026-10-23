@@ -583,7 +583,9 @@ export class WriteService {
     tempContext?: string,
     existingText?: string,
     strictContext = false,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onPreparation?: (detail: string) => void,
+    onEndingPreparation?: (ready: Promise<void>) => void
   ): Promise<{
     system: string
     user: string
@@ -601,6 +603,7 @@ export class WriteService {
     if ((existingText?.trim().length ?? 0) > EXISTING_TEXT_MAX_CHARS) {
       throw new Error('CHAPTER_CONTEXT_TOO_LARGE')
     }
+    onPreparation?.('正在读取项目与前文')
     const dir = await this.projectService.resolveDir(projectId)
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const project = await this.projectService.getProjectData(projectId)
@@ -611,9 +614,10 @@ export class WriteService {
 
     // prevEndingState 只有写正文用得上，这里显式要
     const ctx = strictContext
-      ? await this.prepareWritingContext(projectId, chapterNumber, signal)
+      ? await this.prepareWritingContext(projectId, chapterNumber, signal, onPreparation, onEndingPreparation)
       : await this.loadChapterContext(dir, chapterNumber, { needEndingState: true })
 
+    onPreparation?.('正在组装细纲、前文与写作要求')
     const overrides = this.settings
       ? (await this.settings.get()).chapterRuleOverrides ?? {}
       : {}
@@ -676,7 +680,7 @@ export class WriteService {
       this.recallChapterEvidence(dir, chapterNumber, ctx, existingText, tempContext),
       buildContinuityContext(dir, chapterNumber, {
         text: [ctx.mainSynopsis, ctx.volumeOutline?.sections.map(s => s.body).join('\n'), ctx.detail?.plotSummary, ctx.detail?.writingRequirements, ctx.detail?.hook,
-          tempContext, existingText?.slice(-4000)].filter(Boolean).join('\n'),
+          tempContext, existingText?.slice(-4000), !ctx.prevEndingState ? ctx.prevTail : ''].filter(Boolean).join('\n'),
         characters: [...new Set([...(ctx.detail?.charactersAppearing ?? []),
           ...ctx.characters.filter(c => existingText?.includes(c.name)).map(c => c.name)])],
         aliases: ctx.characterAliases ?? [],
@@ -736,9 +740,16 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    const { autoStrength, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, ...llmOpts } = opts as ChapterGenerateOptions
+    const onGenerationStage = (stage: ChapterGenerationStage): void => {
+      if (!opts.signal?.aborted) reportStage?.(stage)
+    }
     throwIfAborted(opts.signal)
     this.invalidateChapterMemorySync(projectId, chapterNumber)
+    onGenerationStage?.('preparing:等待项目记忆同步完成')
     await this.memoryCoordinator.exclusive(projectId, async () => undefined)
+    const endingPreparations: Promise<void>[] = []
+    let endingError: unknown
     const prompt = await this.buildChapterPrompt(
       projectId,
       chapterNumber,
@@ -746,7 +757,9 @@ export class WriteService {
       opts.tempContext,
       opts.existingText,
       true,
-      opts.signal
+      opts.signal,
+      detail => onGenerationStage?.(`preparing:${detail}`),
+      ready => { endingPreparations.push(ready.catch(error => { endingError = error })) }
     ).catch((error: unknown) => {
       if (opts.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED')) throw error
       throw new Error(`WRITING_CONTEXT_MISSING: 写作上下文准备未完成。${(error as Error).message}`)
@@ -754,7 +767,6 @@ export class WriteService {
     const targetWords = prompt.targetWords ?? TARGET_WORDS
     // 让调用方（IPC → 前端）知道本次是不是「还没写完的续写」：
     // extend 下整章是半成品，写后自检的完成度类项不该按整章判死。
-    const { autoStrength, onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, ...llmOpts } = opts as ChapterGenerateOptions
     if (autoStrength) {
       const meta = (await this.chapterService.getChapter(projectId, chapterNumber)).meta
       const suggestion = suggestChapterStrength(meta)
@@ -769,14 +781,23 @@ export class WriteService {
       bound: prompt.wordTarget.bound
     })
     const savedBefore = await this.chapterService.getChapter(projectId, chapterNumber)
-    onGenerationStage?.('generating')
+    throwIfAborted(opts.signal)
+    onGenerationStage?.('waiting')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
-      onStatus: status => onGenerationStage?.(`agy:${status}`),
+      onStatus: status => {
+        llmOpts.onStatus?.(status)
+        onGenerationStage?.(`agy:${status}`)
+      },
       systemPrompt: prompt.system,
       maxTokens: opts.maxTokens ?? tokensForWords(targetWords),
       meta: { feature: 'chapter', projectId, chapterNumber }
-    }, opts.existingText)
+    }, opts.existingText, () => onGenerationStage?.('generating'))
+    // The preview may stream using the complete previous manuscript, but it cannot
+    // be saved or accepted until the parallel continuity extraction has settled.
+    await Promise.all(endingPreparations)
+    if (endingError) throw endingError
+    throwIfAborted(opts.signal)
     // 批量/手机端拿返回值，编辑器拿流式token；两条路径都只保留正文。
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
     await this.validateGeneratedProse(projectId, chapterNumber, prose, opts.existingText)
@@ -1146,9 +1167,15 @@ export class WriteService {
     confirmedPlan?: string | null
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
+    const { onPromptMeta: _onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, ...llmOpts } = opts as ChapterGenerateOptions
+    const onGenerationStage = (stage: ChapterGenerationStage): void => {
+      if (!opts.signal?.aborted) reportStage?.(stage)
+    }
     throwIfAborted(opts.signal)
     this.invalidateChapterMemorySync(projectId, chapterNumber)
+    onGenerationStage?.('preparing:等待项目记忆同步完成')
     await this.memoryCoordinator.exclusive(projectId, async () => undefined)
+    onGenerationStage?.('preparing:正在读取正文、细纲与修改要求')
     const savedBefore = await this.chapterService.getChapter(projectId, chapterNumber)
     const prompt = await this.buildAdjustChapterPrompt(
       projectId,
@@ -1158,8 +1185,8 @@ export class WriteService {
       styleProfileId,
       confirmedPlan
     )
-    const { onPromptMeta: _onPromptMeta, onGenerationStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, ...llmOpts } = opts as ChapterGenerateOptions
-    onGenerationStage?.('generating')
+    throwIfAborted(opts.signal)
+    onGenerationStage?.('waiting')
     const full = await this.generateProseStream(prompt.user, {
       ...llmOpts,
       onStatus: status => {
@@ -1171,7 +1198,7 @@ export class WriteService {
         opts.maxTokens ??
         tokensForWords(Math.min(MAX_TARGET_WORDS, Math.max(TARGET_WORDS, content.length))),
       meta: { feature: 'chapter-adjust', projectId, chapterNumber }
-    })
+    }, undefined, () => onGenerationStage?.('generating'))
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
     await this.validateGeneratedProse(projectId, chapterNumber, prose)
     await markLongformPending(await this.projectService.resolveDir(projectId), chapterNumber, hashProse(prose))
@@ -1204,7 +1231,8 @@ export class WriteService {
   private async generateProseStream(
     userPrompt: string,
     opts: GenerateOptions,
-    existingText?: string
+    existingText?: string,
+    onFirstToken?: () => void
   ): Promise<string> {
     const controller = new AbortController()
     const onUserAbort = (): void => {
@@ -1217,6 +1245,7 @@ export class WriteService {
 
     let accumulated = ''
     let metaHit = false
+    let started = false
     const userOnToken = opts.onToken
 
     try {
@@ -1231,6 +1260,10 @@ export class WriteService {
             // 不把旁白 token 继续喂给 UI；已喂出的由前端失败回滚清掉
             if (!controller.signal.aborted) controller.abort()
             return
+          }
+          if (!started && !controller.signal.aborted && token.trim()) {
+            started = true
+            onFirstToken?.()
           }
           userOnToken?.(token)
         }
@@ -3819,7 +3852,7 @@ export class WriteService {
       `- **"改写"成品必须自身去 AI 味**，按叙事用途处理套路，不把一种微动作替换成另一种。`,
       `- 仿佛、缓缓、眼中闪过、嘴角勾起、不是A，而是B 等用于定位具体问题，不按词频逐词禁用；必要心理判断可直接保留，不强制外化。`,
       `- 改写必须保持说话人、事件顺序、视角、已知信息、情绪、关系和结果；不新增提问、承诺、反转或情节。少写无用途环境、重复心理和发声解说，不删掉关键行动与因果。`,
-      `- 整章对白目标 70%，仅完整章按有效字数观察；润色保持事实与篇幅，不为占比新增问答、删掉必要台词或把旁白套引号。`,
+      `- 对白与叙述按场景需要安排，不设强制比例；润色保持事实与篇幅，不为占比新增问答、删掉必要台词或把旁白套引号。`,
       `- 不要客套话、不要总评/前言/标题、不要打分、不要 Markdown 标记。`,
       ``,
       `------ 第 ${chapterNumber} 章 正文 ------`,
@@ -4147,7 +4180,7 @@ export class WriteService {
     ).map((c) => c.name)
     return new ProseMemoryIndex(dir).searchBefore(chapterNumber, {
       text: [ctx.detail?.plotSummary, ctx.detail?.hook, ctx.detail?.writingRequirements,
-        instruction, existingText.slice(-2000)].filter(Boolean).join('\n'),
+        instruction, existingText.slice(-2000), !ctx.prevEndingState ? ctx.prevTail : ''].filter(Boolean).join('\n'),
       characters: [...new Set([...activeNames, ...appearing])],
       characterAliases: ctx.characterAliases,
       props: ctx.prevEndingState?.props ?? [],
@@ -4159,7 +4192,9 @@ export class WriteService {
   }
 
   /** Recover missing context before writing; disk errors retry without starting the next chapter. */
-  private async prepareWritingContext(projectId: string, chapterNumber: number, signal?: AbortSignal): Promise<ChapterContext> {
+  private async prepareWritingContext(projectId: string, chapterNumber: number, signal?: AbortSignal,
+    onPreparation?: (detail: string) => void,
+    onEndingPreparation?: (ready: Promise<void>) => void): Promise<ChapterContext> {
     const dir = await this.projectService.resolveDir(projectId)
     let lastError: unknown
     for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS; attempt++) {
@@ -4167,8 +4202,9 @@ export class WriteService {
       try {
         // Each chapter sees author edits even when filesystem timestamps collide.
         invalidateMemoryProject(dir)
-        await this.completeWritingContext(projectId, dir, chapterNumber, signal)
-        const context = await this.loadChapterContext(dir, chapterNumber, { needEndingState: true, strict: true, signal })
+        await this.completeWritingContext(projectId, dir, chapterNumber, signal, onPreparation, onEndingPreparation)
+        onPreparation?.('正在加载写作记忆与前文')
+        const context = await this.loadChapterContext(dir, chapterNumber, { needEndingState: !onEndingPreparation, strict: true, signal })
         throwIfAborted(signal)
         return context
       } catch (error) {
@@ -4180,7 +4216,10 @@ export class WriteService {
     throw new Error(`WRITING_CONTEXT_MISSING: 自动补齐上下文仍未完成：${(lastError as Error).message}`)
   }
 
-  private async completeWritingContext(projectId: string, dir: string, chapterNumber: number, signal?: AbortSignal): Promise<void> {
+  private async completeWritingContext(projectId: string, dir: string, chapterNumber: number, signal?: AbortSignal,
+    onPreparation?: (detail: string) => void,
+    onEndingPreparation?: (ready: Promise<void>) => void): Promise<void> {
+    onPreparation?.('正在检查历史审核状态与衔接正文')
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const outlines = new DetailedOutlineMdRepo(dir)
     const prose = new ProseRepo(dir)
@@ -4199,12 +4238,34 @@ export class WriteService {
         // Both operations read the same saved prose; neither consumes the other's
         // output. Do not serialize two model calls before the first prose token.
         const prevTail = tail(previous, PREV_TAIL_CHARS)
+        const pending = new Set(['前章长期核对与概要', '上章结尾状态'])
+        let reporting = true
+        const reportPending = (): void => {
+          if (reporting && !signal?.aborted && pending.size) {
+            onPreparation?.(`正在准备：${[...pending].join('、')}`)
+          }
+        }
+        const reportDone = <T>(label: string, result: T): T => {
+          pending.delete(label)
+          reportPending()
+          return result
+        }
+        reportPending()
+        const endingTask = this.getEndingStateCached(dir, chapterNumber, prevTail, signal).then(state => {
+          if (!state) this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), emptyEndingState(chapterNumber - 1))
+          return reportDone('上章结尾状态', state)
+        })
+        if (onEndingPreparation) onEndingPreparation(endingTask.then(async () => {
+          throwIfAborted(signal)
+          if (await prose.read(chapterNumber - 1) !== previous) throw new Error('LONGFORM_CONTEXT_CHANGED: 生成期间前章正文已变化，本次不保存或同步记忆。')
+        }))
         const [summary, endingState] = await Promise.all([
-          this.completeChapterSummary(projectId, dir, chapterNumber - 1, previous, signal),
-          this.getEndingStateCached(dir, chapterNumber, prevTail, signal)
-        ])
+          this.completeChapterSummary(projectId, dir, chapterNumber - 1, previous, signal)
+            .then(result => reportDone('前章长期核对与概要', result)),
+          onEndingPreparation ? Promise.resolve(undefined) : endingTask
+        ]).finally(() => { reporting = false })
         throwIfAborted(signal)
-        if (!endingState) {
+        if (!onEndingPreparation && !endingState) {
           // Match strict context loading: keep the original prose as fallback,
           // without launching another three extraction retries immediately.
           this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), emptyEndingState(chapterNumber - 1))
@@ -4216,10 +4277,12 @@ export class WriteService {
       } else {
         // A lost manuscript is never recreated as historical fact. Fill the plan,
         // then explicitly label its source in the prompt instead of claiming full prose.
+        onPreparation?.('正在恢复前章衔接资料')
         await this.completeChapterOutline(projectId, dir, chapterNumber - 1, '', signal)
         previous = await this.previousContextFallback(dir, chapterNumber - 1)
       }
     }
+    onPreparation?.('正在检查并补齐本章细纲')
     await this.completeChapterOutline(projectId, dir, chapterNumber, previous, signal)
   }
 
@@ -4444,7 +4507,7 @@ export class WriteService {
       // 上一章结尾状态结构化提取（Phase 12 Task 1）
       // 这是一次完整 LLM 调用，只有写正文的 renderUserPrompt 用得到；
       // 「按要求重写 / 出建议 / 追问」都不读它，故默认不跑（见 needEndingState）。
-      let prevEndingState: PrevEndingState | undefined
+      let prevEndingState: PrevEndingState | undefined = this.peekEndingState(dir, chapterNumber, prevTail)
       if (opts?.needEndingState && prevTail) {
         prevEndingState = await this.getEndingStateCached(dir, chapterNumber, prevTail, opts.signal)
         if (opts.strict && !prevEndingState) {
@@ -4452,7 +4515,7 @@ export class WriteService {
           this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), prevEndingState)
         }
       }
-      if (opts?.strict && chapterNumber > 1 && !prevEndingState) {
+      if (opts?.strict && opts.needEndingState && chapterNumber > 1 && !prevEndingState) {
         prevEndingState = emptyEndingState(chapterNumber - 1)
         this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), prevEndingState)
         this.endingStateExtractionFailures.add(this.endingStateKey(dir, chapterNumber, prevTail))
@@ -5195,7 +5258,7 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(`下笔前先自检一次：正文是否已经逐条落实上面的【本章硬性写作要求】（在不违背临时写作要求的前提下）。如果没有，先补足再输出。`)
   }
   parts.push('只输出小说正文，不附记忆回执、规划表或自检报告。')
-  parts.push('【本次表达与推进方式】\n整章直接对白字数目标 70%，续写合并只读前部观察整章，短片段不单独验收比例；按人物处境安排有效对白、行动与叙述。保留有效交锋和必要因果，避免重复解释、机械确认或让角色解说自己的动作。续写保留只读前部，不为调整占比重写或扩写。')
+  parts.push('【本次表达与推进方式】\n对白与叙述按场景需要安排，不设强制比例，作者指定的项目比例仅供参考；按人物处境安排有效对白、行动与叙述。保留有效交锋和必要因果，避免重复解释、机械确认或让角色解说自己的动作。续写保留只读前部，不为调整占比重写或扩写。')
   return parts.join('\n\n')
 }
 

@@ -22,6 +22,8 @@ import type {
 import { isProjectArchived } from '../../shared/types'
 import { toFolderName } from './folder-name'
 import { extractProjectPackage, writeProjectPackage } from './project-package'
+import { writeProseImport, type ProseImportPlan } from './prose-import'
+import type { ProseImportResult } from '../../shared/prose-import'
 
 export { toFolderName } from './folder-name'
 
@@ -239,6 +241,17 @@ export class ProjectService {
     const found = listed.find((project) => samePath(project.path, dir))
     if (!found) throw new Error('导入完成，但书架没有找到这本小说')
     return found
+  }
+
+  async importProse(name: string, plan: ProseImportPlan): Promise<ProseImportResult> {
+    const root = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
+    const dir = await writeProseImport(root, name, plan)
+    const projects = await this.scanProjects().catch((error: unknown) => {
+      throw new Error(`正文已保存到 ${dir}，书架登记失败，请点击扫描项目。`, { cause: error })
+    })
+    const project = projects.find(item => samePath(item.path, dir))
+    if (!project) throw new Error(`正文已保存到 ${dir}，书架登记失败，请点击扫描项目。`)
+    return { project, importedCount: plan.chapters.length, pendingCount: plan.preview.issues.length }
   }
 
   async scanProjects(): Promise<ProjectMeta[]> {

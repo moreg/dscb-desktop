@@ -1,3 +1,4 @@
+import ChapterDetectionDialog from './ChapterDetectionDialog'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
@@ -787,6 +788,7 @@ export default function ChapterEditor({
   ).length
   // 正文历史版本弹窗（保留最近5个版本，倒序排列）
   const [showVersionsDialog, setShowVersionsDialog] = useState(false)
+  const [showDetectionDialog, setShowDetectionDialog] = useState(false)
   // 正文追问（chat）：全书视野回答写作疑问，不修改正文
   const [showAskDialog, setShowAskDialog] = useState(false)
   const [askQuestion, setAskQuestion] = useState('')
@@ -2009,7 +2011,7 @@ export default function ChapterEditor({
     setGenerationRetry(null)
     generationContextRef.current = tempContextVal
     generationPreviewRef.current = ''
-    setGenerationStage('generating')
+    setGenerationStage('preparing')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
     setAutoForeshadowRepair(null)
@@ -2356,7 +2358,7 @@ export default function ChapterEditor({
     setAdjustPlanning(false)
     setAdjusting(true)
     foreshadowCheckContextRef.current = null
-    setGenerationStage('generating')
+    setGenerationStage('preparing')
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
     setAutoForeshadowRepair(null)
@@ -4788,6 +4790,9 @@ export default function ChapterEditor({
         >
           {saving ? '保存中…' : dirty ? '保存 ·' : '已存'}
         </button>
+        <button className="btn btn-sm" onClick={() => setShowDetectionDialog(true)} title="逐章保存送检全文、登记朱雀结果并校验正文版本">
+          朱雀复测记录
+        </button>
         <button
           className="btn btn-sm"
           onClick={() => setShowVersionsDialog(true)}
@@ -4865,7 +4870,7 @@ export default function ChapterEditor({
             adjusting ||
             adjustPlanning
           }
-          title="扫描并清除 AI 写作痕迹（禁用词/句式/心理描写/破折号/升华句）"
+          title="检查重复表达、句式和叙事问题，保留合法标点与剧情事实"
         >
           {deslopScanning ? '词句与场景检查中…' : '🧹 去 AI 味'}
         </button>
@@ -6912,6 +6917,8 @@ export default function ChapterEditor({
           </div>
         </div>
       ) : null}
+      {showDetectionDialog && <ChapterDetectionDialog key={`${projectId}:${chapterNumber}`} projectId={projectId}
+        chapterNumber={chapterNumber} draft={draft} dirty={dirty} onClose={() => setShowDetectionDialog(false)} />}
       <ChapterVersionsDialog
         projectId={projectId}
         chapterNumber={chapterNumber}

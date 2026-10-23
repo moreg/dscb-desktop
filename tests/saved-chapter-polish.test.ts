@@ -219,14 +219,14 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
     expect(await service.getChapterSummary(projectId, 1, RAW)).toBeNull()
   })
 
-  it('实际精修链将排版引起的动作顺序变化放在事实核验之前，保存稿就是核验稿', async () => {
+  it('实际精修链保留动作顺序，保存稿就是核验稿', async () => {
     vi.mocked((service as unknown as PolishHarness).autoDeslopGeneratedProse).mockRestore()
     const before = '“先核对印章。”林远把账册摊开，“再打开院门。”\r\n\r\n' + RAW
     await chapters.updateContent(projectId, 1, before)
     vi.mocked(llm.generateStream).mockResolvedValue('{"unchanged":true,"issues":[]}')
     const result = await run({}, 1, 1).task
     const formatted = formatChapterProse(before)
-    expect(formatted.indexOf('林远把账册摊开')).toBeLessThan(formatted.indexOf('先核对印章'))
+    expect(formatted.indexOf('林远把账册摊开')).toBeGreaterThan(formatted.indexOf('先核对印章'))
     expect(llm.generateStream).toHaveBeenCalledWith(expect.stringContaining('【润色稿】\n\n' + formatted),
       expect.objectContaining({ meta: expect.objectContaining({ feature: 'deslop:verify' }) }))
     expect((await chapters.getChapter(projectId, 1)).content).toBe(formatted)
@@ -277,8 +277,9 @@ describe('已有正文批量精修：保存、概要、并发和取消', () => {
         : JSON.stringify({ unchanged: false, issues: ['原稿先说核对印章再摊开账册，排版稿将摊开动作前移'] }))
     const result = await run({}, 1, 1).task
     expect(result.results[0]).toMatchObject({ changed: false, autoDeslop: { status: 'review_required', repairAttempts: 0 } })
-    expect(llm.generateStream).toHaveBeenCalledWith(expect.stringContaining('建立保真清单'),
-      expect.objectContaining({meta:expect.objectContaining({feature:'deslop:repair-plan'})}))
+    const features=vi.mocked(llm.generateStream).mock.calls.map(([,opts])=>opts?.meta?.feature)
+    expect(features.filter(feature=>feature==='deslop:repair-plan')).toHaveLength(1)
+    expect(features).not.toContain('deslop:scene-repair')
     expect((await chapters.getChapter(projectId, 1)).content).toBe(before)
     expect(service.generateChapterSummary).not.toHaveBeenCalled()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()

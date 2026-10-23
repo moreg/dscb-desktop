@@ -1,3 +1,5 @@
+import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from './prose-import'
+import type { ChapterDetectionHistory, ChapterDetectionRecord, DetectionResultInput } from './chapter-detection'
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
 import type { AppUpdateState } from './app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from './long-story-brainstorm'
@@ -472,7 +474,7 @@ export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
 export type AgyGenerationStatus = 'queued' | 'waiting' | 'streaming' | 'retrying'
-export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}` | `continuity:${string}`
+export type ChapterGenerationStage = 'preparing' | `preparing:${string}` | 'waiting' | 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}` | `continuity:${string}`
 export interface PostWriteProgress {
   stage: 'outline' | 'generate' | 'review' | 'verify' | 'dialogue' | 'finalCheck' | 'selfCheck' | 'extract' | 'deepReview' | 'evidence' | 'plantEvidence' | 'writeMemory' | 'writeSettings' | 'summary'
   round?: number
@@ -489,6 +491,8 @@ export interface AutoForeshadowRepairResult {
 export interface DialogueQualityReport {
   /** 未通过的候选稿，仅供继续修订与核对；不得当成通过正文自动采用。 */
   pendingDraft?: string
+  /** 独立场景审核的原始问题，供跨轮复核；不混入事实差异。 */
+  sceneIssues?: string[]
   passed: boolean
   beforeRatio: number
   afterRatio: number
@@ -606,6 +610,9 @@ export interface RendererApi {
   exportProjectPackage: (projectId: string) => Promise<{ canceled: boolean; path?: string }>
   /** 从小说包恢复一本小说到桌面版书架。用户取消选择文件时 canceled 为 true。 */
   importProjectPackage: () => Promise<{ canceled: boolean; project?: ProjectMeta }>
+  previewProseImport: (request: ProseImportRequest) => Promise<ProseImportPreview | null>
+  commitProseImport: (token: string, name: string) => Promise<ProseImportResult>
+  cancelProseImport: () => Promise<void>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
   /** 更新小说名称和简介；不改项目目录，避免破坏工作区路径。 */
@@ -647,6 +654,9 @@ export interface RendererApi {
   ) => Promise<ProjectData>
   /** 选择本地文本文件用于文风提取，返回文件内容和文件名 */
   selectTextFile: () => Promise<SelectedTextFile[] | null>
+  listChapterDetections: (id: string, n: number) => Promise<ChapterDetectionHistory>
+  captureChapterDetection: (id: string, n: number, content: string) => Promise<ChapterDetectionRecord>
+  recordChapterDetection: (id: string, n: number, recordId: string, input: DetectionResultInput) => Promise<ChapterDetectionRecord>
   listChapters: (projectId: string) => Promise<ChapterMeta[]>
   getChapter: (projectId: string, n: number) => Promise<ChapterContent>
   createChapter: (projectId: string, input: CreateChapterInput) => Promise<ChapterMeta>

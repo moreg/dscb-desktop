@@ -1,0 +1,16 @@
+.chapter-detection-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.chapter-detection-dialog input,
+.chapter-detection-dialog select,
+.chapter-detection-dialog textarea {
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 8px;
+  font: inherit;
+  max-width: 100%;
+}
+.chapter-detection-dialog select { max-width: min(590px, 100%); }
+.chapter-detection-dialog fieldset { border: 1px solid var(--line); border-radius: 8px; }
+.chapter-detection-dialog pre { overflow-wrap: anywhere; }
+.chapter-detection-dialog summary { cursor: pointer; }

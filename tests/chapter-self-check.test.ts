@@ -162,16 +162,11 @@ describe('evaluateChapterSelfCheck', () => {
 
     // 标点归标点、痕迹归痕迹：破折号是「守则第 9 条没照做」，不是 AI 味判断，
     // 而且可确定性替换。混成一条时用户无从知道哪个能一键改、哪个要动笔。
-    it('破折号进 punctuation_rule，不进 ai_tells', () => {
-      const t = '第一行没问题。\n他想说什么——话到嘴边又咽了回去。'
-      expect(punct(t)?.verdict).toBe('warn')
-      expect(punct(t)?.detail).toContain('第 2 行')
-      expect(punct(t)?.detail).toContain('确定性替换')
-      expect(tell(t)?.verdict).toBe('pass')
-    })
-
-    it('省略号同样进 punctuation_rule', () => {
-      expect(punct('他愣住了……半天没说话。')?.verdict).toBe('warn')
+    it('合法破折号、省略号不作为违规或AI痕迹', () => {
+      const text = '第一行没问题。\n他想说什么——话到嘴边又咽了回去。'
+      expect(punct(text)?.verdict).toBe('pass')
+      expect(tell(text)?.verdict).toBe('pass')
+      expect(punct('他愣住了……半天没说话。')?.verdict).toBe('pass')
     })
 
     it('道具停止式进 ai_tells（全系统唯一 AI 多于真人的规则）', () => {
@@ -182,7 +177,7 @@ describe('evaluateChapterSelfCheck', () => {
     })
 
     it('两类同时出现时各报各的行号', () => {
-      const t = '他手里的算盘停了。\n他想说什么——又忍住了。'
+      const t = '他手里的算盘停了。\n“他……我……算了……”'
       expect(tell(t)?.detail).toContain('第 1 行')
       expect(punct(t)?.detail).toContain('第 2 行')
     })

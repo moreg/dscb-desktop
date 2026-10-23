@@ -1,131 +1,26 @@
-/**
- * 章节正文格式化：
- * - 去掉汉字间与行首尾的多余空白；英文词间空白归一为空格
- * - 去掉空行（连续换行压成单个换行）
- * - 叙述一句一段，对话独立成段，多句台词拆成引号完整的段落
- * - 对话引号内不用中文句号（含闭合前），保留问号、叹号和英文标点
- *
- * 保持清理汉字空格与单换行的产品策略，但不把英文短语粘成一个词。
- */
+/** 最小正文排版：清理多余空白，保留语意段落、句末标点和事件顺序。 */
 import { stripPublishedChapterRefs } from './strip-chapter-meta'
 
 const LATIN_SPACE_NEIGHBOR = /[\p{Script=Latin}\p{M}0-9.,!?;:'"“”‘’–—…()[\]{}@#%&+/\\=<>_-]/u
 
-/**
- * 将同一人台词中间被动作打断的句式重构为规范网文排版：
- * “不是今晚才沾上的。”朴博士把图像放大，“旧切片里就有主毒……”
- * 转换为：
- * 朴博士把图像放大。
- * “不是今晚才沾上的。”
- * “旧切片里就有主毒……”
- */
+/** 保留旧调用接口。动作位置属于叙事事实，格式化不得搬动动作。 */
 export function separateDialogueInterruption(text: string): string {
-  if (!text) return text
-  const lines = text.split('\n')
-  const out: string[] = []
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    // 匹配单行内“台词1”动作“台词2”的夹塞动作结构
-    const m = trimmed.match(/^([“"「])([^”"」\n]+?)([”"」])\s*([^“”"「」\n]{1,60}?)\s*([“"「])([^”"」\n]+?)([”"」])$/)
-    if (m) {
-      const openQ = m[1]
-      const closeQ = m[3]
-      const rawQ1 = m[2]
-      let action = m[4].trim().replace(/^[，,：:\s]+|[，,：:\s]+$/g, '')
-      if (action && !/[。！？…~～]$/.test(action)) action += '。'
-
-      const q2 = m[6]
-
-      if (action) {
-        out.push(action)
-      }
-      out.push(`${openQ}${rawQ1}${closeQ}`, `${m[5]}${q2}${m[7]}`)
-    } else {
-      out.push(line)
-    }
-  }
-
-  return out.join('\n')
-}
-
-/** 只在顶层句末断段，保留嵌套引文、括号与连续问叹号的完整性。 */
-function splitSentences(text: string): string[] {
-  const pairs: Record<string, string> = { '“': '”', '「': '」', '『': '』', '‘': '’', '"': '"', '（': '）', '(': ')' }
-  const stack: string[] = []
-  const sentences: string[] = []
-  let start = 0
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]
-    if (stack.length && char === stack[stack.length - 1]) stack.pop()
-    else if (pairs[char]) stack.push(pairs[char])
-    if (!stack.length && /[。！？!?]/.test(char)) {
-      while (i + 1 < text.length && /[。！？!?]/.test(text[i + 1])) i++
-      sentences.push(text.slice(start, i + 1).trim())
-      start = i + 1
-    }
-  }
-  if (text.slice(start).trim()) sentences.push(text.slice(start).trim())
-  return sentences.filter(Boolean)
-}
-
-function formatSentenceParagraphs(text: string): string {
-  const paragraphs: string[] = []
-  // 模型可能把一对完整引号跨行输出，先补齐各行引号，再统一断句。
-  const completeLines = text.replace(/“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"/g, (quote) => {
-    if (!quote.includes('\n')) return quote
-    const open = quote[0]
-    const close = quote.slice(-1)
-    return quote.slice(1, -1).split('\n').filter((line) => line.trim())
-      .map((line) => `${open}${line}${close}`).join('\n')
-  })
-  for (const line of completeLines.split('\n')) {
-    // 双引号内是台词；保留单引号嵌套引文。未闭合台词留给续写，不补造结尾。
-    const quotes = /“([^”]*)”|「([^」]*)」|『([^』]*)』|"([^"\n]*)"/g
-    let start = 0
-    for (const match of line.matchAll(quotes)) {
-      const prefix = line.slice(start, match.index)
-      const body = match[1] ?? match[2] ?? match[3] ?? match[4]
-      const suffix = line.slice(match.index! + match[0].length)
-      // 叙述中用引号标出的词语不当作独立发言。
-      if (!/[。！？!?]/.test(body) && /^(?:字|词|[一二三四五六七八九十两几]+个?字|一词|这(?:个词|[一二三四五六七八九十两几]+个字))/.test(suffix.trim())) continue
-      if (prefix.trim() && suffix.trim() && !/[。！？!?]/.test(body) &&
-          !/[：:]$/.test(prefix.trim()) && !/(?:说|问|喊|道|答)$/.test(prefix.trim())) continue
-      if (prefix.trim()) paragraphs.push(...splitSentences(prefix.trim()))
-      const open = match[0][0]
-      const close = match[0].slice(-1)
-      for (const sentence of splitSentences(body)) {
-        const content = sentence.replace(/。/g, '').trim()
-        if (content) paragraphs.push(`${open}${content}${close}`)
-      }
-      start = match.index! + match[0].length
-    }
-    if (line.slice(start).trim()) paragraphs.push(...splitSentences(line.slice(start).trim()))
-  }
-  return paragraphs.join('\n')
+  return text
 }
 
 export function formatChapterProse(text: string): string {
   if (!text) return text
   const normalized = text
-    // 统一换行
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    // 汉字间去空白；英文词、数字与英文标点之间保留一个分词空格。
+    .replace(/\r\n?/g, '\n')
     .replace(/[^\S\n]+/g, (space, offset: number, input: string) => {
       const left = input[offset - 1] ?? ''
       const right = input[offset + space.length] ?? ''
       return LATIN_SPACE_NEIGHBOR.test(left) && LATIN_SPACE_NEIGHBOR.test(right) ? ' ' : ''
     })
-    // 连续空行压成单行换行
-    .replace(/\n{2,}/g, '\n')
-    // 去掉首尾空行
-    .replace(/^\n+/, '')
-    .replace(/\n+$/, '')
-
-  const proseWithDialogue = separateDialogueInterruption(normalized)
-  // 空白收干净之后再认章号：「第 9 章」会先变成「第9章」。
-  return formatSentenceParagraphs(stripPublishedChapterRefs(proseWithDialogue))
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  // 保留既有的误入正文章号清理；不按句号拆段，也不补造或删去台词标点。
+  return stripPublishedChapterRefs(normalized)
 }
 
 /**
@@ -149,9 +44,9 @@ export function joinContinuation(base: string, addition: string): string {
   if (!addition.trim()) return base
   const left = base.replace(/\s+$/, '')
   const right = addition.replace(/^\s+/, '')
-  // 原文本就以换行结尾 → 作者已经手动分段，尊重它
+  // 只在本次新增段落的接缝留一个空行，不重排前文已有段落。
   const endedWithNewline = /\n[^\S\n]*$/.test(base)
-  if (endedWithNewline || SENTENCE_END_RE.test(left)) return left + '\n' + right
+  if (endedWithNewline || SENTENCE_END_RE.test(left)) return left + '\n\n' + right
   // 若模型在英文词间断开，接缝上已有的分词空格不能随 trim 一起丢掉。
   if ((/[^\S\n]$/.test(base) || /^[^\S\n]/.test(addition)) &&
     LATIN_SPACE_NEIGHBOR.test(left.slice(-1)) && LATIN_SPACE_NEIGHBOR.test(right[0])) {

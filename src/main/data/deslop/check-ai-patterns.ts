@@ -279,39 +279,14 @@ function scanProsePatterns(proseLines: ProseLine[]): DeslopFinding[] {
     const trimmed = text.trim()
     if (!trimmed || isDivider(trimmed) || isStructural(trimmed)) continue
 
-    // em-dash（破折号，blocking）
-    const dashRe = /——|—|--+/g
-    let dash: RegExpExecArray | null
-    while ((dash = dashRe.exec(text)) !== null) {
+    // 合法的停顿、中断不构成错误；密集使用只作语境复核提示。
+    const pauses = [...text.matchAll(/——|……/g)]
+    if (pauses.length >= 3) {
       findings.push({
-        line: lineNo,
-        column: dash.index + 1,
-        type: 'em-dash',
-        severity: 'blocking',
-        gate: 'D',
-        message: '破折号按功能改写：打断→动作 beat/短句，拖长音→省略或动作，插入说明→逗号/冒号；勿一律改句号。',
-        excerpt: compact(text.slice(Math.max(0, dash.index - 8), dash.index + dash[0].length + 8))
-      })
-    }
-
-    // ellipsis（省略号，advisory）
-    // 铁律 9 明令正文禁用 ……/…，normalize-punctuation 也会机械替换成句号；
-    // 但若这里不产出 finding，「只有省略号问题」的正文会扫出 0 条 —— 扫描报告显示"无问题"、
-    // 前端「开始润色」按钮因 findings.length === 0 被禁用，用户根本没法清理。
-    // 用 advisory 而非 blocking：修复是确定性的（不需要 LLM 复扫清零），只需把 Gate D 纳入处理范围。
-    const ellipsisRe = /……|…/g
-    let ellipsis: RegExpExecArray | null
-    while ((ellipsis = ellipsisRe.exec(text)) !== null) {
-      findings.push({
-        line: lineNo,
-        column: ellipsis.index + 1,
-        type: 'ellipsis',
-        severity: 'advisory',
-        gate: 'D',
-        message: '省略号停顿：正文禁用 ……/…；改用句号、逗号、短句或动作断句（未改写的会由标点兜底替换为句号）。',
-        excerpt: compact(
-          text.slice(Math.max(0, ellipsis.index - 8), ellipsis.index + ellipsis[0].length + 8)
-        )
+        line: lineNo, column: pauses[0].index! + 1,
+        type: 'punctuation-density', severity: 'advisory', gate: 'D',
+        message: '本段停顿符号较密：结合语意复核，真实省略与打断保留，不机械替换。',
+        excerpt: compact(text)
       })
     }
 
@@ -457,6 +432,11 @@ function scanBannedWords(
     for (const word of words) {
       let idx = text.indexOf(word)
       while (idx !== -1) {
+        // “几分钟” is a duration, not the vague emotional qualifier “几分”.
+        if (word === '几分' && /^(?:钟|钱|之一|利息|熟)/.test(text.slice(idx + word.length))) {
+          idx = text.indexOf(word, idx + word.length)
+          continue
+        }
         findings.push({
           line: lineNo,
           column: idx + 1,

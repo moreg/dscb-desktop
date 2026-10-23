@@ -1749,7 +1749,7 @@ function BatchWriteDialog({
     setStopping(false)
     setError(null)
     setStreamingText('')
-    setGenerationStage('generating')
+    setGenerationStage('preparing')
     setLiveAutoDeslop(null)
     setRetryWait(null)
     setLiveCompleted(completed)
@@ -2190,7 +2190,7 @@ function BatchWriteDialog({
             <div className="batch-streaming-head">
               {isDeslopStage(generationStage)
                 ? `生成原稿已保存 · ${deslopProgressLabel(generationStage)}`
-                : generationStage === null ? '正文预览，正在写后检查…' : '正在生成…'}
+                : generationStage === null ? '正文预览，正在写后检查…' : generationProgressLabel(generationStage)}
             </div>
             <pre className="batch-streaming-text">{streamingText}</pre>
           </div>

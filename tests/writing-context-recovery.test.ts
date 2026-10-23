@@ -15,6 +15,7 @@ import { ChapterSummaryRepo } from '../src/main/data/memory/chapter-summary-repo
 import { TrackingMdRepo } from '../src/main/data/skill-format/tracking-md-repo'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
+import type { ChapterGenerationStage } from '../src/shared/types'
 
 const previous = '师父把钥匙交给林远，让他守在山门。林远接住钥匙，留在门边等候。'
 const ending = { chapterNumber: 1, characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] }
@@ -42,6 +43,11 @@ async function plan(number: number, summary = '林远核对来客') {
   await new OutlineRepository(dir).upsertDetailed({ chapterNumber: number, plotSummary: summary })
 }
 function chapterPrompt(): string { return generate.mock.calls.find(call => call[1]?.meta?.feature === 'chapter')![0] }
+function deferred(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void
+  const promise = new Promise<void>(resolve => { release = resolve })
+  return { promise, release }
+}
 
 describe('automatic writing context recovery', () => {
   it('reviews the previous chapter only once when rebuilding its summary, including CLI routes without cache identity', async () => {
@@ -75,6 +81,128 @@ describe('automatic writing context recovery', () => {
     } finally { release() }
     await preparation
     expect(WriteFlowService.prototype.extractEndingState).toHaveBeenCalledTimes(1)
+  })
+
+  it('overlaps ending extraction with prose using complete source, but waits before saving', async () => {
+    await plan(1)
+    await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    const summaryGate = deferred()
+    const endingGate = deferred()
+    const chapterStarted = deferred()
+    const chapterGate = deferred()
+    const stages: ChapterGenerationStage[] = []
+    const tokens: string[] = []
+    const onProseGenerated = vi.fn()
+    let sendToken!: (token: string) => void
+    const original = generate.getMockImplementation()!
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapterSummary') await summaryGate.promise
+      if (opts?.meta?.feature === 'chapter') {
+        sendToken = opts.onToken
+        chapterStarted.release()
+        await chapterGate.promise
+      }
+      return original(prompt, opts)
+    })
+    vi.mocked(WriteFlowService.prototype.extractEndingState).mockImplementation(async () => {
+      await endingGate.promise
+      return ending
+    })
+    const generation = service.generateChapterStream(id, 2, {
+      onGenerationStage: stage => stages.push(stage),
+      onToken: token => tokens.push(token), onProseGenerated
+    })
+    const expectStillPreparing = (): void => {
+      expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapter')).toBe(false)
+      expect(stages).not.toContain('waiting')
+      expect(stages).not.toContain('generating')
+    }
+    try {
+      await vi.waitFor(() => {
+        expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapterSummary')).toBe(true)
+        expect(WriteFlowService.prototype.extractEndingState).toHaveBeenCalledTimes(1)
+      })
+      expect(stages.at(-1)).toBe('preparing:正在准备：前章长期核对与概要、上章结尾状态')
+      expectStillPreparing()
+
+      summaryGate.release()
+      await chapterStarted.promise
+      expect(chapterPrompt()).toContain(previous)
+      expect(stages.at(-1)).toBe('waiting')
+      expect(stages).not.toContain('generating')
+      sendToken('')
+      sendToken(' \n')
+      expect(stages.at(-1)).toBe('waiting')
+      sendToken('林远抬起手，')
+      sendToken('示意来客在门外等候。')
+      expect(stages.at(-1)).toBe('generating')
+      expect(stages.filter(stage => stage === 'generating')).toHaveLength(1)
+      expect(tokens).toEqual(['', ' \n', '林远抬起手，', '示意来客在门外等候。'])
+      chapterGate.release()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(onProseGenerated).not.toHaveBeenCalled()
+      expect(await new ProseRepo(dir).read(2)).toBe('')
+      endingGate.release()
+      await generation
+      expect(onProseGenerated).toHaveBeenCalledTimes(1)
+    } finally {
+      summaryGate.release()
+      endingGate.release()
+      chapterGate.release()
+      await generation
+    }
+    expect(WriteFlowService.prototype.extractEndingState).toHaveBeenCalledTimes(1)
+    expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'chapter')).toHaveLength(1)
+  })
+
+  it.each(['cancel', 'source'] as const)('does not save overlapped prose after %s changes before ending extraction completes', async change => {
+    await plan(1); await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    const gate = deferred(), started = deferred()
+    const controller = new AbortController(), onProseGenerated = vi.fn()
+    vi.mocked(WriteFlowService.prototype.extractEndingState).mockImplementation(async () => { await gate.promise; return ending })
+    const original = generate.getMockImplementation()!
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapter') started.release()
+      return original(prompt, opts)
+    })
+    const result = service.generateChapterStream(id, 2, {signal: controller.signal, onProseGenerated})
+    const rejected = expect(result).rejects.toThrow(change === 'cancel' ? 'LLM_ABORTED' : 'LONGFORM_CONTEXT_CHANGED')
+    await started.promise
+    if (change === 'cancel') controller.abort()
+    else await new ProseRepo(dir).write(1, previous + '师父取回了钥匙。')
+    gate.release()
+    await rejected
+    expect(onProseGenerated).not.toHaveBeenCalled()
+    expect(await new ProseRepo(dir).read(2)).toBe('')
+  })
+
+  it.each(['failed', 'cancelled'] as const)('does not announce or request prose when preparation is %s', async outcome => {
+    await plan(1)
+    await plan(2)
+    await new ProseRepo(dir).write(1, previous)
+    const outlineFile = join(dir, '大纲', '大纲.md')
+    await writeFile(outlineFile, '# 守门\n\n## 主线剧情走向\n\n林远守住山门，查清来客身份。')
+    const controller = new AbortController()
+    const stages: ChapterGenerationStage[] = []
+    const original = generate.getMockImplementation()!
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapterSummary') {
+        if (outcome === 'cancelled') controller.abort()
+        else await writeFile(outlineFile, '# 守门\n\n## 主线剧情走向\n\n林远离开山门去寻找师父。')
+      }
+      return original(prompt, opts)
+    })
+    await expect(service.generateChapterStream(id, 2, {
+      signal: controller.signal,
+      onGenerationStage: stage => stages.push(stage)
+    })).rejects.toThrow(outcome === 'cancelled' ? 'LLM_ABORTED' : 'LONGFORM_CONTEXT_CHANGED')
+    expect(stages.some(stage => stage.startsWith('preparing:'))).toBe(true)
+    expect(stages).not.toContain('waiting')
+    expect(stages).not.toContain('generating')
+    expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapter')).toBe(false)
+    expect(await new ChapterSummaryRepo(dir).read(1)).toBeNull()
   })
 
   it.each(['plan', 'prose', 'cancel'] as const)('does not commit a summary using a reused review after %s changes during extraction', async change => {
