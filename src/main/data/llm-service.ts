@@ -573,12 +573,19 @@ export class LlmService {
         }
 
         const proto = protocolOf(p)
-        const { full, usage } =
+        const { full, usage, truncated } =
           proto === 'anthropic'
             ? await parseAnthropicSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
             : proto === 'openai-responses'
               ? await parseResponsesSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
               : await parseOpenAiSse(res.body as ReadableStream<Uint8Array>, wrappedOnToken)
+
+        if (truncated) {
+          console.warn(
+            '[llm-service] Returning partial text from truncated stream:',
+            opts.meta?.feature ?? 'unknown-feature'
+          )
+        }
 
         if (this.usage && usage) {
           try {
@@ -966,7 +973,7 @@ const MAX_RESPONSE_CHARS = 200_000
 async function parseOpenAiSse(
   body: ReadableStream<Uint8Array>,
   onToken?: (t: string) => void
-): Promise<{ full: string; usage: UsageInfo | null }> {
+): Promise<{ full: string; usage: UsageInfo | null; truncated?: boolean }> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -1021,7 +1028,7 @@ async function parseOpenAiSse(
 async function parseResponsesSse(
   body: ReadableStream<Uint8Array>,
   onToken?: (t: string) => void
-): Promise<{ full: string; usage: UsageInfo | null }> {
+): Promise<{ full: string; usage: UsageInfo | null; truncated?: boolean }> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -1059,7 +1066,21 @@ async function parseResponsesSse(
       }
     }
   }
-  if (incomplete) throw new Error('LLM_OUTPUT_TRUNCATED')
+  if (incomplete) {
+    // max_output_tokens 撞顶：已收到的正文通常是完整可用的降级结果，
+    // 直接丢弃会白白让上层重试三次（每次都撞同一堵墙），最后整批作废。
+    // 按 mobile-brainstorm-service / long-story-brainstorm 的既有约定，
+    // 带上标记返回，交给调用方决定用不用；只字未收才当硬失败。
+    if (full.trim()) {
+      console.warn('[llm-service] Responses output truncated by max_output_tokens, keeping partial text:', full.length, 'chars')
+      if (!usage) {
+        const outputTokens = Math.ceil(full.length / 1.5)
+        usage = { inputTokens: 0, outputTokens, totalTokens: outputTokens }
+      }
+      return { full, usage, truncated: true }
+    }
+    throw new Error('LLM_OUTPUT_TRUNCATED')
+  }
   if (!usage) {
     const outputTokens = Math.ceil(full.length / 1.5)
     usage = { inputTokens: 0, outputTokens, totalTokens: outputTokens }
@@ -1079,7 +1100,7 @@ async function parseResponsesSse(
 async function parseAnthropicSse(
   body: ReadableStream<Uint8Array>,
   onToken?: (t: string) => void
-): Promise<{ full: string; usage: UsageInfo | null }> {
+): Promise<{ full: string; usage: UsageInfo | null; truncated?: boolean }> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -1144,7 +1165,19 @@ async function parseAnthropicSse(
   // 残留 buffer 也尝试 flush
   if (buffer.trim()) flushEvent(buffer.split(/\r?\n/).filter(Boolean))
 
-  if (stopReason === 'max_tokens') throw new Error('LLM_OUTPUT_TRUNCATED')
+  if (stopReason === 'max_tokens') {
+    // 同 parseResponsesSse：撞顶时保留已收正文，避免白白重试。
+    if (full.trim()) {
+      console.warn('[llm-service] Anthropic output truncated by max_tokens, keeping partial text:', full.length, 'chars')
+      const partialUsage: UsageInfo = {
+        inputTokens,
+        outputTokens: outputTokens || Math.ceil(full.length / 1.5),
+        totalTokens: inputTokens + (outputTokens || Math.ceil(full.length / 1.5))
+      }
+      return { full, usage: partialUsage, truncated: true }
+    }
+    throw new Error('LLM_OUTPUT_TRUNCATED')
+  }
 
   const usage: UsageInfo | null =
     inputTokens > 0 || outputTokens > 0
