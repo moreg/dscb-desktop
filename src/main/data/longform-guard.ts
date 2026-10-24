@@ -1,3 +1,4 @@
+import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import type { LlmService, GenerateOptions } from './llm-service'
 import { findJsonObject } from '../../shared/json-extract'
 import { hashProse } from './memory/prose-memory-index'
@@ -67,6 +68,7 @@ export class LongformGuard {
       '知情逐人核对，不将读者/旁白/同伴知道当本人知道。缺失记录、检索预算不足本身不是矛盾，也不能据此断定角色不知情；有记录明确不知/误信却无信息途径突然掌握真相才报错。',
       '长期剧情线以较晚的实际变化为准；不能把历史未结事项自动当成当前未结，也不能凭一次未提及判断遗忘。仅报告本章明确违背既有承诺/结果且没有转变依据的情况。',
       '道具逐件核对名称、材质、持有者、所有权、数量、消耗与转交链。此前正文明确装入某封套、容器或使用某道具，本章却无更换过程改成另一名称或材质，属于明确冲突；不能因为用途相同而当作同一物件。自然简称、指代或有正文依据的更换允许。',
+      READER_NOTE_BOUNDARY,
       '作者修订后的实际正文与有来源的较晚状态优先于旧细纲和旧实体卡。未来细纲仍写旧名、草稿历史卡被保留，均不是恢复旧稿事实的依据；不得默默编造一次换装、转交或重命名来消除冲突。',
       input.continuationStart !== undefined ? `本章前 ${input.continuationStart} 字符为只读旧稿，只报告新增部分引入或进一步确认的冲突，不要求重写旧稿。` : '',
       '作者临时要求可明确调整本章计划，但含糊的“继续写”不是重置全书主线或全员知情的授权。',

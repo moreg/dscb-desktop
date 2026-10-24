@@ -1,4 +1,4 @@
-import { NATURAL_PARAGRAPHS, PROSE_POLICY_RULES, migrateLegacyProseDefaults } from '../../../../shared/prose-policy'
+import { NATURAL_PARAGRAPHS, DIALOGUE_PARAGRAPHS, PROSE_POLICY_RULES, migrateLegacyProseDefaults } from '../../../../shared/prose-policy'
 /**
  * 去 AI 味方法论 + 7 Gate prompt 构建（源自 oh-story-claudecode anti-ai-writing.md + SKILL.md）。
  *
@@ -535,6 +535,7 @@ export const GATE_METHODS: Record<string, string> = {
 - 长段落（>200 字）→ 按镜头/新动作/新线索/视线切换断段
 - 破折号用于真实中断或说明时保留；只改无用途的重复停顿，不机械替换、不补造动作。`,
   E: `**Gate E：对话去腔调**
+- ${DIALOGUE_PARAGRAPHS}
 - 先读整场再改单句：辨认人物已有的说话目的、关注点和关系，结合连续回合判断机械接话、轮流宽慰与人物同腔，不能只核对单句是否合理。按共享场景与对白规则，在授权范围内实际修改仍在重复的交谈；普通润色保留原意，获准重写交谈结构时不只换措辞。不能把自检判断写进台词或旁白充当修复，不新增事实、动机或矛盾来展示差异。已自然的对白保持原样，不把有依据的复问、拆台、安慰或机锋当成冗余删掉。
 - 让对话有具体目的和来回：人物可以回避、追问、顶回去或话说一半，但不得改变原句的信息、立场、说话者和事件结果，也不得凭空加入笑话、口头禅或新动作。
 - 对话标签单一（"道/说"占比过高）→ 说话人已清楚时省略标签，不为换标签机械补动作；只有原文已有且确有用途的动作才保留

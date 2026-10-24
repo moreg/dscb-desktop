@@ -1,4 +1,4 @@
-import { migrateLegacyProseDefaults, NATURAL_PARAGRAPHS, SEMANTIC_PUNCTUATION, SCENE_DIALOGUE, PROSE_POLICY_RULES } from '../../../shared/prose-policy'
+import { migrateLegacyProseDefaults, NATURAL_PARAGRAPHS, DIALOGUE_PARAGRAPHS, SEMANTIC_PUNCTUATION, SCENE_DIALOGUE, PROSE_POLICY_RULES } from '../../../shared/prose-policy'
 import { CHARACTER_VOICE_RULES } from './skill-contracts'
 import { CHAPTER_INDEX_NOT_PROSE } from '../../../shared/strip-chapter-meta'
 import { PRESS_ACTION_RULES } from './action-precision'
@@ -136,6 +136,7 @@ export const STYLE_TARGETS = `
 【文体参考与句段节奏】
 - 长短句服从内容，不凑字数，不机械补字、删信息或合并句子。
 - ${NATURAL_PARAGRAPHS}
+- ${DIALOGUE_PARAGRAPHS}
 - ${SEMANTIC_PUNCTUATION}
 - ${SCENE_DIALOGUE}
 - 篇幅服从任务目标，关键转折充分展开，不以重复确认、无用动作或机械扩写补字数。
@@ -174,7 +175,7 @@ const LEGACY_DIALOGUE_EXAMPLES = new Set([
 ])
 
 
-const CURRENT_DIALOGUE_SENTENCES = SEMANTIC_PUNCTUATION + NATURAL_PARAGRAPHS
+const CURRENT_DIALOGUE_SENTENCES = SEMANTIC_PUNCTUATION + '\n' + DIALOGUE_PARAGRAPHS + '\n' + NATURAL_PARAGRAPHS
 const LEGACY_DIALOGUE_SENTENCES = "**台词中间严禁使用句号**：同一次发言的引号内，小句之间用逗号连接，句号只保留在整段台词最末尾，末尾也可按语气使用问号或感叹号。不要把台词拆成多个引号来规避此规则；叙述句仍按句末正常分段。\n- 错误：“大家都等着看预告，结果制片助理连素材都没交齐。明川，先签字，别让全组陪你耗。”\n- 正确：“大家都等着看预告，结果制片助理连素材都没交齐，明川，先签字，别让全组陪你耗。”\n示例只说明标点，人物与事件不得移入本作；输出前检查引号内是否有非末尾句号，有则改为逗号。"
 const LEGACY_DIALOGUE_FRAGMENTS: Array<[string, string]> = [
   [

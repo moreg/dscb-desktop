@@ -1,5 +1,3 @@
-import { ChapterDetectionRepository } from '../data/chapter-detection-repository'
-import type { DetectionResultInput } from '../../shared/chapter-detection'
 import { safeHandle } from './safe-handle'
 import { ProjectService } from '../data/project-service'
 import { ChapterService } from '../data/chapter-service'
@@ -37,19 +35,6 @@ export function registerChaptersIpc(
   chapters: ChapterService,
   nameService?: ChapterNameService
 ): void {
-  safeHandle('chapters:detectionList', async (_e, id: string, n: number) => {
-    const dir = await service.resolveDir(validateInput(projectIdSchema, id))
-    return new ChapterDetectionRepository(dir).list(validateInput(chapterNumberSchema, n))
-  })
-  safeHandle('chapters:detectionCapture', async (_e, id: string, n: number, content: string) => {
-    const dir = await service.resolveDir(validateInput(projectIdSchema, id))
-    return new ChapterDetectionRepository(dir).capture(validateInput(chapterNumberSchema, n), validateInput(chapterContentSchema, content))
-  })
-  safeHandle('chapters:detectionResult', async (_e, id: string, n: number, recordId: string, input: DetectionResultInput) => {
-    const dir = await service.resolveDir(validateInput(projectIdSchema, id))
-    return new ChapterDetectionRepository(dir).recordResult(validateInput(chapterNumberSchema, n), recordId, input)
-  })
-
   safeHandle('chapters:list', async (_e, id: string) => {
     const projectId = validateInput(projectIdSchema, id)
     return chapters.listChapters(projectId)

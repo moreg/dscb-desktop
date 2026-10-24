@@ -1,5 +1,4 @@
 import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from './prose-import'
-import type { ChapterDetectionHistory, ChapterDetectionRecord, DetectionResultInput } from './chapter-detection'
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
 import type { AppUpdateState } from './app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from './long-story-brainstorm'
@@ -654,9 +653,6 @@ export interface RendererApi {
   ) => Promise<ProjectData>
   /** 选择本地文本文件用于文风提取，返回文件内容和文件名 */
   selectTextFile: () => Promise<SelectedTextFile[] | null>
-  listChapterDetections: (id: string, n: number) => Promise<ChapterDetectionHistory>
-  captureChapterDetection: (id: string, n: number, content: string) => Promise<ChapterDetectionRecord>
-  recordChapterDetection: (id: string, n: number, recordId: string, input: DetectionResultInput) => Promise<ChapterDetectionRecord>
   listChapters: (projectId: string) => Promise<ChapterMeta[]>
   getChapter: (projectId: string, n: number) => Promise<ChapterContent>
   createChapter: (projectId: string, input: CreateChapterInput) => Promise<ChapterMeta>

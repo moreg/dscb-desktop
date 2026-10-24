@@ -8,7 +8,7 @@ const check = process.argv.includes('--check')
 const raw = await readFile(join(app, 'src/shared/prose-policy.json'), 'utf8')
 const policy = JSON.parse(raw)
 const markdown = `# 正文保真与逐章检测\n\n规则版本：${policy.version}。\n\n` +
-  ['paragraphs', 'punctuation', 'dialogue', 'preservation', 'detection'].map(key => policy[key]).join('\n\n') + '\n'
+  ['paragraphs', 'dialogueParagraphs', 'punctuation', 'dialogue', 'preservation', 'detection', 'fanqieFirstChapterNote', 'readerNoteBoundary'].map(key => policy[key]).join('\n\n') + '\n'
 const names = new Set(['正文写作', '正文审核', '细纲生成', '细纲审核', '小说立项', '大纲审核'])
 const targets = [join(skills, '正文规则源.json')]
 async function visit(folder) {

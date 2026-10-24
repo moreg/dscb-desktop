@@ -48,6 +48,21 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(out.system).toContain('顺序铁律')
   })
 
+  it('番茄首章从零生成才要求寄存语，续写、后续章及其他平台不追加首章指令', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const configFile = path.join(dir, '设定', '平台配置.md')
+    const service = new WriteService(ps, mockLlm('正文'))
+    const instruction = '本次从零写番茄第一章：先写贴合《青云志》的寄存语'
+    await writeFile(configFile, '# 平台配置\n- 平台：番茄\n')
+    expect((await service.buildChapterPrompt(projectId, 1)).user).toContain(instruction)
+    expect((await service.buildChapterPrompt(projectId, 1, undefined, undefined, '已有开场。')).user).not.toContain(instruction)
+    expect((await service.buildChapterPrompt(projectId, 2)).user).not.toContain(instruction)
+    await writeFile(configFile, '# 平台配置\n- 平台：七猫\n')
+    expect((await service.buildChapterPrompt(projectId, 1)).user).not.toContain(instruction)
+    await writeFile(configFile, '# 平台配置\n')
+    expect((await service.buildChapterPrompt(projectId, 1)).user).not.toContain(instruction)
+  })
+
   it('system prompt voice matches genre', async () => {
     const svc1 = new WriteService(ps, mockLlm('正文'))
     const out1 = await svc1.buildChapterPrompt(projectId, 1)

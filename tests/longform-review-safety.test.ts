@@ -20,6 +20,7 @@ import type { ChapterSelfCheckReport, MemoryExtraction } from '../src/shared/typ
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
 import type { AsyncLocalStorage } from 'async_hooks'
+import type { ChapterMemoryCoordinator } from '../src/main/data/chapter-memory-coordinator'
 
 const goal = '陆安必须寻找失踪的母亲，不能无故放弃这个全书目标。'
 const bad = '陆安宣布永久放弃寻找母亲，从此只在街边卖画谋生。'
@@ -298,5 +299,65 @@ describe('长篇核对绕过与记忆污染回归', () => {
     verdict = cleared
     await new ProseRepo(dir).write(1, good)
     await expect(service.applyAllNewEntities(id, 1)).rejects.toThrow('版本不符')
+  })
+
+  it('设定补丁排队时主线更新，释放队列重新核对后只提交一次', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, good)
+    const coordinator = (service as unknown as { memoryCoordinator: ChapterMemoryCoordinator }).memoryCoordinator
+    const exclusive = coordinator.exclusive.bind(coordinator)
+    vi.spyOn(coordinator, 'exclusive').mockImplementationOnce(async (pid, action) => {
+      await writeFile(join(dir, '大纲', '大纲.md'), `# 寻母\n\n## 主线剧情走向\n\n${goal}必须核实渡船。`)
+      return exclusive(pid, action)
+    })
+    const apply = vi.spyOn(SettingsWriter.prototype, 'applyPatches')
+    await expect(service.applySettingsPatches(id, extraction(1))).resolves.toMatchObject({ errors: [] })
+    expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')).toHaveLength(2)
+    expect(apply).toHaveBeenCalledTimes(1)
+  })
+
+  it('设定补丁排队时本章改稿，不得自动重试并应用旧提取', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, good)
+    const coordinator = (service as unknown as { memoryCoordinator: ChapterMemoryCoordinator }).memoryCoordinator
+    const exclusive = coordinator.exclusive.bind(coordinator)
+    vi.spyOn(coordinator, 'exclusive').mockImplementationOnce(async (pid, action) => {
+      await new ProseRepo(dir).write(1, good + '船夫点头。')
+      return exclusive(pid, action)
+    })
+    const apply = vi.spyOn(SettingsWriter.prototype, 'applyPatches')
+    await expect(service.applySettingsPatches(id, extraction(1))).rejects.toThrow('本章正文已变化')
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('设定补丁重新核对发现主线冲突，仍然阻止提交', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, bad)
+    const coordinator = (service as unknown as { memoryCoordinator: ChapterMemoryCoordinator }).memoryCoordinator
+    const exclusive = coordinator.exclusive.bind(coordinator)
+    vi.spyOn(coordinator, 'exclusive').mockImplementationOnce(async (pid, action) => {
+      await writeFile(join(dir, '大纲', '大纲.md'), `# 寻母\n\n## 主线剧情走向\n\n${goal}必须核实渡船。`)
+      verdict = rejected
+      return exclusive(pid, action)
+    })
+    const apply = vi.spyOn(SettingsWriter.prototype, 'applyPatches')
+    await expect(service.applySettingsPatches(id, extraction(1))).rejects.toThrow('LONGFORM_CONFLICT')
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('设定补丁重试后资料继续变化，停止而不是无限重试', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, good)
+    const coordinator = (service as unknown as { memoryCoordinator: ChapterMemoryCoordinator }).memoryCoordinator
+    const exclusive = coordinator.exclusive.bind(coordinator)
+    let revision = 0
+    vi.spyOn(coordinator, 'exclusive').mockImplementation(async (pid, action) => {
+      await writeFile(join(dir, '大纲', '大纲.md'), `# 寻母\n\n## 主线剧情走向\n\n${goal}计划版本${++revision}。`)
+      return exclusive(pid, action)
+    })
+    const apply = vi.spyOn(SettingsWriter.prototype, 'applyPatches')
+    await expect(service.applySettingsPatches(id, extraction(1))).rejects.toThrow('主线计划已变化')
+    expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')).toHaveLength(2)
+    expect(apply).not.toHaveBeenCalled()
   })
 })

@@ -49,7 +49,8 @@ import { createChapterCheckTracker, type ChapterSelfCheckSnapshot } from './chap
 
 /** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
 function friendlyFlowError(err: string): string {
-  const e = err.trim()
+  const e = err.trim().replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^(?:Error:\s*)+/, '')
+  if (e.startsWith('LONGFORM_CONTEXT_CHANGED:')) return e.replace(/^LONGFORM_CONTEXT_CHANGED:\s*/, '')
   if (!e) return '请求失败'
   if (e === 'LLM_TIMEOUT' || /aborted due to timeout/i.test(e)) {
     return '请求超时（正文较长或模型响应慢）。已放宽超时，请重试；若仍失败可换更快模型或缩短本章字数。'
@@ -736,7 +737,7 @@ export default function ChapterFlowPanel(props: Props) {
       const preview = await window.api.previewSettingsApply(projectId, memoryExtraction)
       setSettingsPreview(preview)
     } catch (e) {
-      setMemoryError((e as Error).message)
+      setMemoryError(friendlyFlowError((e as Error).message))
     } finally {
       setSettingsApplying(false)
     }

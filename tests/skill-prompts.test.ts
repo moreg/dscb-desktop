@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { DIALOGUE_PARAGRAPHS } from '../src/shared/prose-policy'
 import {
   buildSystemPrompt,
   resolveGenreVoice,
@@ -73,7 +74,8 @@ describe('buildSystemPrompt', () => {
     const finalRules = prompt.slice(prompt.lastIndexOf('【正文保真共享规则'))
     expect(finalRules).toContain('一句一段')
     expect(finalRules).toContain('独立陈述台词的句号放在后引号前')
-    expect(finalRules).toContain('不按句号机械拆分多句发言')
+    expect(finalRules).toContain(DIALOGUE_PARAGRAPHS)
+    expect(finalRules).not.toContain('不按句号机械拆分多句发言')
   })
 
   it('旧内置强制拆段迁移为短段优先且允许自然合段，保留作者其他自定义要求', () => {
