@@ -106,6 +106,61 @@ describe('长篇核对绕过与记忆污染回归', () => {
     expect(generate.mock.calls.filter(([,o])=>o?.meta?.feature==='longformGuard')).toHaveLength(2)
   })
 
+  it('手动概要与后台同稿核对并发时共享任务，不互相覆盖隔离标记', async () => {
+    await new ProseRepo(dir).write(1, good)
+    let release!: () => void
+    let started!: () => void
+    let joined!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const start = new Promise<void>(resolve => { started = resolve })
+    const join = new Promise<void>(resolve => { joined = resolve })
+    generate.mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'longformGuard') { started(); await gate; return cleared }
+      return JSON.stringify({ events: [{ text: '继续寻找母亲', evidence: good }], stateChanges: [], openThreads: [], continuity: [] })
+    })
+    const summary = service.generateChapterSummary(id, 1, good, { force: true })
+    await start
+    const internal = service as unknown as { assertLongformConsistency: (pid: string, n: number, text: string,
+      opts: { signal?: AbortSignal; onStart: () => void }) => Promise<() => Promise<void>> }
+    const background = internal.assertLongformConsistency(id, 1, good, { signal: new AbortController().signal, onStart: joined })
+    await join
+    expect(generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard')).toHaveLength(1)
+    release()
+    const [result, receipt] = await Promise.all([summary, background])
+    await receipt()
+    expect(result.stale).toBe(false)
+    expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
+    expect((await new ChapterSummaryRepo(dir).read(1))?.sourceHash).toBe(hashProse(good))
+  })
+
+  it('取消同稿共享核对的一个调用者，不取消其他调用者或污染通过记录', async () => {
+    await new ProseRepo(dir).write(1, good)
+    let release!: () => void
+    let started!: () => void
+    let joined!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const start = new Promise<void>(resolve => { started = resolve })
+    const join = new Promise<void>(resolve => { joined = resolve })
+    generate.mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'longformGuard') { started(); await gate; expect(opts.signal.aborted).toBe(false); return cleared }
+      return '{}'
+    })
+    const internal = service as unknown as { assertLongformConsistency: (pid: string, n: number, text: string,
+      opts: { signal?: AbortSignal; onStart?: () => void }) => Promise<() => Promise<void>> }
+    const controller = new AbortController()
+    const first = internal.assertLongformConsistency(id, 1, good, { signal: controller.signal })
+    const cancelled = expect(first).rejects.toThrow('LLM_ABORTED')
+    await start
+    const second = internal.assertLongformConsistency(id, 1, good, { onStart: joined })
+    await join
+    controller.abort()
+    await cancelled
+    release()
+    await (await second)()
+    expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
+    expect(generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard')).toHaveLength(1)
+  })
+
   it('恢复稿的旧道具名在润色及记忆提取前即被拦住，批次重试仍复用原稿且不能推进', async () => {
     const previous='陆安把原信装入绸布封套，收入衣内保管。'
     const stale='陆安从衣内取出青布封套，将原信递给陆宁。'

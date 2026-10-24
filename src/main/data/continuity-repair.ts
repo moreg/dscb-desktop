@@ -38,7 +38,7 @@ export function applyContinuityReplacements(content: string, raw: string): strin
 
 /** Invalid edits or failed checks are retried in memory; only verified text is returned for saving. */
 export async function repairContinuity<Check>(input: {
-  chapterNumber: number; content: string; issue: string; context: string; signal?: AbortSignal
+  chapterNumber: number; content: string; issue: string; context: string; signal?: AbortSignal; maxRounds?: number
 }, dependencies: {
   generate: (prompt: string) => Promise<string>
   prepare?: (candidate: string) => Promise<string>
@@ -54,7 +54,7 @@ export async function repairContinuity<Check>(input: {
       const raw = await dependencies.generate([
         `自动修复第 ${input.chapterNumber} 章已经确认的衔接矛盾，只做局部替换。`,
         '以实际前文与有证据的记忆为准；标为细纲/计划的材料不是历史事实。不修改过去章节，不编造转场、道具、能力或人物知情来掩盖矛盾。',
-        '只纠正下列矛盾及其直接影响，保留其余事件、人物动机、伏笔阶段与章末落点，遵守作者临时要求。',
+        '只纠正下列矛盾及其直接影响，保留其余事件、人物动机、伏笔阶段与章末落点，遵守作者临时要求。若章末落点本身被明确指出抢写后续节点，须退回本章计划允许的阶段。',
         '严格输出 JSON：{"replacements":[{"before":"当前正文中可唯一定位的原句或段落","after":"修复后的正文"}]}。不输出整章，不输出解释。',
         'before 必须逐字复制原文，每个位置仅替换一次，范围不得重叠；不靠删除场景或大段重写消除检查提示。',
         '--- 最初确认的问题 ---', input.issue,
@@ -76,6 +76,7 @@ export async function repairContinuity<Check>(input: {
     } catch (error) {
       if (input.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED')) throw error
       feedback = (error as Error).message
+      if (input.maxRounds !== undefined && round >= input.maxRounds) throw new Error(`自动修复复核未通过：${feedback}`, { cause: error })
       if (round % REPAIR_ROUNDS_BEFORE_BACKOFF === 0) {
         dependencies.onProgress?.(round, 'retry', feedback)
         await waitForRetry(Math.min(30_000, 5_000 * (round / REPAIR_ROUNDS_BEFORE_BACKOFF)), input.signal)
