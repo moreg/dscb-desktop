@@ -612,6 +612,19 @@ export default function FanqieChartPage(): ReactElement {
                   {idea.protagonist ? <p>主角：{idea.protagonist}</p> : null}
                   {idea.sellingPoint ? <p>卖点：{idea.sellingPoint}</p> : null}
                   {idea.riskNotes ? <p>风险：{idea.riskNotes}</p> : null}
+                  {idea.fusion ? <p>融梗因果：{idea.fusion}</p> : null}
+                  {idea.trendBasis.length ? <details className="fanqie-insight">
+                    <summary>具体来源梗与删除检验</summary>
+                    {idea.trendBasis.map((ref, index) => <div key={`${ref.bookId}-${index}`}>
+                      <strong>《{ref.title}》</strong><p>原文：{ref.quote}</p><p>{ref.mechanism}</p>
+                    </div>)}
+                  </details> : null}
+                  {idea.pacingPlan ? <details className="fanqie-insight">
+                    <summary>世界设定与长篇展开</summary>
+                    <p>世界设定：{idea.worldSetting}</p><p>能力规则：{idea.powerSystem}</p>
+                    <p>配角与队伍：{idea.supportingCharacters}</p><p>核心冲突与目标：{idea.coreConflict}</p>
+                    <p>读者回报：{idea.targetAudience}</p><p style={{ whiteSpace: 'pre-wrap' }}>阶段推进：{idea.pacingPlan}</p>
+                  </details> : null}
                   {idea.openingChapters?.length ? (
                     <div className="fanqie-insight">
                       <h4>这个脑洞的前三章写作方向</h4>

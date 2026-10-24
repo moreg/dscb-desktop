@@ -171,6 +171,8 @@ export interface ProjectData {
   defaultStyleProfileId?: string
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
+  /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
+  ideaDevelopment?: string
   targetChapters?: number
   chapterWordCount?: number
   status?: string
@@ -224,6 +226,8 @@ export interface CreateProjectDataInput {
   genre?: string
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
+  /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
+  ideaDevelopment?: string
   targetChapters?: number
   chapterWordCount?: number
   customPath?: string

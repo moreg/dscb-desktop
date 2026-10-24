@@ -6,6 +6,9 @@ import { ChapterRhythmWriter } from './skill-format/chapter-rhythm-writer'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { DetailedOutlineWriter } from './skill-format/detailed-outline-writer'
 import { CharacterRepo } from './memory/character-repo'
+import { hashProse } from './memory/prose-memory-index'
+import { blockedLongformChapters, readLongformReviewState } from './longform-review-state'
+import { readChapterStatuses, setChapterStatus } from './chapter-status-store'
 import { countWords } from './words'
 import { CHAPTER_NAME_MAX_LEN, sanitizeChapterName } from '../../shared/parsers'
 import { ChapterRevisionConflictError, contentRevision } from './chapter-revision'
@@ -18,6 +21,7 @@ import type {
   ChapterContent,
   ChapterDetail,
   ChapterSource,
+  ChapterStatus,
   RhythmEntry,
   AutoDeslopResult
 } from '../../shared/types'
@@ -106,6 +110,34 @@ export class ChapterService {
     return ids.length > 0 ? ids : undefined
   }
 
+  /**
+   * 状态推导：有正文默认「草稿」，无正文「待写」；「润色/定稿」标注只在正文哈希
+   * 未变且该章未被长篇核对重新拦截时成立，否则退回草稿——徽章始终如实反映检查状态。
+   */
+  private async resolveStatuses(
+    dir: string,
+    entries: Array<{ chapter: number; exists: boolean; content: string }>
+  ): Promise<Map<number, ChapterStatus>> {
+    const [stored, reviewState] = await Promise.all([
+      readChapterStatuses(dir),
+      readLongformReviewState(dir).catch(() => null)
+    ])
+    const blocked = reviewState ? blockedLongformChapters(reviewState) : {}
+    const result = new Map<number, ChapterStatus>()
+    for (const entry of entries) {
+      if (!entry.exists || !entry.content.trim()) {
+        result.set(entry.chapter, 'outline')
+        continue
+      }
+      const mark = stored[String(entry.chapter)]
+      result.set(entry.chapter,
+        mark && mark.sourceHash === hashProse(entry.content) && !blocked[String(entry.chapter)]
+          ? mark.status
+          : 'draft')
+    }
+    return result
+  }
+
   async listChapters(projectId: string): Promise<ChapterMeta[]> {
     return (await this.listChaptersInternal(projectId)).metas
   }
@@ -132,6 +164,10 @@ export class ChapterService {
     ])
     const bodies = await prose.readMany(rhythm.map((entry) => entry.chapter))
     const now = new Date().toISOString()
+    const statusMap = await this.resolveStatuses(dir, rhythm.map((e) => {
+      const body = bodies.get(e.chapter)!
+      return { chapter: e.chapter, exists: body.exists, content: body.content }
+    }))
     const metas: ChapterMeta[] = []
     const content = new Map<number, string>()
     for (const e of rhythm) {
@@ -148,7 +184,7 @@ export class ChapterService {
         chapterNumber: e.chapter,
         title: det?.title || e.title,
         wordCount,
-        status: has ? 'draft' : 'outline',
+        status: statusMap.get(e.chapter) ?? (has ? 'draft' : 'outline'),
         // synopsis 改用细纲 plotSummary（核心事件）
         synopsis: det?.plotSummary,
         volume: e.volume ?? det?.volume,
@@ -171,13 +207,15 @@ export class ChapterService {
       this.readCharacterNameToIdMap(dir)
     ])
     const entry = rhythm.find((e) => e.chapter === n)
+    const status = (await this.resolveStatuses(dir, [{ chapter: n, exists: Boolean(content), content: content ?? '' }]))
+      .get(n) ?? (content ? 'draft' : 'outline')
     const meta: ChapterMeta = {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
       chapterNumber: n,
       title: det?.title || entry?.title || `第${n}章`,
       wordCount: content ? countWords(content) : 0,
-      status: content ? 'draft' : 'outline',
+      status,
       synopsis: det?.plotSummary,
       volume: entry?.volume ?? det?.volume,
       emotion: det?.emotion ?? entry?.emotion,
@@ -282,6 +320,13 @@ export class ChapterService {
       }
       // 3) 正文文件同步重命名
       await new ProseRepo(dir).rename(n, clean)
+    }
+    // status 现在落盘（追踪/.chapter-status.json）：编辑器的状态循环与调用方的
+    // 显式标注都生效；draft/outline 清除标注退回推导值，reviewed/published 绑定当前正文哈希。
+    if (patch.status === 'reviewed' || patch.status === 'published' ||
+      patch.status === 'draft' || patch.status === 'outline') {
+      const before = await this.getChapter(projectId, n)
+      await setChapterStatus(dir, n, patch.status, hashProse(before.content ?? ''))
     }
     return (await this.getChapter(projectId, n)).meta
   }

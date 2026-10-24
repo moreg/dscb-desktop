@@ -8,7 +8,7 @@ import { GOLDEN_THREE_STAGES } from '../src/main/data/fanqie-chart/analysis'
 import { readJson, writeJsonAtomic } from '../src/main/data/atomic'
 import type { FanqieChartAnalysis, FanqieChartBook, FanqieChartRecord, FanqieChapterContent } from '../src/shared/fanqie-chart'
 import type { LlmService } from '../src/main/data/llm-service'
-import { qualityIdea, relationshipIdea, passingReviews } from './helpers/fanqie-idea'
+import { qualityIdea, relationshipIdea, passingReviews, passingFusionReview } from './helpers/fanqie-idea'
 
 const chartType = 'new_book_male:261'
 const books: FanqieChartBook[] = ['a', 'b', 'c', 'd'].map((bookId, i) => ({ bookId, rank: i + 1,
@@ -48,6 +48,44 @@ async function setup() {
 }
 
 describe('逐本分析缓存与并发', () => {
+  it.each(['invalid', 'cancelled', 'rejected'] as const)('融梗复核 %s 时不覆盖已有结果', async mode => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
+        if (prompt.includes('你是严格的网文选题终审编辑')) return passingReviews(1)
+        return JSON.stringify({ ideas: [qualityIdea()] })
+      })
+      const previous = await service.generateIdeas(chartType, 1, [])
+      expect(previous.ideas?.promptVersion).toBe('chart-ideas-v16-action-and-demand')
+      expect(previous.ideas?.ideas[0].pacingPlan).toBe(qualityIdea().pacingPlan)
+      const controller = new AbortController()
+      let fusionCalls = 0
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) {
+          fusionCalls++
+          expect(prompt).toContain(books[0].intro)
+          if (mode === 'invalid') return '{"reviews":[]}'
+          if (mode === 'cancelled') controller.abort()
+          const review = JSON.parse(passingFusionReview(prompt))
+          if (mode === 'rejected') {
+            review.reviews[0].passed = false
+            review.reviews[0].issues = [{ kind: 'weak_source_dependency', field: 'power_system',
+              quote: qualityIdea().powerSystem, reason: '正常交流就能取得同一信息，指定渠道并非不可替代。' }]
+          }
+          return JSON.stringify(review)
+        }
+        if (prompt.includes('你是严格的网文选题终审编辑')) return passingReviews(1)
+        return JSON.stringify({ ideas: [qualityIdea('待核查方案', 1)] })
+      })
+      await expect(service.generateIdeas(chartType, 1, [], undefined, controller.signal)).rejects.toThrow(mode === 'cancelled' ? '已取消' : '旧结果已保留')
+      expect(fusionCalls).toBe(mode === 'rejected' ? 3 : 1)
+      expect((await service.list())[0].ideas).toEqual(previous.ideas)
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
   it('关系换皮或推进过快须补生成，跨轮比较保留方案的实际关系事件', async () => {
     const fixture = await setup()
     try {
@@ -56,9 +94,12 @@ describe('逐本分析缓存与并发', () => {
       const first = relationshipIdea('第一案', 0)
       const rejected = relationshipIdea('失速方案', 1)
       const repaired = relationshipIdea('第三案', 2)
+      rejected.trendBasis = rejected.trendBasis.map((ref, i) => ({ ...ref, bookId: ['c', 'd'][i] }))
+      repaired.trendBasis = structuredClone(rejected.trendBasis)
       let generations = 0, audits = 0
       fixture.generateStream.mockClear()
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         if (prompt.includes('你是严格的网文选题终审编辑')) {
           audits++
           if (audits === 1) {
@@ -94,6 +135,7 @@ describe('逐本分析缓存与并发', () => {
       fixture.generateStream.mockClear()
       let generations = 0, reviews = 0
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         if (prompt.includes('你是严格的网文选题终审编辑')) {
           reviews++
           expect(prompt).toContain('多女主')
@@ -117,11 +159,12 @@ describe('逐本分析缓存与并发', () => {
     try {
       const service = fixture.create()
       await service.analyze(chartType, false)
-      fixture.generateStream.mockImplementation(async prompt => prompt.includes('你是严格的网文选题终审编辑')
+      fixture.generateStream.mockImplementation(async prompt => prompt.startsWith('你是独立的融梗审稿人') ? passingFusionReview(prompt) : prompt.includes('你是严格的网文选题终审编辑')
         ? passingReviews(1) : JSON.stringify({ ideas: [qualityIdea()] }))
       const previous = await service.generateIdeas(chartType, 1, [])
       fixture.generateStream.mockClear()
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         expect(prompt).not.toContain('你是严格的网文选题终审编辑')
         return JSON.stringify({ ideas: [{ ...qualityIdea('坏方案', 1), goldenFinger: '', trendBasis: qualityIdea().trendBasis.map(ref => ({ ...ref, quote: '不存在的原文' })) }] })
       })
@@ -136,13 +179,14 @@ describe('逐本分析缓存与并发', () => {
     try {
       const service = fixture.create()
       await service.analyze(chartType, false)
-      fixture.generateStream.mockImplementation(async prompt => prompt.includes('你是严格的网文选题终审编辑')
+      fixture.generateStream.mockImplementation(async prompt => prompt.startsWith('你是独立的融梗审稿人') ? passingFusionReview(prompt) : prompt.includes('你是严格的网文选题终审编辑')
         ? passingReviews(1) : JSON.stringify({ ideas: [qualityIdea()] }))
       await service.generateIdeas(chartType, 1, [])
       const reopened = fixture.create()
       await reopened.analyze(chartType, false)
       fixture.generateStream.mockClear()
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         expect(prompt).toContain('历史方案的机制')
         expect(prompt).toContain(qualityIdea().goldenFinger)
         return JSON.stringify({ ideas: [{ ...qualityIdea('只换书名'), coreConcept: '新背景与新人物' }] })
@@ -160,6 +204,7 @@ describe('逐本分析缓存与并发', () => {
       const controller = new AbortController()
       let cancel = false
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         if (!prompt.includes('你是严格的网文选题终审编辑')) return JSON.stringify({ ideas: [qualityIdea()] })
         if (cancel) controller.abort()
         return cancel ? passingReviews(1) : '无法审核'
@@ -206,6 +251,7 @@ describe('逐本分析缓存与并发', () => {
     let marketPrompt = ''
     let openingStarted = false
     fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
       if (prompt.includes('书籍ID：')) openingStarted = true
       if (!prompt.includes('书籍ID：') && !prompt.includes('任务：分类黄金三章汇总')) {
         marketPrompt = prompt
@@ -259,6 +305,7 @@ describe('逐本分析缓存与并发', () => {
     let active = 0
     let peak = 0
     fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
       peak = Math.max(peak, ++active)
       await new Promise(resolve => setTimeout(resolve, 5))
       active--
@@ -279,9 +326,15 @@ describe('逐本分析缓存与并发', () => {
       const service = fixture.create()
       await service.analyze(chartType, false)
       fixture.generateStream.mockClear()
-      const idea = (title: string) => qualityIdea(title, ['第一案', '第二案', '第三案'].indexOf(title))
+      const idea = (title: string) => {
+        const variant = ['第一案', '第二案', '第三案'].indexOf(title)
+        const result = qualityIdea(title, variant)
+        result.trendBasis = result.trendBasis.map((ref, i) => ({ ...ref, bookId: [['a', 'b'], ['c', 'd'], ['a', 'c']][variant][i] }))
+        return result
+      }
       fixture.generateStream.mockImplementationOnce(async () => JSON.stringify({ ideas: [idea('第一案'), { title: '不完整' }] }))
         .mockImplementationOnce(async () => passingReviews(1))
+        .mockImplementationOnce(async prompt => passingFusionReview(prompt))
         .mockImplementationOnce(async prompt => {
           expect(prompt).toContain('写 2 个')
           expect(prompt).toContain('已经保留')
@@ -289,8 +342,9 @@ describe('逐本分析缓存与并发', () => {
           return JSON.stringify({ ideas: [idea('第一案'), idea('第二案'), idea('第三案')] })
         })
         .mockImplementationOnce(async () => passingReviews(2))
+        .mockImplementationOnce(async prompt => passingFusionReview(prompt))
       const record = await service.generateIdeas(chartType, 3, [])
-      expect(fixture.generateStream).toHaveBeenCalledTimes(4)
+      expect(fixture.generateStream).toHaveBeenCalledTimes(6)
       expect(record.ideas?.ideas.map(candidate => candidate.title)).toEqual(['第一案', '第二案', '第三案'])
       expect(record.ideas?.ideas[0].coreConcept).toBe(idea('第一案').coreConcept)
     } finally {
@@ -306,6 +360,7 @@ describe('逐本分析缓存与并发', () => {
       let peak = 0
       let summaryStarted = false
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         if (prompt.includes('书籍ID：')) {
           const id = prompt.match(/书籍ID：(\w+)/)![1]
           active += 1; peak = Math.max(peak, active)
@@ -356,6 +411,7 @@ describe('逐本分析缓存与并发', () => {
     const fixture = await setup()
     try {
       fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) return passingFusionReview(prompt)
         if (prompt.includes('书籍ID：d')) throw new Error('临时模型故障')
         return reply(prompt)
       })

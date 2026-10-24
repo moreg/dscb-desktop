@@ -76,7 +76,7 @@ describe('GitHub app updates', () => {
     vi.useRealTimers()
   })
 
-  it('checks only once after startup, without auto downloading or periodic checks', async () => {
+  it('checks after startup and every hour without auto downloading, and disposes timers', async () => {
     dispose = await registerAppUpdates()
     expect(autoUpdater.autoDownload).toBe(false)
     expect(autoUpdater.autoInstallOnAppQuit).toBe(true)
@@ -86,9 +86,17 @@ describe('GitHub app updates', () => {
     expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
     expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
-    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 - 15_001)
     expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(3)
+    dispose()
+    dispose = undefined
     expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(3)
     expect(autoUpdater.downloadUpdate).not.toHaveBeenCalled()
   })
 
@@ -100,6 +108,11 @@ describe('GitHub app updates', () => {
     expect((await invoke('updates:check')).status).toBe('current')
     expect((await invoke('updates:setAutoCheck', true)).autoCheck).toBe(true)
     expect(writeJsonAtomic).toHaveBeenCalledWith(expect.stringContaining('updates.json'), { autoCheck: true })
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2)
+    await invoke('updates:setAutoCheck', false)
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000)
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2)
     await expect(invoke('updates:setAutoCheck', 'true')).rejects.toThrow('自动检查设置无效')
   })
 
@@ -252,7 +265,7 @@ describe('GitHub app updates', () => {
     autoUpdater.emit('update-downloaded', { ...updateInfo, downloadedFile: 'installer.exe' })
     await vi.advanceTimersByTimeAsync(0)
     expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
-    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ buttons: ['立即重启', '稍后'], cancelId: 1 }))
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ buttons: ['重启应用并更新', '稍后'], cancelId: 1 }))
     expect(app.quit).not.toHaveBeenCalled()
     expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
     expect((await invoke('updates:getState')).status).toBe('downloaded')

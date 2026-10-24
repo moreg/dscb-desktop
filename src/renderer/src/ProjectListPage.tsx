@@ -15,6 +15,11 @@ interface Props {
 
 type Shelf = 'active' | 'archived'
 
+const openedTime = (project: ProjectMeta) => {
+  const t = new Date(project.lastOpenedAt).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
 export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, onOpenBrainstorm }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({})
@@ -141,15 +146,18 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   )
   const shelfProjects = shelf === 'archived' ? archivedProjects : activeProjects
 
+  // 书案倒序展示：最近翻开（新建）的书排最前，无时间戳的排末尾。
   const filtered = useMemo(() => {
-    if (!keyword) return shelfProjects
     const k = keyword.toLowerCase()
-    return shelfProjects.filter(
-      (p) =>
-        p.name.toLowerCase().includes(k) ||
-        (p.genre ?? '').toLowerCase().includes(k) ||
-        (p.description ?? '').toLowerCase().includes(k)
-    )
+    const base = keyword
+      ? shelfProjects.filter(
+          (p) =>
+            p.name.toLowerCase().includes(k) ||
+            (p.genre ?? '').toLowerCase().includes(k) ||
+            (p.description ?? '').toLowerCase().includes(k)
+        )
+      : shelfProjects
+    return [...base].sort((a, b) => openedTime(b) - openedTime(a))
   }, [shelfProjects, keyword])
 
   const totalWords = useMemo(

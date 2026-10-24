@@ -1,6 +1,6 @@
 import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
-import { buildAdoptedOpeningDirections } from '../../shared/fanqie-project'
+import { buildAdoptedOpeningDirections, buildAdoptedIdeaDevelopment } from '../../shared/fanqie-project'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { DetailedOutlineWriter, type DetailedOutlinePatch } from './skill-format/detailed-outline-writer'
@@ -245,7 +245,7 @@ export class OutlineService {
       || await readText(join(dir, '设定', '题材定位.md')) || ''
     if (!coreSettings.trim() && !meta.description?.trim()) throw new Error('请先提供作品脑洞或核心设定，再生成大纲')
     const prompt = buildMainOutlinePrompt({ ...meta, coreSettings, previousOutline: before ?? undefined,
-      platform: await readWritingPlatformConfig(dir) })
+      platform: await readWritingPlatformConfig(dir) }) + buildAdoptedIdeaDevelopment(meta.ideaDevelopment)
     const raw = await this.llm.generateStream(prompt, { maxTokens: 16384,
       meta: { feature: 'outline-generate', projectId } })
     const content = raw.trim().replace(/^```(?:markdown|md)?\s*\n/, '').replace(/\n```$/, '')
@@ -317,6 +317,7 @@ export class OutlineService {
     prompt += `\n\n### 逐章既定标题与节奏来源\n${JSON.stringify(rhythm.filter(r => r.chapter >= fromChapter && r.chapter < fromChapter + count))}\n未回填的是预测，已回填的是实际值，不能据 false 认定正文未成稿。`
     const description = meta.description?.trim()
     prompt += buildAdoptedOpeningDirections(meta.openingChapters, fromChapter, count)
+    prompt += buildAdoptedIdeaDevelopment(meta.ideaDevelopment)
     if (description) {
       prompt += `\n\n### 最新作品简介（额外构思参考）\n${description}\n\n作品简介可能包含新采用的脑洞，仅用于补充创意和卖点。具体人物事实、世界观规则和卷级事件仍以以上正式核心设定与大纲为准；存在冲突时遵循正式规划，不擅自改写既有设定或已安排的剧情。`
     }

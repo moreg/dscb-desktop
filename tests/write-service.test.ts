@@ -641,6 +641,11 @@ describe('WriteService', () => {
       expect(progress.completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
       expect(completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
       expect(spy).toHaveBeenCalledTimes(10)
+      // 写后处理全部完成的章节自动标「润色」；未写章节仍是「待写」。
+      const { ChapterService } = await import('../src/main/data/chapter-service')
+      const chapterService = new ChapterService(ps)
+      expect((await chapterService.getChapter(projectId, 3)).meta.status).toBe('reviewed')
+      expect((await chapterService.getChapter(projectId, 11)).meta.status).toBe('outline')
       spy.mockRestore()
     })
 

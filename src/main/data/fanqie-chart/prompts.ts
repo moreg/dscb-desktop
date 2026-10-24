@@ -2,6 +2,8 @@ import type { EvidenceBook } from './analysis'
 import type { FanqieChartBook, FanqieChapterContent, FanqieChartInsight, FanqieGoldenThreeSummary, FanqieChartIdea } from '../../../shared/fanqie-chart'
 import { prepareBooks, tagStatistics } from './analysis'
 import { chartBookTags } from '../../../shared/fanqie-chart-tags'
+import { CHART_FUSION_GENERATION_RULES } from './fusion-rules'
+import { chartSourceUsageLimit } from './fusion-review'
 
 export function buildGoldenThreeSummaryPrompt(input: {
   category: string
@@ -85,6 +87,7 @@ export function buildIdeasPrompt(input: {
   chartDate: string
   books: FanqieChartBook[]
   ideaCount: number
+  batchIdeaCount?: number
   focusTags: string[]
   goldenThreeSummary: FanqieGoldenThreeSummary
   acceptedIdeas?: Array<{ title: string; goldenFinger: string; coreConcept: string; openingHook: string; protagonist?: string; openingChapters?: FanqieChartIdea['openingChapters'] }>
@@ -121,7 +124,7 @@ ${JSON.stringify(input.previousMechanisms ?? [])}
 写作要求：
 1. 每条都要有能听懂的金手指、第一章当场兑现的场面，以及后面还能加码的循环。
 2. ${input.ideaCount} 条之间的金手指机制不要换皮重复。
-3. trendBasis 至少两本不同的书，quote 必须是 title、intro 或 tags 里的连续原文。
+3. trendBasis 至少两本不同的书，至少两项 field 为 intro，quote 是简介连续原文，包含两个相互关联、有辨识度的具体细节；每项 mechanism 必须说明原始梗、输入、操作、回报以及删除此来源后失败的步骤。标题和标签只能辅助，不能凑来源数量。
 4. 每条给 3 个不超过 15 字的原创书名。hookLine 20 到 40 字。
 5. strategy 只能是 trend、fusion、opportunity 之一。
 6. 每个脑洞必须有 openingChapters，恰好三项，chapter 分别为1、2、3。根据本分类汇总，把总体方向落实到这个脑洞自己的主角、金手指、具体处境和行动；三个脑洞不能共用一套开篇，也不要复写样本情节。
@@ -132,8 +135,13 @@ ${JSON.stringify(input.previousMechanisms ?? [])}
 11. 自查时间期限、能力规则、物资收支和人物动机，确保简介、金手指和三章方向互相一致。全部字段必须完整填写，trendBasis 每条必须解释原文支持的机制，不用标签本身证明复杂剧情规律。生成后会有独立终审，不合格方案会要求重写。
 12. 为每位女性规划关系起点、具体转折、前三章的阶段终点和仍未解决的问题。感情的确定速度须有实际铺垫，不靠补一句“早有好感”消除身份冲突或旧裂痕；成熟关系可有较快变化，但要写出此前具体积累。本批及历史方案之间不能重复同一关系事件链，尤其不要逐个套“首章修复旧情—次章另一女性主动邀约—第三章坦白多线好感且双方接受”。不同方案要改变关系矛盾、吸引来源、转折行为与阶段终点，而不只是换女性职业。不要把所有方案又统一改成相同的慢热互信模板。
 
-只输出 JSON，结构：
-{"ideas":[{"titleCandidates":["书名甲","书名乙","书名丙"],"strategy":"fusion","genre":"主类型","hookLine":"一句话梗","goldenFinger":"规则和第一次兑现","fusion":"第二个类型怎样改变回报，单一类型就写新切法","coreConcept":"处境、规则、矛盾","sellingPoint":"读者图什么、第一章兑现什么","protagonist":"姓名、身份、目标和缺点","openingHook":"第一章的行动和当场赢到什么","marketReasoning":"继承了哪类场面，又避开了哪本的组合","readerFit":"相近的阅读偏好","riskNotes":"同质化风险","openingChapters":[{"chapter":1,"openingEvent":"开场事件","protagonistAction":"主角行动","conflict":"具体阻力","payoff":"当章兑现","endHook":"章末钩子","summaryApplication":"汇总机制的具体应用"},{"chapter":2,"openingEvent":"承接前章","protagonistAction":"进一步行动","conflict":"冲突升级","payoff":"升级回报","endHook":"新的问题","summaryApplication":"应用方式"},{"chapter":3,"openingEvent":"引爆冲突","protagonistAction":"关键决断","conflict":"高潮阻力","payoff":"兑现开篇承诺","endHook":"长期循环","summaryApplication":"应用方式"}],"trendBasis":[{"bookId":"真实id","field":"intro","quote":"原文","mechanism":"这本哪一场让人想看下去"}]}]}
+以下共享规则中的 snake_case 字段对应输出 JSON 的 camelCase 字段，例如 trend_basis 对应 trendBasis，power_system 对应 powerSystem。
+${CHART_FUSION_GENERATION_RULES}
+本批总数（含保留方案）为 ${input.batchIdeaCount ?? input.ideaCount}，每本来源最多用于 ${chartSourceUsageLimit(input.batchIdeaCount ?? input.ideaCount, evidence.length)} 条；不足时换源重构，不用泛套路凑数。
+同时输出完整长篇展开：worldSetting（世界与真实约束）、powerSystem（原来源规则、新增能力、边界及各来源协同）、supportingCharacters（配角技能、交流能力、既有队伍与利益）、coreConflict（阶段目标和独特回报，不把选定物品或渠道当成目标）、targetAudience（阅读期待与兑现）、pacingPlan（开篇、中段、后段各一个实际破局节点，列出之前已得资产、各来源新贡献、普通替代路径为何不等效；长期重复循环、升级方向和未解悬念）。六项都写具体情节，不写口号或全文正文。开篇与 openingChapters 必须一致，新增能力和正常交流、取物、购种、卖粮筹银、既有队伍不能悄悄替代来源；发现能替代就重构概念，不凭空添加禁令。保留复原灭绝物种等真正独特回报，不能降格为普通种粮。
+六个展开字段均为字符串，不输出数组或对象。powerSystem必须区分来源核心操作、限制、新增能力的触发条件、检测输入依赖、设备与工作场域；pacingPlan每阶段写清新需求相对旧库存/旧能力的差别，核验信息如何先取得再送达决策者、启动与执行如何闭合，以及一条保留资源与正常措施组合后的最强替代路线，含原有预警提前量和实际时间/数量条件。不能只逐项否定单一工具，不能只排除一次买粮而漏掉购种后自繁，不能把新批次本身当目标。前三章比较具体因果链，尤其第二、三章不得统一为拒绝过劳、尊重边界、结清报酬。文字简洁，避免在多个字段重复整段规则。
+只输出 JSON，结构如下，六个展开字段不可省略：
+{"ideas":[{"titleCandidates":["书名甲","书名乙","书名丙"],"strategy":"fusion","genre":"主类型","hookLine":"一句话梗","goldenFinger":"规则和第一次兑现","fusion":"来源A的具体梗如何与来源B串成同一因果链；逐一删除各来源会在哪步失效，保留其他能力和资产后为何不能等效替代","coreConcept":"处境、规则、矛盾","sellingPoint":"读者图什么、第一章兑现什么","protagonist":"姓名、身份、目标和缺点","openingHook":"第一章的行动和当场赢到什么","marketReasoning":"继承了哪类场面，又避开了哪本的组合","readerFit":"相近的阅读偏好","riskNotes":"同质化风险","worldSetting":"世界与实际约束","powerSystem":"原来源规则、新增能力与协同操作","supportingCharacters":"配角的知识、正常交流和队伍能力","coreConflict":"实际目标、独特回报、必要条件与失败后果","targetAudience":"阅读期待与具体兑现","pacingPlan":"开篇、中段、后段的节点、既得资源、各源新贡献与替代路径；长期循环、升级和悬念","openingChapters":[{"chapter":1,"openingEvent":"开场事件","protagonistAction":"主角行动","conflict":"具体阻力","payoff":"当章兑现","endHook":"章末钩子","summaryApplication":"汇总机制的具体应用"},{"chapter":2,"openingEvent":"承接前章","protagonistAction":"进一步行动","conflict":"冲突升级","payoff":"升级回报","endHook":"新的问题","summaryApplication":"应用方式"},{"chapter":3,"openingEvent":"引爆冲突","protagonistAction":"关键决断","conflict":"高潮阻力","payoff":"兑现开篇承诺","endHook":"长期循环","summaryApplication":"应用方式"}],"trendBasis":[{"bookId":"真实id","field":"intro","quote":"原文","mechanism":"这本哪一场让人想看下去"}]}]}
 ${input.acceptedIdeas?.length ? `已经保留以下合格方案，只补充本次要求的 ${input.ideaCount} 个新方案，不要重写或重复这些方案的书名、概念和机制：${JSON.stringify(input.acceptedIdeas)}` : ''}
 ${input.repairNotes?.length ? `上次结果有缺项，请补全本次新方案：${JSON.stringify(input.repairNotes)}` : ''}`
 }

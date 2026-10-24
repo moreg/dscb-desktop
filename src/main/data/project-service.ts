@@ -65,6 +65,7 @@ export class ProjectService {
       genre: input.genre,
       description: input.description,
       openingChapters: input.openingChapters,
+      ideaDevelopment: input.ideaDevelopment,
       targetChapters: input.targetChapters,
       chapterWordCount: input.chapterWordCount,
       createdAt: now

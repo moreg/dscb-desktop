@@ -16,6 +16,7 @@ const createProjectSchema = z.object({
   targetChapters: z.number().int().min(1).max(100_000).optional(),
   chapterWordCount: z.number().int().min(100).max(100_000).optional(),
   customPath: z.string().max(1000).optional(),
+  ideaDevelopment: z.string().max(200000).optional(),
   openingChapters: z.array(z.object({
     chapter: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     openingEvent: z.string().trim().min(1).max(10000),

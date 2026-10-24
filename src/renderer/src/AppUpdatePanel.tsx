@@ -43,7 +43,7 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
     finally { setPending(false) }
   }
   async function startDownload() {
-    if (!window.confirm('更新将在后台下载，可继续写作或最小化应用。下载完成后会询问是否立即重启，安装完成后自动重新打开。是否下载？')) return
+    if (!window.confirm('更新将在后台下载，可继续写作或最小化应用。下载完成后会询问是否立即重启应用并安装更新，安装完成后应用将自动打开，无需重启电脑。是否下载？')) return
     const next = await run(() => window.api.downloadAppUpdate())
     if (next?.status === 'downloading') window.dispatchEvent(new Event(BACKGROUND_DOWNLOAD_EVENT))
   }
@@ -58,7 +58,7 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
     : state.status === 'available' ? `发现新版本 ${state.version}`
     : state.status === 'current' ? '当前已是最新版本'
     : state.status === 'downloading' ? `正在下载 ${state.version} · ${Math.round(state.percent ?? 0)}%`
-    : state.status === 'downloaded' ? `版本 ${state.version} 已下载，是否立即重启？请先保存内容并结束任务；重启后将安装更新并自动重新打开。`
+    : state.status === 'downloaded' ? `版本 ${state.version} 已下载，是否立即重启应用并安装更新？请先保存内容并结束任务；安装完成后应用将自动打开，无需重启电脑。`
     : state.status === 'restarting' ? '正在关闭应用并安装更新，完成后将自动重新打开。'
     : state.status === 'error' ? state.error
     : '更新来自 GitHub Releases'
@@ -78,7 +78,7 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
         <AppUpdateReleaseNotes key={state.version} notes={state.releaseNotes} compact={compact} />}
       {!compact && <label style={{ display: 'block', margin: '12px 0', fontSize: 13 }}>
         <input type="checkbox" checked={state.autoCheck} disabled={pending}
-          onChange={e => { void run(() => window.api.setAppUpdateAutoCheck(e.target.checked)) }} /> 启动时自动检查更新
+          onChange={e => { void run(() => window.api.setAppUpdateAutoCheck(e.target.checked)) }} /> 自动检查更新（启动时及每小时）
       </label>}
       <div className="row" style={{ gap: 8 }}>
         {!compact && <button className="btn btn-ghost" disabled={!state.supported || busy || state.status === 'downloaded'}
@@ -86,7 +86,7 @@ export default function AppUpdatePanel({ compact = false }: { compact?: boolean 
         {(state.status === 'available' || (state.status === 'error' && state.version)) &&
           <button className="btn" disabled={busy} onClick={() => { void startDownload() }}>后台下载</button>}
         {state.status === 'downloaded' && <button className="btn" disabled={!state.supported || busy}
-          onClick={() => { void run(() => window.api.restartAppUpdate()) }}>立即重启</button>}
+          onClick={() => { void run(() => window.api.restartAppUpdate()) }}>重启应用并更新</button>}
         {compact && state.status === 'downloading' && <button className="btn btn-ghost"
           onClick={() => setBackground(true)}>转入后台</button>}
         {compact && <button className="btn btn-ghost" disabled={busy && state.status === 'restarting'} onClick={() => setDismissed(noticeKey)}>{state.status === 'downloaded' ? '稍后' : '收起'}</button>}

@@ -1046,15 +1046,29 @@ function ChapterCandidateItems({
             </button>
           </div>
         ) : (
-          <button
-            className="btn btn-ghost"
-            style={{ padding: '2px 10px', fontSize: 12 }}
-            disabled={picked.size === 0 || busy || detail.stale}
-            onClick={() => setConfirming(true)}
-            title="绕过证据校验，把选中的条目直接写进记忆库"
-          >
-            确认属实，强制写入{picked.size > 0 ? `（${picked.size} 条）` : ''}
-          </button>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '2px 10px', fontSize: 12 }}
+              disabled={picked.size === 0 || busy || detail.stale}
+              onClick={() => setConfirming(true)}
+              title="绕过证据校验，把选中的条目直接写进记忆库"
+            >
+              确认属实，强制写入{picked.size > 0 ? `（${picked.size} 条）` : ''}
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '2px 10px', fontSize: 12 }}
+              disabled={busy || detail.stale}
+              onClick={() => {
+                setPicked(new Set(pending.map(keyOf)))
+                setConfirming(true)
+              }}
+              title="选中本章全部未通过条目，二次确认后一次写入"
+            >
+              全部强制写入（{pending.length} 条）
+            </button>
+          </div>
         )
       ) : null}
     </div>

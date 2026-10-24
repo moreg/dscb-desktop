@@ -55,13 +55,13 @@ export async function registerAppUpdates(restoreWindow: () => void = () => {}): 
   const restart = () => {
     if (!state.supported || state.status !== 'downloaded' || restarting) return state
     if (activeStreamCount() > 0 || activeBatchProjects.size > 0) {
-      publish({ error: '仍有生成或批量任务正在进行，请先结束任务，再点击“立即重启”。' })
+      publish({ error: '仍有生成或批量任务正在进行，请先结束任务，再点击“重启应用并更新”。' })
       return state
     }
     restarting = true
     publish({ status: 'restarting', error: undefined })
     const windows = BrowserWindow.getAllWindows()
-    const canceled = () => restartFailed('重启已取消。请先保存未保存的内容并结束任务，再点击“立即重启”。')
+    const canceled = () => restartFailed('应用重启已取消。请先保存未保存的内容并结束任务，再点击“重启应用并更新”。')
     const ready = (event: Electron.Event) => {
       // will-quit only runs after every window accepts closing and mobile shutdown completes.
       event.preventDefault()
@@ -101,13 +101,13 @@ export async function registerAppUpdates(restoreWindow: () => void = () => {}): 
     promptedVersions.add(info.version)
     void dialog.showMessageBox({
       type: 'info', title: '更新已下载',
-      message: `版本 ${info.version} 已下载，是否立即重启？`,
-      detail: '立即重启将关闭应用、安装更新并自动重新打开。请先保存正文并结束正在进行的任务；选择“稍后”可继续使用。',
-      buttons: ['立即重启', '稍后'], defaultId: 1, cancelId: 1, noLink: true
+      message: `版本 ${info.version} 已下载，是否立即重启应用并安装更新？`,
+      detail: '只会关闭并重新打开本应用，无需重启电脑。请先保存正文并结束正在进行的任务；安装更新后应用将自动打开。选择“稍后”可继续使用。',
+      buttons: ['重启应用并更新', '稍后'], defaultId: 1, cancelId: 1, noLink: true
     }).then(({ response }) => {
       if (response === 0 && state.version === info.version && state.status === 'downloaded') restart()
     }).catch(() => {
-      if (state.status === 'downloaded') publish({ error: '无法显示重启提示，请在应用更新面板点击“立即重启”。' })
+      if (state.status === 'downloaded') publish({ error: '无法显示应用重启提示，请在应用更新面板点击“重启应用并更新”。' })
     })
   }
   autoUpdater.on('update-available', onAvailable)
@@ -118,7 +118,7 @@ export async function registerAppUpdates(restoreWindow: () => void = () => {}): 
 
   const check = async (automatic = false) => {
     if (!state.supported || busy || restarting || state.status === 'downloaded' || state.status === 'downloading') return state
-    // Respect the startup-check preference and keep an already available update visible.
+    // Respect the automatic-check preference and keep an already available update visible.
     if (automatic && (!state.autoCheck || state.status === 'available')) return state
     busy = true
     publish({ status: 'checking', error: undefined, version: undefined, releaseNotes: undefined, percent: undefined })
@@ -154,9 +154,12 @@ export async function registerAppUpdates(restoreWindow: () => void = () => {}): 
 
   const startup = setTimeout(() => { void check(true) }, 15_000)
   startup.unref()
+  const hourly = setInterval(() => { void check(true) }, 60 * 60 * 1000)
+  hourly.unref()
   return () => {
     clearRestartListeners()
     clearTimeout(startup)
+    clearInterval(hourly)
     autoUpdater.removeListener('update-available', onAvailable)
     autoUpdater.removeListener('update-not-available', onCurrent)
     autoUpdater.removeListener('download-progress', onProgress)

@@ -179,6 +179,13 @@ export interface FanqieChartIdea {
   readerFit: string
   riskNotes: string
   trendBasis: FanqieIdeaBasis[]
+  /** v14 新生成方案必填；兼容旧记录。 */
+  worldSetting?: string
+  powerSystem?: string
+  supportingCharacters?: string
+  coreConflict?: string
+  targetAudience?: string
+  pacingPlan?: string
   /** 旧脑洞记录可能没有此字段。新生成的方案包含完整三章方向。 */
   openingChapters?: FanqieIdeaOpeningChapter[]
 }
@@ -194,6 +201,7 @@ export interface FanqieIdeaOpeningChapter {
 }
 
 export interface FanqieChartIdeas {
+  promptVersion?: string
   ideas: FanqieChartIdea[]
   chartDate: string
   sampleCount: number
