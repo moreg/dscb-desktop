@@ -297,8 +297,77 @@ describe('长篇核对绕过与记忆污染回归', () => {
     expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeDefined()
     expect(await new ProseRepo(dir).read(1)).toBe(bad)
     // 补跑进度必须可见：每章开始与流程步骤都要发事件，不能让界面停在"准备补跑"
-    expect(stages.some((s) => s.startsWith('开始补跑第 1 章'))).toBe(true)
+    expect(stages.some((s) => s.startsWith('开始完整补跑第 1 章'))).toBe(true)
     expect(steps.some((s) => s.chapter === 1 && s.step.startsWith('continuity'))).toBe(true)
+  })
+
+  it('概要与正文一致的隔离章走快路径：只补长篇核对即解除，不重跑完整流程', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, good)
+    await seedSummary(1, good)
+    await markBatchReviewPending(dir, 1, hashProse(good))
+    await markLongformPending(dir, 1, hashProse(good))
+    const batchSpy = vi.spyOn(service as unknown as { generateChaptersBatch: () => Promise<unknown> },
+      'generateChaptersBatch')
+    const guardCalls = () => generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard').length
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result.ok).toBe(true)
+    expect(result.repaired).toEqual([1])
+    expect(batchSpy).not.toHaveBeenCalled()
+    expect(guardCalls()).toBe(1)
+    const state = await readLongformReviewState(dir)
+    expect(state.pending['1']).toBeUndefined()
+    expect(state.batchPending?.['1']).toBeUndefined()
+    expect(await new ProseRepo(dir).read(1)).toBe(good)
+  })
+
+  it('快路径查出冲突且修复失败时保留隔离并报告', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    await seedSummary(1, bad)
+    await markBatchReviewPending(dir, 1, hashProse(bad))
+    vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict').mockRejectedValue(new Error('模拟修复失败'))
+    const batchSpy = vi.spyOn(service as unknown as { generateChaptersBatch: () => Promise<unknown> },
+      'generateChaptersBatch')
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]?.chapter).toBe(1)
+    expect(result.failures[0]?.error).toContain('LONGFORM_CONFLICT')
+    expect(result.failures[0]?.error).toContain('自动修复未完成')
+    expect(batchSpy).not.toHaveBeenCalled()
+    expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeDefined()
+    expect(await new ProseRepo(dir).read(1)).toBe(bad)
+  })
+
+  it('快路径冲突修复成功后转入完整补跑重建概要与记忆', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    await seedSummary(1, bad)
+    await markBatchReviewPending(dir, 1, hashProse(bad))
+    vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict').mockImplementation(async () => { verdict = cleared; return good })
+    const batchSpy = vi.spyOn(service as unknown as { generateChaptersBatch: () => Promise<unknown> },
+      'generateChaptersBatch').mockResolvedValue({ status: 'completed' })
+    const progressMessages: string[] = []
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {}, { onRepairProgress: (m: string) => progressMessages.push(m) })
+    expect(result.repaired).toEqual([1])
+    expect(batchSpy).toHaveBeenCalledTimes(1)
+    const call = batchSpy.mock.calls[0] as unknown as Array<unknown>
+    expect(call[6]).toMatchObject({ fromChapter: 1, total: 1, completed: [1], pendingPostProcessChapter: 1 })
+    expect(progressMessages.some((m) => m.includes('转入完整补跑'))).toBe(true)
   })
 
   it('没有隔离章节时补跑为空操作', async () => {

@@ -3564,10 +3564,11 @@ export class WriteService {
   }
 
   /**
-   * 批次恢复记录丢失后的兜底：逐章补跑隔离章节的完整写后流程。
-   * 有正文的章按升序复用批次恢复机制（contentOverride 复用正文，不重新生成），
-   * 跑完检查、自动修复与同步后由批次流程解除批次隔离；正文已丢失的章记录无稿可核，
-   * 锁内校验后直接清除残留。任何一章补跑失败都会保留其隔离状态并计入 failures。
+   * 批次恢复记录丢失后的兜底：逐章补跑隔离章节的欠账，只处理真正缺的部分。
+   * 概要与当前正文一致的章：完整写后流程（核对、记忆、概要）曾对这份稿件全部跑完，
+   * 批次隔离只是被中断残留的登记——补一次长篇核对即可解除，不重跑去 AI 味与深度审稿；
+   * 概要缺失或已过期的章：写后流程确实没跑完，按批次恢复机制逐项补齐（含自动修复）。
+   * 正文已丢失的章记录无稿可核，锁内校验后直接清除残留。
    */
   async repairQuarantinedChapters(
     projectId: string,
@@ -3586,13 +3587,21 @@ export class WriteService {
       throwIfAborted(opts.signal)
       // 逐章重读隔离状态：前一章补跑通过可能已顺带解除后续章的记录。
       if (!blockedLongformChapters(await readLongformReviewState(dir))[String(chapter)]) continue
-      if (!(await new ProseRepo(dir).read(chapter)).trim()) {
+      const prose = await new ProseRepo(dir).read(chapter)
+      if (!prose.trim()) {
         if (await removeStaleLongformEntries(dir, chapter,
           async () => hashProse(await new ProseRepo(dir).read(chapter)))) cleared.push(chapter)
         continue
       }
+      const summary = await new ChapterSummaryRepo(dir).read(chapter)
+      if (summary && summary.sourceHash === hashProse(prose)) {
+        const quick = await this.repairQuarantinedChapterQuick(projectId, dir, chapter, prose, opts)
+        if (quick.outcome === 'cleared') { repaired.push(chapter); continue }
+        if (quick.outcome === 'failed') { failures.push({ chapter, error: quick.error }); continue }
+        opts.onRepairProgress?.(`第 ${chapter} 章冲突已自动修复，概要与记忆需按新稿重建，转入完整补跑`, chapter)
+      }
       // 升序补跑：前章解除隔离后，后章的写前历史核对才能读到它。
-      opts.onRepairProgress?.(`开始补跑第 ${chapter} 章（复用已保存正文，核对与同步约需几分钟）`, chapter)
+      opts.onRepairProgress?.(`开始完整补跑第 ${chapter} 章（去 AI 味、深度审稿、记忆与概要逐项补齐，约需十几分钟）`, chapter)
       const progress = await this.generateChaptersBatch(projectId, chapter, chapter, onChapterComplete,
         opts.styleProfileId ?? null,
         { ...opts, onFlowProgress: (step, ch) => {
@@ -3605,6 +3614,47 @@ export class WriteService {
       else failures.push({ chapter, error: progress.pauseReason ?? progress.error ?? '补跑未完成' })
     }
     return { ok: failures.length === 0, repaired, cleared, failures }
+  }
+
+  /**
+   * 快路径补跑：对与概要一致的保存稿只补长篇核对并解除隔离。
+   * cleared=核对通过已解除；repairedNeedsFull=查出冲突且已自动修复，正文变化需转完整补跑；
+   * failed=核对或修复失败，隔离保留。
+   */
+  private async repairQuarantinedChapterQuick(
+    projectId: string, dir: string, chapter: number, prose: string,
+    opts: { signal?: AbortSignal; tempContext?: string;
+      onRepairProgress?: (message: string, chapterNumber: number) => void }
+  ): Promise<{ outcome: 'cleared' } | { outcome: 'repairedNeedsFull' } | { outcome: 'failed'; error: string }> {
+    try {
+      await this.assertLongformConsistency(projectId, chapter, prose, {
+        signal: opts.signal, instruction: opts.tempContext,
+        onStart: () => opts.onRepairProgress?.(`第 ${chapter} 章 正在核对长期记忆、人物知情与主线`, chapter)
+      })
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith('LONGFORM_CONFLICT:')) {
+        return { outcome: 'failed', error: (error as Error).message }
+      }
+      opts.onRepairProgress?.(`第 ${chapter} 章查出长篇冲突，正在自动修复并复核`, chapter)
+      try {
+        const repaired = await this.repairLongformConflict(projectId, chapter, prose, error.message,
+          (_step, detail) => opts.onRepairProgress?.(detail ?? _step, chapter),
+          { signal: opts.signal, tempContext: opts.tempContext })
+        await this.chapterService.updateContent(projectId, chapter, repaired, contentRevision(prose),
+          { source: 'reviewed', note: '补跑时自动修复长篇一致性冲突并复核通过' })
+        return { outcome: 'repairedNeedsFull' }
+      } catch (repairError) {
+        throwIfAborted(opts.signal)
+        return { outcome: 'failed', error: `${error.message}；自动修复未完成，已保留当前稿：${(repairError as Error).message}` }
+      }
+    }
+    // 核对通过：单章待核对已由核对本身清除，这里解除批次隔离并把章节状态标回润色。
+    const state = await readLongformReviewState(dir)
+    const token = state.batchPending?.[String(chapter)]?.token
+    if (token) await clearBatchReviewPending(dir, chapter, token)
+    await setChapterStatus(dir, chapter, 'reviewed', hashProse(prose))
+      .catch((err: unknown) => console.warn(`[QuarantineRepair] Failed to mark chapter ${chapter} reviewed:`, err))
+    return { outcome: 'cleared' }
   }
 
   /**
