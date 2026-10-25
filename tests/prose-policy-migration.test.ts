@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FANQIE_FIRST_CHAPTER_NOTE, DIALOGUE_PARAGRAPHS, migrateLegacyProseDefaults, serializeProseOverrides } from '../src/shared/prose-policy'
+import { DIALOGUE_PARAGRAPHS, migrateLegacyProseDefaults, serializeProseOverrides, READER_NOTE_BOUNDARY } from '../src/shared/prose-policy'
 import { buildDeslopPrompt, DESLOP_SYSTEM_PROMPT } from '../src/main/data/skill-prompts/deslop/anti-ai-methods'
 import { PLANNING_RULES } from '../src/main/data/skill-prompts/opening/planning-rules'
 
@@ -52,12 +52,12 @@ describe('历史内置表达规则迁移', () => {
 
 
 describe('番茄首章读者互动约定', () => {
-  it('规划与精修共用同一约定，明确保留例外和续写边界', () => {
+  it('默认不再自动生成首章寄存语，规划与精修提示不再包含生成约定', () => {
     for (const prompt of [PLANNING_RULES, DESLOP_SYSTEM_PROMPT]) {
-      expect(prompt).toContain(FANQIE_FIRST_CHAPTER_NOTE)
-      expect(prompt).toContain('第二章起、七猫和平台未明项目不自动生成')
-      expect(prompt).toContain('精修和审核不得据此误删')
-      expect(prompt).toContain('用户明确要求省略、指定文案或改变形式时优先')
+      expect(prompt).not.toContain('脑子寄存处】这是作者指定')
+      expect(prompt).not.toContain('第二章起、七猫和平台未明项目不自动生成')
     }
+    expect(READER_NOTE_BOUNDARY).toContain('现行默认不再自动生成')
+    expect(READER_NOTE_BOUNDARY).toContain('不按关键词删除正文')
   })
 })

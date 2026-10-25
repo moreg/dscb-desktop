@@ -9,14 +9,13 @@ export const DIALOGUE_PUNCTUATION_RULE = `同一对引号内除末尾句号外�
 export const SCENE_DIALOGUE = policy.dialogue
 export const PROSE_PRESERVATION = policy.preservation
 export const READER_NOTE_BOUNDARY = policy.readerNoteBoundary
-export const FANQIE_FIRST_CHAPTER_NOTE = policy.fanqieFirstChapterNote
 export const PROSE_POLICY_RULES = `【正文保真共享规则 ${policy.version}】
 ${policy.paragraphs}
 ${policy.dialogueParagraphs}
 ${policy.punctuation}
 ${policy.dialogue}
 ${policy.preservation}
-${policy.fanqieFirstChapterNote}`
+${policy.readerNoteBoundary}`
 
 /** Only exact, previously shipped fragments are migrated; settings bytes are never rewritten. */
 export function migrateLegacyProseDefaults(text: string): string {

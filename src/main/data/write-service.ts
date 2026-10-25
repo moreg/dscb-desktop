@@ -749,10 +749,7 @@ export class WriteService {
       continueMode
     }) + (longformPlan ? `\n\n${longformPlan}` : '')
 
-    const openingNote = platformConfig?.platform === 'fanqie' && chapterNumber === 1 && !existingText?.trim()
-      ? `\n\n本次从零写番茄第一章：先写贴合《${project.name}》的寄存语，再空一行进入故事；不要输出说明或备选版本。`
-      : ''
-    return { system, user: user + openingNote, targetWords, chapterTargetWords, writtenWords, wordTarget, continueMode }
+    return { system, user, targetWords, chapterTargetWords, writtenWords, wordTarget, continueMode }
   }
 
   async generateChapterStream(

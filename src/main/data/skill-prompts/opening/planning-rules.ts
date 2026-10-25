@@ -1,6 +1,6 @@
 import { FANQIE_OPENING_RULES, PLANNING_SKILL_CONTRACT, DIALOGUE_TARGET_RULES, CHARACTER_VOICE_RULES } from '../skill-contracts'
 import { renderWritingPlatformConfig, type WritingPlatformConfig } from '../../writing-platform'
-import { DIALOGUE_PARAGRAPHS, FANQIE_FIRST_CHAPTER_NOTE } from '../../../../shared/prose-policy'
+import { DIALOGUE_PARAGRAPHS } from '../../../../shared/prose-policy'
 
 /** 立项、规划和审核共用的内容边界；不把正文排版套到管理说明。 */
 export const PLANNING_RULES = `
@@ -11,8 +11,6 @@ ${CHARACTER_VOICE_RULES}
 ${DIALOGUE_TARGET_RULES}
 
 ${FANQIE_OPENING_RULES}
-
-${FANQIE_FIRST_CHAPTER_NOTE}
 
 【规划与审核统一规则】
 - 用户本次明确要求优先，沿用项目平台、人设、文风和已确认事实；缺少平台配置时保留既有风格，不自动转平台。

@@ -639,7 +639,7 @@ export class FanqieChartService {
                 return validateFusionReview(findJsonObject(fusionText), batch)
               } catch (error) {
                 const reason = error instanceof Error ? error.message.slice(0, 400) : '报告结构不完整'
-                if (reviewAttempt) throw new Error(`融梗复核重审仍无效，旧结果已保留：${reason}`)
+                if (reviewAttempt) throw new Error(`融梗复核重审仍无效，旧结果已保留：${reason}`, { cause: error })
                 correction = `上次复核报告无效：${reason}。请对下方同一份原稿重新完整复核，不改写故事、不预设通过或失败，也不要重复非法删除。\n`
                 onProgress?.('复核报告不完整或删除范围不合法，正在对原稿重新核查一次')
               }
