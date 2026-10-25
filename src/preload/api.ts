@@ -964,11 +964,11 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('write:listQuarantinedChapters', { projectId }),
     repairQuarantinedChapters: (
       projectId: string,
-      onProgress?: (chapter: number, stage: ChapterGenerationStage) => void,
+      onProgress?: (chapter: number, message: string) => void,
       externalRequestId?: string
     ) => {
       const requestId = externalRequestId ?? crypto.randomUUID()
-      const progressHandler = (_e: unknown, payload: { requestId: string; chapter: number; stage: ChapterGenerationStage }) => {
+      const progressHandler = (_e: unknown, payload: { requestId: string; chapter: number; stage: string }) => {
         if (payload.requestId === requestId) onProgress?.(payload.chapter, payload.stage)
       }
       if (onProgress) ipcRenderer.on('write:quarantineRepairProgress', progressHandler as never)

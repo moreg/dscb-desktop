@@ -1106,7 +1106,7 @@ export interface RendererApi {
   /** 批次恢复记录丢失后的兜底：复用已保存正文逐章补跑完整检查与自动修复，解除隔离。 */
   repairQuarantinedChapters: (
     projectId: string,
-    onProgress?: (chapter: number, stage: ChapterGenerationStage) => void,
+    onProgress?: (chapter: number, message: string) => void,
     requestId?: string
   ) => Promise<{
     ok: boolean

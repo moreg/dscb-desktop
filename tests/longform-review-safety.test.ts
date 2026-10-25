@@ -281,16 +281,24 @@ describe('长篇核对绕过与记忆污染回归', () => {
     verdict = rejected
     await new ProseRepo(dir).write(1, bad)
     await markBatchReviewPending(dir, 1, hashProse(bad))
+    const stages: string[] = []
+    const steps: Array<{ step: string; chapter: number }> = []
     const repair = (service as unknown as {
       repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
         Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
     }).repairQuarantinedChapters.bind(service)
-    const result = await repair(id, () => {})
+    const result = await repair(id, () => {}, {
+      onRepairProgress: (message: string) => stages.push(message),
+      onFlowProgress: (step: string, chapter: number) => steps.push({ step, chapter })
+    })
     expect(result.ok).toBe(false)
     expect(result.failures[0]?.chapter).toBe(1)
     expect(result.failures[0]?.error).toContain('LONGFORM_CONFLICT')
     expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeDefined()
     expect(await new ProseRepo(dir).read(1)).toBe(bad)
+    // 补跑进度必须可见：每章开始与流程步骤都要发事件，不能让界面停在"准备补跑"
+    expect(stages.some((s) => s.startsWith('开始补跑第 1 章'))).toBe(true)
+    expect(steps.some((s) => s.chapter === 1 && s.step.startsWith('continuity'))).toBe(true)
   })
 
   it('没有隔离章节时补跑为空操作', async () => {

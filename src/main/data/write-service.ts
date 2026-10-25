@@ -286,6 +286,9 @@ export interface BatchGenerateOptions extends GenerateOptions {
   onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
   /** 正文真正落盘后的恢复检查点；完成该回调后才允许写后同步。 */
   onContentSaved?: (chapterNumber: number) => Promise<void>
+  /** 单章写后流程的步骤回调（generating/audit/outlineSync/memoryApply/continuity:… 等），
+   * 批量与补跑 UI 用它显示当前章进行到哪一步；此前批次内部丢弃了这些步骤，恢复补跑全程无进度。 */
+  onFlowProgress?: (step: string, chapterNumber: number) => void
 }
 
 /** prompt 组装阶段才知道的字数口径，回传给前端做「目标 / 实际 / 还差」提示 */
@@ -3569,7 +3572,9 @@ export class WriteService {
   async repairQuarantinedChapters(
     projectId: string,
     onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
-    opts: BatchGenerateOptions & { styleProfileId?: string | null } = {}
+    opts: BatchGenerateOptions & { styleProfileId?: string | null;
+      /** 补跑进度（每章开始 + 写后流程步骤），字符串直出便于界面展示 */
+      onRepairProgress?: (message: string, chapterNumber: number) => void } = {}
   ): Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }> {
     const dir = await this.projectService.resolveDir(projectId)
     const repaired: number[] = []
@@ -3587,8 +3592,13 @@ export class WriteService {
         continue
       }
       // 升序补跑：前章解除隔离后，后章的写前历史核对才能读到它。
+      opts.onRepairProgress?.(`开始补跑第 ${chapter} 章（复用已保存正文，核对与同步约需几分钟）`, chapter)
       const progress = await this.generateChaptersBatch(projectId, chapter, chapter, onChapterComplete,
-        opts.styleProfileId ?? null, opts,
+        opts.styleProfileId ?? null,
+        { ...opts, onFlowProgress: (step, ch) => {
+          opts.onFlowProgress?.(step, ch)
+          opts.onRepairProgress?.(step, ch)
+        } },
         { fromChapter: chapter, total: 1, completed: [chapter], pendingPostProcessChapter: chapter },
         { autoContinue: true })
       if (progress.status === 'completed') repaired.push(chapter)
@@ -3691,7 +3701,9 @@ export class WriteService {
         for (let attempt = 0; ; attempt++) {
           throwIfAborted(opts.signal)
           try {
-            result = await this.runFullFlowForChapter(projectId, ch, () => {}, {
+            result = await this.runFullFlowForChapter(projectId, ch, (step, detail) => {
+              ;(opts as BatchGenerateOptions).onFlowProgress?.(detail ? `${step}:${detail}` : step, ch)
+            }, {
               ...opts, styleProfileId, strengthOverride,
               onGenerationStage: (stage: ChapterGenerationStage) => (opts as BatchGenerateOptions).onGenerationStage?.(stage, ch),
               onAutoDeslopResult: (report: AutoDeslopResult) => (opts as BatchGenerateOptions).onAutoDeslopResult?.(report, ch),

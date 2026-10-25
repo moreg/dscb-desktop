@@ -1074,9 +1074,9 @@ export function registerWriteIpc(service: WriteService): void {
             }),
             {
               signal,
-              onGenerationStage: (stage, chapterNumber) =>
+              onRepairProgress: (message, chapterNumber) =>
                 safeSend(win, 'write:quarantineRepairProgress', {
-                  requestId: validated.requestId, chapter: chapterNumber, stage
+                  requestId: validated.requestId, chapter: chapterNumber, stage: message
                 })
             }
           )

@@ -52,10 +52,14 @@ const STATUS_CLASS: Record<ChapterStatus, string> = {
 
 const CHAPTER_PAGE_SIZE = 20
 
-/** 生成阶段标签去掉前缀（preparing:/continuity:/agy:），补跑横幅只展示可读部分。 */
+/** 生成阶段标签去掉标识符前缀（preparing:/continuity:/continuityRepair:），只展示可读部分。 */
 function quarantineStageLabel(stage: string): string {
-  const idx = stage.indexOf(':')
-  return idx >= 0 && idx <= 16 ? stage.slice(idx + 1) : stage
+  const m = stage.match(/^([a-zA-Z]+):(.*)$/)
+  return m ? m[2] : stage
+}
+
+function quarantineElapsedLabel(seconds: number): string {
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`
 }
 
 /** 生成分页页码窗口：首尾页恒显，中间取当前页邻域，超距用省略号收拢。 */
@@ -160,6 +164,15 @@ export default function ChapterListPage({
   const [quarantineProgress, setQuarantineProgress] = useState('')
   const [quarantineResult, setQuarantineResult] = useState('')
   const [quarantineConfirming, setQuarantineConfirming] = useState(false)
+  // 补跑耗时的每秒计时：核对与记忆同步每章要几分钟，没有秒表用户会以为卡死了
+  const [quarantineElapsed, setQuarantineElapsed] = useState(0)
+  useEffect(() => {
+    if (!quarantineBusy) return
+    setQuarantineElapsed(0)
+    const started = Date.now()
+    const timer = setInterval(() => setQuarantineElapsed(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [quarantineBusy])
   const [showBenchmark, setShowBenchmark] = useState(false)
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
@@ -332,7 +345,7 @@ export default function ChapterListPage({
     setQuarantineBusy(true)
     setQuarantineConfirming(false)
     setQuarantineResult('')
-    setQuarantineProgress('准备补跑…')
+    setQuarantineProgress('准备补跑…（核对与记忆同步每章约需几分钟）')
     void window.api
       .repairQuarantinedChapters(projectId, (chapter, stage) => {
         setQuarantineProgress(`第 ${chapter} 章 ${quarantineStageLabel(stage)}`)
@@ -503,7 +516,9 @@ export default function ChapterListPage({
               }}
             >
               {quarantineBusy ? (
-                <span className="meta">⟳ {quarantineProgress || '正在补跑…'}</span>
+                <span className="meta">
+                  ⟳ 已运行 {quarantineElapsedLabel(quarantineElapsed)} · {quarantineProgress || '正在补跑…'}
+                </span>
               ) : quarantined.length ? (
                 <span className="meta">
                   第 {quarantined.map((q) => q.chapter).join('、')} 章正文待补跑长篇检查
