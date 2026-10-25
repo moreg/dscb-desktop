@@ -1050,6 +1050,14 @@ export function registerWriteIpc(service: WriteService): void {
       return service.listQuarantinedChapters(validated.projectId)
     }
   )
+  safeHandle(
+    'write:dropQuarantinedChapter',
+    async (_e, payload: { projectId: string; chapter: number }) => {
+      const validated = validateInput(z.object({ projectId: projectIdSchema, chapter: chapterNumberSchema }), payload)
+      await service.dropQuarantinedChapter(validated.projectId, validated.chapter)
+      return { ok: true }
+    }
+  )
   ipcMain.handle('write:repairQuarantinedChapters', async (e, payload: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     try {

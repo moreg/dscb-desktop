@@ -962,6 +962,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     },
     listQuarantinedChapters: (projectId: string) =>
       ipcRenderer.invoke('write:listQuarantinedChapters', { projectId }),
+    dropQuarantinedChapter: (projectId: string, chapter: number) =>
+      ipcRenderer.invoke('write:dropQuarantinedChapter', { projectId, chapter }),
     repairQuarantinedChapters: (
       projectId: string,
       onProgress?: (chapter: number, message: string) => void,

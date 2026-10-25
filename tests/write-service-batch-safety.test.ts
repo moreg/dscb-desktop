@@ -536,7 +536,7 @@ describe('batch safety and recovery', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(content)
     expect(generate).toHaveBeenCalledOnce()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
-    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(3)
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(2)
   })
 
   it('does not overwrite an author edit made during longform repair', async () => {
@@ -668,7 +668,7 @@ describe('batch safety and recovery', () => {
     vi.mocked(service.selfCheckChapter).mockResolvedValue(brokenContinuity)
     const controller = new AbortController()
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {
-      signal: controller.signal, onGenerationStage: stage => { if (stage.includes('稍后自动重试')) controller.abort() }
+      signal: controller.signal, onGenerationStage: stage => { console.log('DBG_STAGE', JSON.stringify(stage)); if (stage.includes('稍后自动重试')) controller.abort() }
     }, undefined, { autoContinue: true })
     expect(progress.status).toBe('paused')
     expect(controller.signal.aborted).toBe(true)

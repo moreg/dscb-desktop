@@ -2985,7 +2985,12 @@ export class WriteService {
           return await this.runFullFlowForChapterInOperation(projectId, chapterNumber, onProgress, { ...currentOpts, ...callbacks })
         } catch (error) {
           throwIfAborted(opts.signal)
-          if (!(error instanceof Error) || !error.message.startsWith('LONGFORM_CONFLICT:') || draft === undefined || round >= 3) throw error
+          if (!(error instanceof Error) || !error.message.startsWith('LONGFORM_CONFLICT:') || draft === undefined) throw error
+          if (round >= 1) {
+            // 预算上限：一轮修复不收敛就停手。守门核对是独立的 LLM 判断，可能反复挑出新问题，
+            // 无限重试只会成小时空转；AI 直出场景重新生成比继续修补快得多。
+            throw new Error(`${error.message}\n自动修复重试后仍未收敛，已停止修补并保留当前稿；建议删除本章正文重新生成（章节列表「补跑待核对」横幅可一键删稿重写）。`, { cause: error })
+          }
           const dir = await this.projectService.resolveDir(projectId)
           if (await new ProseRepo(dir).read(chapterNumber) !== draft) throw error
           let repaired: string
@@ -3023,7 +3028,7 @@ export class WriteService {
     const repairContext = [context.user, '【主线与卷纲计划】', plan,
       '【长篇冲突修正约束】只调整本章被指出的矛盾及直接后果。提前解毒、复明、揭密或完成后续节点时，退回本章核心事件完成后的阶段收尾，保留后续节点；细纲章末钩子与下一章核心事件重叠时，只保留触发信号本身（人或物出现、征兆初现），不得保留任何状态完成宣告（如"彻底""排出""退去""恢复""看清"）；不得修改未来细纲来迎合错误正文。'].join('\n\n')
     const options = (feature: string): GenerateOptions => ({ signal: opts.signal, meta: { feature, projectId, chapterNumber } })
-    const result = await repairContinuity({ chapterNumber, content, issue, context: repairContext, signal: opts.signal, maxRounds: 3 }, {
+    const result = await repairContinuity({ chapterNumber, content, issue, context: repairContext, signal: opts.signal, maxRounds: 2 }, {
       onProgress: (round, stage) => {
         const label = `长篇一致性自动修复 · 第 ${round} 轮 · ${stage === 'generate' ? '修正冲突段落' : stage === 'verify' ? '独立复核修订内容' : '重跑长篇与细纲检查'}`
         onProgress('continuityRepair', label)
@@ -3664,6 +3669,32 @@ export class WriteService {
     await setChapterStatus(dir, chapter, 'reviewed', hashProse(prose))
       .catch((err: unknown) => console.warn(`[QuarantineRepair] Failed to mark chapter ${chapter} reviewed:`, err))
     return { outcome: 'cleared' }
+  }
+
+  /**
+   * 删稿重写：AI 直出场景下正文不值得长期抢救，重生成比持续修补快得多。
+   * 清空该章正文、概要与章节剧情点，解除全部隔离，回到待生成状态；之后重新续写即可。
+   * 仅对处于隔离中的章节生效；不改动细纲——若细纲已被按旧稿回写，重生成前请先检查细纲。
+   */
+  async dropQuarantinedChapter(projectId: string, chapter: number): Promise<void> {
+    const dir = await this.projectService.resolveDir(projectId)
+    if (!blockedLongformChapters(await readLongformReviewState(dir))[String(chapter)]) {
+      throw new Error(`第 ${chapter} 章不在待核对隔离中，未做任何改动`)
+    }
+    await this.chapterService.updateContent(projectId, chapter, '', undefined,
+      { source: 'manual', note: '删稿重写：清空正文并解除隔离' })
+    // 锁内重读正文：若并发写作恰好重新写入了正文，其新登记的隔离不会被误删。
+    await removeStaleLongformEntries(dir, chapter, async () => {
+      const prose = await new ProseRepo(dir).read(chapter)
+      return prose.trim() ? hashProse(prose) : null
+    })
+    await new ChapterSummaryRepo(dir).remove(chapter)
+    // 章节剧情点按「第0XX章 」前缀存文件，随稿一并清除；人物/道具等实体状态由重生成后的同步覆盖。
+    const plotDir = join(dir, '记忆', '剧情点')
+    const prefix = `第${String(chapter).padStart(3, '0')}章`
+    for (const entry of await fs.readdir(plotDir).catch(() => [] as string[])) {
+      if (entry.startsWith(prefix)) await fs.rm(join(plotDir, entry), { force: true }).catch(() => undefined)
+    }
   }
 
   /**

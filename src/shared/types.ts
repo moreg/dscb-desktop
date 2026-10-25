@@ -1103,6 +1103,8 @@ export interface RendererApi {
   listQuarantinedChapters: (projectId: string) => Promise<
     Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
   >
+  /** 删稿重写：清空该章正文、概要与章节剧情点并解除全部隔离，回到待生成状态。 */
+  dropQuarantinedChapter: (projectId: string, chapter: number) => Promise<{ ok: boolean }>
   /** 批次恢复记录丢失后的兜底：复用已保存正文逐章补跑完整检查与自动修复，解除隔离。 */
   repairQuarantinedChapters: (
     projectId: string,

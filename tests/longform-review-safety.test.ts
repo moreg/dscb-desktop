@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { WriteService } from '../src/main/data/write-service'
@@ -380,6 +380,50 @@ describe('长篇核对绕过与记忆污染回归', () => {
     const result = await repair(id, () => {})
     expect(result).toEqual({ ok: true, repaired: [], cleared: [], failures: [] })
     expect(batchSpy).not.toHaveBeenCalled()
+  })
+
+  it('删稿重写：清空正文、概要、章节剧情点并解除全部隔离', async () => {
+    await new ProseRepo(dir).write(1, good)
+    await seedSummary(1, good)
+    await markBatchReviewPending(dir, 1, hashProse(good))
+    await markLongformPending(dir, 1, hashProse(good))
+    const plotDir = join(dir, '记忆', '剧情点')
+    await mkdir(plotDir, { recursive: true })
+    await writeFile(join(plotDir, '第001章 试探.md'), '剧情点内容', 'utf8')
+    const drop = (service as unknown as {
+      dropQuarantinedChapter: (pid: string, chapter: number) => Promise<void>
+    }).dropQuarantinedChapter.bind(service)
+    await drop(id, 1)
+    expect(await new ProseRepo(dir).read(1)).toBe('')
+    const state = await readLongformReviewState(dir)
+    expect(state.pending['1']).toBeUndefined()
+    expect(state.batchPending?.['1']).toBeUndefined()
+    await expect(new ChapterSummaryRepo(dir).read(1)).resolves.toBeNull()
+    await expect(stat(join(plotDir, '第001章 试探.md'))).rejects.toThrow()
+    // 未隔离的章不受影响，删稿拒绝执行
+    await new ProseRepo(dir).write(2, good)
+    await expect(drop(id, 2)).rejects.toThrow('不在待核对隔离中')
+    expect(await new ProseRepo(dir).read(2)).toBe(good)
+  })
+
+  it('修复一轮不收敛即停手并建议重新生成', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    await markBatchReviewPending(dir, 1, hashProse(bad))
+    vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict').mockResolvedValue(bad + '随后齐越又提了一次旧剑。')
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]?.chapter).toBe(1)
+    expect(result.failures[0]?.error).toContain('LONGFORM_CONFLICT')
+    expect(result.failures[0]?.error).toContain('建议删除本章正文重新生成')
+    expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeDefined()
+    // 保留当前稿=修复稿：外层在重跑核对前已把修复稿落盘
+    expect(await new ProseRepo(dir).read(1)).toBe(bad + '随后齐越又提了一次旧剑。')
   })
 
   it('手动概要重建和自动补齐的降级分支都不能把拒绝稿包装成有效历史', async () => {

@@ -164,6 +164,8 @@ export default function ChapterListPage({
   const [quarantineProgress, setQuarantineProgress] = useState('')
   const [quarantineResult, setQuarantineResult] = useState('')
   const [quarantineConfirming, setQuarantineConfirming] = useState(false)
+  const [dropConfirming, setDropConfirming] = useState<number | null>(null)
+  const [dropping, setDropping] = useState<number | null>(null)
   // 补跑耗时的每秒计时：核对与记忆同步每章要几分钟，没有秒表用户会以为卡死了
   const [quarantineElapsed, setQuarantineElapsed] = useState(0)
   useEffect(() => {
@@ -372,6 +374,25 @@ export default function ChapterListPage({
       })
   }
 
+  const runDropChapter = (chapter: number) => {
+    if (dropping !== null || quarantineBusy) return
+    setDropping(chapter)
+    setQuarantineResult('')
+    void window.api
+      .dropQuarantinedChapter(projectId, chapter)
+      .then(() => {
+        setQuarantineResult(`第 ${chapter} 章正文与隔离已清除，可直接重新续写本章`)
+        setDropConfirming(null)
+      })
+      .catch((err) => {
+        setQuarantineResult(`删稿失败：${err instanceof Error ? err.message : String(err)}`)
+      })
+      .finally(() => {
+        setDropping(null)
+        refresh()
+      })
+  }
+
   const handlePageChange = (nextPage: number) => {
     setPage(nextPage)
     const mainEl = document.querySelector('.main-content')
@@ -511,38 +532,67 @@ export default function ChapterListPage({
             <div
               style={{
                 marginTop: 10, padding: '10px 14px', borderRadius: 8,
-                border: '1px solid var(--border, #444)',
-                display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'
+                border: '1px solid var(--border, #444)', display: 'flex',
+                flexDirection: 'column', gap: 8
               }}
             >
-              {quarantineBusy ? (
-                <span className="meta">
-                  ⟳ 已运行 {quarantineElapsedLabel(quarantineElapsed)} · {quarantineProgress || '正在补跑…'}
-                </span>
-              ) : quarantined.length ? (
-                <span className="meta">
-                  第 {quarantined.map((q) => q.chapter).join('、')} 章正文待补跑长篇检查
-                  （批次隔离；恢复记录已失效时，这里是唯一解除入口）
-                  {quarantineResult ? `——上次结果：${quarantineResult}` : ''}
-                </span>
-              ) : (
-                <span className="meta" style={{ color: 'var(--danger)' }}>{quarantineResult}</span>
-              )}
-              {pendingChapters.length ? (
-                <button
-                  className="btn btn-ghost"
-                  style={quarantineConfirming ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
-                  onClick={() => {
-                    if (quarantineConfirming) runQuarantineRepair()
-                    else setQuarantineConfirming(true)
-                  }}
-                  disabled={quarantineBusy || loading}
-                  title="复用这些章已保存的正文自动补跑完整检查与修复（会调用 AI，每章需几分钟），通过后解除隔离，无需手改正文"
-                >
-                  {quarantineConfirming
-                    ? `确认补跑 ${pendingChapters.length} 章？`
-                    : `补跑待核对 ${pendingChapters.length} 章`}
-                </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                {quarantineBusy ? (
+                  <span className="meta">
+                    ⟳ 已运行 {quarantineElapsedLabel(quarantineElapsed)} · {quarantineProgress || '正在补跑…'}
+                  </span>
+                ) : quarantined.length ? (
+                  <span className="meta">
+                    {pendingChapters.length} 章正文待补跑长篇检查（批次隔离；恢复记录已失效时，这里是唯一解除入口）
+                    {quarantineResult ? `——上次结果：${quarantineResult}` : ''}
+                  </span>
+                ) : (
+                  <span className="meta" style={{ color: 'var(--danger)' }}>{quarantineResult}</span>
+                )}
+                {pendingChapters.length ? (
+                  <button
+                    className="btn btn-ghost"
+                    style={quarantineConfirming ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+                    onClick={() => {
+                      if (quarantineConfirming) runQuarantineRepair()
+                      else setQuarantineConfirming(true)
+                    }}
+                    disabled={quarantineBusy || loading}
+                    title="复用这些章已保存的正文自动补跑检查与修复（会调用 AI），通过后解除隔离，无需手改正文；概要与正文一致的章只补一次核对，几分钟完成"
+                  >
+                    {quarantineConfirming
+                      ? `确认补跑 ${pendingChapters.length} 章？`
+                      : `补跑待核对 ${pendingChapters.length} 章`}
+                  </button>
+                ) : null}
+              </div>
+              {quarantined.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {quarantined.map((q) => (
+                    <div key={q.chapter} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span className="meta" style={{ minWidth: 64 }}>第 {q.chapter} 章</span>
+                      <span className="meta">{q.hasProse ? '正文待检查' : '正文已丢失，补跑时将清除残留记录'}</span>
+                      {q.hasProse ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={dropConfirming === q.chapter ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+                          disabled={quarantineBusy || dropping !== null}
+                          title="清空本章正文、概要与隔离记录，回到待生成状态后重新续写——AI 直出下重生成远快于持续修补。细纲不改动，重生成前请先检查细纲是否被旧稿带偏"
+                          onClick={() => {
+                            if (dropConfirming === q.chapter) runDropChapter(q.chapter)
+                            else setDropConfirming(q.chapter)
+                          }}
+                        >
+                          {dropping === q.chapter
+                            ? '删稿中…'
+                            : dropConfirming === q.chapter
+                              ? '确认删稿重写？'
+                              : '删稿重写'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
               ) : null}
             </div>
           )
