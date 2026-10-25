@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
@@ -16,8 +16,13 @@ interface Props {
 
 type Shelf = 'active' | 'archived'
 
-/** 书架分页大小：自适应网格下桌面窗口约 3~4 列，一页 12 张即 3~4 行 */
-const SHELF_PAGE_SIZE = 12
+/**
+ * 书架分页按网格实际列数自适应（列数 × 行数）：auto-fill 列数随窗口宽度变，
+ * 写死页大小会出现「一行 5 张、每页 12 张 → 末行空 3 格」的排不满问题。
+ */
+const SHELF_PAGE_ROWS = 3
+/** 首帧量出列数前的兜底页大小，量到后即替换 */
+const SHELF_PAGE_SIZE_FALLBACK = 12
 
 const openedTime = (project: ProjectMeta) => {
   const t = new Date(project.lastOpenedAt).getTime()
@@ -43,6 +48,22 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [exportingId, setExportingId] = useState<string | null>(null)
   const loadSequence = useRef(0)
   const packageInput = useRef<HTMLInputElement>(null)
+  const [gridColumns, setGridColumns] = useState(0)
+  const gridObserver = useRef<ResizeObserver | null>(null)
+  // 回调 ref 随网格挂载/卸载触发：量出 auto-fill 的实际列数，窗口缩放时跟随重算。
+  const gridRef = useCallback((grid: HTMLDivElement | null) => {
+    gridObserver.current?.disconnect()
+    gridObserver.current = null
+    if (!grid) return
+    const measure = () => {
+      const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length
+      if (cols > 0) setGridColumns(cols)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(grid)
+    gridObserver.current = observer
+  }, [])
 
   const loadProjects = async (withSpinner: boolean) => {
     const sequence = ++loadSequence.current
@@ -175,11 +196,12 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     setPage(1)
   }, [shelf, keyword])
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / SHELF_PAGE_SIZE))
+  const shelfPageSize = gridColumns > 0 ? gridColumns * SHELF_PAGE_ROWS : SHELF_PAGE_SIZE_FALLBACK
+  const totalPages = Math.max(1, Math.ceil(filtered.length / shelfPageSize))
   const currentPage = Math.min(Math.max(1, page), totalPages)
   const pagedProjects = useMemo(
-    () => filtered.slice((currentPage - 1) * SHELF_PAGE_SIZE, currentPage * SHELF_PAGE_SIZE),
-    [filtered, currentPage]
+    () => filtered.slice((currentPage - 1) * shelfPageSize, currentPage * shelfPageSize),
+    [filtered, currentPage, shelfPageSize]
   )
 
   const handlePageChange = (nextPage: number) => {
@@ -336,7 +358,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 : '没有匹配的项目。'}
         </p>
       ) : (
-        <div className="project-grid">
+        <div className="project-grid" ref={gridRef}>
           {pagedProjects.map((p) => {
             const ch = chapterCounts[p.id]
             const wc = wordCounts[p.id]
