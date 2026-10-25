@@ -999,11 +999,20 @@ export class WriteService {
         throwIfAborted(options.signal)
         throw new Error(`${error.message}\n自动修复未完成，已保留当前稿：${(repairError as Error).message}`, { cause: repairError })
       }
-      await this.chapterService.updateContent(projectId, chapterNumber, repaired, contentRevision(content),
+      // 修复轮内不做整场去 AI 味（repairLongformConflict），编辑器单章路径在这里补一次，
+      // 与生成流程同序：去味后再核对一次并以此解除待核对。
+      const polished = this.deslopService
+        ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired, options.styleProfileId ?? null, {
+          signal: options.signal, isTail: true, reviewInstruction: options.instruction,
+          onGenerationStage: options.onGenerationStage
+        })
+        : repaired
+      const finalContent = polished.trim() ? polished : repaired
+      await this.chapterService.updateContent(projectId, chapterNumber, finalContent, contentRevision(content),
         { source: 'reviewed', note: '自动修复长篇一致性冲突并复核通过' })
       // 修复稿落盘后重新核对：通过即解除该章待核对状态，后续章节可正常读取。
-      await this.assertLongformConsistency(projectId, chapterNumber, repaired, options)
-      return repaired
+      await this.assertLongformConsistency(projectId, chapterNumber, finalContent, options)
+      return finalContent
     }
   }
 
@@ -3022,10 +3031,9 @@ export class WriteService {
       },
       generate: prompt => this.llm.generateStream(prompt, { ...options('continuityRepair'), maxTokens: 8192,
         systemPrompt: '你是网文编辑，只输出局部替换 JSON，按作者计划和历史事实修复长篇冲突。' }),
-      prepare: async candidate => this.deslopService ? this.autoDeslopGeneratedProse(projectId, chapterNumber, candidate, opts.styleProfileId ?? null, {
-        signal: opts.signal, isTail: true, reviewInstruction: opts.tempContext,
-        onGenerationStage: opts.onGenerationStage, onAutoDeslopResult: opts.onAutoDeslopResult
-      }) : candidate,
+      // 修复轮内不再整场去 AI 味：外层复用修复稿重跑写后流程时会做这一次，
+      // 修复轮里先做一遍等于同一稿子连续两场修订，每轮多花十几分钟。
+      prepare: async candidate => candidate,
       verify: async (original, candidate) => {
         const raw = await this.llm.generateStream([
           '独立复核长篇冲突修复，严格输出 JSON：{"passed":true或false,"issues":[具体问题字符串]}。',
@@ -3039,7 +3047,8 @@ export class WriteService {
         }
       },
       check: async candidate => {
-        await this.assertLongformConsistency(projectId, chapterNumber, candidate, { signal: opts.signal, instruction: opts.tempContext })
+        // 终审只留一次：候选稿、计划与历史在细纲复核前后都不变（变化会抛错），
+        // 连跑两次长篇核对每次都是几分钟的大上下文调用，纯重复。
         const checked = await this.checkOutlineWithRetry(chapterNumber, outline, candidate, options('batchOutline'), signal)
         if (checked.checked === false || checked.hasOutline === false || checked.passed === false) throw new Error('长篇修复后的细纲复核未通过')
         if (await readLongformPlan(dir, chapterNumber) !== plan || await this.loadChapterOutlineText(dir, chapterNumber) !== outline) {
