@@ -136,6 +136,7 @@ export function registerWriteIpc(service: WriteService): void {
             | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
             | undefined
           let autoDeslop: AutoDeslopResult | undefined
+          let conflictRepaired: string | undefined
           const content = await service.generateChapterStream(
             validated.projectId,
             validated.chapterNumber,
@@ -151,6 +152,7 @@ export function registerWriteIpc(service: WriteService): void {
                   stage
                 }),
               onAutoDeslopResult: (result) => { autoDeslop = result },
+              onConflictRepaired: (full) => { conflictRepaired = full },
               onPromptMeta: (meta) => {
                 continueMode = meta.continueMode
                 wordBudget = {
@@ -184,8 +186,12 @@ export function registerWriteIpc(service: WriteService): void {
             }
           )
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+          // 冲突修复稿优先作为整章回传；伏笔补写在其基础上进行，applied 时以它的整章为最终稿。
+          const fullAfterConflict = conflictRepaired !== undefined
+            ? { fullContent: conflictRepaired, conflictRepaired: true as const } : {}
           return { ok: true, content, autoDeslop, continueMode, wordBudget,
             foreshadowRepair: repaired.report,
+            ...fullAfterConflict,
             ...(repaired.report.status === 'applied' ? { fullContent: repaired.content } : {}) }
         } finally {
           endStream(validated.requestId)
@@ -1035,6 +1041,54 @@ export function registerWriteIpc(service: WriteService): void {
       }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  safeHandle(
+    'write:listQuarantinedChapters',
+    async (_e, payload: { projectId: string }) => {
+      const validated = validateInput(z.object({ projectId: projectIdSchema }), payload)
+      return service.listQuarantinedChapters(validated.projectId)
+    }
+  )
+  ipcMain.handle('write:repairQuarantinedChapters', async (e, payload: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    try {
+      const validated = validateInput(z.object({
+        projectId: projectIdSchema,
+        requestId: z.string().min(1).max(255)
+      }), payload)
+      if (activeBatchProjects.has(validated.projectId)) {
+        throw new Error('BATCH_ALREADY_RUNNING: 该项目正在批量写作，请等待当前任务结束')
+      }
+      activeBatchProjects.add(validated.projectId)
+      try {
+        const signal = beginStream(validated.requestId)
+        const abortBatch = () => { abortStream(validated.requestId) }
+        e.sender.once('destroyed', abortBatch)
+        try {
+          if (e.sender.isDestroyed()) abortBatch()
+          return await service.repairQuarantinedChapters(
+            validated.projectId,
+            (chapter, result) => safeSend(win, 'write:batchChapterComplete', {
+              requestId: validated.requestId, chapter, result
+            }),
+            {
+              signal,
+              onGenerationStage: (stage, chapterNumber) =>
+                safeSend(win, 'write:quarantineRepairProgress', {
+                  requestId: validated.requestId, chapter: chapterNumber, stage
+                })
+            }
+          )
+        } finally {
+          e.sender.removeListener('destroyed', abortBatch)
+          endStream(validated.requestId)
+        }
+      } finally {
+        activeBatchProjects.delete(validated.projectId)
+      }
+    } catch (err) {
+      return { ok: false, repaired: [], cleared: [], failures: [], error: err instanceof Error ? err.message : String(err) }
     }
   })
   for (const channel of ['write:generateBatch', 'write:resumeBatch'] as const) {

@@ -960,6 +960,23 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         if (onProgress) ipcRenderer.removeListener('write:batchPolishProgress', progressHandler as never)
       })
     },
+    listQuarantinedChapters: (projectId: string) =>
+      ipcRenderer.invoke('write:listQuarantinedChapters', { projectId }),
+    repairQuarantinedChapters: (
+      projectId: string,
+      onProgress?: (chapter: number, stage: ChapterGenerationStage) => void,
+      externalRequestId?: string
+    ) => {
+      const requestId = externalRequestId ?? crypto.randomUUID()
+      const progressHandler = (_e: unknown, payload: { requestId: string; chapter: number; stage: ChapterGenerationStage }) => {
+        if (payload.requestId === requestId) onProgress?.(payload.chapter, payload.stage)
+      }
+      if (onProgress) ipcRenderer.on('write:quarantineRepairProgress', progressHandler as never)
+      return ipcRenderer.invoke('write:repairQuarantinedChapters', { projectId, requestId })
+        .finally(() => {
+          if (onProgress) ipcRenderer.removeListener('write:quarantineRepairProgress', progressHandler as never)
+        })
+    },
     resumeBatch: (
       projectId: string,
       fromChapter: number,

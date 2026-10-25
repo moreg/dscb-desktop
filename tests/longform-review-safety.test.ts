@@ -10,7 +10,7 @@ import { ChapterSummaryRepo } from '../src/main/data/memory/chapter-summary-repo
 import { PlotPointRepo } from '../src/main/data/memory/plot-point-repo'
 import { ProseMemoryIndex, hashProse } from '../src/main/data/memory/prose-memory-index'
 import { buildContinuityContext } from '../src/main/data/memory/continuity-context'
-import { markLongformPending, markBatchReviewPending, readLongformReviewState, clearLongformPending } from '../src/main/data/longform-review-state'
+import { markLongformPending, markBatchReviewPending, clearBatchReviewPending, readLongformReviewState, clearLongformPending } from '../src/main/data/longform-review-state'
 import { MemoryWriter } from '../src/main/data/memory-writer'
 import { SettingsWriter } from '../src/main/data/settings-writer'
 import type { WriteFlowService } from '../src/main/data/write-flow-service'
@@ -204,6 +204,105 @@ describe('长篇核对绕过与记忆污染回归', () => {
     const restarted = new WriteService(projects, { generateStream: generate } as unknown as LlmService)
     await expect(restarted.buildChapterPrompt(id, 2)).rejects.toThrow('LONGFORM_HISTORY_PENDING')
     expect(await new ProseRepo(dir).read(1)).toBe(bad)
+  })
+
+  it('批次隔离与单章待核对的拦截提示分别指向批次恢复和单章同步', async () => {
+    await new ProseRepo(dir).write(1, good)
+    const token = await markBatchReviewPending(dir, 1, hashProse(good))
+    await expect(service.buildChapterPrompt(id, 2)).rejects.toThrow('批次隔离')
+    await expect(service.buildChapterPrompt(id, 2)).rejects.toThrow('补跑待核对章节')
+    await clearBatchReviewPending(dir, 1, token)
+    await markLongformPending(dir, 1, hashProse(good))
+    await expect(service.buildChapterPrompt(id, 2)).rejects.toThrow('重新同步 / 补跑同步')
+    expect(await new ProseRepo(dir).read(1)).toBe(good)
+  })
+
+  it('单章写作交稿核对查出冲突时自动修复、落盘并复核解除待核对', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    const repairSpy = vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict').mockImplementation(async () => { verdict = cleared; return good })
+    const autoRepaired = (service as unknown as {
+      assertLongformConsistencyAutoRepaired: (pid: string, n: number, text: string, opts?: object) => Promise<string>
+    }).assertLongformConsistencyAutoRepaired.bind(service)
+    await expect(autoRepaired(id, 1, bad)).resolves.toBe(good)
+    expect(repairSpy).toHaveBeenCalledTimes(1)
+    expect(await new ProseRepo(dir).read(1)).toBe(good)
+    expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
+  })
+
+  it('传入正文与磁盘保存稿不一致时不自动修复，原样抛出冲突', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    const repairSpy = vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict')
+    const autoRepaired = (service as unknown as {
+      assertLongformConsistencyAutoRepaired: (pid: string, n: number, text: string, opts?: object) => Promise<string>
+    }).assertLongformConsistencyAutoRepaired.bind(service)
+    await expect(autoRepaired(id, 1, bad + '后来他又后悔了。')).rejects.toThrow('LONGFORM_CONFLICT')
+    expect(repairSpy).not.toHaveBeenCalled()
+    expect(await new ProseRepo(dir).read(1)).toBe(bad)
+  })
+
+  it('自动修复失败时保留当前稿，错误附带原始冲突明细', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> },
+      'repairLongformConflict').mockRejectedValue(new Error('模拟修复失败'))
+    const autoRepaired = (service as unknown as {
+      assertLongformConsistencyAutoRepaired: (pid: string, n: number, text: string, opts?: object) => Promise<string>
+    }).assertLongformConsistencyAutoRepaired.bind(service)
+    await expect(autoRepaired(id, 1, bad)).rejects.toThrow(/LONGFORM_CONFLICT[\s\S]*自动修复未完成[\s\S]*模拟修复失败/)
+    expect(await new ProseRepo(dir).read(1)).toBe(bad)
+  })
+
+  it('补跑待核对章节：有正文的章复用批次恢复机制，正文丢失的章清残留记录', async () => {
+    await new ProseRepo(dir).write(1, good)
+    await markBatchReviewPending(dir, 1, hashProse('已丢失的旧稿'))
+    await markLongformPending(dir, 1, hashProse('已丢失的旧稿'))
+    await markBatchReviewPending(dir, 2, hashProse(bad))
+    const batchSpy = vi.spyOn(service as unknown as { generateChaptersBatch: () => Promise<unknown> },
+      'generateChaptersBatch').mockResolvedValue({ status: 'completed' })
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result.ok).toBe(true)
+    expect(result.repaired).toEqual([1])
+    expect(result.cleared).toEqual([2])
+    const call = batchSpy.mock.calls[0] as unknown as Array<unknown>
+    expect(call[1]).toBe(1)
+    expect(call[2]).toBe(1)
+    expect(call[6]).toMatchObject({ fromChapter: 1, total: 1, completed: [1], pendingPostProcessChapter: 1 })
+  })
+
+  it('补跑查出冲突时保留隔离并在结果中报告', async () => {
+    verdict = rejected
+    await new ProseRepo(dir).write(1, bad)
+    await markBatchReviewPending(dir, 1, hashProse(bad))
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]?.chapter).toBe(1)
+    expect(result.failures[0]?.error).toContain('LONGFORM_CONFLICT')
+    expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeDefined()
+    expect(await new ProseRepo(dir).read(1)).toBe(bad)
+  })
+
+  it('没有隔离章节时补跑为空操作', async () => {
+    const batchSpy = vi.spyOn(service as unknown as { generateChaptersBatch: () => Promise<unknown> },
+      'generateChaptersBatch')
+    const repair = (service as unknown as {
+      repairQuarantinedChapters: (pid: string, cb: (n: number, r: unknown) => void, opts?: object) =>
+        Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }>
+    }).repairQuarantinedChapters.bind(service)
+    const result = await repair(id, () => {})
+    expect(result).toEqual({ ok: true, repaired: [], cleared: [], failures: [] })
+    expect(batchSpy).not.toHaveBeenCalled()
   })
 
   it('手动概要重建和自动补齐的降级分支都不能把拒绝稿包装成有效历史', async () => {

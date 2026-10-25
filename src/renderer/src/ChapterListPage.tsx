@@ -52,6 +52,12 @@ const STATUS_CLASS: Record<ChapterStatus, string> = {
 
 const CHAPTER_PAGE_SIZE = 20
 
+/** 生成阶段标签去掉前缀（preparing:/continuity:/agy:），补跑横幅只展示可读部分。 */
+function quarantineStageLabel(stage: string): string {
+  const idx = stage.indexOf(':')
+  return idx >= 0 && idx <= 16 ? stage.slice(idx + 1) : stage
+}
+
 /** 生成分页页码窗口：首尾页恒显，中间取当前页邻域，超距用省略号收拢。 */
 function pageWindow(current: number, total: number): (number | 'ellipsis')[] {
   if (total <= 7) {
@@ -146,6 +152,14 @@ export default function ChapterListPage({
   // 还没入库的记忆候选：连写多章后最容易堆在这里，给个常驻入口
   const [candidateCount, setCandidateCount] = useState(0)
   const [showCandidateReview, setShowCandidateReview] = useState(false)
+  // 批次隔离/待核对章节：批次恢复记录被覆盖后，这里是唯一解除入口
+  const [quarantined, setQuarantined] = useState<
+    Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
+  >([])
+  const [quarantineBusy, setQuarantineBusy] = useState(false)
+  const [quarantineProgress, setQuarantineProgress] = useState('')
+  const [quarantineResult, setQuarantineResult] = useState('')
+  const [quarantineConfirming, setQuarantineConfirming] = useState(false)
   const [showBenchmark, setShowBenchmark] = useState(false)
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
@@ -298,6 +312,53 @@ export default function ChapterListPage({
     // showCandidateReview 进出都刷新一次：复核面板里重跑过之后计数要跟着变
   }, [projectId, chapters, showCandidateReview])
 
+  useEffect(() => {
+    let alive = true
+    void window.api.listQuarantinedChapters(projectId)
+      .then((list) => {
+        if (alive) setQuarantined(list)
+      })
+      .catch(() => {
+        if (alive) setQuarantined([])
+      })
+    return () => {
+      alive = false
+    }
+    // 补跑通过后章节状态会变，随章节列表刷新同步重查
+  }, [projectId, chapters])
+
+  const runQuarantineRepair = () => {
+    if (quarantineBusy) return
+    setQuarantineBusy(true)
+    setQuarantineConfirming(false)
+    setQuarantineResult('')
+    setQuarantineProgress('准备补跑…')
+    void window.api
+      .repairQuarantinedChapters(projectId, (chapter, stage) => {
+        setQuarantineProgress(`第 ${chapter} 章 ${quarantineStageLabel(stage)}`)
+      })
+      .then((result) => {
+        const parts: string[] = []
+        if (result.repaired.length) parts.push(`第 ${result.repaired.join('、')} 章检查通过，已解除隔离`)
+        if (result.cleared.length) parts.push(`第 ${result.cleared.join('、')} 章正文已不存在，清除了残留记录`)
+        if (result.failures.length) {
+          parts.push(`失败：${result.failures.map((f) => `第 ${f.chapter} 章 ${f.error}`).join('；')}`)
+        }
+        setQuarantineResult(
+          parts.join('；') || (result.error ? `补跑失败：${result.error}` : '没有需要补跑的章节')
+        )
+        setQuarantineProgress('')
+      })
+      .catch((err) => {
+        setQuarantineResult(`补跑失败：${err instanceof Error ? err.message : String(err)}`)
+        setQuarantineProgress('')
+      })
+      .finally(() => {
+        setQuarantineBusy(false)
+        refresh()
+      })
+  }
+
   const handlePageChange = (nextPage: number) => {
     setPage(nextPage)
     const mainEl = document.querySelector('.main-content')
@@ -430,6 +491,47 @@ export default function ChapterListPage({
           </div>
         </div>
         {exportError ? <p className="empty" style={{ color: 'var(--danger)' }}>{exportError}</p> : null}
+        {(() => {
+          const pendingChapters = quarantined.filter((q) => q.hasProse)
+          if (!quarantined.length && !quarantineBusy && !quarantineResult) return null
+          return (
+            <div
+              style={{
+                marginTop: 10, padding: '10px 14px', borderRadius: 8,
+                border: '1px solid var(--border, #444)',
+                display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'
+              }}
+            >
+              {quarantineBusy ? (
+                <span className="meta">⟳ {quarantineProgress || '正在补跑…'}</span>
+              ) : quarantined.length ? (
+                <span className="meta">
+                  第 {quarantined.map((q) => q.chapter).join('、')} 章正文待补跑长篇检查
+                  （批次隔离；恢复记录已失效时，这里是唯一解除入口）
+                  {quarantineResult ? `——上次结果：${quarantineResult}` : ''}
+                </span>
+              ) : (
+                <span className="meta" style={{ color: 'var(--danger)' }}>{quarantineResult}</span>
+              )}
+              {pendingChapters.length ? (
+                <button
+                  className="btn btn-ghost"
+                  style={quarantineConfirming ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+                  onClick={() => {
+                    if (quarantineConfirming) runQuarantineRepair()
+                    else setQuarantineConfirming(true)
+                  }}
+                  disabled={quarantineBusy || loading}
+                  title="复用这些章已保存的正文自动补跑完整检查与修复（会调用 AI，每章需几分钟），通过后解除隔离，无需手改正文"
+                >
+                  {quarantineConfirming
+                    ? `确认补跑 ${pendingChapters.length} 章？`
+                    : `补跑待核对 ${pendingChapters.length} 章`}
+                </button>
+              ) : null}
+            </div>
+          )
+        })()}
       </div>
 
       <div className="toolbar">

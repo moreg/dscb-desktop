@@ -536,6 +536,8 @@ export interface ChapterStreamResult {
   content?: string
   /** 伏笔可能补入已有正文中段；有此字段时直接采用整章，不再拼接旧稿。 */
   fullContent?: string
+  /** 交稿核对查出长篇冲突已由 AI 自动修复并复核通过；fullContent 为修复后整章。 */
+  conflictRepaired?: boolean
   foreshadowRepair?: AutoForeshadowRepairResult
   autoDeslop?: AutoDeslopResult
   continueMode?: 'extend' | 'finish'
@@ -1097,6 +1099,22 @@ export interface RendererApi {
     onProgress?: (chapter: number, step: string) => void,
     requestId?: string
   ) => Promise<{ ok: boolean; results?: SavedChapterPolishResult[]; error?: string }>
+  /** 批次隔离与单章待核对的章节清单（含正文是否还在），供「补跑待核对章节」入口展示。 */
+  listQuarantinedChapters: (projectId: string) => Promise<
+    Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
+  >
+  /** 批次恢复记录丢失后的兜底：复用已保存正文逐章补跑完整检查与自动修复，解除隔离。 */
+  repairQuarantinedChapters: (
+    projectId: string,
+    onProgress?: (chapter: number, stage: ChapterGenerationStage) => void,
+    requestId?: string
+  ) => Promise<{
+    ok: boolean
+    repaired: number[]
+    cleared: number[]
+    failures: Array<{ chapter: number; error: string }>
+    error?: string
+  }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
     projectId: string,

@@ -86,3 +86,28 @@ export async function clearLongformPending(dir: string, chapter: number, token: 
     await writeJsonAtomic(file, state)
   })
 }
+
+/**
+ * 清除指向已丢失稿件的残留隔离记录（正文为空或哈希与当前保存稿不符时，记录无稿可核）。
+ * 当前正文哈希在锁内重新读取比较，避免误删并发写作刚登记的新记录；哈希仍匹配的记录保留，
+ * 必须走完整核对解除。
+ */
+export async function removeStaleLongformEntries(dir: string, chapter: number,
+  readCurrentProseHash: () => Promise<string | null>): Promise<boolean> {
+  const file = fileFor(dir)
+  return withFileLock(file, async () => {
+    const state = await readLongformReviewState(dir)
+    const currentHash = await readCurrentProseHash()
+    let removed = false
+    for (const map of [state.pending, state.batchPending]) {
+      if (!map) continue
+      const entry = map[String(chapter)]
+      if (entry && entry.sourceHash !== currentHash) {
+        delete map[String(chapter)]
+        removed = true
+      }
+    }
+    if (removed) await writeJsonAtomic(file, state)
+    return removed
+  })
+}

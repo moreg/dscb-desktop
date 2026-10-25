@@ -58,7 +58,7 @@ import { findItemMaterialDrift, renderItemDriftHints } from './memory/item-drift
 import { LongformGuard, needsLongformGuard } from './longform-guard'
 import { readLongformPlan } from './longform-plan'
 import { readLongformReviewState, markLongformPending, clearLongformPending,
-  blockedLongformChapters, markBatchReviewPending, clearBatchReviewPending } from './longform-review-state'
+  blockedLongformChapters, markBatchReviewPending, clearBatchReviewPending, removeStaleLongformEntries } from './longform-review-state'
 import { setChapterStatus } from './chapter-status-store'
 import { readLongformInstruction } from './longform-review-state'
 import { ChapterMemoryCoordinator, type MemorySyncTicket } from './chapter-memory-coordinator'
@@ -277,6 +277,8 @@ export interface ChapterGenerateOptions extends GenerateOptions {
   onProseGenerated?: (content: string) => void | Promise<void>
   /** Persist the final polished draft before checking it; raw-draft callbacks keep their original contract. */
   onFinalProseReady?: (content: string) => void | Promise<void>
+  /** 交稿核对发现长篇冲突并自动修复成功后回调整章修复稿；返回值仍是字符串，调用方靠它拿到替换后的全文。 */
+  onConflictRepaired?: (fullContent: string) => void
 }
 
 export interface BatchGenerateOptions extends GenerateOptions {
@@ -757,7 +759,7 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const { autoStrength, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, ...llmOpts } = opts as ChapterGenerateOptions
+    const { autoStrength, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
     const onGenerationStage = (stage: ChapterGenerationStage): void => {
       if (!opts.signal?.aborted) reportStage?.(stage)
     }
@@ -835,20 +837,35 @@ export class WriteService {
     if (!onProseGenerated && polished !== prose) await this.chapterService.updateContent(projectId, chapterNumber,
       formatChapterProse(joinContinuation(opts.existingText ?? '', polished)), contentRevision(rawContent),
       { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
-    await this.assertLongformConsistency(projectId, chapterNumber,
-      formatChapterProse(joinContinuation(opts.existingText ?? '', polished)), {
-        signal: opts.signal, instruction: opts.tempContext,
-        onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线')
-      })
+    const fullContent = formatChapterProse(joinContinuation(opts.existingText ?? '', polished))
+    const finalFull = await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, fullContent, {
+      signal: opts.signal, instruction: opts.tempContext, styleProfileId,
+      onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线'),
+      onGenerationStage
+    })
+    if (finalFull !== fullContent) {
+      await onFinalProseReady?.(finalFull)
+      onConflictRepaired?.(finalFull)
+      const existing = opts.existingText
+      // 返回值保持「续写尾段」语义；修复波及既有前缀时只能交整章，靠 onConflictRepaired 的全文兜底。
+      if (existing && finalFull.startsWith(existing)) return formatChapterProse(finalFull.slice(existing.length))
+      return finalFull
+    }
     return polished
   }
 
   private async assertLongformHistoryReady(dir: string, chapterNumber: number): Promise<void> {
-    const pending = blockedLongformChapters(await readLongformReviewState(dir))
+    const state = await readLongformReviewState(dir)
+    const pending = blockedLongformChapters(state)
     if (!Object.keys(pending).some(n => Number(n) < chapterNumber)) return
     const sources = await new ProseMemoryIndex(dir).readBefore(chapterNumber, true)
     const blocked = sources.find(s => pending[String(s.chapterNumber)])
-    if (blocked) throw new Error(`LONGFORM_HISTORY_PENDING: 第 ${blocked.chapterNumber} 章正文尚未通过长篇核对，请先修正或补跑该章；本次不读取为历史事实或推进后章。`)
+    if (!blocked) return
+    // 批次隔离只能由批次流程补跑解除；提示必须指向对应入口，否则作者会照"同步"提示反复空跑。
+    const hint = state.batchPending?.[String(blocked.chapterNumber)]
+      ? '该章是批量写作留下的批次隔离，请在章节列表点「补跑待核对章节」，应用会复用该章已保存正文自动补跑检查与修复，无需手改正文；单章同步不能解除批次隔离'
+      : '请打开该章点「重新同步 / 补跑同步」自动补跑长篇核对；若报出冲突，用「按要求修改」输入"修复长篇一致性冲突"，AI 会自动修正并复核，无需手改正文'
+    throw new Error(`LONGFORM_HISTORY_PENDING: 第 ${blocked.chapterNumber} 章正文尚未完成长篇核对：${hint}；本次不读取为历史事实或推进后章。`)
   }
 
   private async assertLongformConsistency(projectId: string, chapterNumber: number, content: string,
@@ -950,6 +967,40 @@ export class WriteService {
     return async () => {
       throwIfAborted(options.signal)
       await receipt()
+    }
+  }
+
+  /**
+   * 单章 AI 写作交稿前的核对：查出冲突时按批次同款约束自动修复并复核，作者无需手改。
+   * 只有传入正文与磁盘保存稿一致时才动正文（修复稿直接落盘），其余情况原样抛错交由调用方处理。
+   * 返回最终（可能已修复）的整章内容；修复失败时保留当前稿并附带原始冲突明细。
+   */
+  private async assertLongformConsistencyAutoRepaired(projectId: string, chapterNumber: number, content: string,
+    options: { signal?: AbortSignal; instruction?: string; onStart?: () => void;
+      styleProfileId?: string | null; onGenerationStage?: (stage: ChapterGenerationStage) => void } = {}): Promise<string> {
+    try {
+      await this.assertLongformConsistency(projectId, chapterNumber, content, options)
+      return content
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith('LONGFORM_CONFLICT:')) throw error
+      throwIfAborted(options.signal)
+      const dir = await this.projectService.resolveDir(projectId)
+      if (await new ProseRepo(dir).read(chapterNumber) !== content) throw error
+      let repaired: string
+      try {
+        repaired = await this.repairLongformConflict(projectId, chapterNumber, content, error.message,
+          () => undefined,
+          { signal: options.signal, styleProfileId: options.styleProfileId, tempContext: options.instruction,
+            onGenerationStage: options.onGenerationStage })
+      } catch (repairError) {
+        throwIfAborted(options.signal)
+        throw new Error(`${error.message}\n自动修复未完成，已保留当前稿：${(repairError as Error).message}`, { cause: repairError })
+      }
+      await this.chapterService.updateContent(projectId, chapterNumber, repaired, contentRevision(content),
+        { source: 'reviewed', note: '自动修复长篇一致性冲突并复核通过' })
+      // 修复稿落盘后重新核对：通过即解除该章待核对状态，后续章节可正常读取。
+      await this.assertLongformConsistency(projectId, chapterNumber, repaired, options)
+      return repaired
     }
   }
 
@@ -1263,13 +1314,15 @@ export class WriteService {
     if (!onProseGenerated && polished !== prose) await this.chapterService.updateContent(projectId, chapterNumber,
       polished, contentRevision(prose), { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
     try {
-      await this.assertLongformConsistency(projectId, chapterNumber, polished, { signal: opts.signal, instruction,
-        onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线') })
+      return await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, polished, {
+        signal: opts.signal, instruction, styleProfileId,
+        onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线'),
+        onGenerationStage
+      })
     } catch (error) {
       throwIfAborted(opts.signal)
       throw new ChapterRewriteReviewError(polished, error)
     }
-    return polished
   }
 
   /**
@@ -3490,6 +3543,58 @@ export class WriteService {
     return opts.signal?.aborted
       ? { ok: false, results, error: '已停止批量去 AI 味' }
       : { ok: true, results }
+  }
+
+  /** 批次隔离与单章待核对清单：正文是否还在、是否来自批次，供章节列表的补跑入口展示。 */
+  async listQuarantinedChapters(projectId: string): Promise<
+    Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
+  > {
+    const dir = await this.projectService.resolveDir(projectId)
+    const state = await readLongformReviewState(dir)
+    const chapters = Object.keys(blockedLongformChapters(state)).map(Number).sort((a, b) => a - b)
+    const result: Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }> = []
+    for (const chapter of chapters) {
+      const prose = await new ProseRepo(dir).read(chapter)
+      result.push({ chapter, hasProse: Boolean(prose.trim()), fromBatch: Boolean(state.batchPending?.[String(chapter)]) })
+    }
+    return result
+  }
+
+  /**
+   * 批次恢复记录丢失后的兜底：逐章补跑隔离章节的完整写后流程。
+   * 有正文的章按升序复用批次恢复机制（contentOverride 复用正文，不重新生成），
+   * 跑完检查、自动修复与同步后由批次流程解除批次隔离；正文已丢失的章记录无稿可核，
+   * 锁内校验后直接清除残留。任何一章补跑失败都会保留其隔离状态并计入 failures。
+   */
+  async repairQuarantinedChapters(
+    projectId: string,
+    onChapterComplete: (chapter: number, result: ChapterFlowResult) => void,
+    opts: BatchGenerateOptions & { styleProfileId?: string | null } = {}
+  ): Promise<{ ok: boolean; repaired: number[]; cleared: number[]; failures: Array<{ chapter: number; error: string }> }> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const repaired: number[] = []
+    const cleared: number[] = []
+    const failures: Array<{ chapter: number; error: string }> = []
+    const chapters = Object.keys(blockedLongformChapters(await readLongformReviewState(dir)))
+      .map(Number).sort((a, b) => a - b)
+    for (const chapter of chapters) {
+      throwIfAborted(opts.signal)
+      // 逐章重读隔离状态：前一章补跑通过可能已顺带解除后续章的记录。
+      if (!blockedLongformChapters(await readLongformReviewState(dir))[String(chapter)]) continue
+      if (!(await new ProseRepo(dir).read(chapter)).trim()) {
+        if (await removeStaleLongformEntries(dir, chapter,
+          async () => hashProse(await new ProseRepo(dir).read(chapter)))) cleared.push(chapter)
+        continue
+      }
+      // 升序补跑：前章解除隔离后，后章的写前历史核对才能读到它。
+      const progress = await this.generateChaptersBatch(projectId, chapter, chapter, onChapterComplete,
+        opts.styleProfileId ?? null, opts,
+        { fromChapter: chapter, total: 1, completed: [chapter], pendingPostProcessChapter: chapter },
+        { autoContinue: true })
+      if (progress.status === 'completed') repaired.push(chapter)
+      else failures.push({ chapter, error: progress.pauseReason ?? progress.error ?? '补跑未完成' })
+    }
+    return { ok: failures.length === 0, repaired, cleared, failures }
   }
 
   /**
