@@ -3,6 +3,7 @@ import type { LlmService } from './llm-service'
 import { DIALOGUE_VITALITY_RULES, DIALOGUE_FACT_PRESERVATION_RULES } from './skill-prompts/scene-naturalness'
 import { reviewSceneDialogue } from './scene-dialogue-review'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
+import { DIALOGUE_PUNCTUATION_RULE } from '../../shared/prose-policy'
 import type { DialogueQualityReport, DeslopFinding } from '../../shared/types'
 export type { DialogueQualityReport } from '../../shared/types'
 
@@ -128,7 +129,7 @@ export async function ensureDialogueQuality(
           DIALOGUE_FACT_PRESERVATION_RULES,
           '区分剧情事实与表达载体：同一状态已被明确建立并仍保留时，可以合并重复提醒、重复确认及没有新增结果的小动作，不要求每次看一眼、点头或再摸一下逐项保留。叮嘱仅重复已保留的规则、没有增加责任或条件时也可合并。',
           '若省略会改变物品去向、首次发现、谁获知信息、人物立场、承诺或后续因果，就属于事实变化；唯一出现的关键警告、约定、未决调查方向及结尾决定不得删去。不要将保留同一事实误判为必须保留每次重复表达。',
-          '作者的对白排版要求：同一对引号内不使用中文句号（包括闭合引号前），陈述台词以闭合引号收尾；多句按语意拆为引号完整的独立段落，问号和感叹号按语气保留；不能擅自以另一套标点习惯否定本稿。',
+          `作者的对白排版要求：${DIALOGUE_PUNCTUATION_RULE}不能擅自以另一套标点习惯否定本稿。`,
           '精简表达时保留仍有效的并行线索、未完成事项和后续决定，不能将多条核查方向改成只有一条；省掉反复说明不等于省掉决定本身。',
           '一次完整对照全章，列出所有明确的事实差异与无用途的重复，而不是每轮只挑一处。复核修复稿时仍检查全文，但不把措辞喜好当成新的硬性问题。',
           '表达修订必须能与事实保真同时成立：不能要求删除独立证据限制、遗漏人物知情或重排实际调查次序。多个不同事项的限定或保留原有先后本身不等于重复；结合相邻回合指出无用途的重复信息或逐轮搬运的交流组织，不能把必须保留的事实本身作为拒绝原因。保留事实也不豁免其生硬表达。',
@@ -201,7 +202,7 @@ export async function ensureDialogueQuality(
       DIALOGUE_VITALITY_RULES,
       '本次明确授权双向改善表达载体：可由在场且已知该消息的人说出必要信息，也可把无用途的重复对白说明合并为叙述，保留有效直接对白，必要时围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
       '对照问题涉及的连续回合修订，保留有效交流、必要动作和原有调查方向。精简重复时保留其承载的事实、否定边界、未完成事项和后续决定；不能将多条仍有效的线索压成只有一条。事实差异优先最小局部修复，不为重组表达另写剧情。',
-      '排版一句一段，直接对白独立成段，引号内不使用中文句号（包括闭合前），问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
+      `排版一句一段，直接对白独立成段，${DIALOGUE_PUNCTUATION_RULE}动作不插进同一人的连续发言中。`,
       '破折号和省略号按功能处理，不能机械变句号。原稿闭合台词末尾被下一句或动作打断的“——”可以保留，用来保留尚未说完的请求；其他修辞停顿应改短句或动作。不能补全尚未说出的消息、删除原有请求，不能留下“需要您。”这样的缺谓语整句。',
       '【本次作者修订要求（必须落实）】', options.revisionInstruction ?? '',
       '【修订前正文（核对旧问题是否仍在，不是新剧情来源）】', options.previousDraft ?? '',

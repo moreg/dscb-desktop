@@ -5,7 +5,7 @@ import { LocationRepo } from './memory/location-repo'
 import { ItemRepo } from './memory/item-repo'
 import { PlotPointRepo } from './memory/plot-point-repo'
 import { hashProse } from './memory/prose-memory-index'
-import { parseCharacterStatesAt, type CharacterStateSnapshot } from './skill-format/tracking-md-repo'
+import { parseCharacterStatesAt, parseItemStatesAt, type CharacterStateSnapshot, type ItemStateSnapshot } from './skill-format/tracking-md-repo'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { writeTextAtomic } from './atomic'
 import { withFileLock } from './file-lock'
@@ -251,6 +251,13 @@ export class MemoryWriter {
       errors.push(`追踪角色状态写入失败: ${(e as Error).message}`)
     }
 
+    // 2.8 追踪物品状态表：写入 追踪/物品.md（生成提示词与长篇核对读「当前状态/变更记录」）
+    try {
+      await this.syncTrackingItemStates(extraction.chapterNumber, extraction.itemStateChanges ?? [])
+    } catch (e) {
+      errors.push(`追踪物品状态写入失败: ${(e as Error).message}`)
+    }
+
     // 3. 唯一定位与本章回收；空回收也对账，撤回重写后消失的自动回收。
     const fRepo = new ForeshadowingMdRepo(this.projectDir)
     const foreshadowings = await fRepo.list()
@@ -394,6 +401,12 @@ export class MemoryWriter {
       tracking++
     } catch (e) {
       errors.push(`撤销角色状态记录失败: ${(e as Error).message}`)
+    }
+    try {
+      await this.syncTrackingItemStates(chapter, [])
+      tracking++
+    } catch (e) {
+      errors.push(`撤销物品状态记录失败: ${(e as Error).message}`)
     }
 
     // 4. 仅撤销本程序本章仍持有归属的回收，不再以文本猜测回滚目标。
@@ -879,9 +892,50 @@ export class MemoryWriter {
     })
   }
 
+  /**
+   * 把物品状态变化同步进 追踪/物品.md：
+   * 与角色状态表同一套托管块机制，保留作者原有内容，同章重写只替换本程序的节。
+   */
+  private async syncTrackingItemStates(
+    chapter: number,
+    changes: NonNullable<MemoryExtraction['itemStateChanges']>
+  ): Promise<void> {
+    const file = join(this.projectDir, '追踪', '物品.md')
+    if (changes.length === 0 && !(await readText(file))) return
+    await this.ensureTrackingSkeleton('itemStates')
+    await withFileLock(file, async () => {
+      const original = (await readText(file)) ?? ''
+      const blocks = readManagedStateBlocks(original)
+      const own = blocks.find((b) => b.chapter === chapter)
+      if (own && !own.intact) throw new Error(`第 ${chapter} 章物品自动历史已被人工编辑，已保留；请先核对该章历史`)
+      const toRebuild = blocks.filter((b) => b.chapter >= chapter && b.intact)
+      let text = original
+      const changed = stateChangesKey(own?.changes ?? []) !== stateChangesKey(changes)
+      const invalidated = changed ? blocks.filter((b) => b.chapter > chapter && !b.intact && !b.full.includes('writer-state-invalidated:')) : []
+      for (const block of invalidated) {
+        const start = `<!-- writer-state-history:${block.chapter}:start -->`
+        text = text.replace(block.full, block.full.replace(start, `${start}\n<!-- writer-state-invalidated:${block.chapter} -->\n> 前章物品状态已改写：本节含人工编辑，原文保留，自动续写暂停采用，待核对后重新确认。`))
+      }
+      for (const block of toRebuild) text = text.replace(block.full, '')
+      const deltas = new Map(toRebuild.map((b) => [b.chapter, b.changes]))
+      deltas.set(chapter, changes)
+      for (const [number, itemChanges] of [...deltas].sort(([a], [b]) => a - b)) {
+        const prior = new Map(parseItemStatesAt(text, number - 1).map((s) => [s.name, s]))
+        const body = renderItemStateHistory(number, itemChanges, prior)
+        if (!body) continue
+        const data = Buffer.from(JSON.stringify(itemChanges), 'utf8').toString('base64')
+        const content = `<!-- writer-state-data:${data} -->\n${body}`
+        const block = `<!-- writer-state-history:${number}:start -->\n<!-- writer-state-checksum:${hashProse(content)} -->\n${content}\n<!-- writer-state-history:${number}:end -->`
+        text = text.trimEnd() + `\n\n${block}\n`
+      }
+      await writeTextAtomic(file, text)
+      if (invalidated.length) throw new Error(`${invalidated.length} 个后章物品历史含人工编辑，已标记待核对并暂停用于自动续写，原文保留`)
+    })
+  }
+
   /** 确保追踪骨架文件存在（与 project-service 开书模板对齐） */
   private async ensureTrackingSkeleton(
-    kind: 'context' | 'timeline' | 'characterStates'
+    kind: 'context' | 'timeline' | 'characterStates' | 'itemStates'
   ): Promise<void> {
     const dir = join(this.projectDir, '追踪')
     await fs.mkdir(dir, { recursive: true })
@@ -890,7 +944,9 @@ export class MemoryWriter {
         ? join(dir, '上下文.md')
         : kind === 'timeline'
           ? join(dir, '时间线.md')
-          : join(dir, '角色状态.md')
+          : kind === 'itemStates'
+            ? join(dir, '物品.md')
+            : join(dir, '角色状态.md')
     const existing = await readText(file)
     if (existing && existing.trim()) return
 
@@ -899,7 +955,9 @@ export class MemoryWriter {
         ? `# 上下文（日更进度摘要）\n\n| 日期 | 章节 | 进度摘要 | 下一章目标 | 阻塞点 |\n|---|---|---|---|---|\n`
         : kind === 'timeline'
           ? `# 时间线\n\n| 章节 | 事件名 | 时间跨度 | 涉及角色 | 详细描述 |\n|---|---|---|---|---|\n`
-          : `# 角色状态快照\n\n## 当前状态\n\n| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |\n|---|---|---|---|---|---|---|\n\n## 状态变更记录\n\n| 章节 | 角色 | 变更内容 |\n|---|---|---|\n`
+          : kind === 'itemStates'
+            ? `# 物品状态快照\n\n## 当前状态\n\n| 物品 | 材质外观 | 当前持有者 | 所在位置 | 状态 | 更新章节 |\n|---|---|---|---|---|---|\n\n## 状态变更记录\n\n| 章节 | 物品 | 变更内容 |\n|---|---|---|\n`
+            : `# 角色状态快照\n\n## 当前状态\n\n| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |\n|---|---|---|---|---|---|---|\n\n## 状态变更记录\n\n| 章节 | 角色 | 变更内容 |\n|---|---|---|\n`
     await writeTextAtomic(file, body)
   }
 
@@ -1229,8 +1287,67 @@ function renderStateHistory(
   ].join('\n')
 }
 
-function readManagedStateBlocks(text: string): { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] {
-  const blocks: { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] = []
+/** 字段名归一：物品状态表同义映射（提取提示词与写入共用口径） */
+export function normalizeItemStateField(field: string): string {
+  const f = field.trim()
+  const map: Record<string, string> = {
+    外观: '材质外观', 材质: '材质外观', 外形: '材质外观', 形制: '材质外观', 质地: '材质外观',
+    持有: '持有者', 持有人: '持有者', 持有物: '持有者', 归属: '持有者',
+    位置: '所在位置', 所在: '所在位置', 封存: '所在位置', 存放: '所在位置',
+    现状: '状态', 情况: '状态'
+  }
+  return map[f] ?? f
+}
+
+type ItemStateColumn = 'material' | 'holder' | 'location' | 'status'
+
+function mapItemFieldToColumn(field: string): ItemStateColumn {
+  const f = normalizeItemStateField(field)
+  if (f === '材质外观') return 'material'
+  if (f === '持有者') return 'holder'
+  if (f === '所在位置') return 'location'
+  return 'status'
+}
+
+function renderItemStateHistory(
+  chapter: number,
+  changes: NonNullable<MemoryExtraction['itemStateChanges']>,
+  prior: Map<string, ItemStateSnapshot>
+): string {
+  const byName = new Map<string, { field: string; value: string }[]>()
+  for (const c of changes) {
+    const name = c.name?.trim()
+    const value = String(c.newValue ?? '').trim()
+    if (!name || !value) continue
+    const list = byName.get(name) ?? []
+    list.push({ field: normalizeItemStateField(c.field || '状态'), value })
+    byName.set(name, list)
+  }
+  const snapshots: ItemStateSnapshot[] = []
+  const logs: string[] = []
+  for (const [name, fields] of byName) {
+    const state: ItemStateSnapshot = { name, material: '-', holder: '-', location: '-', status: '-', ...prior.get(name), updateChapter: chapter }
+    const columns = new Map<ItemStateColumn, string[]>()
+    for (const f of fields) {
+      const column = mapItemFieldToColumn(f.field)
+      columns.set(column, [...(columns.get(column) ?? []), f.value])
+      logs.push(`| 第 ${chapter} 章 | ${escapeTableCell(name)} | ${escapeTableCell(`${f.field}：${f.value}`)} |`)
+    }
+    for (const [column, values] of columns) state[column] = [...new Set(values)].join('；')
+    snapshots.push(state)
+  }
+  if (!snapshots.length) return ''
+  return [
+    `## 自动历史快照（第 ${chapter} 章）`, '',
+    '| 物品 | 材质外观 | 当前持有者 | 所在位置 | 状态 | 更新章节 |',
+    '|---|---|---|---|---|---|',
+    ...snapshots.map((s) => `| ${[s.name, s.material, s.holder, s.location, s.status, `第 ${chapter} 章`].map(escapeTableCell).join(' | ')} |`),
+    '', `## 自动状态变更（第 ${chapter} 章）`, '',
+    '| 章节 | 物品 | 变更内容 |', '|---|---|---|', ...logs, ''
+  ].join('\n')
+}
+
+function readManagedStateBlocks(text: string): { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] {  const blocks: { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] = []
   for (const match of text.matchAll(/<!-- writer-state-history:(\d+):start -->\r?\n([\s\S]*?)\r?\n<!-- writer-state-history:\1:end -->/g)) {
     const chapter = Number(match[1])
     const body = match[2]

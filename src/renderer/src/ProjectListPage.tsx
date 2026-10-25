@@ -3,6 +3,7 @@ import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
 import ProseImportDialog from './ProseImportDialog'
+import { ChapterPaginator } from './ChapterListPage'
 import { isWebClient, openServerExport } from './web-download'
 import { uploadProjectPackage } from './web-import'
 import './long-story-project.css'
@@ -14,6 +15,9 @@ interface Props {
 }
 
 type Shelf = 'active' | 'archived'
+
+/** 书架分页大小：自适应网格下桌面窗口约 3~4 列，一页 12 张即 3~4 行 */
+const SHELF_PAGE_SIZE = 12
 
 const openedTime = (project: ProjectMeta) => {
   const t = new Date(project.lastOpenedAt).getTime()
@@ -31,6 +35,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [creationNotice, setCreationNotice] = useState('')
   const [keyword, setKeyword] = useState('')
   const [shelf, setShelf] = useState<Shelf>('active')
+  const [page, setPage] = useState(1)
   const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [archiveError, setArchiveError] = useState('')
@@ -164,6 +169,26 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     () => shelfProjects.reduce((s, p) => s + (wordCounts[p.id] ?? 0), 0),
     [shelfProjects, wordCounts]
   )
+
+  // 切换书架或改搜索词后回第一页；页码超出总页数（如删除/归档后）也夹回范围内
+  useEffect(() => {
+    setPage(1)
+  }, [shelf, keyword])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / SHELF_PAGE_SIZE))
+  const currentPage = Math.min(Math.max(1, page), totalPages)
+  const pagedProjects = useMemo(
+    () => filtered.slice((currentPage - 1) * SHELF_PAGE_SIZE, currentPage * SHELF_PAGE_SIZE),
+    [filtered, currentPage]
+  )
+
+  const handlePageChange = (nextPage: number) => {
+    setPage(nextPage)
+    const mainEl = document.querySelector('.main-content')
+    if (mainEl) {
+      mainEl.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
 
   const applyArchived = async (project: ProjectMeta, archived: boolean) => {
     const setArchived = (
@@ -312,7 +337,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
         </p>
       ) : (
         <div className="project-grid">
-          {filtered.map((p) => {
+          {pagedProjects.map((p) => {
             const ch = chapterCounts[p.id]
             const wc = wordCounts[p.id]
             const initial = p.name.trim().charAt(0) || '卷'
@@ -320,7 +345,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
               <article
                 key={p.id}
                 className="project-card"
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpenProject(p.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    onOpenProject(p.id)
+                  }
+                }}
               >
                 <div className="pc-head">
                   <div className="pc-avatar" aria-hidden>{initial}</div>
@@ -373,16 +406,6 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                     )}
                     <button
                       type="button"
-                      className="open project-entry"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onOpenProject(p.id)
-                      }}
-                    >
-                      进入 →
-                    </button>
-                    <button
-                      type="button"
                       className="open"
                       title="导出整本小说包，可在网页版或桌面版书案导入"
                       disabled={exportingId !== null}
@@ -413,6 +436,13 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
           })}
         </div>
       )}
+      <ChapterPaginator
+        currentPage={currentPage}
+        totalPages={totalPages}
+        totalItems={filtered.length}
+        unitLabel="本"
+        onPageChange={handlePageChange}
+      />
       {pendingArchive ? (
         <ArchiveConfirmDialog
           project={pendingArchive}

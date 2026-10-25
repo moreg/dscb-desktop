@@ -98,6 +98,16 @@ describe('长篇写作交稿闸门', () => {
     await expect(guard.check({ ...input, content: '甲'.repeat(40001) })).rejects.toThrow('40000')
   })
 
+  it('程序比对提示只进入核对方向说明，改变提示即不命中缓存且不影响通过', async () => {
+    const llm = mock()
+    const guard = new LongformGuard(llm as unknown as LlmService)
+    await guard.check(input)
+    await guard.check({ ...input, hints: ['本章出现「木牌」，而已知道具「铜牌」未在本章出现。'] })
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+    expect(llm.generateStream.mock.calls[1][0]).toContain('程序比对可疑点')
+    expect(llm.generateStream.mock.calls[1][0]).toContain('木牌')
+  })
+
   it('只有道具历史也必须检查，旧三项检查结果不能绕过新增道具核对', async () => {
     const llm = mock(JSON.stringify({completed:true,checked:['mainline','knowledge','thread'],findings:[]}))
     const source = {...input,plan:'',history:'[道具 · 最近可核实记录] 原信装入绸布封套后由陆安随身保管。'}

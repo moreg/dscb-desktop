@@ -1,5 +1,5 @@
 // 桌面版生成和复核共用规则；更改版本以区分旧批次的验收口径。
-export const CHART_IDEAS_PROMPT_VERSION = 'chart-ideas-v16-action-and-demand'
+export const CHART_IDEAS_PROMPT_VERSION = 'chart-ideas-v17-effects-and-resolution'
 
 export const CHART_FUSION_RULES = `## 榜单融梗（每条必做）
 - 每条脑洞都要从至少两本不同的本期榜单作品提取具体、有辨识度的梗，再重组为原创故事。trend、fusion、opportunity 都必须融梗，策略分类不代表是否融梗。抽象是去掉人名专名，不能把来源压扁成通用题材。
@@ -52,6 +52,10 @@ export const CHART_COUNTERFACTUAL_RULES = `## 反事实执行：核心操作、�
 `
 
 export const CHART_ACTION_DEMAND_RULES = `## 行动闭环、检测依赖与真实新增需求
+- 保留资源必须保留效力：已制成药剂、已取得设备、已达成合作不只保留容器和名字，还保留原有效果、数量、期限与普通使用权限。删去未来制造/赋能操作，不自动使旧成品失效；只有原文明示每次使用仍需该来源主动激活，才核对激活缺口，不得由审稿人临时添加。逐阶段说明旧库存能覆盖多少实际需求，未知库存不能假定为零。
+- 来源独立贡献必须与其余来源和新增能力比较。若本案新增交班已承担跨界入口，另一来源仅剩普通做工购物，不能通过禁止普通劳动、撤销已接订单或没收技能证明其必需；具体来源引文准确不等于改造后仍有独立贡献。正常技能、合法机会和已得资产始终参与剩余解法。
+- 三章行动逐章核查，不能用开篇、中段、后段三个抽样节点代替。每章串起承诺、知情、见面/传讯、准备、执行、验收与下一章期限；限定每晚见面的角色不能在订单已到期后才商量并无依据按时完成。时长上限不等于实际耗时，分别安排身体休息、照料与工作。只写“顺利完成”不补足缺失时间线。
+- 终局核验必须接上解决动作：区分发现/确认危险、采取能改变结果的操作、验证实际后果。若目标是避免身份取代，仅确认双方清醒或再挣一笔钱不能证明阻止了取代；不能把指定的新工资当自主性的唯一证据。若目标本就是取得当事者新回应，完整回应可以是终局回报，不强迫新增灾难；长期悬念可以保留，但当前承诺的阶段目标必须实际兑现。
 - 跨界核验必须闭合：按行动先后写清决策者当前在哪一端、观察者如何到达现场、用什么取得读数、消息怎样跨界返回、由谁在何时启动迁移。水尺、摄像头、手机的存在不等于跨时信号、供电、观察者和接收路径都存在。若必须先整村返程才能现场步查，就不能把该步查结果当作返程的前置条件。首次触发也必须有已存在的入口，不能先保留本次尚未完成的跨越再解释如何启动。
 - 核验路线不能循环依赖待验证行动，不得在章节偷偷增加个人通道、遥感、自动传讯或可随意回来的侦察队。合法的留守观察者、独立通信或预置装置必须在行动前建立，并交代触发、范围、时效和失联时如何决策；不能只补一句“提前确认过”。所有题材都要核对信息取得、送达、决策和执行的顺序，不能只在跨界题材检查。
 - 新增检测与来源能力要画清输入依赖：按“样本/信号→哪项感知或检测产生什么数据→新增规则处理数据→输出与验证”拆分。检测要求、加工方法、显示界面不等于独立检测能力。“通过能力显示残留和相容性”不能被审稿人直接改写成另一台独立相容性检测器，也不能不经分析把全部相容性功能并入来源一起删掉。
@@ -126,6 +130,10 @@ removal_effect 写保留其他手段后，具体哪一步仍无法完成；remai
 deletion_audit再填dependency_boundary（resolved/ambiguous）、input_dependency和branch_analysis（后两项至少8字）。input_dependency说明源输入与新增处理/验证的依赖，不把界面或合格要求当成检测器；明确时解释删除后的输入缺口，模糊时branch_analysis必须分别推演独立新增检测与依赖来源检测两支。ambiguous时该来源所有stage_checks.required_now必须false，登记weak_source_dependency；不得把其中一支的可行或失败作为已证实结论。合法的条件分支可以令三个删除合法性布尔值为true；这只表示没有在各支偷改能力，不表示原稿边界已解决。
 每个stage_goal再填new_requirement、old_stock_test（各至少8字）及need_established布尔值：具体新功能/数量/时限缺口是什么，旧成果、成熟品、采购及延期为何不足；仅换批号不能算新需求。未说明新需求且旧资源路线未排除时need_established=false，各来源本阶段required_now不能为true，并报weak_source_dependency；没有批次或库存也要解释本阶段的新回应/操作为什么确实尚未取得。
 每条review再输出恰好三个action_checks（opening/middle/late），每项为stage、field、quote、known_before、verification_route、activation_sequence、loop_closed布尔值、reason。说明节点前位置与已知信息，谁怎样到现场观察、信息如何返回、何时据此执行；非跨界也核对先后。各说明至少8字，quote引用实际相关原文。执行依赖尚未完成的待核验行动，或必要观察/送达渠道未交代，loop_closed=false，并报action_loop_gap；该阶段所有来源required_now不能为true。此检查审原方案能否执行，不要与删除后的替代路线混淆。
+每条review额外输出chapter_action_checks，恰好chapter=1/2/3三项，各含field=opening_chapters、quote、timeline、carryover、loop_closed布尔值、reason。quote只能来自对应章的单一字段；timeline串起本章信息/会面/准备/执行/验收时序，carryover核对上章承诺和下章期限。说明各至少8字；不能用三个长篇阶段的抽查代替。某章缺关键时点时loop_closed=false并报action_loop_gap，不能因action_checks全true而放行。缺文字时可空引文但不得通过。
+每条review再填resolution_check：field、quote、required_output、intervention、resulting_change、goal_achieved布尔值、reason。required_output逐字等于late阶段目标；其余说明至少8字，解释大纲已经写出的解决动作怎样改变局面并兑现承诺，不要求先写全文。只有确认危险、状态或能力却无解决动作时goal_achieved=false，登记action_loop_gap，所有来源late.required_now=false。若实际承诺仅是取得新回应，完整回应可以达标，不另加灾难；不得偷偷降低原本救援/保全目标。
+每个source_check另填independence_audit：field、quote、status（independent/covered/unproven）、remaining_operations、difference（说明各至少8字）。对照其余来源、新增能力及正常技能，明确本来源改造后独有哪一步；普通劳动、已接合法订单、现有沟通渠道不能被禁用来证明增量。引文来自概念、展开或opening_chapters；covered/unproven时登记weak_source_dependency，该来源所有required_now=false，不能凭引用准确或多次出现就判independent。
+deletion_audit再填retained_effects_preserved布尔值与existing_effects（至少8字）：说明既得成品、设备、合作的实际功能/效力/期限及普通使用权限怎样保留，并核对是否另需原文明示的主动激活。没有旧成品也说明现有手段保留范围，不能写无。仅留容器却删药效时为false，整份报告无效须重审，即使故事另有真实问题也不得采纳该错误反事实。禁止未经核查直接填true。
 每个stage_goal增加material_substitution_test，不少于8字，实际比较指定材料与目标：本地持续供粮要尝试正常购种后本地自繁；复原灭绝物种或完整活母本则说明何种身份/谱系不可丢失；非农业目标也要比较可替换的材料或说明不涉及，不能只写必须取得指定物。
 每个stage_check增加execution_audit对象：field、quote、carrier（设备/载体或实际执行者）、operating_scope（能力作用场域与启动条件）、retained_conditions（节点前已有设备、耗材、资源状态与条件）、evidence_sufficient布尔值、reason，说明设备与渠道、作用场域和时间线是否清楚。每个说明至少8字；非设备机制也核对其实际执行条件。条件不明且影响必要性时evidence_sufficient=false，该阶段required_now不能为true；不得替作者假设古代可录音或禁止录音。
 每个stage_check另填combination_check对象：route、outcome、field、quote、reason、payoff_match、payoff_comparison（含义与route_checks相同），再填preserved_resources与time_window（均至少8字）。它是三类单项之外的一次组合核查，列清保留的旧资产、新增能力、正常技能，串出最强合理路线及预警提前量、取得资源/加工/转移的时间。不得仅重复单项失败结论。组合可行或未排除，required_now必须为false；没写组合核查不能通过。combination_check同样不能偷留被删的核心操作或取消保留能力的触发条件。

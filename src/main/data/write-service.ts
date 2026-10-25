@@ -53,6 +53,8 @@ import { ProseMemoryIndex, hashProse, type ProseMemoryHit } from './memory/prose
 import { ChapterSummaryRepo, chapterSummaryText, type ChapterSummary } from './memory/chapter-summary-repo'
 import { buildCharacterAliasGroups, projectCharactersForChapter, type CharacterAliasGroup } from './memory/character-memory-context'
 import { buildContinuityContext, parseContinuityFacts, assertSummaryKnowledgeCoverage } from './memory/continuity-context'
+import { ItemRepo } from './memory/item-repo'
+import { findItemMaterialDrift, renderItemDriftHints } from './memory/item-drift'
 import { LongformGuard, needsLongformGuard } from './longform-guard'
 import { readLongformPlan } from './longform-plan'
 import { readLongformReviewState, markLongformPending, clearLongformPending,
@@ -862,12 +864,27 @@ export class WriteService {
       ])
       const active = [...new Set([...(detail?.charactersAppearing ?? []),
         ...characters.filter(c => content.includes(c.name)).map(c => c.name)])]
-      const history = (await buildContinuityContext(dir, chapterNumber, {
-        text: [detail?.plotSummary, content, plan].filter(Boolean).join('\n'), characters: active, props: [], includeTrajectory: true,
-        aliases: buildCharacterAliasGroups(characters, chapterNumber, { excludeUndated: chapterNumbers.some(n => n >= chapterNumber) })
-      })).join('\n\n')
       const sources = await new ProseMemoryIndex(dir).readBefore(chapterNumber, true)
-      return { plan, history, sources: hashProse(JSON.stringify(sources.map(s => [s.chapterNumber, s.sourcePath, s.sourceHash]))) }
+      // 材质漂移比对基准自动来自道具卡、前文正文与计划；命中的可疑道具再进 props，让台账不靠正文命中也能入选核对上下文。
+      const drifts = findItemMaterialDrift({
+        content, knownItems: (await new ItemRepo(dir).list()).map(item => item.name), plan,
+        priorText: sources.map(s => s.passages.map(p => p.text).join('\n')).join('\n')
+      })
+      const continuity = await buildContinuityContext(dir, chapterNumber, {
+        text: [detail?.plotSummary, content, plan].filter(Boolean).join('\n'), characters: active,
+        props: [...new Set(drifts.flatMap(d => [d.known, d.token]))], includeTrajectory: true,
+        aliases: buildCharacterAliasGroups(characters, chapterNumber, { excludeUndated: chapterNumbers.some(n => n >= chapterNumber) })
+      })
+      // 物品状态表给判官可定位的材质/持有者依据；漂移提示指出的可疑物由此对账。
+      const itemTracking = await new TrackingMdRepo(dir).readItemTracking(chapterNumber)
+      const itemTable = itemTracking ? [
+        '## 物品状态追踪表（自动维护；与正文冲突时以正文和较晚记录为准）',
+        ...itemTracking.states.map((s) => `- ${s.name}：材质外观 ${s.material || '未知'}；持有者 ${s.holder || '未知'}；所在 ${s.location || '未知'}；状态 ${s.status || '未知'}（更新于第 ${s.updateChapter} 章）`),
+        ...itemTracking.changes.map((c) => `- 第 ${c.chapter} 章 · ${c.name}：${c.change}`)
+      ].join('\n') : ''
+      const history = [...continuity, ...(itemTable ? [itemTable] : [])].join('\n\n')
+      return { plan, history, hints: renderItemDriftHints(drifts),
+        sources: hashProse(JSON.stringify(sources.map(s => [s.chapterNumber, s.sourcePath, s.sourceHash]))) }
     }
     const before = await readContext()
     const instruction = options.instruction ?? await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(before.plan))
@@ -2488,6 +2505,7 @@ export class WriteService {
       newForeshadowings: [],
       newPlotPoints: pick('plotPoint', source.newPlotPoints),
       characterStateChanges: pick('stateChange', source.characterStateChanges),
+      itemStateChanges: pick('itemStateChange', source.itemStateChanges),
       collectedForeshadowings: pick('foreshadowCollect', source.collectedForeshadowings),
       settingsPatches: pick('settingsPatch', source.settingsPatches),
       settingsSuggestions: []
@@ -2495,6 +2513,7 @@ export class WriteService {
     const forcedCount =
       subset.newPlotPoints.length +
       subset.characterStateChanges.length +
+      (subset.itemStateChanges?.length ?? 0) +
       subset.collectedForeshadowings.length +
       (subset.settingsPatches?.length ?? 0)
     if (forcedCount === 0) throw new Error('没有选中任何条目')
@@ -6234,6 +6253,8 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
   const hasContent =
     tracking.characterStates.length > 0 ||
     tracking.stateChanges.length > 0 ||
+    tracking.itemStates.length > 0 ||
+    tracking.itemStateChanges.length > 0 ||
     tracking.timeline ||
     tracking.recentProgress.length > 0 ||
     tracking.openIssues.length > 0
@@ -6254,10 +6275,30 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
     }
   }
 
+  // 物品状态快照：材质外观列在模型动笔前固定物件属性，是防材质漂移的第一道防线
+  if (tracking.itemStates.length > 0) {
+    parts.push('## 物品状态快照')
+    parts.push('| 物品 | 材质外观 | 当前持有者 | 所在位置 | 状态 | 来源章节 |')
+    parts.push('|------|------|------|------|------|------|')
+    for (const s of tracking.itemStates) {
+      parts.push(
+        `| ${s.name} | ${s.material || '-'} | ${s.holder || '-'} | ${s.location || '-'} | ${s.status || '-'} | ${s.updateChapter || '未标注，仅供参考'} |`
+      )
+    }
+  }
+
   // 近期状态变更（截到本章为止）
   if (tracking.stateChanges.length > 0) {
     parts.push(`## 近期状态变更（第 ${chapterNumber} 章及之前）`)
     for (const c of tracking.stateChanges.slice(-15)) {
+      parts.push(`- 第 ${c.chapter} 章 · ${c.name}：${c.change}`)
+    }
+  }
+
+  // 近期物品变更（截到本章为止）
+  if (tracking.itemStateChanges.length > 0) {
+    parts.push(`## 近期物品变更（第 ${chapterNumber} 章及之前）`)
+    for (const c of tracking.itemStateChanges.slice(-10)) {
       parts.push(`- 第 ${c.chapter} 章 · ${c.name}：${c.change}`)
     }
   }

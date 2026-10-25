@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { DIALOGUE_PARAGRAPHS } from '../src/shared/prose-policy'
+import { buildDeslopPrompt } from '../src/main/data/skill-prompts/deslop/anti-ai-methods'
 import {
   buildSystemPrompt,
   resolveGenreVoice,
@@ -40,6 +41,28 @@ describe('resolveGenreVoice', () => {
 })
 
 describe('buildSystemPrompt', () => {
+  it.each([undefined, 'extend', 'finish'] as const)('%s 默认精修不因旧小节停用而丢失，保留作者自定义', (mode) => {
+    const overrides = { deai: '', dialogue: '作者自定义：保留人物方言和克制语气。' }
+    const before = { ...overrides }
+    const prompt = buildSystemPrompt('历史', null, overrides, null, mode)
+    expect(prompt).toContain('【默认成稿精修：保留剧情、人设和文风】')
+    expect(prompt).toContain('避免机械问答')
+    expect(prompt).toContain('避免重复解释')
+    expect(prompt).toContain('避免动作清单感')
+    expect(prompt).toContain('保留谁向谁传达什么及亲见、听说、推测的区别')
+    expect(prompt).toContain(overrides.dialogue)
+    expect(overrides).toEqual(before)
+    if (mode) expect(prompt).toContain('禁止重写、复述或另起一个开头')
+  })
+
+  it('改味入口默认沿用同一精修规则，仍保护原稿范围与事实', () => {
+    const prompt = buildDeslopPrompt('原有片段。', 'mild', [], ['B'])
+    expect(prompt).toContain('【默认成稿精修：保留剧情、人设和文风】')
+    expect(prompt).toContain('避免动作清单感')
+    expect(prompt).toContain('原稿是唯一剧情基线')
+    expect(prompt).toContain('原有片段。')
+  })
+
   it('番茄开篇专项只向平台明确为番茄的正文请求注入', () => {
     const prompt = (platform: 'fanqie' | 'qimao' | null) => buildSystemPrompt('玄幻', null,
       undefined, null, 'extend', { platform, text: '' })

@@ -305,7 +305,7 @@ export class OutlineService {
       isGolden,
       await readWritingPlatformConfig(dir)
     )
-    const contextPaths = ['设定/关系.md', '追踪/角色状态.md', '追踪/伏笔.md', '追踪/时间线.md', '追踪/上下文.md', '追踪/细纲规划.md']
+    const contextPaths = ['设定/关系.md', '追踪/角色状态.md', '追踪/物品.md', '追踪/伏笔.md', '追踪/时间线.md', '追踪/上下文.md', '追踪/细纲规划.md']
     const context = await Promise.all(contextPaths.map(async file => {
       const text = await readText(join(dir, file))
       return text?.trim() ? `### ${file}（只读来源，计划不是已发生事实）\n${text}` : ''

@@ -649,20 +649,14 @@ a:hover { color: var(--vermilion); }
   flex-wrap: wrap;
   font-size: 11.5px;
   color: var(--ink-3);
+  margin-top: auto;
 }
 .project-card .pc-foot .open {
   color: var(--vermilion);
   font-weight: 600;
   font-family: var(--font-sans);
 }
-.project-card .project-entry {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font-size: inherit;
-  padding: 4px 0;
-}
-.project-card .project-entry:focus-visible {
+.project-card:focus-visible {
   outline: 2px solid var(--vermilion);
   outline-offset: 2px;
 }

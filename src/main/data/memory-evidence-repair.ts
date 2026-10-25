@@ -12,6 +12,7 @@ export async function repairMissingMemoryEvidence(
   const arrays = {
     plotPoint: extraction.newPlotPoints,
     stateChange: extraction.characterStateChanges,
+    itemStateChange: extraction.itemStateChanges ?? [],
     foreshadowCollect: extraction.collectedForeshadowings,
     settingsPatch: extraction.settingsPatches ?? []
   }
@@ -41,12 +42,14 @@ export async function repairMissingMemoryEvidence(
     ...extraction,
     newPlotPoints: extraction.newPlotPoints.map((v) => ({ ...v })),
     characterStateChanges: extraction.characterStateChanges.map((v) => ({ ...v })),
+    itemStateChanges: (extraction.itemStateChanges ?? []).map((v) => ({ ...v })),
     collectedForeshadowings: extraction.collectedForeshadowings.map((v) => ({ ...v })),
     settingsPatches: extraction.settingsPatches?.map((v) => ({ ...v }))
   }
   const targets = {
     plotPoint: updated.newPlotPoints,
     stateChange: updated.characterStateChanges,
+    itemStateChange: updated.itemStateChanges ?? [],
     foreshadowCollect: updated.collectedForeshadowings,
     settingsPatch: updated.settingsPatches ?? []
   }

@@ -15,7 +15,7 @@ function fixture(count = 1) {
   return { ideas, payload: JSON.parse(passingFusionReview(prompt)) as Payload }
 }
 
-describe('v16 融梗复核闸门', () => {
+describe('v17 融梗复核闸门', () => {
   it('完整的逐来源、逐阶段与整批对比协议才能通过', () => {
     const { ideas, payload } = fixture(3)
     expect(validateFusionReview(payload, ideas)).toHaveLength(3)
@@ -25,6 +25,18 @@ describe('v16 融梗复核闸门', () => {
 
   const mutations: Array<[string, (payload: Payload) => void]> = [
     ['漏来源', p => { p.reviews[0].source_checks.pop() }],
+    ['只留旧药瓶删药效', p => { p.reviews[0].source_checks[0].deletion_audit.retained_effects_preserved = false }],
+    ['未审旧资源效力', p => { p.reviews[0].source_checks[0].deletion_audit.existing_effects = '' }],
+    ['来源被新增能力覆盖仍通过', p => { p.reviews[0].source_checks[0].independence_audit.status = 'covered' }],
+    ['来源独立增量不明仍通过', p => { p.reviews[0].source_checks[0].independence_audit.status = 'unproven' }],
+    ['来源增量使用伪造证据', p => { p.reviews[0].source_checks[0].independence_audit.quote = '禁止正常劳动购物' }],
+    ['漏第二章行动检查', p => { p.reviews[0].chapter_action_checks.splice(1, 1) }],
+    ['重复章号冒充完整检查', p => { p.reviews[0].chapter_action_checks[1].chapter = 1 }],
+    ['三阶段通过掩盖第二章缺环', p => { p.reviews[0].chapter_action_checks[1].loop_closed = false }],
+    ['章节行动伪造引文', p => { p.reviews[0].chapter_action_checks[1].quote = '次日到期后再会面仍能按时交货' }],
+    ['终局偷换目标', p => { p.reviews[0].resolution_check.required_output = '只确认大家还清醒，不解决原危机' }],
+    ['只核验不解决仍通过', p => { p.reviews[0].resolution_check.goal_achieved = false }],
+    ['终局操作没有证据', p => { p.reviews[0].resolution_check.quote = '' }],
     ['重复来源', p => { p.reviews[0].source_checks[1].book_id = 'a' }],
     ['伪造引文', p => { p.reviews[0].source_checks[0].quote = '原文里没有的屏蔽沟通禁令' }],
     ['字符串布尔值', p => { Object.assign(p.reviews[0], { passed: 'true' }) }],
@@ -157,14 +169,52 @@ describe('v16 融梗复核闸门', () => {
   })
 
   it('生成和复核均保留历次反事实漏洞规则及实际前三章', () => {
-    expect(CHART_IDEAS_PROMPT_VERSION).toBe('chart-ideas-v16-action-and-demand')
+    expect(CHART_IDEAS_PROMPT_VERSION).toBe('chart-ideas-v17-effects-and-resolution')
     const prompt = buildFusionReviewPrompt([qualityIdea()])
     const generation = buildIdeasPrompt({ chartLabel: '测试榜单', category: '都市', chartDate: '2026-10-24', books: [],
       ideaCount: 3, focusTags: [], goldenThreeSummary: { bookCount: 0, chapterCount: 0, directions: [] } })
-    for (const text of ['采集致富', '幼童心声', '态度', '历史贡献', '灭绝', '购种', '卖粮', '既有队伍', '设备与渠道', '只删限制、保留核心能力', '本地自繁', '组合', '预警提前量', '跨界核验必须闭合', '新增检测与来源能力', '新批次不能偷换实际目标', '前三章整条推进去重']) {
+    for (const text of ['采集致富', '幼童心声', '态度', '历史贡献', '灭绝', '购种', '卖粮', '既有队伍', '设备与渠道', '只删限制、保留核心能力', '本地自繁', '组合', '预警提前量', '跨界核验必须闭合', '新增检测与来源能力', '新批次不能偷换实际目标', '前三章整条推进去重', '保留资源必须保留效力', '来源独立贡献', '三章行动逐章核查', '终局核验必须接上解决动作']) {
       expect(generation).toContain(text)
       expect(prompt).toContain(text)
     }
     expect(prompt).toContain(qualityIdea().openingChapters![0].protagonistAction)
+  })
+
+  it('第二章独立失败报告不能被三阶段通过覆盖，并拒绝借用另一章引文', () => {
+    const { ideas, payload } = fixture()
+    const row = payload.reviews[0]
+    row.passed = false
+    row.chapter_action_checks[1].loop_closed = false
+    row.issues.push({ kind: 'action_loop_gap', field: 'opening_chapters', quote: ideas[0].openingChapters![1].openingEvent,
+      reason: '第二章的执行期限和信息会面顺序没有闭合。' })
+    expect(validateFusionReview(payload, ideas)[0].passed).toBe(false)
+    row.chapter_action_checks[1].quote = ideas[0].openingChapters![0].openingEvent
+    expect(() => validateFusionReview(payload, ideas)).toThrow('引文不属于对应章节')
+  })
+
+  it('允许终局未解决的有据拒收，但不能继续把后段来源判为必需', () => {
+    const { ideas, payload } = fixture()
+    const row = payload.reviews[0]
+    row.passed = false
+    row.resolution_check.goal_achieved = false
+    row.source_checks.forEach(check => { check.stage_checks[2].required_now = false })
+    row.issues.push({ kind: 'action_loop_gap', field: 'pacing_plan', quote: ideas[0].pacingPlan!,
+      reason: '终局只有确认危险，没有能改变实际结果的操作。' })
+    expect(validateFusionReview(payload, ideas)[0].passed).toBe(false)
+    row.source_checks[0].stage_checks[2].required_now = true
+    expect(() => validateFusionReview(payload, ideas)).toThrow('终局未解决')
+  })
+
+  it('来源被新增能力覆盖可以拒收，但仍须保留正常劳动和旧资源效果', () => {
+    const { ideas, payload } = fixture()
+    const row = payload.reviews[0]
+    row.passed = false
+    row.source_checks[0].independence_audit.status = 'covered'
+    row.source_checks[0].stage_checks.forEach(stage => { stage.required_now = false })
+    row.issues.push({ kind: 'weak_source_dependency', field: 'power_system', quote: ideas[0].powerSystem!,
+      reason: '新增入口已承担该来源贡献，普通劳动和现有技能均保留。' })
+    expect(validateFusionReview(payload, ideas)[0].passed).toBe(false)
+    row.source_checks[0].deletion_audit.retained_effects_preserved = false
+    expect(() => validateFusionReview(payload, ideas)).toThrow('反事实删除范围不合法')
   })
 })

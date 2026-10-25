@@ -326,3 +326,22 @@ describe('多句引文与克制型断言（真实回归案例）', () => {
     expect(validateMemoryCandidate(content, state('追问了分手原因', content))[0]).toContain('否定')
   })
 })
+
+describe('物品状态条目校验', () => {
+  const content = '陆宁把那块铜牌翻过来，牌背刻着“宁”字，随后贴身收好。'
+
+  it('物品变化与人物状态一样逐条核验证据，坏证据只挡该条', () => {
+    const extraction = parseMemoryExtractionJson(JSON.stringify({
+      newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [],
+      itemStateChanges: [
+        { name: '铜牌', field: '材质', oldValue: '', newValue: '铜质，牌背刻着“宁”字', evidence: '牌背刻着“宁”字' },
+        { name: '铜牌', field: '持有者', oldValue: '赵伯', newValue: '陆宁', evidence: '赵伯当场把铜牌扔了出去' }
+      ]
+    }), 1)
+    const partition = partitionMemoryCandidate(content, extraction)
+    expect(partition.itemIssues).toHaveLength(1)
+    expect(partition.itemIssues[0]).toContain('物品 铜牌 的持有者')
+    expect(partition.verified.itemStateChanges).toHaveLength(1)
+    expect(partition.verified.itemStateChanges![0].field).toBe('材质')
+  })
+})

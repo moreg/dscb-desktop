@@ -2360,6 +2360,11 @@ export interface MemoryExtraction {
    * field 推荐：伤势/情绪/位置/当前状态/身份/性格/能力/境界/外貌/关系/持有物
    */
   characterStateChanges: { name: string; field: string; oldValue: string; newValue: string; evidence?: string }[]
+  /**
+   * 既有物品的归属/状态变化（自动写入 追踪/物品.md，生成与长篇核对共用）。
+   * field 推荐：材质外观/持有者/所在位置/状态（在手/封存/耗损/耗尽/易主/销毁）
+   */
+  itemStateChanges?: { name: string; field: string; oldValue: string; newValue: string; evidence?: string }[]
   /** 伏笔回收（自动更新） */
   collectedForeshadowings: { content: string; chapter: number; evidence?: string; foreshadowingId?: string }[]
   /**
@@ -2619,7 +2624,7 @@ export interface MemoryCandidateSummary {
 
 /** 记忆候选里的单个条目（复核界面逐条勾选用） */
 export interface MemoryCandidateItem {
-  kind: 'plotPoint' | 'stateChange' | 'foreshadowCollect' | 'settingsPatch'
+  kind: 'plotPoint' | 'stateChange' | 'itemStateChange' | 'foreshadowCollect' | 'settingsPatch'
   /** 在 extraction 对应数组里的下标，与 kind 一起定位条目（仅本次提取内有效） */
   index: number
   /** 内容派生的稳定标识，跨重跑仍指向同一条 */

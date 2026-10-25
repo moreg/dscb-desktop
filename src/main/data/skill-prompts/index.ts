@@ -4,7 +4,7 @@ import { renderForbiddenWordsMarkdown } from './forbidden-words'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
 import { DESLOP_PLAIN_WRITING_RULES } from './deslop/anti-ai-methods'
-import { DIALOGUE_VITALITY_RULES } from './scene-naturalness'
+import { DIALOGUE_VITALITY_RULES, NATURAL_NARRATIVE_REVISION_RULES } from './scene-naturalness'
 import { renderWritingPlatformConfig, type WritingPlatformConfig } from '../../../shared/writing-platform'
 
 export { FORBIDDEN_WORD_CATEGORIES, flattenForbiddenWords } from './forbidden-words'
@@ -102,7 +102,7 @@ export function buildSystemPrompt(
   }
 
   // 共用质量要求独立于可编辑旧规则，续写与批量整章都要保留人物来回。
-  sections.push('---', DIALOGUE_VITALITY_RULES, DIALOGUE_TARGET_RULES)
+  sections.push('---', DIALOGUE_VITALITY_RULES, DIALOGUE_TARGET_RULES, NATURAL_NARRATIVE_REVISION_RULES)
   if (platformConfig?.platform === 'fanqie') sections.push('---', FANQIE_OPENING_RULES)
 
   // 续写覆盖声明放最后：位置最靠后、措辞最具体，冲突时压过上面的通用守则

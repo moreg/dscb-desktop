@@ -15,6 +15,8 @@ export interface LongformGuardInput {
   instruction?: string
   /** Existing prose is immutable during a continuation. */
   continuationStart?: number
+  /** Deterministic pre-scan pointers (e.g. item material drift); directions only, never verdicts. */
+  hints?: string[]
 }
 
 interface Finding { kind: 'mainline' | 'knowledge' | 'thread' | 'item'; message: string; snippet: string; reference: string }
@@ -77,6 +79,7 @@ export class LongformGuard {
       '【作者主线与卷纲计划，不能当作已发生事实】', input.plan || '（缺少明确主线计划，不能推测目标）',
       '【本章之前的历史与逐人认知，保留出处与不确定性】', input.history,
       '【作者本次要求】', input.instruction ?? '',
+      ...(input.hints?.length ? ['【程序比对可疑点：仅为核对方向，不是结论；核实为有依据的独立物件或无冲突时不得写入 findings】', ...input.hints] : []),
       '【本章实际正文】', input.content
     ].filter(Boolean).join('\n\n')
     const identity = await this.cacheIdentity()

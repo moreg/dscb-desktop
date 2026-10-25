@@ -48,6 +48,56 @@ async function setup() {
 }
 
 describe('逐本分析缓存与并发', () => {
+  it('无效复核只重审同一原稿一次，不重新生成或重跑普通终审', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      let generationCalls = 0
+      let editorialCalls = 0
+      const reviewMaterials: string[] = []
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) {
+          reviewMaterials.push(prompt.split('待审材料：\n')[1])
+          if (reviewMaterials.length === 1) {
+            const invalid = JSON.parse(passingFusionReview(prompt))
+            invalid.reviews[0].source_checks[0].deletion_audit.retained_effects_preserved = false
+            return JSON.stringify(invalid)
+          }
+          expect(prompt).toContain('反事实删除范围不合法')
+          expect(prompt).toContain('不改写故事、不预设通过或失败')
+          return passingFusionReview(prompt)
+        }
+        if (prompt.includes('你是严格的网文选题终审编辑')) { editorialCalls++; return passingReviews(1) }
+        generationCalls++
+        return JSON.stringify({ ideas: [qualityIdea()] })
+      })
+      const result = await service.generateIdeas(chartType, 1, [])
+      expect(result.ideas?.ideas[0].title).toBe(qualityIdea().title)
+      expect(generationCalls).toBe(1)
+      expect(editorialCalls).toBe(1)
+      expect(reviewMaterials).toHaveLength(2)
+      expect(reviewMaterials[0]).toBe(reviewMaterials[1])
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
+  it('复核请求失败不触发报告修复，保留旧结果', async () => {
+    const fixture = await setup()
+    try {
+      const service = fixture.create()
+      await service.analyze(chartType, false)
+      let calls = 0
+      fixture.generateStream.mockImplementation(async prompt => {
+        if (prompt.startsWith('你是独立的融梗审稿人')) { calls++; throw new Error('模拟模型网络错误') }
+        if (prompt.includes('你是严格的网文选题终审编辑')) return passingReviews(1)
+        return JSON.stringify({ ideas: [qualityIdea()] })
+      })
+      await expect(service.generateIdeas(chartType, 1, [])).rejects.toThrow('模拟模型网络错误')
+      expect(calls).toBe(1)
+      expect((await service.list())[0].ideas).toBeNull()
+    } finally { await rm(fixture.dir, { recursive: true, force: true }) }
+  })
+
   it.each(['invalid', 'cancelled', 'rejected'] as const)('融梗复核 %s 时不覆盖已有结果', async mode => {
     const fixture = await setup()
     try {
@@ -59,7 +109,7 @@ describe('逐本分析缓存与并发', () => {
         return JSON.stringify({ ideas: [qualityIdea()] })
       })
       const previous = await service.generateIdeas(chartType, 1, [])
-      expect(previous.ideas?.promptVersion).toBe('chart-ideas-v16-action-and-demand')
+      expect(previous.ideas?.promptVersion).toBe('chart-ideas-v17-effects-and-resolution')
       expect(previous.ideas?.ideas[0].pacingPlan).toBe(qualityIdea().pacingPlan)
       const controller = new AbortController()
       let fusionCalls = 0
@@ -81,7 +131,7 @@ describe('逐本分析缓存与并发', () => {
         return JSON.stringify({ ideas: [qualityIdea('待核查方案', 1)] })
       })
       await expect(service.generateIdeas(chartType, 1, [], undefined, controller.signal)).rejects.toThrow(mode === 'cancelled' ? '已取消' : '旧结果已保留')
-      expect(fusionCalls).toBe(mode === 'rejected' ? 3 : 1)
+      expect(fusionCalls).toBe(mode === 'rejected' ? 3 : mode === 'invalid' ? 2 : 1)
       expect((await service.list())[0].ideas).toEqual(previous.ideas)
     } finally { await rm(fixture.dir, { recursive: true, force: true }) }
   })

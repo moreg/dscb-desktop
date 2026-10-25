@@ -13,6 +13,11 @@ function extraction(chapter: number, field: string, value: string): MemoryExtrac
     characterStateChanges: value ? [{ name: '林远', field, oldValue: '', newValue: value }] : [] }
 }
 
+function itemExtraction(chapter: number, changes: NonNullable<MemoryExtraction['itemStateChanges']>): MemoryExtraction {
+  return { chapterNumber: chapter, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [], newPlotPoints: [], collectedForeshadowings: [],
+    characterStateChanges: [], itemStateChanges: changes }
+}
+
 describe('automatic history remains recoverable', () => {
   let dir: string
   const original = `# 角色状态
@@ -258,5 +263,51 @@ describe('automatic history remains recoverable', () => {
     await expect(writer.applyAutomatic({ ...extraction(5, '', ''), parseError: '缺少必填数组' })).rejects.toThrow('未写入或清理历史')
     expect(await readFile(join(dir, '追踪', '角色状态.md'), 'utf8')).toBe(before)
     expect(await readFile(join(dir, '记忆', '剧情点', '第005章 获赠.md'), 'utf8')).toContain('获得铜钥匙')
+  })
+})
+
+describe('item tracking table', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'aw-item-tracking-'))
+    await mkdir(join(dir, '追踪'), { recursive: true })
+  })
+
+  it('writes material/holder snapshots, replays per chapter and preserves author content', async () => {
+    await writeFile(join(dir, '追踪', '物品.md'), '# 物品状态\n\n> 作者备注：铜牌是娘留的。')
+    const writer = new MemoryWriter(dir)
+    await writer.applyAutomatic(itemExtraction(3, [
+      { name: '铜牌', field: '材质', oldValue: '', newValue: '铜质，掌心大' }
+    ]))
+    await writer.applyAutomatic(itemExtraction(8, [
+      { name: '铜牌', field: '持有者', oldValue: '', newValue: '陆宁' }
+    ]))
+    const repo = new TrackingMdRepo(dir)
+    expect((await repo.read(5))!.itemStates[0]).toMatchObject({ name: '铜牌', material: '铜质，掌心大', holder: '-' })
+    expect((await repo.read(9))!.itemStates[0]).toMatchObject({ material: '铜质，掌心大', holder: '陆宁' })
+    expect((await repo.read(9))!.itemStateChanges.some((c) => c.change.includes('陆宁'))).toBe(true)
+    expect((await repo.readItemTracking(9))!.states[0]).toMatchObject({ holder: '陆宁' })
+    expect(await readFile(join(dir, '追踪', '物品.md'), 'utf8')).toContain('作者备注：铜牌是娘留的。')
+  })
+
+  it('replaces a rewritten chapter block and clears it with an empty extraction', async () => {
+    const writer = new MemoryWriter(dir)
+    await writer.applyAutomatic(itemExtraction(4, [{ name: '铁盒', field: '状态', oldValue: '', newValue: '封存于暗格' }]))
+    await writer.applyAutomatic(itemExtraction(4, [{ name: '铁盒', field: '状态', oldValue: '', newValue: '在手' }]))
+    const repo = new TrackingMdRepo(dir)
+    expect((await repo.read(5))!.itemStates[0]).toMatchObject({ status: '在手' })
+    expect((await readFile(join(dir, '追踪', '物品.md'), 'utf8')).match(/writer-state-history:4:start/g)).toHaveLength(1)
+    await writer.applyAutomatic(itemExtraction(4, []))
+    expect(await repo.readItemTracking(5)).toBeNull()
+  })
+
+  it('undo removes only this chapter automatic item history', async () => {
+    const writer = new MemoryWriter(dir)
+    await writer.applyAutomatic(itemExtraction(2, [{ name: '玉佩', field: '持有者', oldValue: '', newValue: '林远' }]))
+    await writer.applyAutomatic(itemExtraction(6, [{ name: '玉佩', field: '所在位置', oldValue: '', newValue: '当铺' }]))
+    await writer.revertAutomatic(itemExtraction(6, []))
+    const itemTracking = (await new TrackingMdRepo(dir).readItemTracking(7))!
+    expect(itemTracking.states[0]).toMatchObject({ holder: '林远', location: '-' })
+    expect(itemTracking.changes.every((c) => c.chapter <= 2)).toBe(true)
   })
 })

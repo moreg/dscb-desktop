@@ -23,9 +23,16 @@ const execution = evidence.extend({ carrier: detailed, operating_scope: detailed
   evidence_sufficient: z.boolean(), reason: detailed })
 const deletion = evidence.extend({ core_operation: detailed, retained_triggers: detailed,
   core_operation_removed: z.boolean(), retained_means_preserved: z.boolean(), activation_conditions_preserved: z.boolean(), reason: detailed,
+  retained_effects_preserved: z.boolean(), existing_effects: detailed,
   dependency_boundary: z.enum(['resolved', 'ambiguous']), input_dependency: detailed, branch_analysis: detailed })
 const action = evidence.extend({ stage: z.enum(stages), known_before: detailed, verification_route: detailed,
   activation_sequence: detailed, loop_closed: z.boolean(), reason: detailed })
+const chapterAction = evidence.extend({ chapter: z.number().int().min(1).max(3),
+  timeline: detailed, carryover: detailed, loop_closed: z.boolean(), reason: detailed })
+const resolution = evidence.extend({ required_output: detailed, intervention: detailed, resulting_change: detailed,
+  goal_achieved: z.boolean(), reason: detailed })
+const independence = evidence.extend({ status: z.enum(['independent', 'covered', 'unproven']),
+  remaining_operations: detailed, difference: detailed })
 const stageCheck = evidence.extend({ stage: z.enum(stages), fresh_contribution: detailed, without_source_route: detailed,
   required_now: z.boolean(), required_output: detailed, route_checks: z.array(route).length(3),
   execution_audit: execution, combination_check: combination })
@@ -34,10 +41,12 @@ const goal = evidence.extend({ stage: z.enum(stages), required_output: detailed,
   new_requirement: detailed, old_stock_test: detailed, need_established: z.boolean() })
 const sourceCheck = evidence.extend({ book_id: z.string(), reason: z.string().trim().min(1),
   contribution_type: z.enum(['mechanism', 'relationship_structure', 'attitude_only']),
-  removal_effect: detailed, remaining_route: detailed, removed_part: detailed, deletion_audit: deletion,
+  removal_effect: detailed, remaining_route: detailed, removed_part: detailed, deletion_audit: deletion, independence_audit: independence,
   retained_means: z.array(evidence.extend({ reason: detailed })).min(1), stage_checks: z.array(stageCheck).length(3) })
 const reviewSchema = z.object({ reviews: z.array(z.object({ index: z.number().int().min(1), passed: z.boolean(),
-  stage_goals: z.array(goal).length(3), action_checks: z.array(action).length(3), source_checks: z.array(sourceCheck), issues: z.array(issue) })),
+  stage_goals: z.array(goal).length(3), action_checks: z.array(action).length(3),
+  chapter_action_checks: z.array(chapterAction).length(3), resolution_check: resolution,
+  source_checks: z.array(sourceCheck), issues: z.array(issue) })),
 opening_comparisons: z.array(z.object({ left_index: z.number().int(), right_index: z.number().int(),
   same_conflict: z.boolean(), left_quote: z.string().min(1), right_quote: z.string().min(1), reason: detailed })),
 chapter_comparisons: z.array(z.object({ left_index: z.number().int(), right_index: z.number().int(), same_progression: z.boolean(), reason: detailed,
@@ -89,7 +98,8 @@ function ensure(condition: unknown, message: string): asserts condition {
 /** 仅验证协议完整性与引文；具体因果判断由独立模型完成，不能把格式合格当作语义证明。 */
 export function validateFusionReview(payload: unknown, ideas: FanqieChartIdea[]) {
   const parsed = reviewSchema.safeParse(payload)
-  ensure(parsed.success, '缺少完整的逐来源、逐阶段、替代路径或目标等效性核查')
+  ensure(parsed.success, `缺少完整的逐来源、逐阶段、替代路径或目标等效性核查${parsed.success ? '' :
+    '，需修正字段：' + parsed.error.issues.slice(0, 6).map(issue => issue.path.join('.')).join('、')}`)
   const { reviews, opening_comparisons: pairs, chapter_comparisons: chapterPairs } = parsed.data
   ensure(reviews.length === ideas.length && new Set(reviews.map(row => row.index)).size === ideas.length && reviews.every(row => row.index <= ideas.length), '方案索引缺失或重复')
   for (const row of reviews) {
@@ -113,11 +123,24 @@ export function validateFusionReview(payload: unknown, ideas: FanqieChartIdea[])
       checkEvidence(action, [...evidenceKeys, 'opening_chapters'], action.loop_closed)
       ensure(action.loop_closed || row.issues.some(issue => issue.kind === 'action_loop_gap'), '行动核验闭环不成立不能通过')
     }
+    ensure(new Set(row.chapter_action_checks.map(check => check.chapter)).size === 3, '行动时序未逐章覆盖前三章')
+    for (const check of row.chapter_action_checks) {
+      const chapter = ideas[row.index - 1].openingChapters?.find(chapter => chapter.chapter === check.chapter)
+      ensure(check.field === 'opening_chapters' && (!check.loop_closed || check.quote.trim()) &&
+        (!check.quote || containsQuote(chapter, check.quote)), '行动时序引文不属于对应章节')
+      ensure(check.loop_closed || row.issues.some(issue => issue.kind === 'action_loop_gap'), '章节行动缺环不能被阶段抽查覆盖')
+    }
+    checkEvidence(row.resolution_check, evidenceKeys, row.resolution_check.goal_achieved)
+    ensure(row.resolution_check.required_output === row.stage_goals.find(goal => goal.stage === 'late')!.required_output,
+      '终局解决核查偷换了实际目标')
+    ensure(row.resolution_check.goal_achieved || row.issues.some(issue => issue.kind === 'action_loop_gap'), '终局只有核验没有解决动作不能通过')
     for (const check of row.source_checks) {
       checkEvidence(check, expansionKeys, row.passed)
       checkEvidence(check.deletion_audit, evidenceKeys)
-      ensure(check.deletion_audit.core_operation_removed && check.deletion_audit.retained_means_preserved && check.deletion_audit.activation_conditions_preserved,
+      ensure(check.deletion_audit.core_operation_removed && check.deletion_audit.retained_means_preserved && check.deletion_audit.activation_conditions_preserved && check.deletion_audit.retained_effects_preserved,
         '反事实删除范围不合法，不能只删限制保留核心能力、没收既得手段或取消触发条件')
+      checkEvidence(check.independence_audit, [...evidenceKeys, 'opening_chapters'], check.independence_audit.status === 'independent')
+      ensure(check.independence_audit.status === 'independent' || hasWeak, '来源被其他能力覆盖或增量未证实不能通过')
       ensure(check.contribution_type !== 'attitude_only' || hasWeak, '态度逆转不能冒充不可替代贡献')
       ensure(check.deletion_audit.dependency_boundary !== 'ambiguous' || hasWeak, '新增检测边界不明须报告未证实')
       for (const retained of check.retained_means) checkEvidence(retained, evidenceKeys)
@@ -126,6 +149,8 @@ export function validateFusionReview(payload: unknown, ideas: FanqieChartIdea[])
         checkEvidence(stage, expansionKeys, stage.required_now)
         const goal = row.stage_goals.find(goal => goal.stage === stage.stage)!
         const action = row.action_checks.find(action => action.stage === stage.stage)!
+        ensure(!stage.required_now || check.independence_audit.status === 'independent', '来源无独立增量不能判必需')
+        ensure(!stage.required_now || stage.stage !== 'late' || row.resolution_check.goal_achieved, '终局未解决不能判来源必需')
         ensure(!stage.required_now || (action.loop_closed && goal.need_established && check.deletion_audit.dependency_boundary === 'resolved'),
           '行动闭环、新需求或检测依赖未证实不能判来源必需')
         ensure(stage.required_output === goal.required_output, '删除不同来源时偷换了实际目标')

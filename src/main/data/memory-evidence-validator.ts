@@ -85,6 +85,7 @@ export function normalizeMemoryEvidence(content: string, extraction: MemoryExtra
   return { ...extraction,
     newPlotPoints: extraction.newPlotPoints.map(normalize),
     characterStateChanges: extraction.characterStateChanges.map(normalize),
+    itemStateChanges: (extraction.itemStateChanges ?? []).map(normalize),
     collectedForeshadowings: extraction.collectedForeshadowings.map(normalize),
     settingsPatches: extraction.settingsPatches?.map(normalize)
   }
@@ -289,6 +290,7 @@ export interface MemoryCandidateItemVerdict {
 export type MemoryCandidateItemKind =
   | 'plotPoint'
   | 'stateChange'
+  | 'itemStateChange'
   | 'foreshadowCollect'
   | 'settingsPatch'
 
@@ -320,6 +322,17 @@ export function inspectMemoryCandidateItems(
       label,
       evidence: change.evidence,
       // 断言口径只取新值：旧值里的否定说的是变化之前，不能用来豁免
+      issues: list(inspectEvidence(content, label, change.evidence, change.newValue))
+    })
+  })
+  ;(extraction.itemStateChanges ?? []).forEach((change, index) => {
+    const label = `物品 ${change.name} 的${change.field}`
+    out.push({
+      kind: 'itemStateChange',
+      index,
+      key: `itemState:${change.name}:${change.field}`,
+      label,
+      evidence: change.evidence,
       issues: list(inspectEvidence(content, label, change.evidence, change.newValue))
     })
   })
@@ -389,6 +402,9 @@ export function partitionMemoryCandidate(
   const characterStateChanges = extraction.characterStateChanges.filter((_, i) =>
     passed('stateChange', i)
   )
+  const itemStateChanges = (extraction.itemStateChanges ?? []).filter((_, i) =>
+    passed('itemStateChange', i)
+  )
   const collectedForeshadowings = extraction.collectedForeshadowings.filter((_, i) =>
     passed('foreshadowCollect', i)
   )
@@ -413,6 +429,7 @@ export function partitionMemoryCandidate(
       ...extraction,
       newPlotPoints,
       characterStateChanges,
+      itemStateChanges,
       collectedForeshadowings,
       settingsPatches
     }

@@ -72,6 +72,8 @@ export interface ChapterPaginatorProps {
   totalPages: number
   totalItems: number
   onPageChange: (page: number) => void
+  /** 条目单位文案，默认「章」；书架等场景传「本」 */
+  unitLabel?: string
   className?: string
 }
 
@@ -80,13 +82,14 @@ export function ChapterPaginator({
   totalPages,
   totalItems,
   onPageChange,
+  unitLabel = '章',
   className
 }: ChapterPaginatorProps) {
   if (totalPages <= 1) return null
   return (
     <div className={`paginator ${className ?? ''}`.trim()}>
       <span className="page-info">
-        第 {currentPage}/{totalPages} 页 · 共 {totalItems} 章
+        第 {currentPage}/{totalPages} 页 · 共 {totalItems} {unitLabel}
       </span>
       <button
         type="button"

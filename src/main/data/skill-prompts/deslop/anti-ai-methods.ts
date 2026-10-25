@@ -23,7 +23,7 @@ import type { DeslopFinding, DeslopLevel, DeslopStyleContext } from '../../../..
 import { resolveGenreVoice } from '../genre-voice'
 import { CHARACTER_VOICE_RULES } from '../skill-contracts'
 import { PRESS_ACTION_RULES } from '../action-precision'
-import { DIALOGUE_VITALITY_RULES, SCENE_NATURALNESS_RULES } from '../scene-naturalness'
+import { DIALOGUE_VITALITY_RULES, SCENE_NATURALNESS_RULES, NATURAL_NARRATIVE_REVISION_RULES } from '../scene-naturalness'
 
 /** 从续写守则提取的编辑约束；只整理已有正文，不授权续写或扩充剧情。 */
 export const DESLOP_CONTINUATION_RULES = `
@@ -55,6 +55,8 @@ ${PRESS_ACTION_RULES}
 ${SCENE_NATURALNESS_RULES}
 
 ${DIALOGUE_VITALITY_RULES}
+
+${NATURAL_NARRATIVE_REVISION_RULES}
 
 ${DESLOP_CONTINUATION_RULES}
 `.trim()
