@@ -6,6 +6,8 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import {
   draftPath,
+  saveDraftText,
+  discardDraftText,
   isDraftDifferent,
   type DraftMeta
 } from '../data/draft'
@@ -82,7 +84,7 @@ export function registerChaptersIpc(
       }
 
       await fs.mkdir(path.dirname(file), { recursive: true })
-      await fs.writeFile(file, validated.content, 'utf-8')
+      await saveDraftText(file, validated.content)
       return { at: Date.now() }
     }
   )
@@ -130,13 +132,14 @@ export function registerChaptersIpc(
 
   safeHandle(
     'chapters:discardDraft',
-    async (_e, projectId: string, chapterNumber: number): Promise<boolean> => {
+    async (_e, projectId: string, chapterNumber: number, expectedContent?: string): Promise<boolean> => {
       const validated = validateInput(
         z.object({
           projectId: projectIdSchema,
-          chapterNumber: chapterNumberSchema
+          chapterNumber: chapterNumberSchema,
+          expectedContent: chapterContentSchema.optional()
         }),
-        { projectId, chapterNumber }
+        { projectId, chapterNumber, expectedContent }
       )
       const dir = await service.resolveDir(validated.projectId)
       const file = draftPath(dir, validated.chapterNumber)
@@ -148,12 +151,7 @@ export function registerChaptersIpc(
         throw new Error('PATH_TRAVERSAL_DETECTED')
       }
 
-      try {
-        await fs.unlink(file)
-        return true
-      } catch {
-        return false
-      }
+      return discardDraftText(file, validated.expectedContent)
     }
   )
 

@@ -1,3 +1,4 @@
+import { readChapterStatuses } from '../src/main/data/chapter-status-store'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -34,6 +35,8 @@ const resultFor = (chapterNumber: number): ChapterFlowResult => ({
 
 describe('batch safety and recovery', () => {
   let service: WriteService
+  let ps: ProjectService
+  let settings: SettingsRepository
   let flow: WriteFlowService
   let dir: string
   let projectId: string
@@ -42,12 +45,13 @@ describe('batch safety and recovery', () => {
 
   beforeEach(async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'batch-safety-'))
-    const settings = {
+    settings = {
       getProjectsRoot: async (fallback: string) => fallback,
       get: async () => ({ autoMemorySync: true }),
-      getReviewRules: async () => ({ enabled: false })
+      getReviewRules: async () => ({ enabled: false }),
+      getDeslopRules: async () => ({})
     } as unknown as SettingsRepository
-    const ps = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), settings)
+    ps = new ProjectService(path.join(root, 'projects'), new LibraryRepository(path.join(root, 'library.json')), settings)
     projectId = (await ps.create({ name: '测试小说', genre: '玄幻' })).id
     dir = await ps.resolveDir(projectId)
     llm = { generateStream: vi.fn().mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
@@ -317,7 +321,8 @@ describe('batch safety and recovery', () => {
     expect(flow.generateFigureStream).not.toHaveBeenCalled()
   })
 
-  it('reuses successful steps when retrying a paused chapter', async () => {
+  it.each([true, false])('reuses persisted steps only with a stable model identity (%s)', async (stable) => {
+    llm.getCacheIdentity = async () => stable ? 'stable-http-model' : null
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     // 对照和回写细纲都成功，记忆提取连续三次失败 → 暂停
@@ -328,12 +333,30 @@ describe('batch safety and recovery', () => {
     const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
     expect(first.status).toBe('paused')
     expect(first.pauseReason).toContain('模型断流')
-    const resumed = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    const restarted = new WriteService(ps, llm, flow, undefined, undefined, settings)
+    const regenerate = vi.spyOn(restarted, 'generateChapterStream').mockRejectedValue(new Error('must not regenerate'))
+    vi.spyOn(restarted, 'selfCheckChapter').mockResolvedValue(passedCheck)
+    vi.spyOn(restarted, 'syncChapterAfterWrite').mockImplementation(vi.mocked(service.syncChapterAfterWrite).getMockImplementation()!)
+    vi.spyOn(restarted as unknown as typeof summaryService, 'generateChapterSummaryChecked')
+      .mockImplementation(vi.mocked(summaryService.generateChapterSummaryChecked).getMockImplementation()!)
+    const resumed = await restarted.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
     expect(resumed.status).toBe('completed')
     expect(generate).toHaveBeenCalledOnce()
-    // 细纲对照不重跑，只补跑失败的记忆提取
-    expect(flow.checkOutlineStream).toHaveBeenCalledOnce()
+    expect(regenerate).not.toHaveBeenCalled()
+    // Unknown/CLI identities cannot authorize reuse across operation boundaries.
+    expect(flow.checkOutlineStream).toHaveBeenCalledTimes(stable ? 1 : 2)
     expect(flow.extractMemoryStream).toHaveBeenCalledTimes(4)
+  })
+
+  it.each(['applied', 'review_required', 'failed', undefined] as const)('only marks genuinely accepted prose reviewed (%s)', async (status) => {
+    const result = resultFor(1)
+    if (status) result.autoDeslop = { status, message: '验收结果', remainingIssues: 0 }
+    vi.spyOn(service, 'runFullFlowForChapter').mockResolvedValue(result)
+    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(progress.status).toBe('completed')
+    const statuses = await readChapterStatuses(dir)
+    expect(statuses['1']?.status).toBe(status === 'applied' ? 'reviewed' : undefined)
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
   })
 
   it('automatically retries missing summaries before the next chapter without regenerating prose', async () => {

@@ -153,6 +153,39 @@ describe('自动写作去 AI 味', () => {
     return vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:verify')
   }
 
+  it('单章续写所有修复共享预算，耗尽后仍保留原稿和失败原因', async () => {
+    const { trackChapterCall } = await import('../src/main/data/chapter-execution')
+    const repair = vi.fn(async () => '候选')
+    vi.mocked(deslop.deslop).mockImplementation(async () => {
+      for (const feature of ['deslop:scene-repair', 'chapter-scene-repair', 'continuityRepair', 'deslop:repair']) {
+        await trackChapterCall(feature, repair)
+      }
+      return deslopResult(POLISHED)
+    })
+    const { onAutoDeslopResult, reports } = results()
+    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(RAW)
+    expect(repair).toHaveBeenCalledTimes(3)
+    expect(reports.at(-1)).toMatchObject({ status: 'failed', message: expect.stringContaining('CHAPTER_REPAIR_BUDGET') })
+    expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+  })
+
+  it('续写修复衔接后只复核最终稿，不重复整章润色，也不冒充表达验收通过', async () => {
+    const internal = service as unknown as {
+      assertLongformConsistency: () => Promise<() => Promise<void>>
+      repairLongformConflict: () => Promise<string>
+    }
+    const repaired = POLISHED.replace('林远收好钥匙', '林远握住钥匙')
+    vi.spyOn(internal, 'assertLongformConsistency').mockRejectedValueOnce(new Error('LONGFORM_CONFLICT: 钥匙状态不符'))
+      .mockResolvedValue(async () => {})
+    vi.spyOn(internal, 'repairLongformConflict').mockResolvedValue(repaired)
+    const { onAutoDeslopResult, reports } = results()
+    expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(repaired)
+    expect(deslop.deslop).toHaveBeenCalledTimes(1)
+    expect(internal.assertLongformConsistency).toHaveBeenCalledTimes(2)
+    expect(await new ProseRepo(dir).read(1)).toBe(repaired)
+    expect(reports.at(-1)).toMatchObject({ status: 'review_required', message: expect.stringContaining('表达尚未重新验收') })
+  })
+
   it('正文调用将 AGY 排队和等待状态转发到章节进度', async () => {
     vi.mocked(llm.generateStream).mockImplementationOnce(async (_prompt, opts = {}) => {
       opts.onStatus?.('queued')

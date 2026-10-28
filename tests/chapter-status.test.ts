@@ -15,8 +15,8 @@ import type { SettingsRepository } from '../src/main/data/settings-repository'
 const mockSettings = { getProjectsRoot: async (fallback: string) => fallback } as unknown as SettingsRepository
 
 /**
- * 章节状态推导：草稿/待写按正文有无推导；「润色/定稿」标注绑定标注时的正文哈希，
- * 正文再改过、或该章被长篇核对重新拦截时自动退回草稿——徽章如实反映检查状态。
+ * 章节状态按正文内容推导：空文件仍待写；草稿与旧润色标注合并成正文。
+ * 定稿标注仍绑定正文哈希与长篇核对状态。
  */
 describe('chapter status', () => {
   let root: string
@@ -40,16 +40,16 @@ describe('chapter status', () => {
     )
   })
 
-  it('derives outline/draft from prose existence and honors an unchanged reviewed mark', async () => {
+  it('merges legacy reviewed marks into正文 in both detail and list', async () => {
     expect((await cs.getChapter(projectId, 1)).meta.status).toBe('outline')
     const prose = '第一章正文。\n\n他推门而入。'
     await new ProseRepo(dir).write(1, prose, '一章')
     expect((await cs.getChapter(projectId, 1)).meta.status).toBe('draft')
 
     await setChapterStatus(dir, 1, 'reviewed', hashProse(prose))
-    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('reviewed')
+    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('draft')
     expect(await cs.listChapters(projectId).then((list) => list.find((c) => c.chapterNumber === 1)?.status))
-      .toBe('reviewed')
+      .toBe('draft')
   })
 
   it('demotes to draft when prose changes after the mark', async () => {
@@ -70,7 +70,7 @@ describe('chapter status', () => {
     const token = await markLongformPending(dir, 1, hashProse(prose))
     expect((await cs.getChapter(projectId, 1)).meta.status).toBe('draft')
     await clearLongformPending(dir, 1, token)
-    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('reviewed')
+    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('draft')
   })
 
   it('updateMeta persists manual status and draft clears the mark', async () => {
@@ -81,4 +81,23 @@ describe('chapter status', () => {
     await cs.updateMeta(projectId, 1, { status: 'draft' })
     expect((await cs.getChapter(projectId, 1)).meta.status).toBe('draft')
   })
+  it.each(['', ' \n\t\r\n', '\uFEFF　\n'])('keeps an existing blank file pending even with a saved status (%j)', async (content) => {
+    const repo = new ProseRepo(dir)
+    await repo.write(1, content, '一章')
+    await setChapterStatus(dir, 1, 'published', hashProse(content))
+    expect((await repo.readMany([1])).get(1)?.exists).toBe(true)
+    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('outline')
+    expect((await cs.listChapters(projectId)).find(c => c.chapterNumber === 1)?.status).toBe('outline')
+  })
+
+  it('updates both views immediately when a正文 file is emptied outside the app', async () => {
+    const prose = '真正的章节正文。'
+    await new ProseRepo(dir).write(1, prose, '一章')
+    await setChapterStatus(dir, 1, 'published', hashProse(prose))
+    expect((await cs.listChapters(projectId))[0].status).toBe('published')
+    await writeFile(path.join(dir, '正文', '第001章 一章.md'), '')
+    expect((await cs.listChapters(projectId))[0].status).toBe('outline')
+    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('outline')
+  })
+
 })

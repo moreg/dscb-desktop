@@ -1,3 +1,5 @@
+import ChapterRefinementPanel from './ChapterRefinementPanel'
+import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
@@ -359,6 +361,18 @@ export default function ChapterEditor({
     void window.api.invalidateChapterMemorySync(projectId, chapterNumber).catch(console.error)
   }, [projectId, chapterNumber])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [refinementOpen, setRefinementOpen] = useState(false)
+  const [refinementBusy, setRefinementBusy] = useState(false)
+  const [refinementCommitting, setRefinementCommitting] = useState(false)
+  const [refinementSelection, setRefinementSelection] = useState<{ start: number; end: number }>()
+  const [refinementAutoTrigger, setRefinementAutoTrigger] = useState(0)
+  const openRefinement = () => {
+    const editor = textareaRef.current
+    setRefinementSelection(editor && editor.selectionEnd > editor.selectionStart
+      ? { start: editor.selectionStart, end: editor.selectionEnd } : undefined)
+    setRefinementOpen(true)
+  }
+
   const lineGutterRef = useRef<HTMLDivElement>(null)
   const lineGutterInnerRef = useRef<HTMLDivElement>(null)
   const mirrorRef = useRef<HTMLDivElement>(null)
@@ -1232,6 +1246,8 @@ export default function ChapterEditor({
     setAdjustPlan('')
     setAdjustPlanChecks([])
     setShowAdjustDialog(false)
+    setRefinementOpen(false)
+    setRefinementSelection(undefined)
     preStreamDraftRef.current = null
     userAbortedRef.current = false
     // 切章/project 时清空内存中的改写历史（避免跨章串台）
@@ -1855,6 +1871,7 @@ export default function ChapterEditor({
   }
 
   const save = async () => {
+    if (refinementCommitting) throw new Error('正在采用精修，请稍后保存')
     // 保存前自动跑一次检查；strict 模式下若 error > 0 弹窗确认
     if (writeAuditMode === 'strict') {
       try {
@@ -2138,7 +2155,11 @@ export default function ChapterEditor({
         void runPostGenerateAudit(myGen, formatted)
         // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
         if (finalized.canSyncMemory) {
-          void runPostGenerateMemorySync(myGen, formatted, { previousSelfCheck })
+          void runPostGenerateMemorySync(myGen, formatted, { previousSelfCheck }).then(() => {
+            if (sessionEpochRef.current === myEpoch && genRef.current === myGen && result.continueMode !== 'extend') {
+              setRefinementAutoTrigger(value => value + 1)
+            }
+          }).catch(() => undefined)
         } else {
           pauseMemoryForForeshadowRepair(formatted, result.foreshadowRepair!.message)
         }
@@ -3741,8 +3762,8 @@ export default function ChapterEditor({
 
   const cycleStatus = async () => {
     if (!data) return
-    const order: ChapterStatus[] = ['outline', 'draft', 'reviewed', 'published']
-    const idx = order.indexOf(data.meta.status)
+    const order: readonly ChapterStatus[] = CHAPTER_STATUS_OPTIONS
+    const idx = order.indexOf(normalizeChapterStatus(data.meta.status))
     const next = order[(idx + 1) % order.length]
     const meta = await window.api.updateChapterMeta(projectId, chapterNumber, { status: next })
     setData({ ...data, meta })
@@ -4335,21 +4356,39 @@ export default function ChapterEditor({
     return <p className="empty">展卷中…</p>
   }
 
-  const STATUS_FULL: Record<ChapterStatus, string> = {
-    outline: '待写',
-    draft: '草稿',
-    reviewed: '润色',
-    published: '定稿'
-  }
-  const STATUS_CLASS: Record<ChapterStatus, string> = {
-    outline: 'status-outline',
-    draft: 'status-draft',
-    reviewed: 'status-reviewed',
-    published: 'status-published'
-  }
 
   return (
     <div className="chapter-editor-shell">
+      <ChapterRefinementPanel key={`${projectId}:${chapterNumber}`} projectId={projectId} chapterNumber={chapterNumber}
+        content={draft} selection={refinementSelection} styleProfileId={requestedStyleProfileId}
+        open={refinementOpen} disabled={generating || adjusting || adjustPlanning || saving || deslopRunning}
+        autoTrigger={refinementAutoTrigger}
+        autoAlreadyPolished={autoDeslopSnapshot === draft && !!autoDeslopResult &&
+          (autoDeslopResult.status === 'applied' || autoDeslopResult.status === 'unchanged') && autoDeslopResult.dialogueQuality?.passed !== false}
+        onOpen={() => setRefinementOpen(true)} onClose={() => { setRefinementOpen(false); requestAnimationFrame(() => textareaRef.current?.focus()) }} onUsage={refreshUsage}
+        onBusyChange={(busy, committing) => { setRefinementBusy(busy); setRefinementCommitting(!!committing); streamBusyRef.current = busy }}
+        beforeRun={async () => {
+          if (!await window.api.hasLlmKey()) { setAlertInfo({ message: '请先在设置中配置模型服务。' }); return false }
+          return !usage || !shouldBlockAiGenerate(usage.month.cost, costAlertConfig) ||
+            window.confirm(`本月 AI 费用已超过预警线，是否继续本次精修？`)
+        }}
+        onCommitted={async (before, content) => {
+          const epoch = sessionEpochRef.current
+          if ((textareaRef.current?.value ?? draft) !== before) {
+            setAlertInfo({ message: '精修已保存，但编辑器又有新修改，已保留当前编辑内容；请核对后再保存。' }); return
+          }
+          pushRewrite(before, content, 'refinement')
+          setDraft(content, { preserveCaret: false })
+          setData(previous => previous ? { ...previous, content } : previous)
+          setDirty(false); setLastSavedAt(Date.now())
+          const cleared = await window.api.discardDraft(projectId, chapterNumber, before).catch(() => false)
+          if (sessionEpochRef.current !== epoch) return
+          if (cleared) setDraftBanner(null)
+          setAutoDeslopResult(null); setAutoDeslopSnapshot(null)
+          setAutoAudit(null); setSelfCheckSnapshot(null); selfCheckTrackerRef.current.invalidate()
+          const fresh = await window.api.getChapter(projectId, chapterNumber)
+          if (sessionEpochRef.current === epoch && textareaRef.current?.value === content && fresh.content === content) setData(fresh)
+        }} />
       <div className="page-head">
         <div className="page-head-row">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -4838,10 +4877,15 @@ export default function ChapterEditor({
         >
           格式化
         </button>
+        <button className="btn btn-sm" onClick={openRefinement}
+          disabled={!draft.trim() || generating || adjusting || adjustPlanning || saving}
+          title="为选区或整章生成独立精修候选，核验后对比采用">
+          {refinementBusy ? '精修处理中…' : '精修正文'}
+        </button>
         <button
           className="btn btn-sm"
           onClick={openAdjustDialog}
-          disabled={adjusting || generating || adjustPlanning}
+          disabled={adjusting || generating || adjustPlanning || refinementBusy}
           title="先看修改建议，确认后再落笔重写正文"
         >
           {adjusting ? '落笔中…' : adjustPlanning ? '出建议中…' : '按要求重写'}
@@ -4980,6 +5024,8 @@ export default function ChapterEditor({
             : autoDeslopResult.status === 'unchanged'
               ? '自动去 AI 味已完成，无需修改'
               : autoDeslopResult.message}
+          <button className="btn btn-sm" style={{ marginLeft: 10 }} onClick={openRefinement}
+            disabled={generating || adjusting || adjustPlanning || saving}>精修本章</button>
           {autoDeslopResult.dialogueQuality?.passed === false && autoDeslopResult.dialogueQuality.pendingDraft && (
             <details style={{ marginTop: 8 }}>
               <summary>查看待复核修订稿（尚未替换正文）</summary>
@@ -5564,7 +5610,7 @@ export default function ChapterEditor({
           defaultValue={draft}
           // 流式生成期间锁定输入：每个 token 都会整体覆写 el.value，
           // 此时用户手打的内容会被下一个 token 无提示冲掉
-          readOnly={generating || adjusting}
+          readOnly={generating || adjusting || refinementCommitting}
           onScroll={handleEditorScroll}
           onKeyDown={handleEditorKeyDown}
           onChange={handleEditorChange}

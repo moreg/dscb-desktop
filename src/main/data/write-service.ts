@@ -1,3 +1,6 @@
+import { batchQuality } from '../../shared/batch-quality'
+import { runChapterExecution } from './chapter-execution'
+import { ChapterStageCache, chapterDependencyHash } from './chapter-stage-cache'
 import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import { PLANNING_RULES, buildPlanningPlatformRules } from './skill-prompts/opening/planning-rules'
 import { DIALOGUE_RULES } from './skill-prompts/chapter-rules'
@@ -390,7 +393,7 @@ export class WriteService {
   private readonly summaryEpoch = new Map<string, number>()
   private readonly summaryWriteQueue = new Map<string, Promise<void>>()
   private summaryRequestSequence = 0
-  /** 批量写后步骤的成功结果，暂停后重试同一稿件时复用，见 PostProcessCacheEntry。 */
+  /** 本轮写后步骤的成功结果；跨轮恢复通过 ChapterStageCache 校验完整依赖。 */
   private readonly postProcessCache = new Map<string, PostProcessCacheEntry>()
 
   /** Draft edits/undo invalidate in-flight extraction before it can commit. */
@@ -758,6 +761,16 @@ export class WriteService {
     styleProfileIdOrOpts?: string | null | ChapterGenerateOptions,
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
+    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber,
+      () => this.generateChapterStreamInExecution(projectId, chapterNumber, styleProfileIdOrOpts, maybeOpts))
+  }
+
+  private async generateChapterStreamInExecution(
+    projectId: string,
+    chapterNumber: number,
+    styleProfileIdOrOpts?: string | null | ChapterGenerateOptions,
+    maybeOpts: ChapterGenerateOptions = {}
+  ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
     const { autoStrength, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
     const onGenerationStage = (stage: ChapterGenerationStage): void => {
@@ -841,7 +854,7 @@ export class WriteService {
     const finalFull = await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, fullContent, {
       signal: opts.signal, instruction: opts.tempContext, styleProfileId,
       onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线'),
-      onGenerationStage
+      onGenerationStage, skipRepolish: true, onAutoDeslopResult
     })
     if (finalFull !== fullContent) {
       await onFinalProseReady?.(finalFull)
@@ -977,7 +990,8 @@ export class WriteService {
    */
   private async assertLongformConsistencyAutoRepaired(projectId: string, chapterNumber: number, content: string,
     options: { signal?: AbortSignal; instruction?: string; onStart?: () => void;
-      styleProfileId?: string | null; onGenerationStage?: (stage: ChapterGenerationStage) => void } = {}): Promise<string> {
+      styleProfileId?: string | null; onGenerationStage?: (stage: ChapterGenerationStage) => void;
+      skipRepolish?: boolean; onAutoDeslopResult?: (result: AutoDeslopResult) => void } = {}): Promise<string> {
     try {
       await this.assertLongformConsistency(projectId, chapterNumber, content, options)
       return content
@@ -996,9 +1010,9 @@ export class WriteService {
         throwIfAborted(options.signal)
         throw new Error(`${error.message}\n自动修复未完成，已保留当前稿：${(repairError as Error).message}`, { cause: repairError })
       }
-      // 修复轮内不做整场去 AI 味（repairLongformConflict），编辑器单章路径在这里补一次，
-      // 与生成流程同序：去味后再核对一次并以此解除待核对。
-      const polished = this.deslopService
+      // 生成交稿路径已经做过表达修订，局部修复后仅核对事实，避免重新进入整章润色。
+      // 独立补跑同步等入口仍保留原有润色行为。
+      const polished = this.deslopService && !options.skipRepolish
         ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired, options.styleProfileId ?? null, {
           signal: options.signal, isTail: true, reviewInstruction: options.instruction,
           onGenerationStage: options.onGenerationStage
@@ -1009,6 +1023,13 @@ export class WriteService {
         { source: 'reviewed', note: '自动修复长篇一致性冲突并复核通过' })
       // 修复稿落盘后重新核对：通过即解除该章待核对状态，后续章节可正常读取。
       await this.assertLongformConsistency(projectId, chapterNumber, finalContent, options)
+      if (options.skipRepolish) {
+        const report: AutoDeslopResult = { status: 'review_required', remainingIssues: 0,
+          message: '衔接冲突已修复并复核通过；修复后的表达尚未重新验收，可在精修正文中继续处理。',
+          issues: ['为避免重复整章润色，局部衔接修复后不自动重跑表达修订。'] }
+        await this.chapterService.setAutoDeslopReport(projectId, chapterNumber, finalContent, report)
+        options.onAutoDeslopResult?.(report)
+      }
       return finalContent
     }
   }
@@ -1142,6 +1163,7 @@ export class WriteService {
       ])
       result = await autoDeslopProse(prose, {
         service: this.deslopService, llm: this.llm, ...rules, whitelist,
+        sceneRepairLimit: 2,
         initialDialogueDraft,
         dialogueComposition: { mode: 'write', existingText: opts.existingText,
           context: `细纲仅作计划背景，原稿是本次润色的事实基线；不补写尚未发生的细纲事件，不为旧计划中的篇幅或对白要求改动原稿。\n${outlineText}`, revisionInstruction: opts.reviewInstruction, previousDraft: opts.previousDraft, allowSceneRewrite: opts.allowSceneRewrite },
@@ -2963,7 +2985,10 @@ export class WriteService {
     onProgress: (step: string, detail?: string) => void,
     opts: ChapterFlowOptions = {}
   ): Promise<ChapterFlowResult> {
-    return this.longformOperation.run(new Set(), async () => {
+    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber, () => this.longformOperation.run(new Set(), async () => {
+      for (const key of this.postProcessCache.keys()) {
+        if (key.startsWith(`${projectId}:${chapterNumber}:`)) this.postProcessCache.delete(key)
+      }
       let draft = opts.contentOverride
       let currentOpts = opts
       // Track the exact manuscript supplied to the save callbacks. Never repair an
@@ -3010,7 +3035,7 @@ export class WriteService {
           currentOpts = { ...opts, contentOverride: repaired }
         }
       }
-    })
+    }))
   }
 
   private async repairLongformConflict(
@@ -3078,6 +3103,25 @@ export class WriteService {
       meta: { feature, projectId, chapterNumber }
     })
 
+    const stages = new ChapterStageCache(dir, chapterNumber, async () => {
+      try {
+        const features = ['batchOutline', 'batchMemory', 'batchDeepReview', 'deslop:verify', 'deslop:scene-repair']
+        const identities = await Promise.all(features.map(feature => this.llm.getCacheIdentity?.(feature)))
+        if (identities.some(value => !value) || !this.settings) return null
+        const project = await this.projectService.getProjectData(projectId)
+        // External benchmark sources can change independently of the project directory.
+        if (project.benchmarkBooks?.length) return null
+        const config = await Promise.all([
+          this.settings.get(), this.settings.getReviewRules(), this.settings.getDeslopRules(),
+          this.settings.getAiHighFreq?.(),
+          this.loadStyleProfile(dir, opts.styleProfileId ?? project.defaultStyleProfileId ?? null)
+        ])
+        return chapterDependencyHash(dir, [identities, config, hashProse(content), opts.tempContext, opts.styleProfileId, opts.strengthOverride])
+      } catch { return null }
+    })
+    const polishPassed = (report: AutoDeslopResult): boolean => !!report &&
+      (report.status === 'applied' || report.status === 'unchanged') && report.dialogueQuality?.passed !== false
+
     // 1. 生成正文（流式 token 由 opts.onToken 推送）
     const { onContentGenerated, contentOverride, proseFirst, ...generateOpts } = opts
     throwIfAborted(opts.signal)
@@ -3104,13 +3148,17 @@ export class WriteService {
       }
     })
     // 恢复旧批次的已保存正文也要过新验收，不能从“补跑检查”入口绕过事实与表达检查。
-    if (contentOverride !== undefined && this.deslopService) {
+    const priorPolish = contentOverride !== undefined
+      ? await stages.read<AutoDeslopResult>('polish', polishPassed) : undefined
+    if (priorPolish) { autoDeslop = priorPolish; opts.onAutoDeslopResult?.(priorPolish) }
+    if (contentOverride !== undefined && this.deslopService && !priorPolish) {
       content = await this.autoDeslopGeneratedProse(projectId, chapterNumber, content, opts.styleProfileId ?? null, {
         signal: opts.signal, isTail: true, reviewInstruction: opts.tempContext, onGenerationStage: stage => onProgress(stage),
         onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
       })
     }
     await onContentGenerated?.(content)
+    if (autoDeslop && polishPassed(autoDeslop)) await stages.remember('polish', autoDeslop)
     // 批量正文已保存，必须绑定本次稿件，不能把保存后的另一窗口改稿误当成允许提交的基线。
     let savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
     const memoryTicket = this.memoryCoordinator.begin(projectId, chapterNumber)
@@ -3141,7 +3189,7 @@ export class WriteService {
       // skip
     }
 
-    // 暂停后重试时复用本稿已成功的步骤（按正文与细纲指纹命中），只补跑失败的那步。
+    // 本轮同稿复用内存结果；跨轮只允许通过完整依赖校验的持久化记录。
     let cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
     let cached = this.postProcessCache.get(cacheKey) ?? {}
     const cachePut = (patch: PostProcessCacheEntry): void => {
@@ -3157,14 +3205,14 @@ export class WriteService {
     const runPostChecks = (): Promise<[MemoryExtraction, AuditViolation[]]> => Promise.all([
       cached.memory
         ? structuredClone(cached.memory)
-        : this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters, flowOpts('batchMemory'), memoryTicket.controller.signal)
+        : stages.run('memory', () => this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters, flowOpts('batchMemory'), memoryTicket.controller.signal), value => !!value && !value.parseError && Array.isArray(value.newPlotPoints))
           .then((extraction) => {
             if (!extraction.parseError) cachePut({ memory: structuredClone(extraction) })
             return extraction
           }),
       cached.deepReview
         ? structuredClone(cached.deepReview)
-        : this.runAutoDeepReview(projectId, chapterNumber, content, flowOpts('batchDeepReview'), memoryTicket.controller.signal)
+        : stages.run('deep-review', () => this.runAutoDeepReview(projectId, chapterNumber, content, flowOpts('batchDeepReview'), memoryTicket.controller.signal), value => Array.isArray(value) && !value.some(item => item.ruleId?.startsWith('review_incomplete:')))
           .then((review) => {
             if (!review.some((item) => item.ruleId?.startsWith('review_incomplete:'))) cachePut({ deepReview: structuredClone(review) })
             return review
@@ -3174,7 +3222,7 @@ export class WriteService {
     const [checkedOutline, postChecks] = await Promise.all([
       cached.outline && cached.outline.outlineHash === outlineFingerprint(outlineText)
         ? structuredClone(cached.outline.report)
-        : this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal),
+        : stages.run('outline', () => this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal), value => !!value && value.checked === true && Array.isArray(value.diffs)),
       runPostChecks()
     ])
     let outlineDiff = checkedOutline
@@ -3861,9 +3909,9 @@ export class WriteService {
           if (await new ProseRepo(dir).read(ch) !== result.content) throw new Error('核对结束前正文已变化，请补跑当前保存稿')
           if (batchReviewToken) await clearBatchReviewPending(dir, ch, batchReviewToken)
           this.postProcessCache.delete(postProcessCacheKey(projectId, ch, result.content))
-          // 核对、记忆同步、概要都齐了：自动标「润色」。暂停/被拦截的章节保持推导的
-          // 「草稿」；之后正文再改过会因哈希不符、被重新拦截会因隔离区命中而退回草稿。
-          await setChapterStatus(dir, ch, 'reviewed', hashProse(result.content))
+          // 执行完成不等于质量通过：表达/自检仍有问题的章节保持草稿。
+          const qualityPassed = batchQuality(result) === 'passed'
+          await setChapterStatus(dir, ch, qualityPassed ? 'reviewed' : 'draft', hashProse(result.content))
             .catch((err: unknown) => console.warn(`[Batch] Failed to mark chapter ${ch} reviewed:`, err))
         }
         onChapterComplete(ch, result)
@@ -5350,6 +5398,7 @@ function postProcessCacheKey(projectId: string, chapterNumber: number, content: 
 
 /** 写后步骤重试前的等待：限流按退避表等，其余错误稍等 1 秒；被停止时立即返回。 */
 async function waitBeforePostProcessRetry(err: unknown, attempt: number, signal: AbortSignal): Promise<void> {
+  if ((err as Error)?.message?.includes('CHAPTER_REPAIR_BUDGET')) throw err
   const rateLimited = (err as Error)?.message?.includes('LLM_RATE_LIMIT')
   const ms = rateLimited ? RATE_LIMIT_RETRY_DELAYS_MS[attempt] ?? 30_000 : 1_000
   await abortableDelay(ms, signal).catch(() => {})

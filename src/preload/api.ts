@@ -1,3 +1,4 @@
+import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from '../shared/chapter-refinement'
 import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from '../shared/prose-import'
 import type { AppUpdateState } from '../shared/app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from '../shared/long-story-brainstorm'
@@ -130,6 +131,22 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
   }
 
   const api = {
+    refineChapter: (input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_event: unknown, value: { requestId: string; stage: RefinementStage }) => {
+        if (value.requestId === requestId) onStage(value.stage)
+      }
+      ipcRenderer.on('refinement:stage', handler)
+      const result = (ipcRenderer.invoke('refinement:run', { input, action, requestId }) as Promise<RefinementResult>)
+        .finally(() => ipcRenderer.removeListener('refinement:stage', handler))
+      return makeStreamHandle(result, requestId)
+    },
+    loadRefinement: (projectId: string, chapterNumber: number): Promise<RefinementCandidate | null> =>
+      ipcRenderer.invoke('refinement:load', { projectId, chapterNumber }),
+    discardRefinement: (projectId: string, chapterNumber: number, id: string): Promise<void> =>
+      ipcRenderer.invoke('refinement:discard', { projectId, chapterNumber, id }),
+    commitRefinement: (projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean): Promise<RefinementCommit> =>
+      ipcRenderer.invoke('refinement:commit', { projectId, chapterNumber, id, currentDraft, undo }),
     brainstormLongStory: (input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
       const requestId = crypto.randomUUID()
       const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
@@ -257,8 +274,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('chapters:saveDraft', projectId, chapterNumber, content),
     readDraft: (projectId: string, chapterNumber: number) =>
       ipcRenderer.invoke('chapters:readDraft', projectId, chapterNumber),
-    discardDraft: (projectId: string, chapterNumber: number) =>
-      ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber),
+    discardDraft: (projectId: string, chapterNumber: number, expectedContent?: string) =>
+      expectedContent === undefined ? ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber)
+        : ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber, expectedContent),
     /** P19-E：字数汇总（正文 / 节奏图谱） */
     getChapterWordSummary: (projectId: string) =>
       ipcRenderer.invoke('chapters:wordSummary', projectId),

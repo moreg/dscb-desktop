@@ -74,7 +74,8 @@ export async function repairContinuity<Check>(input: {
       if (input.signal?.aborted) throw new Error('LLM_ABORTED')
       return { content: candidate, check }
     } catch (error) {
-      if (input.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED')) throw error
+      if (input.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED') ||
+          (error as Error).message?.includes('CHAPTER_REPAIR_BUDGET')) throw error
       feedback = (error as Error).message
       if (input.maxRounds !== undefined && round >= input.maxRounds) throw new Error(`自动修复复核未通过：${feedback}`, { cause: error })
       if (round % REPAIR_ROUNDS_BEFORE_BACKOFF === 0) {

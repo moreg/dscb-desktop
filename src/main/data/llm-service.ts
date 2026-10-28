@@ -1,3 +1,4 @@
+import { trackChapterCall } from './chapter-execution'
 import type { SecretStore } from './secret-store'
 import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
@@ -156,6 +157,10 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 正文生成
   chapter: 'chapter',
   'chapter-adjust': 'chapter',
+  'chapter-refine': 'chapter',
+  'chapter-refine-plan': 'chapter',
+  'chapter-refine-repair': 'chapter',
+  'chapter-refine-verify': 'review',
   batchForeshadowRepair: 'chapter',
   continuityRepair: 'chapter',
   chapterForeshadowRepair: 'chapter',
@@ -245,6 +250,10 @@ const LONG_TIMEOUT_FEATURES = new Set([
   'continuityRepairVerify',
   'chapter',
   'chapter-adjust',
+  'chapter-refine',
+  'chapter-refine-plan',
+  'chapter-refine-repair',
+  'chapter-refine-verify',
   'chapter-adjust-plan',
   // 重写/续写交稿前核对整章与长期记忆，不能按 3000 输出 token 当成短请求。
   'longformGuard',
@@ -494,6 +503,10 @@ export class LlmService {
   }
 
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
+    return trackChapterCall(opts.meta?.feature, () => this.generateStreamUntracked(prompt, opts))
+  }
+
+  private async generateStreamUntracked(prompt: string, opts: GenerateOptions): Promise<string> {
     // 调用前已取消：立刻退出，避免再开一轮 CLI/HTTP
     if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
     const resolved = await this.resolveProvider(opts.meta?.feature)

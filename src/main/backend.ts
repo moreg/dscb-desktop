@@ -1,3 +1,5 @@
+import { ChapterRefinementService } from './data/chapter-refinement-service'
+import { registerChapterRefinementIpc } from './ipc/chapter-refinement'
 import { join } from 'path'
 import { LibraryRepository } from './data/library-repository'
 import { ProjectService } from './data/project-service'
@@ -131,6 +133,11 @@ export async function startBackend(userData: string, windows: ProjectWindowActio
     deslopService
   )
   registerWriteIpc(writeService)
+  registerChapterRefinementIpc(new ChapterRefinementService(projectService, chapterService, llmService, async input => {
+    const prompt = await writeService.buildAdjustChapterPrompt(input.projectId, input.chapterNumber,
+      input.content, input.instruction || '保留剧情事实，改善表达', input.styleProfileId, input.plan)
+    return prompt.system + '\n\n' + prompt.user
+  }))
   const mobileReferences = new MobileReferenceService(projectService)
   const mobileBatch = new MobileBatchService(
     projectService,

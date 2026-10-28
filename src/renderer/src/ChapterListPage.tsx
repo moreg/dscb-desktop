@@ -1,3 +1,6 @@
+import { BatchClock, formatBatchDuration, restoreBatchTiming, type BatchTiming } from '../../shared/batch-timing'
+import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
+import { batchQuality, BATCH_QUALITY_LABELS, type BatchQuality } from '../../shared/batch-quality'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
@@ -36,19 +39,7 @@ interface Props {
   onOpenOutline: () => void
 }
 
-const STATUS_FULL: Record<ChapterStatus, string> = {
-  outline: '待写',
-  draft: '草稿',
-  reviewed: '润色',
-  published: '定稿'
-}
 
-const STATUS_CLASS: Record<ChapterStatus, string> = {
-  outline: 'status-outline',
-  draft: 'status-draft',
-  reviewed: 'status-reviewed',
-  published: 'status-published'
-}
 
 const CHAPTER_PAGE_SIZE = 20
 
@@ -238,7 +229,7 @@ export default function ChapterListPage({
 
   const counts = useMemo(() => {
     const m: Record<string, number> = { all: chapters.length }
-    for (const c of chapters) m[c.status] = (m[c.status] ?? 0) + 1
+    for (const c of chapters) m[normalizeChapterStatus(c.status)] = (m[normalizeChapterStatus(c.status)] ?? 0) + 1
     return m
   }, [chapters])
 
@@ -268,7 +259,7 @@ export default function ChapterListPage({
   )
 
   const filtered = useMemo(
-    () => chapters.filter((c) => filter === 'all' || c.status === filter),
+    () => chapters.filter((c) => filter === 'all' || normalizeChapterStatus(c.status) === filter),
     [chapters, filter]
   )
 
@@ -558,7 +549,7 @@ export default function ChapterListPage({
                       else setQuarantineConfirming(true)
                     }}
                     disabled={quarantineBusy || loading}
-                    title="复用这些章已保存的正文自动补跑检查与修复（会调用 AI），通过后解除隔离，无需手改正文；概要与正文一致的章只补一次核对，几分钟完成"
+                    title="复用这些章已保存的正文自动补跑检查与修复（会调用 AI），通过后解除隔离，无需手改正文；已通过且依赖未变化的步骤可复用，耗时取决于待核对内容"
                   >
                     {quarantineConfirming
                       ? `确认补跑 ${pendingChapters.length} 章？`
@@ -628,7 +619,7 @@ export default function ChapterListPage({
                 >
                   全部 · {counts.all ?? 0}
                 </span>
-                {(Object.keys(STATUS_FULL) as ChapterStatus[]).map((s) =>
+                {CHAPTER_STATUS_OPTIONS.map((s) =>
                   // 计数为 0 但正处于该筛选时仍要显示：否则激活中的 chip 凭空消失，
                   // 用户看不出自己在筛什么、也没法点回「全部」以外的入口
                   counts[s] || filter === s ? (
@@ -899,6 +890,7 @@ export interface BatchChapterSummary {
   summaryReady: boolean
   words: number
   autoDeslop?: AutoDeslopResult
+  quality?: BatchQuality
   auditError: number
   auditWarn: number
   /** 细纲对照里的 P0 差异条数 */
@@ -984,6 +976,7 @@ export function summarizeChapterResult(
     summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
     autoDeslop: result.autoDeslop,
+    quality: batchQuality(result),
     auditError: deduped.filter((v) => v.severity === 'error').length,
     auditWarn: deduped.filter((v) => v.severity === 'warn').length,
     p0: result.outlineDiff.diffs.filter((d) => d.priority === 'P0').length,
@@ -1526,6 +1519,7 @@ export function recoverBatchProgress(
 }
 
 export interface SavedBatchSession {
+  timing?: BatchTiming
   progress: BatchProgress
   autoContinue: boolean
   autoStrength: boolean
@@ -1559,6 +1553,7 @@ export function parseSavedBatchSession(raw: string | null): SavedBatchSession | 
       !Number.isSafeInteger(session.interruptedChapter) ||
       session.interruptedChapter < p.fromChapter || session.interruptedChapter > p.toChapter
     )) return null
+    if (session.timing !== undefined) session.timing = restoreBatchTiming(session.timing, p.fromChapter, p.toChapter)
     return session
   } catch {
     return null
@@ -1608,6 +1603,14 @@ function BatchWriteDialog({
   onPolishBatch?: (range: BatchPolishRange) => void
 }) {
   const [restoredSession] = useState(() => readSavedBatchSession(projectId))
+  const clockRef = useRef(new BatchClock(restoredSession?.timing))
+  const sessionRef = useRef<SavedBatchSession | null>(restoredSession)
+  const [timing, setTiming] = useState(() => clockRef.current.snapshot(performance.now()))
+  const persistSession = (session: SavedBatchSession): void => {
+    const next = { ...session, timing: clockRef.current.snapshot(performance.now()) }
+    sessionRef.current = next
+    saveBatchSession(projectId, next)
+  }
   const [recovering, setRecovering] = useState(restoredSession?.interruptedChapter !== undefined)
   /**
    * 默认起点：第一个未写章节，而不是「当前最大章号 + 1」。
@@ -1636,6 +1639,18 @@ function BatchWriteDialog({
     [fromChapter, toChapter, draftedChapters]
   )
   const [running, setRunning] = useState(false)
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => {
+      const snapshot = clockRef.current.snapshot(performance.now())
+      setTiming(snapshot)
+      if (sessionRef.current) {
+        sessionRef.current = { ...sessionRef.current, timing: snapshot }
+        saveBatchSession(projectId, sessionRef.current)
+      }
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [running, projectId])
   // 连续模式：每章写完不停，一口气写到结束章号
   const [autoContinue, setAutoContinue] = useState(restoredSession?.autoContinue ?? preset?.autoContinue ?? false)
   const isOneClickTen = preset?.count === 10 && preset.autoContinue
@@ -1738,8 +1753,10 @@ function BatchWriteDialog({
   useEffect(() => () => {
     const requestId = batchRequestIdRef.current
     batchRequestIdRef.current = null
+    const snapshot = clockRef.current.stop(performance.now())
+    if (sessionRef.current) saveBatchSession(projectId, { ...sessionRef.current, timing: snapshot })
     if (requestId) void window.api.abortStream(requestId).catch(() => {})
-  }, [])
+  }, [projectId])
   // 流式预览自动滚底：不滚的话超过容器高度后新 token 一直藏在滚动条下方，
   // 「正在生成…」看起来像卡住了
   const streamingBoxRef = useRef<HTMLDivElement | null>(null)
@@ -1845,10 +1862,13 @@ function BatchWriteDialog({
 
   useEffect(() => {
     if (progress && !running && !recovering) {
-      saveBatchSession(projectId, {
+      const next = {
         progress, autoContinue, autoStrength, styleProfileId,
+        timing: clockRef.current.snapshot(performance.now()),
         interruptedChapter: interruptedChapterRef.current
-      })
+      }
+      sessionRef.current = next
+      saveBatchSession(projectId, next)
     }
   }, [projectId, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
 
@@ -1924,9 +1944,12 @@ function BatchWriteDialog({
     let lastReportedChapter: number | undefined
     const requestId = crypto.randomUUID()
     batchRequestIdRef.current = requestId
+    if (mode === 'start') clockRef.current = new BatchClock()
+    clockRef.current.start(runFrom, performance.now())
+    setTiming(clockRef.current.snapshot(performance.now()))
     const persistProgress = (next: BatchProgress, interruptedChapter?: number): void => {
       interruptedChapterRef.current = interruptedChapter
-      saveBatchSession(projectId, { progress: next, autoContinue, autoStrength, styleProfileId, interruptedChapter })
+      persistSession({ progress: next, autoContinue, autoStrength, styleProfileId, interruptedChapter })
     }
     persistProgress(previous ?? recoverBatchProgress(rangeFrom, rangeTo, [], '上次生成已中断，可重试当前章。'), runFrom)
     setRunning(true)
@@ -1962,6 +1985,8 @@ function BatchWriteDialog({
         styleProfileId,
         (chapter, result) => {
           if (batchRequestIdRef.current !== requestId) return
+          clockRef.current.finishChapter(chapter, performance.now())
+          setTiming(clockRef.current.snapshot(performance.now()))
           if (!completed.includes(chapter)) completed.push(chapter)
           lastReportedChapter = chapter
           // 此时正文已保存；最终 progress 到达前保守保留该章检查恢复点。
@@ -1995,10 +2020,12 @@ function BatchWriteDialog({
           if (batchRequestIdRef.current !== requestId) return
           setStreamingText('')
           setLiveChapter(chapter)
+          clockRef.current.start(chapter, performance.now())
           handleRetryWait(chapter, attempt, maxAttempts, waitMs)
         },
         (stage, chapterNumber) => {
           if (batchRequestIdRef.current !== requestId) return
+          clockRef.current.start(chapterNumber, performance.now())
           setGenerationStage(stage)
           if (isDeslopStage(stage)) setLiveSavedChapters(prev => prev.includes(chapterNumber) ? prev : [...prev, chapterNumber])
           setLiveChapter(chapterNumber)
@@ -2012,10 +2039,12 @@ function BatchWriteDialog({
           if (batchRequestIdRef.current !== requestId) return
           setGenerationStage(null)
           setLiveChapter(chapterNumber)
+          clockRef.current.start(chapterNumber, performance.now())
           setLiveAutoDeslop(result)
         }
       )
       if (batchRequestIdRef.current !== requestId) return
+      setTiming(clockRef.current.stop(performance.now()))
       if (res.progress) {
         persistProgress(res.progress)
         setProgress(res.progress)
@@ -2024,6 +2053,7 @@ function BatchWriteDialog({
       }
     } catch (err) {
       if (batchRequestIdRef.current === requestId) {
+        setTiming(clockRef.current.stop(performance.now()))
         recover(err instanceof Error ? err.message : String(err))
       }
     } finally {
@@ -2046,6 +2076,7 @@ function BatchWriteDialog({
 
   const endBatch = () => {
     if (batchRequestIdRef.current) return
+    sessionRef.current = null
     saveBatchSession(projectId, null)
     onClose()
   }
@@ -2073,7 +2104,7 @@ function BatchWriteDialog({
     generating: '生成中',
     flow: '流程中',
     paused: '已暂停',
-    completed: '已完成',
+    completed: '批量流程已完成',
     failed: '失败'
   }
 
@@ -2091,9 +2122,9 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章先保存生成原稿，再自动去 AI 味并核对事实。表达与语义合计最多修复 2 次，事实差异最多修复 1 次；核验格式异常最多重试 1 次。润色未通过则保留原稿、标记待复核，继续写后检查。
+          逐章先保存生成原稿，再自动去 AI 味并核对事实。每章每轮各类自动修复合计最多 3 次，独立核验仍须完成。表达验收未通过则保留原稿，章节仍显示为正文，验收结果标记为待修订；事实冲突未解决时暂停，不进入下一章。流程完成不代表正文质量验收通过。
           {autoContinue
-            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。仅细纲缺失或同步失败时暂停，已保存的正文保留，可随时点停止。'
+            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。细纲缺失、同步失败或阻断性冲突未解决时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
         </p>
 
@@ -2293,6 +2324,21 @@ function BatchWriteDialog({
               <span className="batch-progress-count">
                 {savedChapterCount} / {displayTotal} 章已保存
               </span>
+            </div>
+            <div style={{ marginTop: 10, fontVariantNumeric: 'tabular-nums' }}>
+              <strong>总耗时：{formatBatchDuration(timing.totalMs)}</strong>
+              <p className="meta" style={{ margin: '4px 0 8px', fontSize: 12 }}>
+                含生成、润色、检查及限流等待；暂停不计时，继续或重试累计耗时。
+                {restoredSession && !restoredSession.timing ? '旧批次未记录此前耗时，从本次继续起统计。' : ''}
+              </p>
+              <div className="row" style={{ flexWrap: 'wrap', gap: '6px 16px' }}>
+                {Object.entries(timing.chapters).sort(([a], [b]) => Number(a) - Number(b)).map(([chapter, ms]) => (
+                  <span key={chapter} className="meta">
+                    第 {chapter} 章耗时：{formatBatchDuration(ms)}
+                    {running && Number(chapter) === liveChapter && !liveCompleted.includes(Number(chapter)) ? '（进行中）' : ''}
+                  </span>
+                ))}
+              </div>
             </div>
             {displayChapter ? (
               <div className="batch-progress-current">
@@ -2536,7 +2582,7 @@ function BatchWriteDialog({
                         </span>
                       ) : null}
                     </span>
-                    <span>{item.words} 字</span>
+                    <span>{item.words} 字 · {BATCH_QUALITY_LABELS[item.quality ?? 'unverified']}</span>
                     <span title={[item.autoDeslop?.message, ...(item.autoDeslop?.issues ?? [])].filter(Boolean).join('；')} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
                       {describeAutoDeslopCell(item)}
                       {item.autoDeslop?.status !== 'applied' && (item.autoDeslop?.repairAttempts ?? 0) > 0 ? `（已自动修复 ${item.autoDeslop!.repairAttempts} 次）` : ''}

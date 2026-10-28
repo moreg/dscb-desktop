@@ -1,3 +1,4 @@
+import { normalizeChapterStatus } from '../../shared/chapter-status'
 import { ProjectService } from './project-service'
 import { OutlineMdRepo } from './skill-format/outline-md-repo'
 import { RhythmHtmlRepo } from './skill-format/rhythm-html-repo'
@@ -111,8 +112,8 @@ export class ChapterService {
   }
 
   /**
-   * 状态推导：有正文默认「草稿」，无正文「待写」；「润色/定稿」标注只在正文哈希
-   * 未变且该章未被长篇核对重新拦截时成立，否则退回草稿——徽章始终如实反映检查状态。
+   * 状态推导：非空内容为「正文」，文件缺失或仅有空白为「待写」。
+   * 旧「润色」并入正文；「定稿」仍需正文哈希匹配且未被长篇核对拦截。
    */
   private async resolveStatuses(
     dir: string,
@@ -132,7 +133,7 @@ export class ChapterService {
       const mark = stored[String(entry.chapter)]
       result.set(entry.chapter,
         mark && mark.sourceHash === hashProse(entry.content) && !blocked[String(entry.chapter)]
-          ? mark.status
+          ? normalizeChapterStatus(mark.status)
           : 'draft')
     }
     return result
@@ -172,7 +173,7 @@ export class ChapterService {
     const content = new Map<number, string>()
     for (const e of rhythm) {
       const body = bodies.get(e.chapter)!
-      const has = body.exists
+      const has = Boolean(body.content.trim())
       const det = detailedMap.get(e.chapter)
       // wordCount：正文实时统计（v4 删除了 记忆系统/章节进度.md，不再有外部字数表）
       const chapterContent = body.content
@@ -208,7 +209,7 @@ export class ChapterService {
     ])
     const entry = rhythm.find((e) => e.chapter === n)
     const status = (await this.resolveStatuses(dir, [{ chapter: n, exists: Boolean(content), content: content ?? '' }]))
-      .get(n) ?? (content ? 'draft' : 'outline')
+      .get(n) ?? (content?.trim() ? 'draft' : 'outline')
     const meta: ChapterMeta = {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),

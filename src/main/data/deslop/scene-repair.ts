@@ -17,6 +17,8 @@ export async function repairDeslopScene<T>(original: string, candidate: string, 
   maxWords: number
   normalizeDraft?: (draft: string) => string
   startWithPatches?: boolean
+  maxAttempts?: number
+  stopOnStall?: boolean
   fallbackFeature?: string
   onFallback?: () => void
   signal?: AbortSignal
@@ -62,7 +64,9 @@ export async function repairDeslopScene<T>(original: string, candidate: string, 
   let fallbackReported=false
   const normalize=options.normalizeDraft??((text:string)=>text)
   const rejectedDrafts=new Map<string,string[]>([[normalize(candidate),options.issues]])
-  for(let attempt=1;attempt<=MAX_SCENE_REPAIR_ATTEMPTS;attempt++){
+  const maxAttempts = Math.min(MAX_SCENE_REPAIR_ATTEMPTS, Math.max(1, options.maxAttempts ?? MAX_SCENE_REPAIR_ATTEMPTS))
+  let lastCheckedIssues: string | undefined
+  for(let attempt=1;attempt<=maxAttempts;attempt++){
     abort()
     options.onAttempt(attempt)
     abort()
@@ -118,6 +122,8 @@ export async function repairDeslopScene<T>(original: string, candidate: string, 
     const changes=Array.isArray(parsed?.patches)?parsed.patches:[{before:repairBase,after:proposed}]
     const previousRejection=rejectedDrafts.get(normalize(proposed))
     if(previousRejection){
+      if (options.stopOnStall) return { issues: [...currentIssues, '修订退回已拒绝的稿件，已停止自动重试；请按具体问题精修。'],
+        ...(candidate !== original ? { pendingDraft: candidate } : {}) }
       if(options.fallbackFeature)useFallback=true
       history.push({attempt,changes,issues:previousRejection})
       recordIssues(['当前稿排版后与此前未通过的稿件逐字相同，不能重新审核碰运气。保留上一份待修订稿，请换一种有依据的改法。',...repairIssues])
@@ -140,10 +146,18 @@ export async function repairDeslopScene<T>(original: string, candidate: string, 
     abort()
     if(result.unconfirmed)return {issues:result.issues,...(candidate!==original?{pendingDraft:candidate}:{})}
     if(result.accepted!==undefined)return result
+    const issueKey = JSON.stringify([...new Set(result.issues.map(issue => issue.trim()))].sort())
+    if (options.stopOnStall && lastCheckedIssues === issueKey) return {
+      issues: [...result.issues, '连续两轮核验仍有相同问题，已停止自动重试；请按具体问题精修。'],
+      ...(candidate !== original ? { pendingDraft: candidate } : {})
+    }
+    lastCheckedIssues = issueKey
     if(result.preferFallback&&options.fallbackFeature)useFallback=true
     history.push({attempt,changes,issues:result.issues})
     rejectedDrafts.set(normalize(candidate),result.issues)
     recordIssues(result.issues)
   }
-  return {issues:[...new Set(currentIssues)],...(candidate!==original?{pendingDraft:candidate}:{})}
+  return {issues:[...new Set(currentIssues), ...(options.maxAttempts !== undefined
+    ? [`本轮自动修订已达 ${maxAttempts} 次，仍未通过验收；请按具体问题精修。`] : [])],
+    ...(candidate!==original?{pendingDraft:candidate}:{})}
 }

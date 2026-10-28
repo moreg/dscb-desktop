@@ -1,3 +1,5 @@
+import { promises as fs } from 'fs'
+import { withFileLock } from './file-lock'
 /**
  * 自动保存草稿（P19-A）。
  *
@@ -47,3 +49,19 @@ export interface DraftMeta {
   different: boolean
 }
 
+/** Share a lock with conditional cleanup so another window's newer backup is preserved. */
+export async function saveDraftText(file: string, content: string): Promise<void> {
+  await withFileLock(file, () => fs.writeFile(file, content, 'utf8'))
+}
+export async function discardDraftText(file: string, expectedContent?: string): Promise<boolean> {
+  return withFileLock(file, async () => {
+    try {
+      if (expectedContent !== undefined && await fs.readFile(file, 'utf8') !== expectedContent) return false
+      await fs.unlink(file)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+  })
+}

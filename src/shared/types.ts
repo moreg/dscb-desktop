@@ -1,3 +1,4 @@
+import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from './chapter-refinement'
 import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from './prose-import'
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
 import type { AppUpdateState } from './app-update'
@@ -53,6 +54,7 @@ export interface CreateProjectInput {
   genre?: string
 }
 
+/** draft = 正文；reviewed 为旧数据兼容值，显示与返回时并入正文。 */
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。支持三种 HTTP API 接入方式及本地 CLI。 */
@@ -574,6 +576,10 @@ export interface MobileServerStatus {
 }
 
 export interface RendererApi {
+  refineChapter(input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void): StreamHandleOf<RefinementResult>
+  loadRefinement(projectId: string, chapterNumber: number): Promise<RefinementCandidate | null>
+  discardRefinement(projectId: string, chapterNumber: number, id: string): Promise<void>
+  commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean): Promise<RefinementCommit>
   getAppUpdateState(): Promise<AppUpdateState>
   checkAppUpdate(): Promise<AppUpdateState>
   downloadAppUpdate(): Promise<AppUpdateState>
@@ -669,7 +675,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number
   ) => Promise<{ content: string; at: number; different: boolean } | null>
-  discardDraft: (projectId: string, chapterNumber: number) => Promise<boolean>
+  discardDraft: (projectId: string, chapterNumber: number, expectedContent?: string) => Promise<boolean>
   /** P19-E：字数汇总（节奏图谱 + 章节进度笔记） */
   getChapterWordSummary: (projectId: string) => Promise<{
     chapters: Array<{

@@ -15,6 +15,8 @@ interface AutoDeslopOptions extends DeslopOptions {
   /** 最终排版必须在事实核验前进行；回退时原稿保持原样。 */
   formatCandidate?: (text: string) => string
   onProgress?: (message: string) => void
+  /** Automatic writing uses a shorter, stall-aware repair cycle. */
+  sceneRepairLimit?: number
 }
 
 const MAX_FACT_REPAIRS = 1
@@ -33,7 +35,7 @@ function unconfirmedReview(issues: string[]): boolean {
 /** 自动润色只采用完整通过复扫、正文护栏与事实对照的轻度改写。 */
 export async function autoDeslopProse(
   original: string,
-  { service, llm, validateCandidate, formatCandidate, onProgress, ...options }: AutoDeslopOptions
+  { service, llm, validateCandidate, formatCandidate, onProgress, sceneRepairLimit, ...options }: AutoDeslopOptions
 ): Promise<{ content: string; report: AutoDeslopResult }> {
   let repairAttempts = 0
   let verificationAttempts = 0
@@ -188,8 +190,10 @@ export async function autoDeslopProse(
       fallbackFeature:'chapter-scene-repair',
       onFallback:()=>onProgress?.('修订出现事实偏移或退回旧稿，由正文模型接手剩余修订；事实与表达审核保持不变'),
       startWithPatches:options.initialDialogueDraft!==undefined,
+      maxAttempts: sceneRepairLimit,
+      stopOnStall: sceneRepairLimit !== undefined,
       minWords:Math.ceil(words*(1-budget)),maxWords:Math.floor(words*(1+budget)),
-      onAttempt:attempt=>{repairAttempts++;onProgress?.(`整场保真修订 ${attempt}/${MAX_SCENE_REPAIR_ATTEMPTS}`)},
+      onAttempt:attempt=>{repairAttempts++;onProgress?.(`整场保真修订 ${attempt}/${sceneRepairLimit ?? MAX_SCENE_REPAIR_ATTEMPTS}`)},
       check:async (draft,constraints,previous)=>{
         const reject=(issues:string[])=>({issues,unconfirmed:unconfirmedReview(issues)})
         let refusal=await guardCandidate(draft)
