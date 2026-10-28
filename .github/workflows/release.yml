@@ -40,7 +40,12 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json tagName 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:GITHUB_REF_NAME
+            $releaseNotesFile = "docs/releases/$((Get-Content package.json -Raw | ConvertFrom-Json).version).md"
+            if (Test-Path -LiteralPath $releaseNotesFile) {
+              gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:GITHUB_REF_NAME --notes-file $releaseNotesFile
+            } else {
+              gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:GITHUB_REF_NAME
+            }
             if ($LASTEXITCODE -ne 0) { throw "Failed to create draft release" }
           }
           $releaseFiles = @(
