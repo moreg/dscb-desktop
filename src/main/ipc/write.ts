@@ -25,6 +25,10 @@ import { postWriteProgressLabel } from '../../shared/generation-progress'
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
 export function registerWriteIpc(service: WriteService): void {
+  safeHandle('write:syncContext', async (_event, raw: unknown) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema, content: chapterContentSchema }), raw)
+    return service.getChapterSyncContext(input.projectId, input.chapterNumber, input.content)
+  })
   safeHandle(
     'write:auditChapter',
     async (_e, payload: { projectId: string; content: string }) => {
@@ -520,21 +524,22 @@ export function registerWriteIpc(service: WriteService): void {
     'write:extractMemory',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string; reuse?: boolean }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.extractMemoryStream(payload.projectId, payload.chapterNumber, {
-            signal,
+            signal, reuseMemory: payload.reuse === undefined ? false : validateInput(z.boolean(), payload.reuse),
             onToken: (token) =>
               safeSend(win, 'llm:token', {
                 requestId: payload.requestId,
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }
@@ -896,10 +901,11 @@ export function registerWriteIpc(service: WriteService): void {
     'write:evaluateRhythm',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.evaluateRhythmStream(payload.projectId, payload.chapterNumber, {
@@ -910,7 +916,7 @@ export function registerWriteIpc(service: WriteService): void {
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }
@@ -933,10 +939,11 @@ export function registerWriteIpc(service: WriteService): void {
     'write:generateFigure',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.generateFigureStream(payload.projectId, payload.chapterNumber, {
@@ -947,7 +954,7 @@ export function registerWriteIpc(service: WriteService): void {
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }

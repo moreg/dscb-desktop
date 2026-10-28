@@ -1,10 +1,11 @@
 import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
+import { createHash } from 'crypto'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
-import { parseOutlineDiffJson } from '../../shared/parsers'
+import { parseOutlineDiffJson, parseMemoryExtractionJson } from '../../shared/parsers'
 import type { MemoryExtraction } from '../../shared/types'
 
 // 纯解析函数从 shared/parsers re-export，供 main 测试与 renderer 共享
@@ -21,6 +22,7 @@ export {
  * 把 SKILL.md 第 1/5/6/7 步的 LLM 调用集中在此，避免 WriteService 膨胀。
  */
 export class WriteFlowService {
+  private memoryAnalyses = new Map<string, string>()
   constructor(private readonly llm: LlmService) {}
 
   async verifyForeshadowingRepair(input: {
@@ -250,7 +252,7 @@ export class WriteFlowService {
     content: string,
     chapterNumber: number,
     knownCharacters: string[],
-    opts: GenerateOptions = {},
+    opts: GenerateOptions & { reuseMemory?: boolean } = {},
     knownForeshadowings: Foreshadowing[] = []
   ): Promise<string> {
     // 空提取会替换同章自动记忆，不能在漏掉中段的情况下声称提取完整。
@@ -298,12 +300,33 @@ export class WriteFlowService {
       `------ 第 ${chapterNumber} 章正文 ------`,
       body
     ].join('\n')
-    return this.llm.generateStream(prompt, {
-      ...opts,
+    const { reuseMemory, ...generateOpts } = opts
+    const feature = opts.meta?.feature ?? 'memoryExtract'
+    const identity = await this.llm.getCacheIdentity?.(feature).catch(() => null)
+    const { onToken: _token, onStatus: _status, onDiagnostic: _diagnostic, signal: _signal, meta: _meta, ...parameters } = generateOpts
+    const key = identity ? createHash('sha256').update(JSON.stringify([
+      opts.meta?.projectId, identity, prompt, parameters
+    ])).digest('hex') : null
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    const cached = key && reuseMemory ? this.memoryAnalyses.get(key) : undefined
+    if (cached !== undefined) {
+      opts.onToken?.(cached)
+      return cached
+    }
+    const raw = await this.llm.generateStream(prompt, {
+      ...generateOpts,
       // 默认 8192 对「多数组 JSON」在部分模型上仍会被 max_tokens 截断；提取单独抬高
       maxTokens: opts.maxTokens ?? 12_288,
       meta: { feature: 'memoryExtract', ...opts.meta }
     })
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    if (key && !parseMemoryExtractionJson(raw, chapterNumber).parseError &&
+      identity === await this.llm.getCacheIdentity?.(feature).catch(() => null)) {
+      this.memoryAnalyses.delete(key)
+      this.memoryAnalyses.set(key, raw)
+      if (this.memoryAnalyses.size > 24) this.memoryAnalyses.delete(this.memoryAnalyses.keys().next().value!)
+    }
+    return raw
   }
 
   /**

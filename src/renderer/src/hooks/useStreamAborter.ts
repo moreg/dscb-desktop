@@ -11,7 +11,7 @@ import type { StreamHandleOf } from '../../../shared/types'
  * 用法：const track = useStreamAborter()
  *       const result = await track(window.api.xxxStream(...))
  */
-export function useStreamAborter(): <T>(handle: StreamHandleOf<T>) => Promise<T> {
+export function useStreamAborter(sourceKey?: string): <T>(handle: StreamHandleOf<T>) => Promise<T> {
   const active = useRef<Set<{ abort?: () => Promise<unknown> }>>(new Set())
 
   useEffect(
@@ -23,7 +23,7 @@ export function useStreamAborter(): <T>(handle: StreamHandleOf<T>) => Promise<T>
       }
       active.current.clear()
     },
-    []
+    [sourceKey]
   )
 
   return useCallback(async <T,>(handle: StreamHandleOf<T>): Promise<T> => {

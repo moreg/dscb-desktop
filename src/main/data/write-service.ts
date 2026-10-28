@@ -429,6 +429,32 @@ export class WriteService {
     return this.generateChapterSummaryChecked(projectId, chapterNumber, content, opts)
   }
 
+  /** Analysis receipts never authorize writes. All stages must refer to the saved editor snapshot. */
+  async getChapterSyncContext(projectId: string, chapterNumber: number, content: string): Promise<string | null> {
+    if (!content.trim()) throw new Error('正文为空，无法同步')
+    const dir = await this.projectService.resolveDir(projectId)
+    const assertSource = async (): Promise<void> => {
+      if ((await this.chapterService.getChapter(projectId, chapterNumber)).content !== content) {
+        throw new Error('正文与保存版本不一致，请先保存正文再同步；同步期间请勿修改正文。')
+      }
+    }
+    await assertSource()
+    let key: string | null = null
+    try {
+      const project = await this.projectService.getProjectData(projectId)
+      const identities = await Promise.all(['outlineCheck', 'memoryExtract', 'rhythmEval', 'figureGen', 'autoMemorySync']
+        .map(feature => this.llm.getCacheIdentity?.(feature)))
+      if (this.settings && identities.every(Boolean) && !project.benchmarkBooks?.length) {
+        const config = await Promise.all([this.settings.get(), this.settings.getReviewRules(), this.settings.getDeslopRules()])
+        key = await chapterDependencyHash(dir, ['chapter-sync-1', identities, config, content], relative =>
+          relative === '记忆/索引.md' || relative === '记忆/.sync-index.json' ||
+          relative === `记忆/章节概要/第${String(chapterNumber).padStart(3, '0')}章.json`)
+      }
+    } catch { /* Unidentifiable dependencies disable reuse, never source validation. */ }
+    await assertSource()
+    return key
+  }
+
   /** Only internal callers may carry a just-completed review into summary extraction.
    * The receipt re-reads prose, plans and historical sources before use and commit. */
   private async generateChapterSummaryChecked(
@@ -1762,25 +1788,28 @@ export class WriteService {
   async extractMemoryStream(
     projectId: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    opts: GenerateOptions & { reuseMemory?: boolean } = {},
+    sourceContent?: string
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
     // 取正文：优先 ProseRepo，回退 ChapterService
-    let content = ''
-    try {
-      const md = await new ProseRepo(dir).read(chapterNumber)
-      if (md) content = md
-    } catch (err) {
-      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
-      // skip
-    }
-    if (!content) {
+    let content = sourceContent ?? ''
+    if (sourceContent === undefined) {
       try {
-        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
-        if (chapter.content) content = chapter.content
+        const md = await new ProseRepo(dir).read(chapterNumber)
+        if (md) content = md
       } catch (err) {
-        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
         // skip
+      }
+      if (!content) {
+        try {
+          const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+          if (chapter.content) content = chapter.content
+        } catch (err) {
+          console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+          // skip
+        }
       }
     }
     // 取已知人物名
@@ -1801,7 +1830,8 @@ export class WriteService {
       }
     }
     const knownForeshadowings = await new ForeshadowingMdRepo(dir).list()
-    return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, opts, knownForeshadowings)
+    return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, { ...opts,
+      meta: { feature: 'memoryExtract', ...opts.meta, projectId, chapterNumber } }, knownForeshadowings)
   }
 
   /**
@@ -2872,25 +2902,28 @@ export class WriteService {
   async evaluateRhythmStream(
     projectId: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    opts: GenerateOptions = {},
+    sourceContent?: string
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
     // 取正文
-    let content = ''
-    try {
-      const md = await new ProseRepo(dir).read(chapterNumber)
-      if (md) content = md
-    } catch (err) {
-      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
-      // skip
-    }
-    if (!content) {
+    let content = sourceContent ?? ''
+    if (sourceContent === undefined) {
       try {
-        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
-        if (chapter.content) content = chapter.content
+        const md = await new ProseRepo(dir).read(chapterNumber)
+        if (md) content = md
       } catch (err) {
-        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
         // skip
+      }
+      if (!content) {
+        try {
+          const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+          if (chapter.content) content = chapter.content
+        } catch (err) {
+          console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+          // skip
+        }
       }
     }
     // 取预期情绪值
@@ -2940,24 +2973,27 @@ export class WriteService {
   async generateFigureStream(
     projectId: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    opts: GenerateOptions = {},
+    sourceContent?: string
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
-    let content = ''
-    try {
-      const md = await new ProseRepo(dir).read(chapterNumber)
-      if (md) content = md
-    } catch (err) {
-      console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
-      // skip
-    }
-    if (!content) {
+    let content = sourceContent ?? ''
+    if (sourceContent === undefined) {
       try {
-        const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
-        if (chapter.content) content = chapter.content
+        const md = await new ProseRepo(dir).read(chapterNumber)
+        if (md) content = md
       } catch (err) {
-        console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+        console.warn('[extractMemoryStream] Failed to read prose markdown:', err)
         // skip
+      }
+      if (!content) {
+        try {
+          const chapter = await this.chapterService.getChapter(projectId, chapterNumber)
+          if (chapter.content) content = chapter.content
+        } catch (err) {
+          console.warn('[extractMemoryStream] Failed to read chapter from repository:', err)
+          // skip
+        }
       }
     }
     return this.flow.generateFigureStream(content, chapterNumber, opts)

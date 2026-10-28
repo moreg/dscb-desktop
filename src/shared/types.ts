@@ -921,10 +921,13 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void
   ) => StreamHandle
   /** 记忆提取（流式）：从正文提取新增角色/地点/情节/伏笔/状态变化 */
+  getChapterSyncContext: (projectId: string, chapterNumber: number, content: string) => Promise<string | null>
   extractMemoryStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string,
+    reuse?: boolean
   ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
@@ -1050,7 +1053,8 @@ export interface RendererApi {
   evaluateRhythmStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string
   ) => StreamHandle
   /** 节奏回填：把评估值写回节奏图谱.html */
   applyRhythmEvaluation: (
@@ -1061,7 +1065,8 @@ export interface RendererApi {
   generateFigureStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string
   ) => StreamHandle
   /** 保存图解 HTML 到 图解/ 目录 */
   saveFigure: (

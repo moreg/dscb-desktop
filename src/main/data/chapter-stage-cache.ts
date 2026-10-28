@@ -9,13 +9,14 @@ const REVISION = 'batch-stages-1'
 const excluded = new Set(['.cache', '.git', '.versions', '.longform-review.json', '.chapter-status.json'])
 
 /** Conservative content fingerprint: edits, additions and removals all invalidate receipts. */
-export async function chapterDependencyHash(dir: string, config: unknown): Promise<string | null> {
+export async function chapterDependencyHash(dir: string, config: unknown, ignore?: (relative: string) => boolean): Promise<string | null> {
   const files: [string, string][] = []
   async function walk(relative: string): Promise<void> {
     const entries = await fs.readdir(join(dir, relative), { withFileTypes: true })
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       if (excluded.has(entry.name) || entry.name.endsWith('.tmp')) continue
       const path = join(relative, entry.name)
+      if (ignore?.(path.replace(/\\/g, '/'))) continue
       if (entry.isSymbolicLink()) throw new Error('External dependency')
       if (entry.isDirectory()) await walk(path)
       else if (entry.isFile()) files.push([path, digest(await fs.readFile(join(dir, path)))])

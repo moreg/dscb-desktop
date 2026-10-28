@@ -671,10 +671,14 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }>
       return makeStreamHandle(result, requestId)
     },
+    getChapterSyncContext: (projectId: string, chapterNumber: number, content: string) =>
+      ipcRenderer.invoke('write:syncContext', { projectId, chapterNumber, content }),
     extractMemoryStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string,
+      reuse?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -685,7 +689,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:extractMemory', { projectId, chapterNumber, requestId })
+        .invoke('write:extractMemory', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}), ...(reuse !== undefined ? { reuse } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
@@ -829,7 +833,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     evaluateRhythmStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -840,7 +845,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId })
+        .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
@@ -852,7 +857,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     generateFigureStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -863,7 +869,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:generateFigure', { projectId, chapterNumber, requestId })
+        .invoke('write:generateFigure', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
