@@ -666,6 +666,60 @@ describe('LlmService feature routing', () => {
     fetchSpy.mockRestore()
   })
 
+  it.each(['chapter-refine', 'chapter-refine-plan', 'chapter-refine-repair', 'chapter-refine-verify'])(
+    'routes %s through the configured refine provider, not chapter or review',
+    async (feature) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-refine-'))
+      const s = new SecretStore(path.join(dir, 'providers.enc'))
+      await s.write({
+        activeId: 'p_active',
+        providers: [
+          { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+          { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' },
+          { id: 'p_review', label: 'review', baseUrl: 'https://review.example.com/v1', model: 'review-model', apiKey: 'k3' },
+          { id: 'p_refine', label: 'refine', baseUrl: 'https://refine.example.com/v1', model: 'refine-model', apiKey: 'k4' }
+        ],
+        featureRouting: {
+          chapter: { providerId: 'p_chapter' },
+          review: { providerId: 'p_review' },
+          refine: { providerId: 'p_refine', model: 'refine-override' }
+        }
+      })
+      const svc = new LlmService(s)
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        body: sseBody(['data: [DONE]\n\n'])
+      } as never)
+      await svc.generateStream('hi', { meta: { feature } })
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe('https://refine.example.com/v1/chat/completions')
+      expect(JSON.parse(init.body as string).model).toBe('refine-override')
+      fetchSpy.mockRestore()
+    }
+  )
+
+  it('falls back to activeId for refine when the slot is empty, even if chapter is routed', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-refine-empty-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_chapter' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter-refine' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
   it('deslop:cleanup:N resolves to humanize category via prefix normalization', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-cleanup-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))

@@ -1,5 +1,4 @@
 import { BatchClock, formatBatchDuration, restoreBatchTiming, type BatchTiming } from '../../shared/batch-timing'
-import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { batchQuality, BATCH_QUALITY_LABELS, type BatchQuality } from '../../shared/batch-quality'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -7,7 +6,6 @@ import type {
   AutoDeslopResult,
   ChapterMeta,
   Character,
-  ChapterStatus,
   BatchProgress,
   ChapterFlowResult,
   ChapterGenerationStage,
@@ -40,6 +38,29 @@ interface Props {
 }
 
 
+
+/** 列表上的三档：草稿与润色都是已有正文，合成「正文」；空文件仍是待写。 */
+export type ChapterListBucket = 'pending' | 'prose' | 'published'
+
+export function chapterListBucket(chapter: Pick<ChapterMeta, 'status' | 'wordCount'>): ChapterListBucket {
+  if ((chapter.wordCount ?? 0) <= 0 || chapter.status === 'outline') return 'pending'
+  if (chapter.status === 'published') return 'published'
+  return 'prose'
+}
+
+const BUCKET_LABEL: Record<ChapterListBucket, string> = {
+  pending: '待写',
+  prose: '正文',
+  published: '定稿'
+}
+
+const BUCKET_CLASS: Record<ChapterListBucket, string> = {
+  pending: 'status-outline',
+  prose: 'status-draft',
+  published: 'status-published'
+}
+
+const LIST_BUCKETS: ChapterListBucket[] = ['pending', 'prose', 'published']
 
 const CHAPTER_PAGE_SIZE = 20
 
@@ -168,7 +189,7 @@ export default function ChapterListPage({
   }, [quarantineBusy])
   const [showBenchmark, setShowBenchmark] = useState(false)
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
-  const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
+  const [filter, setFilter] = useState<'all' | ChapterListBucket>('all')
   const [page, setPage] = useState(1)
   // 导出正文：'all' 表示导出全书，number 表示导出该卷；null 表示当前没有导出在进行
   const [exporting, setExporting] = useState<'all' | number | null>(null)
@@ -228,8 +249,8 @@ export default function ChapterListPage({
   const charName = (id: string) => characters.find((c) => c.id === id)?.name ?? '?'
 
   const counts = useMemo(() => {
-    const m: Record<string, number> = { all: chapters.length }
-    for (const c of chapters) m[normalizeChapterStatus(c.status)] = (m[normalizeChapterStatus(c.status)] ?? 0) + 1
+    const m: Record<'all' | ChapterListBucket, number> = { all: chapters.length, pending: 0, prose: 0, published: 0 }
+    for (const c of chapters) m[chapterListBucket(c)] += 1
     return m
   }, [chapters])
 
@@ -259,7 +280,7 @@ export default function ChapterListPage({
   )
 
   const filtered = useMemo(
-    () => chapters.filter((c) => filter === 'all' || normalizeChapterStatus(c.status) === filter),
+    () => chapters.filter((c) => filter === 'all' || chapterListBucket(c) === filter),
     [chapters, filter]
   )
 
@@ -600,7 +621,7 @@ export default function ChapterListPage({
                 apply()
               }
             }
-            const applyFilter = (f: 'all' | ChapterStatus) => {
+            const applyFilter = (f: 'all' | ChapterListBucket) => {
               setFilter(f)
               setPage(1)
               const mainEl = document.querySelector('.main-content')
@@ -619,7 +640,7 @@ export default function ChapterListPage({
                 >
                   全部 · {counts.all ?? 0}
                 </span>
-                {CHAPTER_STATUS_OPTIONS.map((s) =>
+                {LIST_BUCKETS.map((s) =>
                   // 计数为 0 但正处于该筛选时仍要显示：否则激活中的 chip 凭空消失，
                   // 用户看不出自己在筛什么、也没法点回「全部」以外的入口
                   counts[s] || filter === s ? (
@@ -630,9 +651,9 @@ export default function ChapterListPage({
                       tabIndex={0}
                       onClick={() => applyFilter(s)}
                       onKeyDown={chipKeyDown(() => applyFilter(s))}
-                      title={STATUS_FULL[s]}
+                      title={BUCKET_LABEL[s]}
                     >
-                      {STATUS_FULL[s]} · {counts[s] ?? 0}
+                      {BUCKET_LABEL[s]} · {counts[s] ?? 0}
                     </span>
                   ) : null
                 )}
@@ -701,8 +722,8 @@ export default function ChapterListPage({
                     <div className="ch-top">
                       <span className="ch-num">第 {c.chapterNumber} 章</span>
                       <span className="ch-title">{c.title}</span>
-                      <span className={`chip ${STATUS_CLASS[c.status]}`}>
-                        {STATUS_FULL[c.status]}
+                      <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
+                        {BUCKET_LABEL[chapterListBucket(c)]}
                       </span>
                     </div>
                     {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
@@ -2434,6 +2455,7 @@ function BatchWriteDialog({
             <ul className="batch-last-result-list">
               <li>
                 字数：{lastResult.content.length}
+                {timing.chapters[lastResult.chapterNumber] !== undefined ? ` · 耗时 ${formatBatchDuration(timing.chapters[lastResult.chapterNumber])}` : ''}
               </li>
               <li className={lastSummary?.autoDeslop?.status === 'failed' || lastSummary?.autoDeslop?.status === 'review_required' ? 'batch-last-result-warn' : undefined}>
                 {lastSummary ? describeAutoDeslopCell(lastSummary) : ''}
@@ -2582,6 +2604,7 @@ function BatchWriteDialog({
                         </span>
                       ) : null}
                     </span>
+                    {timing.chapters[item.chapter] !== undefined ? <span>耗时 {formatBatchDuration(timing.chapters[item.chapter])}</span> : null}
                     <span>{item.words} 字 · {BATCH_QUALITY_LABELS[item.quality ?? 'unverified']}</span>
                     <span title={[item.autoDeslop?.message, ...(item.autoDeslop?.issues ?? [])].filter(Boolean).join('；')} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
                       {describeAutoDeslopCell(item)}

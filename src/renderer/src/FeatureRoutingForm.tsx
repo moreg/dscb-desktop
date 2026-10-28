@@ -8,6 +8,7 @@ import type {
 const FEATURE_CATEGORIES: { key: FeatureCategory; label: string; hint: string }[] = [
   { key: 'chapter', label: '正文生成', hint: '续写 / 追问改写' },
   { key: 'ask', label: '正文追问', hint: '💬 追问 / 全书视野只答不改' },
+  { key: 'refine', label: '精修正文', hint: '候选稿 / 修改方案 / 独立核验' },
   { key: 'review', label: '审稿质检', hint: '审稿 / 深度审稿 / 批量审稿' },
   { key: 'humanize', label: '去AI味改写', hint: '去AI味 / 改写' },
   {

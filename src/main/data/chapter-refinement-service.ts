@@ -10,6 +10,7 @@ import { ChapterVersionRepository } from './chapter-version-repository'
 import { writeJsonAtomic } from './atomic'
 import { acquireBatchProject, activeBatchProjects } from './write-batch-lock'
 import { findJsonObject } from '../../shared/json-extract'
+import { applyChangeHunks } from '../../shared/text-diff'
 import { REFINEMENT_GOALS, type RefinementInput, type RefinementCandidate, type RefinementVerdict,
   type RefinementStage, type RefinementCommit } from '../../shared/chapter-refinement'
 
@@ -37,9 +38,13 @@ export class ChapterRefinementService {
     if (!activeBatchProjects.has(projectId)) {
       if (record.status === 'applying') {
         const current = (await this.chapters.getChapter(projectId, chapter)).content
-        record.status = current === (record.applyingUndo ? record.input.content : record.candidate)
-          ? record.applyingUndo ? 'undone' : 'accepted' : 'failed'
-        if (record.status === 'failed') record.error = '上次采用未完成，请核对当前正文后重新生成。'
+        const target = record.applyingContent ?? (record.applyingUndo ? record.input.content : record.candidate)
+        if (current === target) this.finishApply(record, target, !!record.applyingUndo)
+        else {
+          record.status = 'failed'
+          record.error = '上次采用未完成，请核对当前正文后重新生成。'
+        }
+        this.clearApplying(record)
         await this.save(record)
       } else if (record.status === 'generating' || record.status === 'verifying') {
         record.status = 'cancelled'
@@ -150,41 +155,93 @@ export class ChapterRefinementService {
       await fs.rm(await this.file(projectId, chapter), { force: true })
     } finally { release() }
   }
-  async commit(projectId: string, chapter: number, id: string, currentDraft: string, undo = false): Promise<RefinementCommit> {
+  private currentBase(record: RefinementCandidate): string {
+    return record.adoptedContent ?? record.input.content
+  }
+  private clearApplying(record: RefinementCandidate): void {
+    delete record.applyingUndo
+    delete record.applyingContent
+  }
+  private selectableStatus(record: RefinementCandidate): 'ready' | 'rejected' {
+    return record.verdict?.passed ? 'ready' : 'rejected'
+  }
+  private finishApply(record: RefinementCandidate, content: string, undo: boolean): void {
+    if (undo) {
+      const keepCandidate = typeof record.adoptedContent === 'string'
+      delete record.adoptedContent
+      delete record.adoptedRevision
+      record.status = keepCandidate ? this.selectableStatus(record) : 'undone'
+      return
+    }
+    if (content === record.candidate) {
+      record.status = 'accepted'
+      delete record.adoptedContent
+      delete record.adoptedRevision
+      return
+    }
+    record.status = this.selectableStatus(record)
+    record.adoptedContent = content
+    record.adoptedRevision = contentRevision(content)
+  }
+  async commit(projectId: string, chapter: number, id: string, currentDraft: string, undo = false, hunkIndex?: number): Promise<RefinementCommit> {
     const release = acquireBatchProject(projectId)
     try {
       const record = await this.load(projectId, chapter)
       if (!record || record.id !== id) throw new Error('精修记录已更新，请重新打开')
-      if (undo ? record.status !== 'accepted' : record.status !== 'ready' || !record.verdict?.passed) throw new Error('候选稿尚未通过验收或已被采用，不能执行本次操作')
-      const expectedDraft = undo ? record.candidate : record.input.content
-      if (currentDraft !== expectedDraft) throw new Error('编辑器正文已变化，请保留当前修改后重新精修')
+      if (undo && hunkIndex !== undefined) throw new Error('撤销本次精修不能同时指定单条改动')
+      const partial = typeof record.adoptedContent === 'string'
+      const selectable = record.status === 'ready' || record.status === 'rejected'
+      if (undo) {
+        if (record.status !== 'accepted' && !(selectable && partial)) throw new Error('候选稿尚未通过验收或已被采用，不能执行本次操作')
+      } else if (hunkIndex !== undefined) {
+        if (!selectable || !record.candidate) throw new Error('当前没有可挑选的改动')
+      } else if (record.status !== 'ready' || !record.verdict?.passed) throw new Error('候选稿尚未通过验收或已被采用，不能执行本次操作')
+      const liveContent = undo
+        ? (record.status === 'accepted' ? record.candidate : this.currentBase(record))
+        : this.currentBase(record)
+      if (currentDraft !== liveContent) throw new Error('编辑器正文已变化，请保留当前修改后重新精修')
       const current = (await this.chapters.getChapter(projectId, chapter)).content
-      const expectedRevision = undo ? contentRevision(record.candidate) : record.baseRevision
+      const expectedRevision = undo ? contentRevision(liveContent) : (record.adoptedRevision ?? record.baseRevision)
       if (contentRevision(current) !== expectedRevision) throw new Error('磁盘正文已变化，未覆盖当前内容，请重新读取后精修')
       if (!undo && contentRevision(await this.context(record.input)) !== record.contextHash) throw new Error('参考上下文或规则已变化，请重新生成并核验')
-      const content = undo ? record.input.content : record.candidate
+      let content: string
+      let note: string
+      if (undo) {
+        content = record.input.content
+        note = '撤销本次精修'
+      } else if (hunkIndex !== undefined) {
+        content = applyChangeHunks(this.currentBase(record), record.candidate, [hunkIndex])
+        note = record.verdict?.passed
+          ? `采用独立精修第${hunkIndex + 1}条改动（核验通过）`
+          : `采用独立精修第${hunkIndex + 1}条改动`
+      } else {
+        content = record.candidate
+        note = '采用独立精修候选稿（核验通过）'
+      }
       const dir = await this.projects.resolveDir(projectId)
-      // Preserve the actual editor source, including unsaved edits, before adopting.
-      if (!undo) await new ChapterVersionRepository(dir).create(chapter, { source: 'manual', content: record.input.content, note: '精修前正文快照' })
+      if (!undo && !partial) await new ChapterVersionRepository(dir).create(chapter, { source: 'manual', content: record.input.content, note: '精修前正文快照' })
+      const previousStatus = record.status
       record.applyingUndo = undo
+      record.applyingContent = content
       record.status = 'applying'
       await this.save(record)
       let warning: string | undefined
       try {
         await this.chapters.updateContent(projectId, chapter, content, expectedRevision,
-          { source: undo ? 'manual' : 'reviewed', note: undo ? '撤销本次精修' : '采用独立精修候选稿（核验通过）' })
+          { source: undo ? 'manual' : 'reviewed', note })
       } catch (error) {
         if ((await this.chapters.getChapter(projectId, chapter)).content !== content) {
-          record.status = undo ? 'accepted' : 'ready'
+          record.status = previousStatus
+          this.clearApplying(record)
           await this.save(record)
           throw error
         }
         warning = '正文已保存，附属记录更新未完成，请查看历史版本。'
       }
-      record.status = undo ? 'undone' : 'accepted'
+      this.finishApply(record, content, undo)
+      this.clearApplying(record)
       try { await this.save(record) } catch { warning = '正文已保存，精修记录更新失败；可从历史版本恢复。' }
-      // Existing source hashes invalidate this chapter's derived summary; never replay later memory.
-      return { content, warning }
+      return { content, warning, candidate: record }
     } finally { release() }
   }
 }

@@ -37,8 +37,14 @@ export interface RefinementCandidate {
   status: 'generating' | 'verifying' | 'ready' | 'rejected' | 'cancelled' | 'failed' | 'applying' | 'accepted' | 'undone'
   error?: string
   applyingUndo?: boolean
+  /** 已单条采用后的当前正文；未单条采用时为空。 */
+  adoptedContent?: string
+  /** adoptedContent 的修订哈希，供后续采用核对磁盘。 */
+  adoptedRevision?: string
+  /** 正在写入的目标正文，供崩溃恢复。 */
+  applyingContent?: string
   updatedAt: string
 }
 export type RefinementStage = 'planning' | 'generating' | 'verifying' | 'repairing'
 export interface RefinementResult { ok: boolean; candidate?: RefinementCandidate; plan?: string; error?: string }
-export interface RefinementCommit { content: string; warning?: string }
+export interface RefinementCommit { content: string; warning?: string; candidate?: RefinementCandidate }

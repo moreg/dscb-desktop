@@ -30,10 +30,11 @@ export function splitUnits(text: string): string[] {
 
 type Op = { type: 'eq' | 'del' | 'add'; before?: string; after?: string; beforeIndex: number }
 
-/**
- * 标准 LCS 回溯，产出 eq / del / add 序列，再合并为改动块。
- */
-export function diffUnits(beforeUnits: string[], afterUnits: string[]): TextDiffHunk[] {
+/** 精修面板展示与单条采用共用的改动条数上限。 */
+export const REFINEMENT_HUNK_LIMIT = 80
+const REFINEMENT_DIFF_CELL_LIMIT = 160000
+
+function diffOps(beforeUnits: string[], afterUnits: string[]): Op[] {
   const n = beforeUnits.length
   const m = afterUnits.length
   const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0))
@@ -68,8 +69,10 @@ export function diffUnits(beforeUnits: string[], afterUnits: string[]): TextDiff
     ops.push({ type: 'add', after: afterUnits[j], beforeIndex: i })
     j++
   }
+  return ops
+}
 
-  // 预计算 before 每段起始偏移
+function hunksFromOps(ops: Op[], beforeUnits: string[]): TextDiffHunk[] {
   const offsets: number[] = []
   let acc = 0
   for (const u of beforeUnits) {
@@ -100,6 +103,102 @@ export function diffUnits(beforeUnits: string[], afterUnits: string[]): TextDiff
     })
   }
   return hunks
+}
+
+/**
+ * 标准 LCS 回溯，产出 eq / del / add 序列，再合并为改动块。
+ */
+export function diffUnits(beforeUnits: string[], afterUnits: string[]): TextDiffHunk[] {
+  return hunksFromOps(diffOps(beforeUnits, afterUnits), beforeUnits)
+}
+
+function locateUnits(text: string, units: string[]): number[] {
+  const starts: number[] = []
+  let pos = 0
+  for (const unit of units) {
+    const i = text.indexOf(unit, pos)
+    if (i < 0) throw new Error('这条改动无法在当前正文中定位，请改用整章采用或重新生成。')
+    starts.push(i)
+    pos = i + unit.length
+  }
+  return starts
+}
+
+function unitParts(text: string, units: string[]): { prefix: string; parts: Array<{ unit: string; sep: string }> } {
+  if (!units.length) return { prefix: text, parts: [] }
+  const starts = locateUnits(text, units)
+  return {
+    prefix: text.slice(0, starts[0]),
+    parts: units.map((unit, i) => {
+      const end = starts[i] + unit.length
+      const next = i + 1 < starts.length ? starts[i + 1] : text.length
+      return { unit, sep: text.slice(end, next) }
+    })
+  }
+}
+
+/**
+ * 把 after 中选中的改动块应用到 before，其余位置保持原文。
+ * 序号与 `listRefinementHunks(before, after)` 一致。
+ */
+export function applyChangeHunks(before: string, after: string, selected: number[]): string {
+  const unique = [...new Set(selected)].sort((a, b) => a - b)
+  if (!unique.length) return before
+  const beforeUnits = splitUnits(before)
+  const afterUnits = splitUnits(after)
+  if (beforeUnits.length * afterUnits.length > REFINEMENT_DIFF_CELL_LIMIT) {
+    if (unique.length !== 1 || unique[0] !== 0) throw new Error('改动序号无效')
+    return after
+  }
+  const ops = diffOps(beforeUnits, afterUnits)
+  const hunks = hunksFromOps(ops, beforeUnits)
+  const limit = Math.min(hunks.length, REFINEMENT_HUNK_LIMIT)
+  if (unique.some(index => index < 0 || index >= limit)) throw new Error('改动序号无效')
+  const selectedSet = new Set(unique)
+  const left = unitParts(before, beforeUnits)
+  const right = unitParts(after, afterUnits)
+  const out: string[] = []
+  let i = 0
+  let j = 0
+  let k = 0
+  let hunkId = 0
+  let prefixEmitted = false
+  const emitPrefix = (fromAfter: boolean): void => {
+    if (prefixEmitted) return
+    out.push(fromAfter ? right.prefix : left.prefix)
+    prefixEmitted = true
+  }
+  while (k < ops.length) {
+    if (ops[k].type === 'eq') {
+      emitPrefix(false)
+      out.push(left.parts[i].unit, left.parts[i].sep)
+      i++
+      j++
+      k++
+      continue
+    }
+    const hunkIndex = hunkId++
+    let del = 0
+    let add = 0
+    while (k < ops.length && ops[k].type !== 'eq') {
+      if (ops[k].type === 'del') del++
+      if (ops[k].type === 'add') add++
+      k++
+    }
+    if (selectedSet.has(hunkIndex)) {
+      emitPrefix(add > 0 && i === 0)
+      for (let n = 0; n < add; n++, j++) out.push(right.parts[j].unit, right.parts[j].sep)
+      i += del
+    } else {
+      emitPrefix(false)
+      for (let n = 0; n < del; n++, i++) out.push(left.parts[i].unit, left.parts[i].sep)
+      j += add
+    }
+  }
+  if (!prefixEmitted) out.push(left.prefix)
+  const merged = out.join('')
+  if (merged === before) throw new Error('这条改动没有产生变化')
+  return merged
 }
 
 /** 截断过长片段便于 UI 展示 */
@@ -170,4 +269,15 @@ export function findFirstDiffWindow(
 export function listChangeHunks(before: string, after: string, max = 20): TextDiffHunk[] {
   if (before === after) return []
   return diffUnits(splitUnits(before), splitUnits(after)).slice(0, max)
+}
+
+/**
+ * 精修对比与单条采用共用的改动块列表。超长章节退化为整章一条，避免平方级 diff。
+ */
+export function listRefinementHunks(before: string, after: string): TextDiffHunk[] {
+  if (before === after) return []
+  if (splitUnits(before).length * splitUnits(after).length > REFINEMENT_DIFF_CELL_LIMIT) {
+    return [{ before, after, index: 0, line: 1 }]
+  }
+  return listChangeHunks(before, after, REFINEMENT_HUNK_LIMIT)
 }

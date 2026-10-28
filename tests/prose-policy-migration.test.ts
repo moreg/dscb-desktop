@@ -27,7 +27,7 @@ describe('历史内置表达规则迁移', () => {
     expect(sent.systemPrompt).not.toContain(old)
     expect(sent.gates.D).not.toContain(old)
     expect(sent.systemPrompt).toContain(custom)
-    expect(sent.gates.D).toContain('不搬动动作改变先后顺序')
+    expect(sent.gates.D).toContain('不要为合段改变原意或搬动动作')
     expect(JSON.stringify(overrides)).toBe(original)
   })
 
@@ -42,8 +42,8 @@ describe('历史内置表达规则迁移', () => {
     const overrides = { style_targets: old + '\n' + author, gates: { D: old } }
     const original = JSON.stringify(overrides)
     const migrated = JSON.parse(serializeProseOverrides(overrides))
-    expect(migrated.style_targets).toContain('默认以一句一段为主，段间空一行')
-    expect(migrated.gates.D).toContain('已全绿正文保持原样')
+    expect(migrated.style_targets).toContain('默认一句一段，段间空一行')
+    expect(migrated.gates.D).toContain('既有前部保持原样')
     expect(migrated.style_targets).toContain(author)
     expect(migrated.style_targets).not.toContain(old)
     expect(JSON.stringify(overrides)).toBe(original)

@@ -1,9 +1,53 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import { REFINEMENT_GOALS, type RefinementInput, type RefinementCandidate, type RefinementGoal,
   type RefinementResult, type RefinementStage } from '../../shared/chapter-refinement'
 import type { StreamHandleOf } from '../../shared/types'
-import { listChangeHunks, splitUnits, type TextDiffHunk } from '../../shared/text-diff'
+import { listRefinementHunks, type TextDiffHunk } from '../../shared/text-diff'
 import './chapter-refinement.css'
+
+export interface RefinementPanelPosition { left: number; top: number; width: number; height: number }
+
+export function clampRefinementPanel(
+  left: number, top: number, width: number, height: number,
+  viewport: { width: number; height: number }
+): RefinementPanelPosition {
+  const margin = 8
+  const w = Math.min(Math.max(280, width), Math.max(280, viewport.width - margin * 2))
+  const h = Math.min(Math.max(200, height), Math.max(200, viewport.height - margin * 2))
+  return {
+    left: Math.min(Math.max(margin, left), Math.max(margin, viewport.width - w - margin)),
+    top: Math.min(Math.max(margin, top), Math.max(margin, viewport.height - 80)),
+    width: w,
+    height: h
+  }
+}
+
+function viewportSize(): { width: number; height: number } | null {
+  if (typeof window.innerWidth !== 'number' || window.innerWidth <= 0) return null
+  return { width: window.innerWidth, height: window.innerHeight }
+}
+
+function compactViewport(): boolean {
+  const view = viewportSize()
+  return !!view && view.width <= 600
+}
+
+function readPanelPosition(projectId: string): RefinementPanelPosition | null {
+  try {
+    const raw = localStorage.getItem(`refinement:pos:${projectId}`)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<RefinementPanelPosition>
+    if ([parsed.left, parsed.top, parsed.width, parsed.height].some(value => typeof value !== 'number' || !Number.isFinite(value))) return null
+    const view = viewportSize()
+    const position = parsed as RefinementPanelPosition
+    return view ? clampRefinementPanel(position.left, position.top, position.width, position.height, view) : position
+  } catch { return null }
+}
+
+function writePanelPosition(projectId: string, position: RefinementPanelPosition): void {
+  try { localStorage.setItem(`refinement:pos:${projectId}`, JSON.stringify(position)) } catch { /* 位置仅在本次会话有效 */ }
+}
 
 interface Props {
   projectId: string
@@ -27,9 +71,7 @@ const STAGES: Record<RefinementStage, string> = {
 }
 const STATUS = { generating: '未完成', verifying: '待核验', ready: '自动核验通过', rejected: '未通过核验', cancelled: '已停止', failed: '未完成', applying: '采用处理中', accepted: '已采用', undone: '已撤销' }
 function changes(before: string, after: string): TextDiffHunk[] {
-  // Avoid quadratic diff allocation for very long chapters; retain a complete readable comparison.
-  if (splitUnits(before).length * splitUnits(after).length > 160000) return [{ before, after, index: 0, line: 1 }]
-  return listChangeHunks(before, after, 80)
+  return listRefinementHunks(before, after)
 }
 
 export default function ChapterRefinementPanel(props: Props) {
@@ -56,9 +98,13 @@ export default function ChapterRefinementPanel(props: Props) {
   })
   const handledTrigger = useRef(props.autoTrigger)
   const selected = scope === 'selection' && props.selection ? props.selection : undefined
-  const stale = !!record && props.content !== (record.status === 'accepted' ? record.candidate : record.input.content)
+  const baseline = record ? (record.status === 'accepted' ? record.candidate : (record.adoptedContent ?? record.input.content)) : props.content
+  const stale = !!record && props.content !== baseline
   const sourceChanged = source !== props.content
-  const hunks = useMemo(() => record?.candidate && view === 'changes' ? changes(record.input.content, record.candidate) : [], [record, view])
+  const hunks = useMemo(() => record?.candidate && view === 'changes' ? changes(record.adoptedContent ?? record.input.content, record.candidate) : [], [record, view])
+  const canPickHunk = !busy && !props.disabled && !stale && !!record?.candidate && (record.status === 'ready' || record.status === 'rejected')
+  const canAdopt = canPickHunk && record?.status === 'ready' && !!record.verdict?.passed
+  const canUndo = !busy && !stale && !props.disabled && (record?.status === 'accepted' || typeof record?.adoptedContent === 'string')
 
   useEffect(() => {
     mounted.current = true
@@ -132,31 +178,103 @@ export default function ChapterRefinementPanel(props: Props) {
     void runRef.current('generate', true)
   }, [props.autoTrigger, auto])
 
-  async function commit(undo: boolean): Promise<void> {
+  const panelRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<{ offsetX: number; offsetY: number; width: number; height: number } | null>(null)
+  const [position, setPosition] = useState<RefinementPanelPosition | null>(() => readPanelPosition(props.projectId))
+  const positionRef = useRef(position)
+  positionRef.current = position
+  const [dragging, setDragging] = useState(false)
+  const compact = compactViewport()
+
+  function startPanelDrag(event: ReactMouseEvent<HTMLElement>): void {
+    if (compactViewport()) return
+    const target = event.target as HTMLElement
+    if (target.closest('button, a, input, select, textarea')) return
+    const rect = panelRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const view = viewportSize()
+    if (!view) return
+    dragRef.current = { offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top, width: rect.width, height: rect.height }
+    const next = clampRefinementPanel(rect.left, rect.top, rect.width, rect.height, view)
+    positionRef.current = next
+    setPosition(next)
+    setDragging(true)
+    event.preventDefault()
+  }
+
+  useEffect(() => {
+    if (!dragging) return
+    const handleMove = (event: MouseEvent) => {
+      const drag = dragRef.current
+      const view = viewportSize()
+      if (!drag || !view) return
+      const next = clampRefinementPanel(event.clientX - drag.offsetX, event.clientY - drag.offsetY, drag.width, drag.height, view)
+      positionRef.current = next
+      setPosition(next)
+    }
+    const handleUp = () => {
+      setDragging(false)
+      dragRef.current = null
+      if (positionRef.current) writePanelPosition(current.current.projectId, positionRef.current)
+    }
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+    }
+  }, [dragging])
+
+  useEffect(() => {
+    const handleResize = () => {
+      const currentPosition = positionRef.current
+      const view = viewportSize()
+      if (!currentPosition || !view) return
+      const next = clampRefinementPanel(currentPosition.left, currentPosition.top, currentPosition.width, currentPosition.height, view)
+      positionRef.current = next
+      setPosition(next)
+    }
+    window.addEventListener?.('resize', handleResize)
+    return () => window.removeEventListener?.('resize', handleResize)
+  }, [])
+
+  async function commit(undo: boolean, hunkIndex?: number): Promise<void> {
     if (!record || busyRef.current || props.disabled || stale) return
     const before = current.current.content
     setWorking(true, true); setError(''); setNotice('')
     try {
-      const result = await window.api.commitRefinement(props.projectId, props.chapterNumber, record.id, before, undo)
+      const result = hunkIndex === undefined
+        ? await window.api.commitRefinement(props.projectId, props.chapterNumber, record.id, before, undo)
+        : await window.api.commitRefinement(props.projectId, props.chapterNumber, record.id, before, undo, hunkIndex)
       if (!mounted.current) return
-      setRecord({ ...record, status: undo ? 'undone' : 'accepted' })
+      setRecord(result.candidate ?? { ...record, status: undo ? 'undone' : 'accepted' })
       await current.current.onCommitted(before, result.content)
       if (!mounted.current) return
       setSource(result.content)
-      setNotice(result.warning || (undo ? '已恢复精修前正文，并保留历史版本。' : '已采用并保存。本章概要会按新正文判定是否过期，后续章节状态不重放。'))
+      setNotice(result.warning || (undo
+        ? (result.candidate?.status === 'ready' ? '已恢复精修前正文，候选仍可继续挑选，并保留历史版本。' : '已恢复精修前正文，并保留历史版本。')
+        : hunkIndex !== undefined && result.content !== record.candidate
+          ? `已采用第 ${hunkIndex + 1} 条并保存。其余改动仍可继续挑选。本章概要会按新正文判定是否过期，后续章节状态不重放。`
+          : '已采用并保存。本章概要会按新正文判定是否过期，后续章节状态不重放。'))
     } catch (e) { if (mounted.current) setError((e as Error).message) }
     finally { if (mounted.current) setWorking(false) }
   }
   async function discard(): Promise<void> {
     if (!record || busyRef.current) return
+    const kept = typeof record.adoptedContent === 'string'
     setWorking(true); setError('')
-    try { await window.api.discardRefinement(props.projectId, props.chapterNumber, record.id); if (mounted.current) { setRecord(null); setNotice('已放弃候选，正文保持不变。') } }
+    try { await window.api.discardRefinement(props.projectId, props.chapterNumber, record.id); if (mounted.current) { setRecord(null); setNotice(kept ? '已放弃剩余候选，已采用的改动保留在正文中。' : '已放弃候选，正文保持不变。') } }
     catch (e) { if (mounted.current) setError((e as Error).message) }
     finally { if (mounted.current) setWorking(false) }
   }
   if (!props.open) return null
-  return <aside className="refinement-panel" role="dialog" aria-label="正文精修" aria-modal="false" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); props.onClose() } }}>
-    <header className="refinement-header"><div><span className="refinement-eyebrow">第 {props.chapterNumber} 章 · 独立候选稿</span><h2>正文精修</h2></div>
+  const floating = position && !compact
+  return <aside ref={panelRef} className={`refinement-panel${dragging ? ' refinement-dragging' : ''}${floating ? ' refinement-floating' : ''}`}
+    role="dialog" aria-label="正文精修" aria-modal="false"
+    style={floating ? { left: position.left, top: position.top, right: 'auto', bottom: 'auto', width: position.width, height: position.height } : undefined}
+    onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); props.onClose() } }}>
+    <header className="refinement-header" onMouseDown={startPanelDrag} title="拖动标题栏移动窗口">
+      <div><span className="refinement-eyebrow">第 {props.chapterNumber} 章 · 独立候选稿</span><h2>正文精修</h2></div>
       <button className="btn btn-sm" onClick={props.onClose} title="收起面板，候选记录会保留">收起</button></header>
     <div className="refinement-body" ref={body}>
       <p className="desc">原文保留，采用后才替换。默认保留剧情事实、人物关系和章节结局。</p>
@@ -193,15 +311,16 @@ export default function ChapterRefinementPanel(props: Props) {
         </div>}
         {record.candidate && <><div className="refinement-actions" aria-label="对比视图">
           <button className="btn btn-sm" aria-pressed={view === 'changes'} onClick={() => setView('changes')}>修改位置</button><button className="btn btn-sm" aria-pressed={view === 'full'} onClick={() => setView('full')}>完整对比</button></div>
-          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={i} open={i === 0}><summary>改动 {i + 1}</summary><div><section><h4>原文</h4><pre>{hunk.before || '（新增）'}</pre></section><section><h4>候选</h4><pre>{hunk.after || '（删除）'}</pre></section></div></details>) : <p>候选与原文相同。</p>}</>
-            : <div className="refinement-full"><section><h4>原文</h4><pre>{record.input.content}</pre></section><section><h4>候选</h4><pre>{record.candidate}</pre></section></div>}</>}
+          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。核验未通过时也可以单条采用。</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}><summary><span>改动 {i + 1}</span>{(record.status === 'ready' || record.status === 'rejected') && <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`采用改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void commit(false, i) }}>采用此条</button>}</summary><div><section><h4>原文</h4><pre>{hunk.before || '（新增）'}</pre></section><section><h4>候选</h4><pre>{hunk.after || '（删除）'}</pre></section></div></details>) : <p>候选与原文相同。</p>}</>
+            : <div className="refinement-full"><section><h4>原文</h4><pre>{record.adoptedContent ?? record.input.content}</pre></section><section><h4>候选</h4><pre>{record.candidate}</pre></section></div>}</>}
       </section>}
     </div>
-    <footer className="refinement-footer"><span className="desc">采用前可自由对比，原文不会自动替换。</span><div className="refinement-actions">
-      {record?.status === 'accepted' ? <button className="btn" disabled={busy || stale || props.disabled} onClick={() => void commit(true)}>撤销本次精修</button> : <>
+    <footer className="refinement-footer"><span className="desc">每条改动都能单独采用。整章采用需核验通过。采用前原文不会自动替换。</span><div className="refinement-actions">
+      {record?.status === 'accepted' ? <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销本次精修</button> : <>
+        {typeof record?.adoptedContent === 'string' && <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销已采用条目</button>}
         {record && <button className="btn" disabled={busy} onClick={() => { body.current?.scrollTo({ top: 0, behavior: 'smooth' }); setNotice('修改目标或补充要求后重新生成。新一轮仍以原文为事实基线。') }}>继续调整</button>}
-        <button className="btn" disabled={!record || busy || props.disabled} onClick={() => void discard()}>放弃候选</button>
-        <button className="btn btn-primary" disabled={busy || props.disabled || stale || record?.status !== 'ready' || !record?.verdict?.passed} onClick={() => void commit(false)}>采用并保存</button></>}
+        <button className="btn" disabled={!record || busy || props.disabled} onClick={() => void discard()}>{typeof record?.adoptedContent === 'string' ? '放弃剩余候选' : '放弃候选'}</button>
+        <button className="btn btn-primary" disabled={!canAdopt} onClick={() => void commit(false)}>{typeof record?.adoptedContent === 'string' ? '采用剩余并保存' : '采用并保存'}</button></>}
     </div></footer>
   </aside>
 }

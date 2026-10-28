@@ -3037,11 +3037,42 @@ function ProviderRow({
 }
 
 /* ---------- 新增 provider 表单 ---------- */
+const PROVIDER_DRAFT_BASE_KEY = 'dscb.providerDraft.baseUrl'
+const PROVIDER_DRAFT_API_KEY = 'dscb.providerDraft.apiKey'
+const DEFAULT_PROVIDER_BASE_URL = 'https://api.openai.com/v1'
+
+/** 添加 provider 时记住上次的 Base URL 和 API Key。只写本机 localStorage，不进仓库。 */
+export function readProviderDraft(storage: Pick<Storage, 'getItem'> | null): { baseUrl: string; apiKey: string } {
+  let baseUrl: string
+  let apiKey: string
+  try {
+    baseUrl = storage?.getItem(PROVIDER_DRAFT_BASE_KEY)?.trim() || ''
+    apiKey = storage?.getItem(PROVIDER_DRAFT_API_KEY) || ''
+  } catch {
+    baseUrl = ''
+    apiKey = ''
+  }
+  return { baseUrl: baseUrl || DEFAULT_PROVIDER_BASE_URL, apiKey }
+}
+
+export function writeProviderDraft(
+  storage: Pick<Storage, 'setItem'> | null,
+  draft: { baseUrl: string; apiKey: string }
+): void {
+  try {
+    storage?.setItem(PROVIDER_DRAFT_BASE_KEY, draft.baseUrl)
+    storage?.setItem(PROVIDER_DRAFT_API_KEY, draft.apiKey)
+  } catch {
+    // 隐私模式或存储满时仍允许本次保存 provider，只是下次要再填。
+  }
+}
+
 function NewProviderForm({ onCreated }: { onCreated: () => void }) {
+  const remembered = readProviderDraft(typeof localStorage === 'undefined' ? null : localStorage)
   const [label, setLabel] = useState('')
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
+  const [baseUrl, setBaseUrl] = useState(remembered.baseUrl)
   const [model, setModel] = useState('')
-  const [apiKey, setApiKey] = useState('')
+  const [apiKey, setApiKey] = useState(remembered.apiKey)
   const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
   const [reasoningEffort, setReasoningEffort] = useState<ProviderSummary['reasoningEffort']>('medium')
   const [saving, setSaving] = useState(false)
@@ -3222,17 +3253,19 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
     setSaving(true)
     try {
+      const savedBaseUrl = isCli ? '' : baseUrl.trim().replace(/\/+$/, '')
+      const savedApiKey = isCli ? '' : apiKey.trim()
       await window.api.upsertProvider({
         id: newId(),
         label: resolvedLabel,
-        baseUrl: isCli ? '' : baseUrl.trim().replace(/\/+$/, ''),
+        baseUrl: savedBaseUrl,
         model: isCli ? model.trim() || 'default' : model.trim(),
-        apiKey: isCli ? '' : apiKey.trim(),
+        apiKey: savedApiKey,
         protocol,
         ...(isResponses || isClaude ? { reasoningEffort } : {})
       })
+      if (!isCli) writeProviderDraft(localStorage, { baseUrl: savedBaseUrl, apiKey: savedApiKey })
       setLabel('')
-      setApiKey('')
       setModel('')
       setCodexCustom(false)
       setAgyCustom(false)
@@ -3536,7 +3569,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                 id="np-baseurl"
                 className="input"
                 value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value
+                  setBaseUrl(next)
+                  writeProviderDraft(localStorage, { baseUrl: next, apiKey })
+                }}
                 placeholder="https://api.openai.com/v1"
                 autoComplete="off"
                 spellCheck={false}
@@ -3607,7 +3644,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             className="input"
             type="password"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value
+              setApiKey(next)
+              writeProviderDraft(localStorage, { baseUrl, apiKey: next })
+            }}
             placeholder="sk-…"
             autoComplete="off"
           />

@@ -40,6 +40,19 @@ describe('chapter status', () => {
     )
   })
 
+  it('treats an existing but empty prose file as outline', async () => {
+    await new ProseRepo(dir).write(1, '', '一章')
+    expect((await cs.getChapter(projectId, 1)).meta).toMatchObject({ status: 'outline', wordCount: 0 })
+    expect(await cs.listChapters(projectId).then((list) => list.find((c) => c.chapterNumber === 1)?.status))
+      .toBe('outline')
+
+    await new ProseRepo(dir).write(1, ' \n\t', '一章')
+    expect((await cs.getChapter(projectId, 1)).meta.status).toBe('outline')
+
+    await setChapterStatus(dir, 1, 'reviewed', hashProse(''))
+    expect((await cs.listChapters(projectId)).find((c) => c.chapterNumber === 1)?.status).toBe('outline')
+  })
+
   it('merges legacy reviewed marks into正文 in both detail and list', async () => {
     expect((await cs.getChapter(projectId, 1)).meta.status).toBe('outline')
     const prose = '第一章正文。\n\n他推门而入。'

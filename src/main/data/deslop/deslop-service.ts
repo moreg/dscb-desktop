@@ -1,4 +1,4 @@
-import { migrateLegacyProseDefaults, serializeProseOverrides } from '../../../shared/prose-policy'
+import { migrateLegacyProseDefaults, serializeProseOverrides, PROSE_POLICY_RULES } from '../../../shared/prose-policy'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { LlmService } from '../llm-service'
@@ -307,7 +307,14 @@ export class DeslopService {
       const scanOnce = async (value: string): Promise<DeslopScanReport> => {
         const cached = scans.get(value)
         if (cached) return cached
-        const scan = await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+        // 整章验收也要覆盖旁白和行动组织，不能在对白分支跳过叙事诊断。
+        // 同一候选只诊断一次；修订后的新候选必须重新检查。
+        const scan = opts.polishNarrative
+          ? await this.scanWithNarrative(value, opts)
+          : await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+        if (scan.narrative?.status === 'failed') {
+          throw new Error(`整章叙事检查未完成：${scan.narrative.error}`)
+        }
         scans.set(value, scan)
         return scan
       }
@@ -490,7 +497,9 @@ export class DeslopService {
       emit(`   风格语境：${bits.join(' ')}\n`)
     }
 
-    const effectiveSystemPrompt = migrateLegacyProseDefaults(opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT)
+    const effectiveSystemPrompt = migrateLegacyProseDefaults(opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT) + `
+
+${PROSE_POLICY_RULES}`
     const allChangeSummary: string[] = []
     let finalText = text
 

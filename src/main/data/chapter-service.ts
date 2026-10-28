@@ -173,7 +173,6 @@ export class ChapterService {
     const content = new Map<number, string>()
     for (const e of rhythm) {
       const body = bodies.get(e.chapter)!
-      const has = Boolean(body.content.trim())
       const det = detailedMap.get(e.chapter)
       // wordCount：正文实时统计（v4 删除了 记忆系统/章节进度.md，不再有外部字数表）
       const chapterContent = body.content
@@ -185,7 +184,7 @@ export class ChapterService {
         chapterNumber: e.chapter,
         title: det?.title || e.title,
         wordCount,
-        status: statusMap.get(e.chapter) ?? (has ? 'draft' : 'outline'),
+        status: statusMap.get(e.chapter) ?? (chapterContent.trim() ? 'draft' : 'outline'),
         // synopsis 改用细纲 plotSummary（核心事件）
         synopsis: det?.plotSummary,
         volume: e.volume ?? det?.volume,

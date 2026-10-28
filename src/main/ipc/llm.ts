@@ -243,7 +243,16 @@ export function registerLlmIpc(secret: SecretStore, service: LlmService): void {
   safeHandle('llm:setFeatureRouting', async (_e, raw: unknown) => {
     if (!raw || typeof raw !== 'object') throw new Error('PROVIDER_INVALID: routing required')
     const incoming = raw as Record<string, unknown>
-    const validCategories = new Set(['chapter', 'review', 'humanize', 'opening', 'auxiliary', 'ask'])
+    const validCategories = new Set([
+      'chapter',
+      'refine',
+      'review',
+      'humanize',
+      'opening',
+      'auxiliary',
+      'ask',
+      'library'
+    ])
     const cfg = await secret.read()
     const ids = new Set(cfg.providers.map((p) => p.id))
     const cleaned: Record<string, { providerId: string; model?: string }> = {}

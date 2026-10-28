@@ -3901,6 +3901,22 @@ pre.body {
   font-family: var(--font-kai);
   letter-spacing: 0.04em;
 }
+.batch-progress-time {
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.batch-progress-chapters {
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 2px;
+  max-height: 72px;
+  overflow: auto;
+  font-variant-numeric: tabular-nums;
+}
 .batch-progress-current {
   color: var(--ink);
   margin: 4px 0;

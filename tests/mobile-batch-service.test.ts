@@ -155,7 +155,7 @@ describe('MobileBatchService: 电脑执行、可信恢复与写入安全', () =>
     expect(job.stage).toBeUndefined()
     expect(job.retryWait).toBeUndefined()
     expect(job.summaries).toEqual([1, 2].map((chapter) => ({ chapter, wordCount: expect.any(Number), saved: true,
-      checks: 'completed', deslop: '已完成去 AI 味', memory: '记忆已同步 2 项' })))
+      checks: 'completed', deslop: '已完成去 AI 味', memory: '记忆已同步 2 项', durationMs: expect.any(Number) })))
     expect((await saved()).job).toEqual(job)
   })
 
@@ -322,6 +322,38 @@ describe('MobileBatchService: 电脑执行、可信恢复与写入安全', () =>
     await service.start(projectId, input)
     await settle()
     expect((await service.get(projectId))?.progress.error).toBe('保存失败，恢复稿已保存在：[电脑端恢复文件]')
+  })
+
+  it('记录总耗时和每章耗时，暂停离开的时间不计入', async () => {
+    let now = 1_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    generate.mockImplementation(async (_id, _from, _to, _onChapter, _style, options) => {
+      options!.onGenerationStage!('generating', 1)
+      now += 4_000
+      return { ...progress('paused'), current: 0, currentChapter: 1, completed: [], pauseReason: '先停一下' }
+    })
+    await service.start(projectId, input)
+    await settle()
+    expect((await service.get(projectId))?.timing?.elapsedMs).toBe(4_000)
+    now += 60_000
+    service = fresh()
+    resume.mockImplementation(async (_id, _from, _to, onChapter, _style, options) => {
+      options!.onGenerationStage!('generating', 1)
+      now += 6_000
+      onChapter(1, result(1))
+      now += 3_000
+      options!.onGenerationStage!('generating', 2)
+      now += 7_000
+      onChapter(2, result(2))
+      return progress()
+    })
+    const restored = (await service.get(projectId))!
+    await service.resume(projectId, restored.id)
+    await settle()
+    const job = (await service.get(projectId))!
+    expect(job.summaries.map((item) => [item.chapter, item.durationMs])).toEqual([[1, 10_000], [2, 7_000]])
+    expect(job.timing?.elapsedMs).toBe(20_000)
+    expect(job.timing?.runStartedAt).toBeUndefined()
   })
 
   it('快照是独立副本，浏览器数据不能修改服务端已完成章节', async () => {

@@ -12,7 +12,7 @@ const original = prose(65, 35)
 const candidate = prose(70, 30)
 const passed = { passed: true, factsUnchanged: true, issues: [], expressionFindings: [] }
 const mockLlm = (reply: (prompt: string, opts: GenerateOptions) => string): LlmService =>
-  ({ generateStream: vi.fn((prompt: string, opts: GenerateOptions) => opts.meta?.feature === 'deslop:scene-dialogue-review' ? JSON.stringify({ passed: true, assessment: '测试替身仅用于验证编排', reviewedPassages: [{ excerpt: prompt.split('【待审核稿】\n\n').at(-1), reason: '本次候选的连续段落已由测试替身明确确认' }], findings: [] }) : reply(prompt, opts)) }) as unknown as LlmService
+  ({ generateStream: vi.fn((prompt: string, opts: GenerateOptions) => opts.meta?.feature === 'deslop:narrative-flow' ? '[]' : opts.meta?.feature === 'deslop:scene-dialogue-review' ? JSON.stringify({ passed: true, assessment: '测试替身仅用于验证编排', reviewedPassages: [{ excerpt: prompt.split('【待审核稿】\n\n').at(-1), reason: '本次候选的连续段落已由测试替身明确确认' }], findings: [] }) : reply(prompt, opts)) }) as unknown as LlmService
 
 describe('自动润色性能与核验复用', () => {
   it('缺少整章表达验收结果时不能仅凭正文护栏和事实检查采用',async()=>{
@@ -82,7 +82,7 @@ describe('自动润色性能与核验复用', () => {
     expect(output.content).toBe(candidate)
     expect(output.report.status).toBe('applied')
     expect(vi.mocked(llm.generateStream).mock.calls.map(([, opts]) => opts?.meta?.feature))
-      .toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review', 'deslop:repair-plan', 'deslop:scene-repair', 'deslop:verify', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
+      .toEqual(['deslop:narrative-flow', 'deslop:dialogue-review', 'deslop:scene-dialogue-review', 'deslop:repair-plan', 'deslop:scene-repair', 'deslop:verify', 'deslop:narrative-flow', 'deslop:dialogue-review', 'deslop:scene-dialogue-review'])
     expect(scan.mock.calls.map(([text]) => text)).toEqual([original, candidate])
     expect(validateCandidate).toHaveBeenCalledOnce()
     expect(validateCandidate).toHaveBeenCalledWith(candidate)
@@ -103,7 +103,7 @@ describe('自动润色性能与核验复用', () => {
     })
     expect(output.report.status).toBe('review_required')
     expect(output.report.dialogueQuality?.passed).toBe(false)
-    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+    expect(llm.generateStream).toHaveBeenCalledTimes(3)
   })
 
   it('无效修复未改变稿件时只审核一次，并将匹配失败反馈交给下一次修复', async () => {

@@ -81,6 +81,9 @@ describe('independent chapter refinement', () => {
     expect(call).toHaveBeenCalledTimes(4)
     await expect(service.commit(input.projectId, 1, result.id, original)).rejects.toThrow('尚未通过验收')
     expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
+    const picked = await service.commit(input.projectId, 1, result.id, original, false, 0)
+    expect(picked.content).toBe(candidate)
+    expect(picked.candidate?.status).toBe('accepted')
   })
   it('keeps an interrupted candidate recoverable but unadoptable and releases the project lock', async () => {
     const controller = new AbortController()
@@ -100,6 +103,25 @@ describe('independent chapter refinement', () => {
     vi.spyOn(chapters, 'updateContent').mockImplementation(async (...args) => { await actual(...args); throw new Error('metadata failed') })
     expect(await service.commit(input.projectId, 1, result.id, original)).toMatchObject({ content: candidate, warning: expect.any(String) })
     expect((await service.load(input.projectId, 1))?.status).toBe('accepted')
+  })
+  it('recovers a partial hunk write after a crash and keeps remaining candidate', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    const mixed = '甲段改。\n\n乙段。\n\n丙段。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。'))
+    const result = await service.generate(input)
+    const file = join(dir, '.cache/chapter-refinement/1.json')
+    const record = JSON.parse(await readFile(file, 'utf8'))
+    await writeFile(file, JSON.stringify({ ...record, status: 'applying', applyingContent: mixed }))
+    await chapters.updateContent(input.projectId, 1, mixed)
+    expect(await make().load(input.projectId, 1)).toMatchObject({ status: 'ready', adoptedContent: mixed })
+    const rest = await service.commit(input.projectId, 1, result.id, mixed)
+    expect(rest.content).toBe(rewritten)
+    expect(rest.candidate?.status).toBe('accepted')
   })
   it('recovers an adopted write after a crash and prevents stale undo', async () => {
     const result = await service.generate(input)
@@ -121,5 +143,64 @@ describe('independent chapter refinement', () => {
   it('refuses fabricated verifier evidence and malformed verdicts', () => {
     expect(() => parseRefinementVerdict(verdict('不存在的引文'), original, candidate)).toThrow('引文')
     expect(() => parseRefinementVerdict('{}', original, candidate)).toThrow('不完整')
+  })
+  it('adopts a single hunk, keeps remaining candidate, then adopts the rest or undoes', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。', '改丙段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。'))
+    const result = await service.generate(input)
+    const first = await service.commit(input.projectId, 1, result.id, source, false, 0)
+    expect(first.content).toBe('甲段改。\n\n乙段。\n\n丙段。')
+    expect(first.candidate).toMatchObject({ status: 'ready', adoptedContent: first.content })
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(first.content)
+    const remaining = await service.commit(input.projectId, 1, result.id, first.content, false, 0)
+    expect(remaining.content).toBe(rewritten)
+    expect(remaining.candidate?.status).toBe('accepted')
+    await service.commit(input.projectId, 1, result.id, rewritten, true)
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(source)
+  })
+  it('keeps a partial adoption ready so remaining hunks can still be picked or undone', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。'))
+    const result = await service.generate(input)
+    const first = await service.commit(input.projectId, 1, result.id, source, false, 0)
+    const undone = await service.commit(input.projectId, 1, result.id, first.content, true)
+    expect(undone.content).toBe(source)
+    expect(undone.candidate?.status).toBe('ready')
+    expect(undone.candidate?.adoptedContent).toBeUndefined()
+    const again = await service.commit(input.projectId, 1, result.id, source, false, 1)
+    expect(again.content).toBe('甲段。\n\n乙段。\n\n丙段改。')
+    const rest = await service.commit(input.projectId, 1, result.id, again.content)
+    expect(rest.content).toBe(rewritten)
+    expect(rest.candidate?.status).toBe('accepted')
+  })
+  it('keeps a rejected candidate rejected after a partial hunk and still allows picking more', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。', false))
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。', false))
+    const result = await service.generate(input)
+    expect(result.status).toBe('rejected')
+    const first = await service.commit(input.projectId, 1, result.id, source, false, 0)
+    expect(first.content).toBe('甲段改。\n\n乙段。\n\n丙段。')
+    expect(first.candidate).toMatchObject({ status: 'rejected', adoptedContent: first.content })
+    await expect(service.commit(input.projectId, 1, result.id, first.content)).rejects.toThrow('尚未通过验收')
+    const rest = await service.commit(input.projectId, 1, result.id, first.content, false, 0)
+    expect(rest.content).toBe(rewritten)
+    expect(rest.candidate?.status).toBe('accepted')
   })
 })

@@ -128,12 +128,16 @@ describe('summarizeUsage', () => {
     const now = new Date('2026-06-22T10:00:00Z')
     const records: UsageRecord[] = [
       { at: '2026-06-22T01:00:00Z', feature: 'outline-main', model: 'test-model', inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 },
-      { at: '2026-06-22T02:00:00Z', feature: 'cast', model: 'test-model', inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 }
+      { at: '2026-06-22T02:00:00Z', feature: 'cast', model: 'test-model', inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 },
+      { at: '2026-06-22T03:00:00Z', feature: 'chapter-refine', model: 'test-model', inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 },
+      { at: '2026-06-22T04:00:00Z', feature: 'chapter-refine-verify', model: 'test-model', inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 }
     ]
     const s = summarizeUsage(records, PRICING, now)
     const labels = s.byFeature.map((f) => f.feature)
     expect(labels).toContain('总纲生成')
     expect(labels).toContain('登场识别')
+    expect(labels).toContain('精修正文')
+    expect(labels).toContain('精修核验')
   })
 
   it('unknown feature key falls through to original key as label', () => {

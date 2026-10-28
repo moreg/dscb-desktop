@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { DIALOGUE_PARAGRAPHS } from '../src/shared/prose-policy'
+import { DIALOGUE_PARAGRAPHS, DIALOGUE_PUNCTUATION_RULE } from '../src/shared/prose-policy'
 import { buildDeslopPrompt } from '../src/main/data/skill-prompts/deslop/anti-ai-methods'
 import {
   buildSystemPrompt,
@@ -11,6 +11,12 @@ import {
 } from '../src/main/data/skill-prompts'
 
 describe('resolveGenreVoice', () => {
+  it('验收与修复使用共享的默认分段，保留连续发言自然合段和规范句号', () => {
+    expect(DIALOGUE_PUNCTUATION_RULE).toContain(DIALOGUE_PARAGRAPHS)
+    expect(DIALOGUE_PUNCTUATION_RULE).toContain('同一段发言中意思连贯的内容用逗号')
+    expect(DIALOGUE_PUNCTUATION_RULE).toContain('完整陈述句使用句号')
+    expect(DIALOGUE_PUNCTUATION_RULE).not.toContain('除末尾句号外不出现中文句号')
+  })
   it('returns urban as default when genre is empty', () => {
     expect(resolveGenreVoice(undefined).key).toBe('urban')
     expect(resolveGenreVoice('').key).toBe('urban')
@@ -85,18 +91,18 @@ describe('buildSystemPrompt', () => {
     const old = '同一对引号内的中间不能出现中文句号「。」，陈述台词只在闭合引号前保留一个句号；陈述台词以句号加闭合引号收尾'
     const overrides = { dialogue: old }
     const prompt = buildSystemPrompt(undefined, null, overrides)
-    expect(prompt).toContain('独立陈述台词的句号放在后引号前')
+    expect(prompt).toContain('完整陈述台词末尾用句号')
     expect(prompt).not.toContain('陈述台词只在闭合引号前保留一个句号')
     expect(overrides.dialogue).toBe(old)
   })
   it.each([undefined, 'extend', 'finish'] as const)('%s 模式按技能统一分段和对白标点', (mode) => {
     const defaults = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(defaults).toContain('默认以一句一段为主，段间空一行')
+    expect(defaults).toContain('默认一句一段，段间空一行')
     expect(defaults).toContain('不设强制比例')
     const prompt = buildSystemPrompt(undefined, null, { dialogue: '' }, null, mode)
     const finalRules = prompt.slice(prompt.lastIndexOf('【正文保真共享规则'))
     expect(finalRules).toContain('一句一段')
-    expect(finalRules).toContain('独立陈述台词的句号放在后引号前')
+    expect(finalRules).toContain('完整陈述台词末尾用句号')
     expect(finalRules).toContain(DIALOGUE_PARAGRAPHS)
     expect(finalRules).not.toContain('不按句号机械拆分多句发言')
   })
@@ -104,8 +110,8 @@ describe('buildSystemPrompt', () => {
   it('旧内置强制拆段迁移为短段优先且允许自然合段，保留作者其他自定义要求', () => {
     const oldRule = '- **一句一段**：每段只写一句完整的话，同一行动与其直接反馈若是两句话也必须分段，不把独立句子的句号改成逗号规避分段。对话独立成段，引号内中间不用中文句号，陈述台词结尾保留句号；多句台词拆成引号完整的独立段落，问号、感叹号按语气保留。'
     const prompt = buildSystemPrompt(undefined, null, { style_targets: oldRule + '\n保留作者自己的语气要求。' })
-    expect(prompt).toContain('默认以一句一段为主，段间空一行')
-    expect(prompt).toContain('需要连贯时可自然合段')
+    expect(prompt).toContain('默认一句一段，段间空一行')
+    expect(prompt).toContain('意思连贯的两句可以用逗号')
     expect(prompt).toContain('保留作者自己的语气要求。')
   })
 

@@ -95,4 +95,26 @@ describe('批量任务保存与恢复校验', () => {
     expect(parseSavedBatchSession(JSON.stringify({ ...session(), interruptedChapter: 100 })))
       .toBeNull()
   })
+
+  it('恢复总耗时和每章耗时，损坏的耗时不让整批恢复失败', () => {
+    const saved = {
+      ...session(),
+      timing: {
+        elapsedMs: 9000,
+        currentChapter: 12,
+        chapterDurations: { 10: 4000, 11: 5000 },
+        chapterPartial: { 12: 1000 },
+        runStartedAt: 1
+      }
+    }
+    expect(parseSavedBatchSession(JSON.stringify(saved))?.timing).toEqual({
+      totalMs: 9000,
+      chapters: { 10: 4000, 11: 5000, 12: 1000 }
+    })
+    const broken = session()
+    ;(broken as { timing?: unknown }).timing = { elapsedMs: -1, chapterDurations: {}, chapterPartial: {} }
+    const parsed = parseSavedBatchSession(JSON.stringify(broken))
+    expect(parsed?.progress).toEqual(broken.progress)
+    expect(parsed?.timing).toEqual({ totalMs: 0, chapters: {} })
+  })
 })

@@ -3,6 +3,18 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { getBatchRangeError, MAX_BATCH_CHAPTERS } from '../../shared/batch-range'
+import {
+  MAX_BATCH_TIMING_MS,
+  beginBatchRun,
+  discardOpenAnchors,
+  emptyBatchTiming,
+  finishBatchChapter,
+  noteBatchChapter,
+  parseBatchTiming,
+  pauseBatchTiming,
+  rollBatchTiming,
+  type BatchTimingState
+} from '../../shared/batch-timing'
 import type { BatchProgress, ChapterContent, ChapterDetail, ChapterFlowResult } from '../../shared/types'
 import { writeJsonAtomic } from '../data/atomic'
 import { acquireBatchProject } from '../data/write-batch-lock'
@@ -29,6 +41,8 @@ export interface MobileBatchSummary {
   checks: 'completed' | 'pending'
   deslop: string
   memory: string
+  /** 本章从开写到检查结束的墙钟耗时，含中断后续跑。 */
+  durationMs?: number
 }
 
 export interface MobileBatchJob {
@@ -42,6 +56,8 @@ export interface MobileBatchJob {
   stage?: 'generating' | 'deslop' | 'checking'
   streamText: string
   summaries: MobileBatchSummary[]
+  /** 本批墙钟耗时。暂停和电脑重启之间的空档不计入。 */
+  timing?: BatchTimingState
   retryWait?: {
     chapter: number
     attempt: number
@@ -105,8 +121,10 @@ const savedJobSchema = z.object({
       saved: z.literal(true),
       checks: z.enum(['completed', 'pending']),
       deslop: z.string().max(300),
-      memory: z.string().max(300)
+      memory: z.string().max(300),
+      durationMs: z.number().int().min(0).max(MAX_BATCH_TIMING_MS).optional()
     })).max(MAX_BATCH_CHAPTERS),
+    timing: z.unknown().optional(),
     retryWait: z.object({
       chapter: chapterSchema,
       attempt: z.number().int().positive(),
@@ -164,7 +182,9 @@ export class MobileBatchService implements MobileBatchRunner {
             total: args.toChapter - args.fromChapter + 1, current: 0,
             currentChapter: args.fromChapter, completed: [], status: 'generating'
           },
-          stage: 'generating', streamText: '', summaries: [], updatedAt: Date.now()
+          stage: 'generating', streamText: '', summaries: [],
+          timing: beginBatchRun(null, 'start', args.fromChapter, Date.now()),
+          updatedAt: Date.now()
         }
         await this.save(job)
         this.jobs.set(projectId, job)
@@ -197,6 +217,7 @@ export class MobileBatchService implements MobileBatchRunner {
         delete job.progress.pauseReason
         delete job.progress.error
         delete job.retryWait
+        job.timing = beginBatchRun(job.timing ?? null, 'resume', next, Date.now())
         await this.save(job)
         this.launch(job, true, release)
         return clone(job)!
@@ -287,6 +308,7 @@ export class MobileBatchService implements MobileBatchRunner {
       },
       onGenerationStage: (stage, chapter) => {
         job.stage = stage === 'preparing' || stage.startsWith('preparing:') || stage === 'waiting' || stage === 'generating' || stage.startsWith('agy:') ? 'generating' : stage === 'foreshadowRepair' || stage.startsWith('foreshadow:') || stage.startsWith('continuity:') ? 'checking' : 'deslop'
+        job.timing = noteBatchChapter(job.timing ?? emptyBatchTiming(), chapter, Date.now())
         job.progress.currentChapter = chapter
         job.progress.status = 'generating'
         // 下一章开始说明上一章写后处理已完成。
@@ -297,6 +319,7 @@ export class MobileBatchService implements MobileBatchRunner {
       },
       onAutoDeslopResult: (_result, chapter) => {
         job.stage = 'checking'
+        job.timing = noteBatchChapter(job.timing ?? emptyBatchTiming(), chapter, Date.now())
         job.progress.currentChapter = chapter
         job.progress.status = 'flow'
         this.checkpoint(job)
@@ -325,7 +348,9 @@ export class MobileBatchService implements MobileBatchRunner {
           const previousSummary = job.summaries.find((summary) => summary.chapter === chapter)
           const deslopFallback = previousSummary?.deslop ?? (resume && previous.pendingPostProcessChapter === chapter
             ? '复用已保存正文，无需再次去 AI 味' : '未返回去 AI 味报告')
-          job.summaries = [...job.summaries.filter((summary) => summary.chapter !== chapter), summarize(chapter, result, deslopFallback)]
+          const finished = finishBatchChapter(job.timing ?? emptyBatchTiming(), chapter, Date.now())
+          job.timing = finished.state
+          job.summaries = [...job.summaries.filter((summary) => summary.chapter !== chapter), summarize(chapter, result, deslopFallback, finished.durationMs)]
             .sort((a, b) => a.chapter - b.chapter)
           job.streamText = ''
           delete job.retryWait
@@ -338,6 +363,7 @@ export class MobileBatchService implements MobileBatchRunner {
         } : undefined,
         { autoContinue: true, autoStrength: job.autoStrength },
         (chapter, attempt, maxAttempts, waitMs) => {
+          job.timing = noteBatchChapter(job.timing ?? emptyBatchTiming(), chapter, Date.now())
           job.progress.currentChapter = chapter
           job.streamText = ''
           job.retryWait = { chapter, attempt, maxAttempts, waitMs, retryAt: Date.now() + waitMs }
@@ -370,6 +396,7 @@ export class MobileBatchService implements MobileBatchRunner {
       if (controller.signal.aborted) job.progress.pauseReason = '任务已暂停，可以继续未完成章节'
       else job.progress.error = message
     } finally {
+      if (job.timing) job.timing = pauseBatchTiming(job.timing, Date.now())
       job.running = false
       job.stopping = false
       job.streamText = ''
@@ -395,9 +422,10 @@ export class MobileBatchService implements MobileBatchRunner {
     if (!parsed.success || parsed.data.job.projectId !== projectId || !validProgress(parsed.data.job.progress)) {
       throw new MobileBatchError(409, '批量任务记录已损坏，请在电脑端检查任务存储')
     }
-    const job = parsed.data.job
+    const job = readStoredJob(parsed.data.job)
     if (job.running || job.stopping || ['pending', 'generating', 'flow'].includes(job.progress.status)) {
       await this.recoverInterrupted(job)
+      if (job.timing) job.timing = discardOpenAnchors(job.timing)
       job.running = false
       job.stopping = false
       job.streamText = ''
@@ -467,6 +495,7 @@ export class MobileBatchService implements MobileBatchRunner {
   }
 
   private save(job: MobileBatchJob): Promise<void> {
+    if (job.timing?.runStartedAt !== undefined) job.timing = rollBatchTiming(job.timing, Date.now())
     job.updatedAt = Date.now()
     const snapshot = clone(job)
     const previous = this.saveTails.get(job.projectId) ?? Promise.resolve()
@@ -516,7 +545,13 @@ function publicMessage(error: unknown): string {
     .slice(0, 1_500)
 }
 
-function summarize(chapter: number, result: ChapterFlowResult, deslopFallback: string): MobileBatchSummary {
+function readStoredJob(stored: z.infer<typeof savedJobSchema>['job']): MobileBatchJob {
+  const timing = parseBatchTiming(stored.timing, true)
+  const { timing: _storedTiming, ...job } = stored
+  return timing ? { ...job, timing } : job
+}
+
+function summarize(chapter: number, result: ChapterFlowResult, deslopFallback: string, durationMs?: number): MobileBatchSummary {
   const memoryErrors = result.memoryApply?.errors ?? []
   const applied = result.memoryApply?.applied
   const memoryCount = applied ? Object.values(applied).reduce((sum, count) => sum + count, 0) : 0
@@ -532,6 +567,7 @@ function summarize(chapter: number, result: ChapterFlowResult, deslopFallback: s
     chapter, wordCount: countWords(result.content), saved: true,
     checks: pending ? 'pending' : 'completed',
     deslop: result.autoDeslop?.message ? publicMessage(new Error(result.autoDeslop.message)).slice(0, 300) : deslopFallback,
-    memory
+    memory,
+    ...(durationMs !== undefined ? { durationMs } : {})
   }
 }

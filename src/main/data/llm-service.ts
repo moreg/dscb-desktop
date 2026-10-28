@@ -157,10 +157,6 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   // 正文生成
   chapter: 'chapter',
   'chapter-adjust': 'chapter',
-  'chapter-refine': 'chapter',
-  'chapter-refine-plan': 'chapter',
-  'chapter-refine-repair': 'chapter',
-  'chapter-refine-verify': 'review',
   batchForeshadowRepair: 'chapter',
   continuityRepair: 'chapter',
   chapterForeshadowRepair: 'chapter',
@@ -168,6 +164,11 @@ const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
   'chapter-adjust-plan': 'chapter',
     // After verified factual drift or a rejected-draft cycle; retain the chapter route and all acceptance gates.
   'chapter-scene-repair': 'chapter',
+  // 精修正文（候选稿 / 方案 / 补救 / 独立核验共用同一模型）
+  'chapter-refine': 'refine',
+  'chapter-refine-plan': 'refine',
+  'chapter-refine-repair': 'refine',
+  'chapter-refine-verify': 'refine',
   // 审稿质检
   review: 'review',
   'deslop:scene-dialogue-review': 'review',

@@ -145,8 +145,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('refinement:load', { projectId, chapterNumber }),
     discardRefinement: (projectId: string, chapterNumber: number, id: string): Promise<void> =>
       ipcRenderer.invoke('refinement:discard', { projectId, chapterNumber, id }),
-    commitRefinement: (projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean): Promise<RefinementCommit> =>
-      ipcRenderer.invoke('refinement:commit', { projectId, chapterNumber, id, currentDraft, undo }),
+    commitRefinement: (projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit> =>
+      ipcRenderer.invoke('refinement:commit', { projectId, chapterNumber, id, currentDraft, undo, hunkIndex }),
     brainstormLongStory: (input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
       const requestId = crypto.randomUUID()
       const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {

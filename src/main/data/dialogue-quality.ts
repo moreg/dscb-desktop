@@ -3,7 +3,7 @@ import type { LlmService } from './llm-service'
 import { DIALOGUE_VITALITY_RULES, DIALOGUE_FACT_PRESERVATION_RULES } from './skill-prompts/scene-naturalness'
 import { reviewSceneDialogue } from './scene-dialogue-review'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
-import { DIALOGUE_PUNCTUATION_RULE } from '../../shared/prose-policy'
+import { DIALOGUE_PUNCTUATION_RULE, NATURAL_PARAGRAPHS } from '../../shared/prose-policy'
 import type { DialogueQualityReport, DeslopFinding } from '../../shared/types'
 export type { DialogueQualityReport } from '../../shared/types'
 
@@ -202,7 +202,7 @@ export async function ensureDialogueQuality(
       DIALOGUE_VITALITY_RULES,
       '本次明确授权双向改善表达载体：可由在场且已知该消息的人说出必要信息，也可把无用途的重复对白说明合并为叙述，保留有效直接对白，必要时围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
       '对照问题涉及的连续回合修订，保留有效交流、必要动作和原有调查方向。精简重复时保留其承载的事实、否定边界、未完成事项和后续决定；不能将多条仍有效的线索压成只有一条。事实差异优先最小局部修复，不为重组表达另写剧情。',
-      `排版一句一段，直接对白独立成段，${DIALOGUE_PUNCTUATION_RULE}动作不插进同一人的连续发言中。`,
+      `${NATURAL_PARAGRAPHS}\n${DIALOGUE_PUNCTUATION_RULE}动作不插进同一人的连续发言中。`,
       '破折号和省略号按功能处理，不能机械变句号。原稿闭合台词末尾被下一句或动作打断的“——”可以保留，用来保留尚未说完的请求；其他修辞停顿应改短句或动作。不能补全尚未说出的消息、删除原有请求，不能留下“需要您。”这样的缺谓语整句。',
       '【本次作者修订要求（必须落实）】', options.revisionInstruction ?? '',
       '【修订前正文（核对旧问题是否仍在，不是新剧情来源）】', options.previousDraft ?? '',

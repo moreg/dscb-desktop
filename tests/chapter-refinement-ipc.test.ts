@@ -28,5 +28,12 @@ it('propagates early cancellation and cleans up its request registry', async () 
 it('commits only a server-side candidate ID and passes the editor baseline for conflict checking', async () => {
   const id = randomUUID(); commit.mockResolvedValue({ content: '候选' })
   expect(await handlers.get('refinement:commit')!({}, { projectId: 'project', chapterNumber: 1, id, currentDraft: '原文', undo: false, candidate: '伪造稿' })).toEqual({ content: '候选' })
-  expect(commit).toHaveBeenCalledWith('project', 1, id, '原文', false)
+  expect(commit).toHaveBeenCalledWith('project', 1, id, '原文', false, undefined)
+})
+it('forwards a hunk index for single-change adoption and ignores client-supplied candidate text', async () => {
+  const id = randomUUID(); commit.mockResolvedValue({ content: '混写正文' })
+  expect(await handlers.get('refinement:commit')!({}, {
+    projectId: 'project', chapterNumber: 1, id, currentDraft: '原文', undo: false, hunkIndex: 2, candidate: '伪造稿'
+  })).toEqual({ content: '混写正文' })
+  expect(commit).toHaveBeenCalledWith('project', 1, id, '原文', false, 2)
 })

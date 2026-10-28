@@ -134,6 +134,7 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
 /** 功能大类：用于按任务类型路由到不同 provider/模型 */
 export type FeatureCategory =
   | 'chapter'
+  | 'refine'
   | 'review'
   | 'humanize'
   | 'opening'
@@ -579,7 +580,7 @@ export interface RendererApi {
   refineChapter(input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void): StreamHandleOf<RefinementResult>
   loadRefinement(projectId: string, chapterNumber: number): Promise<RefinementCandidate | null>
   discardRefinement(projectId: string, chapterNumber: number, id: string): Promise<void>
-  commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean): Promise<RefinementCommit>
+  commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit>
   getAppUpdateState(): Promise<AppUpdateState>
   checkAppUpdate(): Promise<AppUpdateState>
   downloadAppUpdate(): Promise<AppUpdateState>

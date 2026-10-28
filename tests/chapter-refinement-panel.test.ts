@@ -22,7 +22,7 @@ vi.mock('react', async () => {
     }
   }
 })
-import Panel from '../src/renderer/src/ChapterRefinementPanel'
+import Panel, { clampRefinementPanel } from '../src/renderer/src/ChapterRefinementPanel'
 const candidate: RefinementCandidate = { version: 1, id: 'candidate-1', input: { projectId: 'p', chapterNumber: 1, content: '原文句子。', goal: 'expression', instruction: '' },
   baseRevision: '', contextHash: '', candidate: '精修句子。', changes: ['改善表达'], attempts: 1, status: 'ready', updatedAt: '',
   verdict: { passed: true, factsPreserved: true, goalMet: true, assessment: '保留事实', issues: [], evidence: [{ before: '原文句子。', after: '精修句子。', reason: '精修' }] } }
@@ -40,6 +40,13 @@ function button(node: React.ReactNode, text: string): React.ReactElement<{ onCli
     for (const child of React.Children.toArray(node.props.children)) { try { return button(child, text) } catch { /* search siblings */ } }
   }
   throw new Error(`missing button ${text}`)
+}
+function header(node: React.ReactNode): React.ReactElement<{ onMouseDown?: (event: { target: { closest: (selector: string) => null }; preventDefault: () => void; clientX: number; clientY: number }) => void }> {
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    if (node.type === 'header') return node as ReturnType<typeof header>
+    for (const child of React.Children.toArray(node.props.children)) { try { return header(child) } catch { /* search siblings */ } }
+  }
+  throw new Error('missing header')
 }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
 const handle = (result: Promise<RefinementResult>) => Object.assign(result, { requestId: 'request', abort })
@@ -76,7 +83,16 @@ describe('refinement panel behavior', () => {
     const tree = render()
     expect(renderToStaticMarkup(tree)).toContain('事实变化')
     expect(button(tree, '采用并保存').props.disabled).toBe(true)
+    expect(button(tree, '采用此条').props.disabled).toBe(false)
     expect(refine).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled()
+  })
+  it('lets a rejected candidate be adopted hunk by hunk', async () => {
+    load.mockResolvedValue({ ...candidate, status: 'rejected', verdict: { ...candidate.verdict, passed: false, issues: ['事实变化'] } })
+    commit.mockResolvedValue({ content: candidate.candidate, candidate: { ...candidate, status: 'accepted' } })
+    render(); await flush()
+    button(render(), '采用此条').props.onClick(); await flush()
+    expect(commit).toHaveBeenCalledWith('p', 1, 'candidate-1', '原文句子。', false, 0)
+    expect(committed).toHaveBeenCalledWith('原文句子。', '精修句子。')
   })
   it('cancels on unmount and ignores late results without writing to the next chapter UI', async () => {
     let finish!: (value: RefinementResult) => void
@@ -106,5 +122,41 @@ describe('refinement panel behavior', () => {
     render(); await flush(); button(render(), '采用并保存').props.onClick(); await flush()
     expect(renderToStaticMarkup(render())).toContain('磁盘正文已变化')
     expect(committed).not.toHaveBeenCalled()
+  })
+  it('keeps the floating panel inside the viewport', () => {
+    expect(clampRefinementPanel(-40, -12, 720, 900, { width: 1280, height: 800 })).toEqual({
+      left: 8, top: 8, width: 720, height: 784
+    })
+    expect(clampRefinementPanel(4000, 4000, 720, 400, { width: 1000, height: 600 })).toMatchObject({
+      left: 272, top: 520, width: 720, height: 400
+    })
+  })
+  it('drags from the title bar without starting when the handle has no layout yet', () => {
+    const node = header(render())
+    expect(typeof node.props.onMouseDown).toBe('function')
+    node.props.onMouseDown?.({ target: { closest: () => null }, preventDefault() {}, clientX: 40, clientY: 20 })
+    expect(renderToStaticMarkup(render())).toContain('refinement-panel')
+  })
+  it('adopts a single displayed hunk without taking the rest of the candidate', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    const merged = '甲段改。\n\n乙段。\n\n丙段。'
+    const multi: RefinementCandidate = {
+      ...candidate,
+      input: { ...candidate.input, content: source },
+      candidate: rewritten,
+      verdict: { ...candidate.verdict!, evidence: [{ before: '甲段。', after: '甲段改。', reason: '精修' }] }
+    }
+    load.mockResolvedValue(multi)
+    commit.mockResolvedValue({ content: merged, candidate: { ...multi, adoptedContent: merged } })
+    props = { ...props, content: source }
+    render(); await flush()
+    expect(renderToStaticMarkup(render())).toContain('采用此条')
+    expect(button(render(), '采用此条').props.disabled).toBe(false)
+    button(render(), '采用此条').props.onClick(); await flush()
+    expect(commit).toHaveBeenCalledWith('p', 1, 'candidate-1', source, false, 0)
+    expect(committed).toHaveBeenCalledWith(source, merged)
+    expect(renderToStaticMarkup(render())).toContain('已采用第 1 条并保存')
+    expect(renderToStaticMarkup(render())).toContain('采用剩余并保存')
   })
 })

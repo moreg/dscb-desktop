@@ -21,6 +21,7 @@ import {
 import { resolveGenreVoice, type GenreVoice, type GenreKey } from './skill-prompts/genre-voice'
 import { DEFAULT_REVIEW_THRESHOLDS } from './skill-prompts'
 import { countWords } from './words'
+import { DIALOGUE_PARAGRAPHS } from '../../shared/prose-policy'
 import { runCustomAlgorithmChecks } from './custom-check-engine'
 import type {
   AuditReport,
@@ -991,7 +992,7 @@ function pushQualityViolations(
             snippet: truncate(s, 80),
             offset: idx,
             ruleId: 'long_sentence',
-            suggestion: '仅在语意不清时自然断句；台词按独立对话段处理，引号内除末尾句号外不使用中文句号，多句按语意拆为完整引号段落'
+            suggestion: `仅在语意不清时自然断句；${DIALOGUE_PARAGRAPHS}`
           })
           scanFrom = idx + s.length
           reported++
