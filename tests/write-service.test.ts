@@ -1028,6 +1028,25 @@ describe('WriteService', () => {
       spy.mockRestore()
     })
 
+    it('chapterRoute 只作为这一批正文的 providerOverride，不改强度计算', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+      const chapterRoute = { providerId: 'p_gemini', model: 'gemini-2.5-pro' }
+
+      await service.generateChaptersBatch(
+        projectId, 1, 1, () => {}, null, {}, undefined,
+        { autoStrength: true, chapterRoute }
+      )
+
+      expect(spy.mock.calls[0][3]).toMatchObject({
+        providerOverride: chapterRoute,
+        strengthOverride: { temperature: 0.8, reasoningEffort: 'medium' }
+      })
+      spy.mockRestore()
+    })
+
     it('autoStrength 关闭（默认）时不传 strengthOverride，行为与之前一致', async () => {
       const service = new WriteService(ps, mockLlm(''))
       const spy = vi

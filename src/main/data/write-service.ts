@@ -139,6 +139,7 @@ import type {
   ChapterSelfCheckReport,
   CharacterPositionFixResult,
   AdjustPlanComplianceResult,
+  ChapterModelRoute,
   DetailedOutlineItem
 } from '../../shared/types'
 import {
@@ -221,6 +222,11 @@ export interface BatchRunOptions {
    * 对 openai/anthropic/openai-responses/claude/codex/antigravity 协议生效，见 llm-service 里的说明。
    */
   autoStrength?: boolean
+  /**
+   * 这一批正文临时使用的 provider。
+   * 只传给正文生成，不写全局功能路由；去 AI 味、审稿和后处理仍走各自路由。
+   */
+  chapterRoute?: ChapterModelRoute
 }
 
 function diffText(diff: OutlineDiffItem): string {
@@ -3978,6 +3984,7 @@ export class WriteService {
               ;(opts as BatchGenerateOptions).onFlowProgress?.(detail ? `${step}:${detail}` : step, ch)
             }, {
               ...opts, styleProfileId, strengthOverride,
+              providerOverride: runOptions?.chapterRoute,
               onGenerationStage: (stage: ChapterGenerationStage) => (opts as BatchGenerateOptions).onGenerationStage?.(stage, ch),
               onAutoDeslopResult: (report: AutoDeslopResult) => (opts as BatchGenerateOptions).onAutoDeslopResult?.(report, ch),
               onProseGenerated: persistContent,

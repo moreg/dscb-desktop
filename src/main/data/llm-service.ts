@@ -1,6 +1,6 @@
 import { trackChapterCall } from './chapter-execution'
 import type { SecretStore } from './secret-store'
-import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
+import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort, ChapterModelRoute } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity, listAntigravityModelsLive } from './antigravity-runner'
 import { buildAntigravityPrompt } from './antigravity-prompt'
@@ -66,6 +66,14 @@ export interface GenerateOptions {
    * grok 忽略覆盖值。所有覆盖都不修改持久化的 provider 配置。
    */
   strengthOverride?: { temperature?: number; reasoningEffort?: ReasoningEffort }
+
+  /**
+   * 单次调用改用另一个已保存的 provider / 模型。
+   * 合并进当次请求，不写 featureRouting，也不改 provider 自身配置。
+   * 调用方只应加在正文生成上；审稿、去 AI 味和后处理仍走各自路由。
+   * provider 已删除时回退到原来的功能路由。
+   */
+  providerOverride?: ChapterModelRoute
 }
 
 export interface UsageInfo {
@@ -364,8 +372,15 @@ export class LlmService {
    * 回退条件：无 feature / feature 未映射 / 路由未配置 / 路由指向的 provider 已删除 -> activeId
    * 模型覆盖：routing.model 非空时覆盖 provider.model，返回新对象（下游无感知）。
    */
-  private async resolveProvider(feature?: string): Promise<ProviderConfig | null> {
+  private async resolveProvider(feature?: string, override?: ChapterModelRoute): Promise<ProviderConfig | null> {
     const cfg = await this.secret.read()
+    if (override?.providerId) {
+      const picked = cfg.providers.find((x) => x.id === override.providerId)
+      if (picked) {
+        const modelOverride = override.model?.trim()
+        return modelOverride ? { ...picked, model: modelOverride } : picked
+      }
+    }
     // 精确匹配优先；未命中时按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）
     const category = featureCategoryOf(feature)
     const routing = category ? cfg.featureRouting?.[category] : undefined
@@ -510,7 +525,7 @@ export class LlmService {
   private async generateStreamUntracked(prompt: string, opts: GenerateOptions): Promise<string> {
     // 调用前已取消：立刻退出，避免再开一轮 CLI/HTTP
     if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
-    const resolved = await this.resolveProvider(opts.meta?.feature)
+    const resolved = await this.resolveProvider(opts.meta?.feature, opts.providerOverride)
     if (!resolved) throw new Error('LLM_NOT_CONFIGURED')
     /**
      * strengthOverride 只在这次调用里生效，合并出一份临时对象，不写回 resolveProvider

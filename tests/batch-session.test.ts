@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   getBatchResumeChapter,
+  parseChapterModelRoute,
   parseSavedBatchSession,
+  readWindowChapterModel,
   recoverBatchProgress,
   type SavedBatchSession
 } from '../src/renderer/src/ChapterListPage'
@@ -57,6 +59,35 @@ describe('批量任务断线恢复', () => {
 })
 
 describe('批量任务保存与恢复校验', () => {
+  it('恢复这一批正文模型，损坏的模型记录不让整批恢复失败', () => {
+    const saved = { ...session(), chapterRoute: { providerId: ' p_gemini ', model: ' gemini-2.5-pro ' } }
+    expect(parseSavedBatchSession(JSON.stringify(saved))?.chapterRoute).toEqual({
+      providerId: 'p_gemini', model: 'gemini-2.5-pro'
+    })
+    const broken = session()
+    ;(broken as { chapterRoute?: unknown }).chapterRoute = { providerId: '' }
+    expect(parseSavedBatchSession(JSON.stringify(broken))?.progress.fromChapter).toBe(10)
+    expect(parseSavedBatchSession(JSON.stringify(broken))?.chapterRoute).toBeUndefined()
+  })
+
+  it('窗口正文模型只读写当前 sessionStorage', () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value)
+    })
+    expect(readWindowChapterModel('book-a')).toBeNull()
+    sessionStorage.setItem('writer:window-chapter-model:book-a', JSON.stringify({
+      providerId: 'p_gemini', model: 'gemini-2.5-pro'
+    }))
+    expect(readWindowChapterModel('book-a')).toEqual({ providerId: 'p_gemini', model: 'gemini-2.5-pro' })
+    expect(readWindowChapterModel('book-b')).toBeNull()
+    expect(parseChapterModelRoute({ providerId: 'p_gpt', model: 'gpt' })).toEqual({
+      providerId: 'p_gpt', model: 'gpt'
+    })
+    vi.unstubAllGlobals()
+  })
+
   it('恢复同一批范围、已保存章节、待检查章与作者所选配置', () => {
     const saved = session()
     expect(parseSavedBatchSession(JSON.stringify(saved))).toEqual(saved)

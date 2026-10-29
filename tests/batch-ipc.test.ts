@@ -115,6 +115,22 @@ describe('批量 IPC 的范围、并发和取消边界', () => {
     expect(sender.listenerCount('destroyed')).toBe(0)
   })
 
+  it.each(channels)('%s 透传本窗口正文模型，空白模型名不覆盖 provider 自带模型', async (channel) => {
+    const mock = channel === channels[0] ? generate : resume
+    expect((await invoke(channel, { chapterRoute: { providerId: 'p_gemini', model: '  gemini-2.5-pro  ' } })).ok).toBe(true)
+    expect(mock.mock.calls.at(-1)?.[7]).toEqual({
+      autoContinue: false,
+      autoStrength: false,
+      chapterRoute: { providerId: 'p_gemini', model: 'gemini-2.5-pro' }
+    })
+    expect((await invoke(channel, { requestId: 'batch-blank', chapterRoute: { providerId: 'p_gpt', model: '   ' } })).ok).toBe(true)
+    expect(mock.mock.calls.at(-1)?.[7]).toEqual({
+      autoContinue: false,
+      autoStrength: false,
+      chapterRoute: { providerId: 'p_gpt' }
+    })
+  })
+
   it('跨窗口 generate/resume 共享项目锁，另一项目可独立运行', async () => {
     let finish!: (value: BatchProgress) => void
     generate.mockImplementation(() => new Promise((resolve) => { finish = resolve }))

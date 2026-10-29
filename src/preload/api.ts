@@ -896,7 +896,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
       onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
       onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+      /** 本窗口这一批正文使用的模型；不写全局路由 */
+      chapterRoute?: { providerId: string; model?: string }
     ) => {
       const requestId = externalRequestId ?? crypto.randomUUID()
       const chapterHandler = (
@@ -949,7 +951,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           requestId,
           batchState,
           autoContinue,
-          autoStrength
+          autoStrength,
+          ...(chapterRoute ? { chapterRoute } : {})
         })
         .finally(() => {
           ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
@@ -1020,7 +1023,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
       onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
       onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+      /** 本窗口这一批正文使用的模型；不写全局路由 */
+      chapterRoute?: { providerId: string; model?: string }
     ) => {
       const requestId = externalRequestId ?? crypto.randomUUID()
       const chapterHandler = (
@@ -1073,7 +1078,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           requestId,
           batchState,
           autoContinue,
-          autoStrength
+          autoStrength,
+          ...(chapterRoute ? { chapterRoute } : {})
         })
         .finally(() => {
           ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)

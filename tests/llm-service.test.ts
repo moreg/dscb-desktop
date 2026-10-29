@@ -818,6 +818,58 @@ describe('LlmService feature routing', () => {
   })
 })
 
+describe('LlmService providerOverride：单次调用换正文模型，不改路由', () => {
+  it('指定 provider 和模型时走该通道，功能路由与另一调用保持原样', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-'))
+    const store = new SecretStore(path.join(dir, 'providers.enc'))
+    const gpt = {
+      ...sampleProvider,
+      id: 'p_gpt',
+      label: 'GPT',
+      baseUrl: 'https://gpt.example.com/v1',
+      model: 'gpt-6.1',
+      apiKey: 'sk-gpt'
+    }
+    const gemini = {
+      ...sampleProvider,
+      id: 'p_gemini',
+      label: 'Gemini',
+      baseUrl: 'https://gemini.example.com/v1',
+      model: 'gemini-2.5-pro',
+      apiKey: 'sk-gemini'
+    }
+    await store.write({
+      activeId: gpt.id,
+      providers: [gpt, gemini],
+      featureRouting: { chapter: { providerId: gpt.id, model: 'gpt-6.1' } }
+    })
+    const svc = new LlmService(store)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      body: sseBody(['data: {"choices":[{"delta":{"content":"字"}}]}\n\n', 'data: [DONE]\n\n'])
+    }) as never)
+
+    await svc.generateStream('本章', {
+      meta: { feature: 'chapter' },
+      providerOverride: { providerId: 'p_gemini', model: 'gemini-2.5-flash' }
+    })
+    await svc.generateStream('审稿', { meta: { feature: 'review' }, providerOverride: { providerId: 'p_missing' } })
+    await svc.generateStream('下一章', { meta: { feature: 'chapter' } })
+
+    const bodies = fetchSpy.mock.calls.map((call) => {
+      const [url, init] = call as [string, RequestInit]
+      return { url, model: JSON.parse(init.body as string).model as string }
+    })
+    expect(bodies[0]).toEqual({ url: 'https://gemini.example.com/v1/chat/completions', model: 'gemini-2.5-flash' })
+    expect(bodies[1]).toEqual({ url: 'https://gpt.example.com/v1/chat/completions', model: 'gpt-6.1' })
+    expect(bodies[2]).toEqual({ url: 'https://gpt.example.com/v1/chat/completions', model: 'gpt-6.1' })
+    const saved = await store.read()
+    expect(saved.featureRouting?.chapter).toEqual({ providerId: 'p_gpt', model: 'gpt-6.1' })
+    expect(saved.providers.find((item) => item.id === 'p_gemini')?.model).toBe('gemini-2.5-pro')
+    fetchSpy.mockRestore()
+  })
+})
+
 describe('LlmService strengthOverride：单次调用覆盖，不落盘', () => {
   it('openai/anthropic 协议：温度覆盖写进请求体，但不改保存的 provider 配置', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-strength-'))

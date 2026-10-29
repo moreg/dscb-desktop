@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoDeslopResult,
   ChapterMeta,
+  ChapterModelRoute,
   Character,
   BatchProgress,
   ChapterFlowResult,
@@ -14,6 +15,7 @@ import type {
   MemoryCandidateItem,
   MemoryCandidateSummary,
   ProjectData,
+  ProviderSummary,
   TeardownEntry
 } from '../../shared/types'
 import { countPendingConfirms } from '../../shared/post-write-sync'
@@ -1547,6 +1549,63 @@ export interface SavedBatchSession {
   styleProfileId: string | null
   /** 上次窗口离开时可能仍在生成/检查的章，恢复时核对磁盘。 */
   interruptedChapter?: number
+  /** 这一批正文实际使用的模型。恢复时沿用，不回写全局路由。 */
+  chapterRoute?: ChapterModelRoute
+}
+
+const WINDOW_CHAPTER_MODEL_PREFIX = 'writer:window-chapter-model:'
+
+/** 窗口自己的正文模型。sessionStorage 按窗口分开，不进所有窗口共用的 localStorage。 */
+export function parseChapterModelRoute(value: unknown): ChapterModelRoute | null {
+  if (!value || typeof value !== 'object') return null
+  const route = value as { providerId?: unknown; model?: unknown }
+  if (typeof route.providerId !== 'string') return null
+  const providerId = route.providerId.trim()
+  if (!providerId || providerId.length > 100) return null
+  if (route.model !== undefined && typeof route.model !== 'string') return null
+  const model = typeof route.model === 'string' ? route.model.trim() : ''
+  if (model.length > 255) return null
+  return model ? { providerId, model } : { providerId }
+}
+
+export function readWindowChapterModel(projectId: string): ChapterModelRoute | null {
+  try {
+    const raw = sessionStorage.getItem(WINDOW_CHAPTER_MODEL_PREFIX + projectId)
+    return raw ? parseChapterModelRoute(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
+}
+
+function writeWindowChapterModel(projectId: string, route: ChapterModelRoute): void {
+  try {
+    sessionStorage.setItem(WINDOW_CHAPTER_MODEL_PREFIX + projectId, JSON.stringify(route))
+  } catch {
+    // 窗口存储不可用时，选择仍留在当前对话框，这一批请求照样带上。
+  }
+}
+
+function routeValue(route: ChapterModelRoute | null): string {
+  if (!route) return ''
+  return `${route.providerId}::${route.model ?? ''}`
+}
+
+function routeFromValue(value: string): ChapterModelRoute | null {
+  const splitAt = value.indexOf('::')
+  if (splitAt <= 0) return null
+  return parseChapterModelRoute({
+    providerId: value.slice(0, splitAt),
+    model: value.slice(splitAt + 2)
+  })
+}
+
+function modelsForProvider(
+  provider: ProviderSummary,
+  listed: string[] | undefined,
+  selected: ChapterModelRoute | null
+): string[] {
+  const extra = selected?.providerId === provider.id ? selected.model : undefined
+  return [...new Set([...(listed ?? []), provider.model, extra].map((item) => item?.trim()).filter((item): item is string => !!item))]
 }
 
 /** 中断章未完成时重写该章；已完成章则继续下一章，待检查稿始终优先复用。 */
@@ -1574,6 +1633,11 @@ export function parseSavedBatchSession(raw: string | null): SavedBatchSession | 
       !Number.isSafeInteger(session.interruptedChapter) ||
       session.interruptedChapter < p.fromChapter || session.interruptedChapter > p.toChapter
     )) return null
+    if (session.chapterRoute !== undefined) {
+      const route = parseChapterModelRoute(session.chapterRoute)
+      if (!route) delete session.chapterRoute
+      else session.chapterRoute = route
+    }
     if (session.timing !== undefined) session.timing = restoreBatchTiming(session.timing, p.fromChapter, p.toChapter)
     return session
   } catch {
@@ -1628,7 +1692,10 @@ function BatchWriteDialog({
   const sessionRef = useRef<SavedBatchSession | null>(restoredSession)
   const [timing, setTiming] = useState(() => clockRef.current.snapshot(performance.now()))
   const persistSession = (session: SavedBatchSession): void => {
-    const next = { ...session, timing: clockRef.current.snapshot(performance.now()) }
+    const chapterRoute = session.chapterRoute ?? batchRouteRef.current ?? undefined
+    const next: SavedBatchSession = { ...session, timing: clockRef.current.snapshot(performance.now()) }
+    if (chapterRoute) next.chapterRoute = chapterRoute
+    else delete next.chapterRoute
     sessionRef.current = next
     saveBatchSession(projectId, next)
   }
@@ -1682,21 +1749,6 @@ function BatchWriteDialog({
   const [autoStrength, setAutoStrength] = useState(
     restoredSession?.autoStrength ?? (localStorage.getItem(strengthPreferenceKey) !== 'false')
   )
-  const [providerProtocol, setProviderProtocol] = useState<string | null>(null)
-  const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
-  const usesAgyTier = providerProtocol === 'antigravity'
-  useEffect(() => {
-    window.api?.listProviders?.().then((cfg) => {
-      const routing = cfg.featureRouting?.chapter
-      const routedId = routing?.providerId
-      const baseProvider =
-        cfg.providers?.find((p) => p.id === routedId) ??
-        cfg.providers?.find((p) => p.id === cfg.activeId) ??
-        cfg.providers?.[0] ??
-        null
-      setProviderProtocol(baseProvider?.protocol ?? 'openai')
-    }).catch(() => {})
-  }, [])
 
   const rangeChapters = useMemo(() => {
     if (!chapters || !Number.isSafeInteger(fromChapter) || !Number.isSafeInteger(toChapter) || fromChapter > toChapter) return []
@@ -1766,6 +1818,70 @@ function BatchWriteDialog({
   const [liveAutoDeslop, setLiveAutoDeslop] = useState<AutoDeslopResult | null>(null)
   const { projectData, styleProfiles } = useProjectStyleData(projectId)
   const [styleProfileId, setStyleProfileId] = useState<string | null>(restoredSession?.styleProfileId ?? null)
+  const [providers, setProviders] = useState<ProviderSummary[]>([])
+  const [modelsByProvider, setModelsByProvider] = useState<Record<string, string[]>>({})
+  const [routedRoute, setRoutedRoute] = useState<ChapterModelRoute | null>(null)
+  const [windowRoute, setWindowRoute] = useState<ChapterModelRoute | null>(() => readWindowChapterModel(projectId))
+  const [batchRoute, setBatchRoute] = useState<ChapterModelRoute | null>(restoredSession?.chapterRoute ?? null)
+  const [modelsReady, setModelsReady] = useState(false)
+  const batchRouteRef = useRef<ChapterModelRoute | null>(restoredSession?.chapterRoute ?? null)
+  const effectiveRoute = batchRoute ?? windowRoute ?? routedRoute
+  const effectiveRouteRef = useRef<ChapterModelRoute | null>(effectiveRoute)
+  effectiveRouteRef.current = effectiveRoute
+  const selectedProvider = providers.find((item) => item.id === effectiveRoute?.providerId) ?? null
+  const providerProtocol = selectedProvider?.protocol ?? null
+  const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
+  const usesAgyTier = providerProtocol === 'antigravity'
+  const chapterModelLabel = selectedProvider
+    ? `${selectedProvider.label} · ${effectiveRoute?.model || selectedProvider.model || '默认模型'}`
+    : modelsReady ? '未配置模型' : '正在读取…'
+  const chooseChapterModel = (route: ChapterModelRoute): void => {
+    setWindowRoute(route)
+    writeWindowChapterModel(projectId, route)
+    if (progress || batchRouteRef.current) {
+      batchRouteRef.current = route
+      setBatchRoute(route)
+      if (sessionRef.current) persistSession({ ...sessionRef.current, chapterRoute: route })
+    }
+  }
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const cfg = await window.api.listProviders()
+        if (!alive) return
+        setProviders(cfg.providers)
+        const routing = cfg.featureRouting?.chapter
+        const base =
+          cfg.providers.find((item) => item.id === routing?.providerId) ??
+          cfg.providers.find((item) => item.id === cfg.activeId) ??
+          cfg.providers[0] ??
+          null
+        const model = base && routing?.providerId === base.id
+          ? (routing.model?.trim() || base.model || '')
+          : (base?.model || '')
+        setRoutedRoute(base ? (model ? { providerId: base.id, model } : { providerId: base.id }) : null)
+        setModelsReady(true)
+        const listed: Record<string, string[]> = {}
+        await Promise.all(cfg.providers.map(async (item) => {
+          try {
+            if (item.protocol === 'codex') listed[item.id] = await window.api.listCodexModels()
+            else if (item.protocol === 'antigravity') listed[item.id] = await window.api.listAntigravityModels()
+            else if (item.protocol === 'claude') listed[item.id] = await window.api.listClaudeModels()
+            else if (item.protocol === 'grok') listed[item.id] = await window.api.listGrokModels()
+            else listed[item.id] = item.model ? [item.model] : []
+          } catch {
+            listed[item.id] = item.model ? [item.model] : []
+          }
+        }))
+        if (alive) setModelsByProvider(listed)
+      } catch {
+        // 读不到目录时仍允许开写，这一批跟随服务端正文路由。
+        if (alive) setModelsReady(true)
+      }
+    })()
+    return () => { alive = false }
+  }, [])
   // 当前批量运行的 requestId：「⏹ 停止」按钮用它 abortStream 中断当前章生成
   const batchRequestIdRef = useRef<string | null>(null)
   const interruptedChapterRef = useRef(restoredSession?.interruptedChapter)
@@ -1883,13 +1999,11 @@ function BatchWriteDialog({
 
   useEffect(() => {
     if (progress && !running && !recovering) {
-      const next = {
+      persistSession({
         progress, autoContinue, autoStrength, styleProfileId,
-        timing: clockRef.current.snapshot(performance.now()),
-        interruptedChapter: interruptedChapterRef.current
-      }
-      sessionRef.current = next
-      saveBatchSession(projectId, next)
+        interruptedChapter: interruptedChapterRef.current,
+        chapterRoute: batchRouteRef.current ?? undefined
+      })
     }
   }, [projectId, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
 
@@ -1968,6 +2082,11 @@ function BatchWriteDialog({
     if (mode === 'start') clockRef.current = new BatchClock()
     clockRef.current.start(runFrom, performance.now())
     setTiming(clockRef.current.snapshot(performance.now()))
+    const chapterRoute = effectiveRouteRef.current ?? undefined
+    if (chapterRoute) {
+      batchRouteRef.current = chapterRoute
+      setBatchRoute(chapterRoute)
+    }
     const persistProgress = (next: BatchProgress, interruptedChapter?: number): void => {
       interruptedChapterRef.current = interruptedChapter
       persistSession({ progress: next, autoContinue, autoStrength, styleProfileId, interruptedChapter })
@@ -2062,7 +2181,8 @@ function BatchWriteDialog({
           setLiveChapter(chapterNumber)
           clockRef.current.start(chapterNumber, performance.now())
           setLiveAutoDeslop(result)
-        }
+        },
+        chapterRoute
       )
       if (batchRequestIdRef.current !== requestId) return
       setTiming(clockRef.current.stop(performance.now()))
@@ -2180,6 +2300,52 @@ function BatchWriteDialog({
                 : '跟随项目默认'}
             </span>
           </div>
+        </div>
+
+        <div className="field">
+          <label>正文模型</label>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <select
+              className="select"
+              value={routeValue(effectiveRoute)}
+              onChange={(e) => {
+                const route = routeFromValue(e.target.value)
+                if (route) chooseChapterModel(route)
+              }}
+              disabled={running || !modelsReady || providers.length === 0}
+              aria-label="正文模型"
+              title={`本窗口正文使用：${chapterModelLabel}`}
+              style={{ flex: 1, minWidth: 220 }}
+            >
+              {!effectiveRoute ? (
+                <option value="">{modelsReady ? '未配置模型' : '正在读取正文模型…'}</option>
+              ) : providers.length === 0 ? (
+                <option value={routeValue(effectiveRoute)}>{chapterModelLabel}</option>
+              ) : null}
+              {providers.map((provider) => {
+                const models = modelsForProvider(provider, modelsByProvider[provider.id], effectiveRoute)
+                return (
+                  <optgroup key={provider.id} label={`${provider.label}（${provider.protocol ?? 'openai'}）`}>
+                    {models.length === 0 ? (
+                      <option value={`${provider.id}::`}>{provider.label} · 默认模型</option>
+                    ) : (
+                      models.map((model) => (
+                        <option key={`${provider.id}::${model}`} value={`${provider.id}::${model}`}>
+                          {provider.label} · {model}
+                        </option>
+                      ))
+                    )}
+                  </optgroup>
+                )
+              })}
+            </select>
+            <span className="meta" style={{ fontSize: 12 }}>
+              {chapterModelLabel}
+            </span>
+          </div>
+          <p className="meta" style={{ fontSize: 12, margin: '6px 0 0' }}>
+            只用于本窗口这一批正文。其他窗口、编辑器和其他功能仍用各自的模型，这里改选不会互相覆盖。
+          </p>
         </div>
 
         {!progress && defaultRange.from <= maxChapter ? (
@@ -2315,7 +2481,7 @@ function BatchWriteDialog({
           >
             {providerProtocol === 'grok' ? (
               <span className="meta">
-                ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）不支持单次调整生成强度，本批将使用当前配置。
+                ℹ️ 当前正文模型（{chapterModelLabel}）不支持单次调整生成强度，本批将使用当前配置。
               </span>
             ) : rhythmStats && rhythmStats.withRhythm === 0 ? (
               <span style={{ color: '#d97706' }}>
@@ -2686,7 +2852,7 @@ function BatchWriteDialog({
             <button
               className="btn btn-primary"
               onClick={startBatch}
-              disabled={running || recovering || !rangeValid || overwriteWarning.length > 0}
+              disabled={running || recovering || !rangeValid || overwriteWarning.length > 0 || !modelsReady}
             >
               {running
                 ? '生成中…'

@@ -1169,7 +1169,17 @@ export function registerWriteIpc(service: WriteService): void {
               validated.batchState,
               {
                 autoContinue: validated.autoContinue === true,
-                autoStrength: validated.autoStrength === true
+                autoStrength: validated.autoStrength === true,
+                ...(validated.chapterRoute
+                  ? {
+                      chapterRoute: {
+                        providerId: validated.chapterRoute.providerId,
+                        ...(validated.chapterRoute.model?.trim()
+                          ? { model: validated.chapterRoute.model.trim() }
+                          : {})
+                      }
+                    }
+                  : {})
               },
               (chapter, attempt, maxAttempts, waitMs) =>
                 safeSend(win, 'write:batchRetryWait', {

@@ -150,6 +150,15 @@ export interface FeatureRoutingEntry {
   model?: string
 }
 
+/**
+ * 某一批正文临时使用的 provider。
+ * 只作用于这次生成，不写回 featureRouting，也不改其他窗口。
+ */
+export interface ChapterModelRoute {
+  providerId: string
+  model?: string
+}
+
 export interface ProvidersConfig {
   /** 当前选中的 provider id（未配置路由的功能大类走此 provider） */
   activeId: string
@@ -1099,7 +1108,9 @@ export interface RendererApi {
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
     onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
     onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+    /** 本窗口这一批正文使用的模型；不写全局路由 */
+    chapterRoute?: ChapterModelRoute
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 仅精修已保存正文，不重新生成剧情；最多 100 章，可用 requestId 停止。 */
   polishChaptersBatch: (
@@ -1147,7 +1158,9 @@ export interface RendererApi {
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
     onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
     onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+    /** 本窗口这一批正文使用的模型；不写全局路由 */
+    chapterRoute?: ChapterModelRoute
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 列出还没完全落地的记忆候选（整章待核对 / 个别条目被挡下） */
   listMemoryCandidates: (projectId: string) => Promise<MemoryCandidateSummary[]>
