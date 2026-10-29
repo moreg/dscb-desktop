@@ -60,6 +60,7 @@ import { ItemRepo } from './memory/item-repo'
 import { findItemMaterialDrift, renderItemDriftHints } from './memory/item-drift'
 import { LongformGuard, needsLongformGuard } from './longform-guard'
 import { readLongformPlan } from './longform-plan'
+import { readChapterBoundary, assertOutlineBoundary } from './chapter-boundary'
 import { readLongformReviewState, markLongformPending, clearLongformPending,
   blockedLongformChapters, markBatchReviewPending, clearBatchReviewPending, removeStaleLongformEntries } from './longform-review-state'
 import { setChapterStatus } from './chapter-status-store'
@@ -180,6 +181,16 @@ export interface BatchState {
   completed: number[]
   /** 正文已保存但后处理未完成；恢复时复用正文，只重跑检查。 */
   pendingPostProcessChapter?: number
+}
+
+interface ChapterPostWriteOptions {
+  signal?: AbortSignal
+  partialChapter?: boolean
+  tempContext?: string
+  styleProfileId?: string | null
+  onStart?: () => void
+  onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void
+  onAutoDeslopResult?: (result: AutoDeslopResult) => void
 }
 
 interface ChapterFlowOptions extends ChapterGenerateOptions {
@@ -745,7 +756,7 @@ export class WriteService {
     // 下一章边界（防超纲）：模型只看本章细纲时，会把章末钩子放大成下一章核心事件
     // 的完成宣告（实测第68章提前写完第69章的解毒复明，修复还与细纲字面死锁）。
     // 把下一章核心事件作为负面清单下发，章末只留触发信号。
-    const nextDetail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber + 1).catch(() => null)
+    const nextDetail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber + 1)
 
     const user = renderUserPrompt({
       projectName: project.name,
@@ -787,8 +798,14 @@ export class WriteService {
     styleProfileIdOrOpts?: string | null | ChapterGenerateOptions,
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
-    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber,
+    return this.runChapterWrite(projectId, chapterNumber,
       () => this.generateChapterStreamInExecution(projectId, chapterNumber, styleProfileIdOrOpts, maybeOpts))
+  }
+
+  /** Keep generation and its post-write repairs in one budget and one audit scope. */
+  async runChapterWrite<T>(projectId: string, chapterNumber: number, action: () => Promise<T>): Promise<T> {
+    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber,
+      () => this.longformOperation.run(this.longformOperation.getStore() ?? new Set(), action))
   }
 
   private async generateChapterStreamInExecution(
@@ -839,6 +856,13 @@ export class WriteService {
       bound: prompt.wordTarget.bound
     })
     const savedBefore = await this.chapterService.getChapter(projectId, chapterNumber)
+    const writingDir = await this.projectService.resolveDir(projectId)
+    const writingBoundary = await readChapterBoundary(writingDir, chapterNumber)
+    const confirmWritingBoundary = async (): Promise<void> => {
+      if (writingBoundary !== await readChapterBoundary(writingDir, chapterNumber)) {
+        throw new Error('LONGFORM_CONTEXT_CHANGED: 生成或修订期间章节边界细纲已变化，请按新细纲重新核对；本次不能交稿。')
+      }
+    }
     throwIfAborted(opts.signal)
     onGenerationStage?.('waiting')
     const full = await this.generateProseStream(prompt.user, {
@@ -859,6 +883,7 @@ export class WriteService {
     // 批量/手机端拿返回值，编辑器拿流式token；两条路径都只保留正文。
     const prose = formatChapterProse(parseForeshadowReceipt(full).stripped)
     await this.validateGeneratedProse(projectId, chapterNumber, prose, opts.existingText)
+    await confirmWritingBoundary()
     const rawContent = formatChapterProse(joinContinuation(opts.existingText ?? '', prose))
     await markLongformPending(await this.projectService.resolveDir(projectId), chapterNumber, hashProse(rawContent))
     await onProseGenerated?.(prose)
@@ -877,9 +902,10 @@ export class WriteService {
       formatChapterProse(joinContinuation(opts.existingText ?? '', polished)), contentRevision(rawContent),
       { source: 'reviewed', note: '自动去 AI 味（验收通过）' })
     const fullContent = formatChapterProse(joinContinuation(opts.existingText ?? '', polished))
+    await confirmWritingBoundary()
     const finalFull = await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, fullContent, {
       signal: opts.signal, instruction: opts.tempContext, styleProfileId,
-      onStart: () => onGenerationStage?.('continuity:正在核对长期记忆、人物知情与主线'),
+      onStart: () => onGenerationStage?.('continuity:正在核对章节边界、长期记忆、人物知情与主线'),
       onGenerationStage, skipRepolish: true, onAutoDeslopResult
     })
     if (finalFull !== fullContent) {
@@ -914,9 +940,9 @@ export class WriteService {
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const savedBefore = await new ProseRepo(dir).read(chapterNumber)
     const readContext = async () => {
-      const [plan, detail, characters, chapterNumbers] = await Promise.all([
+      const [plan, detail, characters, chapterNumbers, boundary] = await Promise.all([
         readLongformPlan(dir, chapterNumber), new DetailedOutlineMdRepo(dir).readChapter(chapterNumber),
-        new CharacterRepo(dir).list(), new ProseRepo(dir).listChapterNumbers()
+        new CharacterRepo(dir).list(), new ProseRepo(dir).listChapterNumbers(), readChapterBoundary(dir, chapterNumber)
       ])
       const active = [...new Set([...(detail?.charactersAppearing ?? []),
         ...characters.filter(c => content.includes(c.name)).map(c => c.name)])]
@@ -939,11 +965,11 @@ export class WriteService {
         ...itemTracking.changes.map((c) => `- 第 ${c.chapter} 章 · ${c.name}：${c.change}`)
       ].join('\n') : ''
       const history = [...continuity, ...(itemTable ? [itemTable] : [])].join('\n\n')
-      return { plan, history, hints: renderItemDriftHints(drifts),
+      return { plan, boundary, history, hints: renderItemDriftHints(drifts),
         sources: hashProse(JSON.stringify(sources.map(s => [s.chapterNumber, s.sourcePath, s.sourceHash]))) }
     }
     const before = await readContext()
-    const instruction = options.instruction ?? await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(before.plan))
+    const instruction = options.instruction ?? await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(JSON.stringify([before.plan, before.boundary])))
     const operation = this.longformOperation.getStore()
     const identity = async (): Promise<string | null> => {
       try { return this.llm.getOperationIdentity ? await this.llm.getOperationIdentity('longformGuard') : 'operation-local' }
@@ -953,7 +979,7 @@ export class WriteService {
     const key = routing ? hashProse(JSON.stringify([dir, projectId, chapterNumber, content, savedBefore,
       before, instruction, options.continuationStart, routing])) : undefined
     const reused = Boolean(key && operation?.has(key))
-    if (!reused && needsLongformGuard(before.plan, before.history)) options.onStart?.()
+    if (!reused && needsLongformGuard(before.plan, before.history, before.boundary)) options.onStart?.()
     // Identical concurrent audits must own one quarantine token. Different plans,
     // historical sources, instructions, models or prose remain separate audits.
     const sharedKey = hashProse(JSON.stringify([key ?? [dir, projectId, chapterNumber, content, savedBefore,
@@ -974,10 +1000,11 @@ export class WriteService {
           const after = await readContext()
           const changed = [
             before.plan !== after.plan ? '主线计划' : '',
+            before.boundary !== after.boundary ? '章节边界细纲' : '',
             before.history !== after.history ? '历史记忆' : '',
             before.sources !== after.sources ? '前章正文' : '',
             routing !== null && routing !== await identity() ? '核对模型配置' : '',
-            options.instruction === undefined && instruction !== await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(after.plan)) ? '临时要求' : '',
+            options.instruction === undefined && instruction !== await readLongformInstruction(dir, chapterNumber, hashProse(content), hashProse(JSON.stringify([after.plan, after.boundary]))) ? '临时要求' : '',
             await new ProseRepo(dir).read(chapterNumber) !== savedBefore ? '本章正文' : ''
           ].filter(Boolean)
           if (changed.length) {
@@ -993,7 +1020,7 @@ export class WriteService {
       }
       await confirm()
       if (token) await clearLongformPending(dir, chapterNumber, token, options.instruction !== undefined
-        ? { sourceHash: hashProse(content), planHash: hashProse(before.plan), instruction: options.instruction } : undefined)
+        ? { sourceHash: hashProse(content), planHash: hashProse(JSON.stringify([before.plan, before.boundary])), instruction: options.instruction } : undefined)
       return async () => {
         await confirm()
         if ((await readLongformReviewState(dir)).pending[String(chapterNumber)]) {
@@ -1076,9 +1103,16 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts: { signal?: AbortSignal; partialChapter?: boolean; tempContext?: string; onStart?: () => void;
-      onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void } = {}
+    opts: ChapterPostWriteOptions = {}
   ): Promise<{ content: string; report: AutoForeshadowRepairResult }> {
+    return this.runChapterWrite(projectId, chapterNumber,
+      () => this.repairChapterForeshadowingsInExecution(projectId, chapterNumber, content, opts))
+  }
+
+  private async repairChapterForeshadowingsInExecution(
+    projectId: string, chapterNumber: number, content: string, opts: ChapterPostWriteOptions
+  ): Promise<{ content: string; report: AutoForeshadowRepairResult }> {
+    let boundaryRepaired = false
     const result = (status: AutoForeshadowRepairResult['status'], message: string, text = content) =>
       ({ content: text, report: { status, message } })
     throwIfAborted(opts.signal)
@@ -1086,6 +1120,15 @@ export class WriteService {
     if (content.length > 40000) return result('failed', '正文超过40000字符，伏笔检查未完成，请分章后补跑。')
     try {
       const dir = await this.projectService.resolveDir(projectId)
+      const savedBefore = await new ProseRepo(dir).read(chapterNumber)
+      const boundaryBefore = await readChapterBoundary(dir, chapterNumber)
+      const confirmSource = async (): Promise<void> => {
+        throwIfAborted(opts.signal)
+        if (savedBefore !== await new ProseRepo(dir).read(chapterNumber) ||
+          boundaryBefore !== await readChapterBoundary(dir, chapterNumber)) {
+          throw new Error('LONGFORM_CONTEXT_CHANGED: 写后修复期间正文或章节边界已变化，候选稿未采用。')
+        }
+      }
       const outline = await this.loadChapterOutlineText(dir, chapterNumber)
       if (!outline.trim()) return result('skipped', '缺少本章细纲，未执行伏笔自动补写。')
       opts.onStart?.()
@@ -1093,14 +1136,51 @@ export class WriteService {
       const signal = opts.signal ?? new AbortController().signal
       const checkOpts = { signal, partialChapter: opts.partialChapter, tempContext: opts.tempContext,
         meta: { feature: 'outlineCheck', projectId, chapterNumber } }
-      const report = await this.checkOutlineWithRetry(chapterNumber, outline, content, checkOpts, signal)
-      throwIfAborted(signal)
-      if (report.checked === false) throw new Error(`伏笔核对未完成：${report.error || '细纲对照失败'}`)
       const detail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       const plans = detail?.foreshadowings ?? []
-      if (!missingForeshadowings(report, plans).length) return result('unchanged', '本章伏笔核对完成，未发现漏写。')
+      const repairBoundary = async (text: string, report: OutlineDiffReport): Promise<{ content: string; report: OutlineDiffReport }> => {
+        try { assertOutlineBoundary(report); return { content: text, report } }
+        catch (error) {
+          if (!(error instanceof Error) || !error.message.startsWith('LONGFORM_CONFLICT:')) throw error
+          await confirmSource()
+          if (savedBefore === content) await markLongformPending(dir, chapterNumber, hashProse(content))
+          try {
+            let verifiedReport: OutlineDiffReport | undefined
+            const candidate = await this.repairLongformConflict(projectId, chapterNumber, text, error.message,
+              (_step, detail) => opts.onProgress?.({ stage: 'review', detail: detail?.replace('长篇一致性自动修复', '章节边界自动修复') }),
+              { signal, tempContext: opts.tempContext, styleProfileId: opts.styleProfileId },
+              { partialChapter: opts.partialChapter, foreshadowPlans: plans, onOutlineChecked: checked => { verifiedReport = checked } })
+            await confirmSource()
+            if (!verifiedReport) throw new Error('章节边界修复缺少复核结果', { cause: error })
+            boundaryRepaired = true
+            return { content: candidate, report: verifiedReport }
+          } catch (repairError) {
+            throwIfAborted(signal)
+            if ((repairError as Error).message?.includes('LLM_ABORTED')) throw repairError
+            throw new Error(`${error.message}\n自动修复未完成，已保留当前稿：${(repairError as Error).message}`, { cause: repairError })
+          }
+        }
+      }
+      const applied = async (text: string, message: string) => {
+        await confirmSource()
+        if (boundaryRepaired) opts.onAutoDeslopResult?.({ status: 'review_required', remainingIssues: 0,
+          message: '章节边界已修复并复核通过；局部修复后的表达尚未重新验收，可在精修正文中继续处理。',
+          issues: ['局部边界修复后不重复整章润色。'] })
+        return result('applied', message, text)
+      }
+      const checked = await this.checkOutlineWithRetry(chapterNumber, outline, content, checkOpts, signal)
+      throwIfAborted(signal)
+      if (checked.checked === false) throw new Error(`伏笔核对未完成：${checked.error || '细纲对照失败'}`)
+      const initial = await repairBoundary(content, checked)
+      const report = initial.report
+      const workingContent = initial.content
+      if (!missingForeshadowings(report, plans).length) {
+        await confirmSource()
+        return boundaryRepaired ? await applied(workingContent, '超纲已自动局部修复，细纲与章节边界复核通过。')
+          : result('unchanged', '本章伏笔核对完成，未发现漏写。')
+      }
       const repaired = await repairMissingForeshadowings({
-        chapterNumber, content, outline, report, plans, signal, onProgress: opts.onProgress,
+        chapterNumber, content: workingContent, outline, report, plans, signal, onProgress: opts.onProgress,
         context: [opts.partialChapter ? '本轮尚未收尾，只补已推进场景中的遗漏，禁止抢写尚未发生的后续情节点与伏笔。' : '',
           opts.tempContext ?? '', detail?.writingRequirements ?? '',
           JSON.stringify(foreshadowingsBeforeChapter(await new ForeshadowingMdRepo(dir).list(), chapterNumber))].join('\n')
@@ -1121,24 +1201,38 @@ export class WriteService {
         stage => opts.onProgress?.({ stage: stage === 'outline' ? 'finalCheck' : 'verify', detail: '联合结果不完整，回退到分步核验' }))
       })
       throwIfAborted(signal)
+      const bounded = await repairBoundary(repaired.content, repaired.report)
       if (this.deslopService) opts.onProgress?.({ stage: 'dialogue' })
-      const finalContent = this.deslopService
-        ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired.content, null, {
-          signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: content,
+      let finalContent = this.deslopService
+        ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, bounded.content, opts.styleProfileId ?? null, {
+          signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: workingContent,
           onGenerationStage: stage => opts.onProgress?.({ stage: 'dialogue', detail: stage.startsWith('deslop:') ? stage.slice(7) : undefined })
-        }) : repaired.content
-      if (finalContent !== repaired.content) {
+        }) : bounded.content
+      let finalReport = bounded.report
+      if (finalContent !== bounded.content) {
         opts.onProgress?.({ stage: 'finalCheck' })
         const checked = await this.checkOutlineWithRetry(chapterNumber, outline, finalContent, checkOpts, signal)
-        if (checked.checked === false || missingForeshadowings(checked, plans).length) {
-          throw new Error('补写后的对白修复未通过伏笔复核')
-        }
+        if (checked.checked === false) throw new Error('补写后的对白修复未完成细纲复核')
+        const final = await repairBoundary(finalContent, checked)
+        finalContent = final.content
+        finalReport = final.report
       }
+      if (missingForeshadowings(finalReport, plans).length) throw new Error('边界或对白修复后仍有遗漏伏笔，候选稿未采用')
       await this.assertLongformConsistency(projectId, chapterNumber, finalContent, { signal, instruction: opts.tempContext })
-      return result('applied', '遗漏伏笔已自动补写，对白与原细纲复核通过。', finalContent)
+      return await applied(finalContent, boundaryRepaired ? '超纲与遗漏伏笔已自动修复，细纲与章节边界复核通过。'
+        : '遗漏伏笔已自动补写，对白与原细纲复核通过。')
     } catch (err) {
       throwIfAborted(opts.signal)
       if ((err as Error).message?.includes('LLM_ABORTED') || (err as Error).name === 'AbortError') throw err
+      // Once a boundary repair is needed, falling back to the original draft would
+      // return known-invalid prose. A later omission/budget failure must stop delivery too.
+      const hardFailure = /^LONGFORM_(CONFLICT|CONTEXT_CHANGED):/.test((err as Error).message ?? '')
+      if (boundaryRepaired || hardFailure) {
+        const dir = await this.projectService.resolveDir(projectId)
+        if (await new ProseRepo(dir).read(chapterNumber) === content) await markLongformPending(dir, chapterNumber, hashProse(content))
+        if (!hardFailure) throw new Error(`LONGFORM_CONFLICT: 超纲修复后的写后核对未全部通过，已保留原稿并暂停交稿：${(err as Error).message}`, { cause: err })
+        throw err
+      }
       return result('failed', `伏笔自动补写未完成，已保留本轮正文：${(err as Error).message}`)
     }
   }
@@ -3076,14 +3170,17 @@ export class WriteService {
 
   private async repairLongformConflict(
     projectId: string, chapterNumber: number, content: string, issue: string,
-    onProgress: (step: string, detail?: string) => void, opts: ChapterFlowOptions
+    onProgress: (step: string, detail?: string) => void, opts: ChapterFlowOptions,
+    reviewOptions: { partialChapter?: boolean; foreshadowPlans?: string[]; onOutlineChecked?: (report: OutlineDiffReport) => void } = {}
   ): Promise<string> {
     const dir = await this.projectService.resolveDir(projectId)
     const signal = opts.signal ?? new AbortController().signal
     const context = await this.buildChapterPrompt(projectId, chapterNumber, opts.styleProfileId, opts.tempContext)
     const plan = await readLongformPlan(dir, chapterNumber)
+    const boundary = await readChapterBoundary(dir, chapterNumber)
     const outline = await this.loadChapterOutlineText(dir, chapterNumber)
-    const repairContext = [context.user, '【主线与卷纲计划】', plan,
+    const repairContext = [context.user, '【主线与卷纲计划】', plan, '【原始章节边界，修正文不能改边界】', boundary,
+      reviewOptions.partialChapter ? '本轮是未收尾的分轮续写，只修已发生的越界；不得为了整章完成度提前推进未开始的情节点或章末钩子。' : '',
       '【长篇冲突修正约束】只调整本章被指出的矛盾及直接后果。提前解毒、复明、揭密或完成后续节点时，退回本章核心事件完成后的阶段收尾，保留后续节点；细纲章末钩子与下一章核心事件重叠时，只保留触发信号本身（人或物出现、征兆初现），不得保留任何状态完成宣告（如"彻底""排出""退去""恢复""看清"）；不得修改未来细纲来迎合错误正文。'].join('\n\n')
     const options = (feature: string): GenerateOptions => ({ signal: opts.signal, meta: { feature, projectId, chapterNumber } })
     const result = await repairContinuity({ chapterNumber, content, issue, context: repairContext, signal: opts.signal, maxRounds: 2 }, {
@@ -3112,12 +3209,19 @@ export class WriteService {
       check: async candidate => {
         // 终审只留一次：候选稿、计划与历史在细纲复核前后都不变（变化会抛错），
         // 连跑两次长篇核对每次都是几分钟的大上下文调用，纯重复。
-        const checked = await this.checkOutlineWithRetry(chapterNumber, outline, candidate, options('batchOutline'), signal)
-        if (checked.checked === false || checked.hasOutline === false || checked.passed === false) throw new Error('长篇修复后的细纲复核未通过')
-        if (await readLongformPlan(dir, chapterNumber) !== plan || await this.loadChapterOutlineText(dir, chapterNumber) !== outline) {
+        const checked = await this.checkOutlineWithRetry(chapterNumber, outline, candidate, { ...options('batchOutline'),
+          partialChapter: reviewOptions.partialChapter, tempContext: opts.tempContext }, signal)
+        assertOutlineBoundary(checked)
+        const omissions = reviewOptions.foreshadowPlans ? missingForeshadowings(checked, reviewOptions.foreshadowPlans) : []
+        const blocking = checked.diffs.some(diff => (diff.priority === 'P0' || diff.priority === 'P1') && !omissions.includes(diff))
+        if (checked.checked === false || checked.hasOutline === false || blocking ||
+          (checked.passed === false && omissions.length === 0)) throw new Error('长篇修复后的细纲复核未通过')
+        if (await readLongformPlan(dir, chapterNumber) !== plan || await readChapterBoundary(dir, chapterNumber) !== boundary ||
+          await this.loadChapterOutlineText(dir, chapterNumber) !== outline) {
           throw new Error('长篇修复期间计划已改变，候选稿未采用')
         }
         await this.assertLongformConsistency(projectId, chapterNumber, candidate, { signal: opts.signal, instruction: opts.tempContext })
+        reviewOptions.onOutlineChecked?.(checked)
       }
     })
     return result.content
@@ -3392,6 +3496,7 @@ export class WriteService {
       }
     }
     await repairContinuityIfNeeded()
+    assertOutlineBoundary(outlineDiff)
     await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
     if (outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
 
@@ -3427,6 +3532,7 @@ export class WriteService {
       onProgress('outlineSync')
       outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
     }
+    assertOutlineBoundary(outlineDiff)
     if (proseFirst || await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
     const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
       { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore, tempContext: opts.tempContext,
@@ -3454,12 +3560,8 @@ export class WriteService {
   }
 
   private async loadChapterOutlineText(dir: string, chapterNumber: number): Promise<string> {
-    try {
-      const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
-      return d ? renderChapterDetail(d, '本章细纲') : ''
-    } catch {
-      return '' // 无细纲
-    }
+    const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
+    return d ? renderChapterDetail(d, '本章细纲') : ''
   }
 
   /**
@@ -4020,6 +4122,7 @@ export class WriteService {
     if (report.hasOutline === false || report.checked === false) return report
     try {
       throwIfAborted(signal)
+      assertOutlineBoundary(report)
       // Check against the original author plan before accepting/rebasing any prose deviation.
       const confirmLongform = await this.assertLongformConsistency(projectId, chapterNumber, content, { signal, instruction })
       if (report.diffs.length === 0) return { ...report, proseSynced: 0 }
@@ -4046,12 +4149,14 @@ export class WriteService {
       }
       delete patch.title
 
+      let commitDownstream: (() => Promise<number>) | undefined
       if (report.diffs.some((diff) => needsDownstreamOutlineAdjustment(diff) || (diff.type === 1 && !isWordBudgetOnlyDiff(diff)))) {
-        // 先校准后续章再写当前章：失败时当前章细纲保持原样，重试对照还能发现这些差异。
-        await this.adjustDownstreamOutlines(projectId, chapterNumber, current.volume, report.diffs, signal, confirmLongform)
+        // 先准备全部补丁，再核对原始边界；不能先改后章细纲再验证自己的改稿。
+        commitDownstream = await this.prepareDownstreamOutlineAdjustment(projectId, chapterNumber, current.volume, report.diffs, signal)
       }
       throwIfAborted(signal)
       await confirmLongform()
+      await commitDownstream?.()
       if (Object.keys(patch).length > 0) {
         await new DetailedOutlineWriter(dir).update(chapterNumber, patch)
       }
@@ -4118,14 +4223,13 @@ export class WriteService {
    * 按当前章已接受的变化，重排同卷后续 3—10 章的受影响字段。
    * 只允许写细纲文本字段，绝不改标题、情绪值、爽点等级或卷号。
    */
-  private async adjustDownstreamOutlines(
+  private async prepareDownstreamOutlineAdjustment(
     projectId: string,
     chapterNumber: number,
     volume: number | undefined,
     changes: OutlineDiffItem[],
-    signal?: AbortSignal,
-    beforeCommit?: () => Promise<void>
-  ): Promise<number> {
+    signal?: AbortSignal
+  ): Promise<() => Promise<number>> {
     throwIfAborted(signal)
     const dir = await this.projectService.resolveDir(projectId)
     const repo = new DetailedOutlineMdRepo(dir)
@@ -4137,7 +4241,7 @@ export class WriteService {
     const prose = new ProseRepo(dir)
     const saved = await Promise.all(following.map((item) => prose.read(item.chapterNumber)))
     const candidates = following.filter((_item, index) => !saved[index].trim())
-    if (candidates.length === 0) return 0
+    if (candidates.length === 0) return async () => 0
 
     const hasCoreChange = changes.some((diff) =>
       (diff.type === 1 || diff.type === 4 || diff.type === 5) && !isWordBudgetOnlyDiff(diff)
@@ -4231,14 +4335,15 @@ export class WriteService {
       throw new Error(`核心变化需要校准紧随其后的 ${minimumChapter} 章，自动补丁仍缺少第 ${missing.join('、')} 章`)
     }
 
-    const writer = new DetailedOutlineWriter(dir)
-    await beforeCommit?.()
-    for (const [target, patch] of patches) {
-      throwIfAborted(signal)
-      if ((await prose.read(target)).trim()) throw new Error(`第 ${target} 章已有正文，停止调整其细纲`)
-      await writer.update(target, patch)
+    return async () => {
+      const writer = new DetailedOutlineWriter(dir)
+      for (const [target, patch] of patches) {
+        throwIfAborted(signal)
+        if ((await prose.read(target)).trim()) throw new Error(`第 ${target} 章已有正文，停止调整其细纲`)
+        await writer.update(target, patch)
+      }
+      return patches.size
     }
-    return patches.size
   }
 
   /**

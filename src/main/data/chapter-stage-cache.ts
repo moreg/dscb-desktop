@@ -5,7 +5,7 @@ import { writeJsonAtomic } from './atomic'
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 // Bump when stage prompts, parsers or acceptance rules change.
-const REVISION = 'batch-stages-1'
+const REVISION = 'batch-stages-2-boundary'
 const excluded = new Set(['.cache', '.git', '.versions', '.longform-review.json', '.chapter-status.json'])
 
 /** Conservative content fingerprint: edits, additions and removals all invalidate receipts. */

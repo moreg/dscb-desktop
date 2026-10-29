@@ -133,70 +133,74 @@ export function registerWriteIpc(service: WriteService): void {
         )
         const signal = beginStream(validated.requestId)
         try {
-          // 续写模式由 prompt 组装阶段算出（依赖细纲字数预估），回传给前端用于
-          // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
-          let continueMode: 'extend' | 'finish' | undefined
-          let wordBudget:
-            | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
-            | undefined
-          let autoDeslop: AutoDeslopResult | undefined
-          let conflictRepaired: string | undefined
-          const content = await service.generateChapterStream(
-            validated.projectId,
-            validated.chapterNumber,
-            validated.styleProfileId,
-            {
-              tempContext: validated.tempContext,
-              existingText: validated.existingText,
-              autoStrength: validated.autoStrength === true,
-              signal,
-              onGenerationStage: (stage) =>
-                safeSend(win, 'write:generationStage', {
-                  requestId: validated.requestId,
-                  stage
+          return await service.runChapterWrite(validated.projectId, validated.chapterNumber, async () => {
+            // 续写模式由 prompt 组装阶段算出（依赖细纲字数预估），回传给前端用于
+            // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
+            let continueMode: 'extend' | 'finish' | undefined
+            let wordBudget:
+              | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
+              | undefined
+            let autoDeslop: AutoDeslopResult | undefined
+            let conflictRepaired: string | undefined
+            const content = await service.generateChapterStream(
+              validated.projectId,
+              validated.chapterNumber,
+              validated.styleProfileId,
+              {
+                tempContext: validated.tempContext,
+                existingText: validated.existingText,
+                autoStrength: validated.autoStrength === true,
+                signal,
+                onGenerationStage: (stage) =>
+                  safeSend(win, 'write:generationStage', {
+                    requestId: validated.requestId,
+                    stage
+                  }),
+                onAutoDeslopResult: (result) => { autoDeslop = result },
+                onConflictRepaired: (full) => { conflictRepaired = full },
+                onPromptMeta: (meta) => {
+                  continueMode = meta.continueMode
+                  wordBudget = {
+                    targetWords: meta.targetWords,
+                    chapterTargetWords: meta.chapterTargetWords,
+                    writtenWords: meta.writtenWords,
+                    fromOutline: meta.fromOutline,
+                    bound: meta.bound
+                  }
+                },
+                onToken: (token) =>
+                  safeSend(win, 'llm:token', {
+                    requestId: validated.requestId,
+                    token,
+                    done: false
+                  })
+              }
+            )
+            const repaired = await service.repairChapterForeshadowings(
+              validated.projectId,
+              validated.chapterNumber,
+              conflictRepaired ?? formatChapterProse(joinContinuation(validated.existingText ?? '', content)),
+              {
+                signal, partialChapter: continueMode === 'extend', tempContext: validated.tempContext,
+                styleProfileId: validated.styleProfileId,
+                onAutoDeslopResult: result => { autoDeslop = result },
+                onStart: () => safeSend(win, 'write:generationStage', {
+                  requestId: validated.requestId, stage: 'foreshadowRepair'
                 }),
-              onAutoDeslopResult: (result) => { autoDeslop = result },
-              onConflictRepaired: (full) => { conflictRepaired = full },
-              onPromptMeta: (meta) => {
-                continueMode = meta.continueMode
-                wordBudget = {
-                  targetWords: meta.targetWords,
-                  chapterTargetWords: meta.chapterTargetWords,
-                  writtenWords: meta.writtenWords,
-                  fromOutline: meta.fromOutline,
-                  bound: meta.bound
-                }
-              },
-              onToken: (token) =>
-                safeSend(win, 'llm:token', {
-                  requestId: validated.requestId,
-                  token,
-                  done: false
+                onProgress: progress => safeSend(win, 'write:generationStage', {
+                  requestId: validated.requestId, stage: `foreshadow:${postWriteProgressLabel(progress)}`
                 })
-            }
-          )
-          const repaired = await service.repairChapterForeshadowings(
-            validated.projectId,
-            validated.chapterNumber,
-            formatChapterProse(joinContinuation(validated.existingText ?? '', content)),
-            {
-              signal, partialChapter: continueMode === 'extend', tempContext: validated.tempContext,
-              onStart: () => safeSend(win, 'write:generationStage', {
-                requestId: validated.requestId, stage: 'foreshadowRepair'
-              }),
-              onProgress: progress => safeSend(win, 'write:generationStage', {
-                requestId: validated.requestId, stage: `foreshadow:${postWriteProgressLabel(progress)}`
-              })
-            }
-          )
-          safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          // 冲突修复稿优先作为整章回传；伏笔补写在其基础上进行，applied 时以它的整章为最终稿。
-          const fullAfterConflict = conflictRepaired !== undefined
-            ? { fullContent: conflictRepaired, conflictRepaired: true as const } : {}
-          return { ok: true, content, autoDeslop, continueMode, wordBudget,
-            foreshadowRepair: repaired.report,
-            ...fullAfterConflict,
-            ...(repaired.report.status === 'applied' ? { fullContent: repaired.content } : {}) }
+              }
+            )
+            safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
+            // 冲突修复稿优先作为整章回传；伏笔补写在其基础上进行，applied 时以它的整章为最终稿。
+            const fullAfterConflict = conflictRepaired !== undefined
+              ? { fullContent: conflictRepaired, conflictRepaired: true as const } : {}
+            return { ok: true, content, autoDeslop, continueMode, wordBudget,
+              foreshadowRepair: repaired.report,
+              ...fullAfterConflict,
+              ...(repaired.report.status === 'applied' ? { fullContent: repaired.content } : {}) }
+          })
         } finally {
           endStream(validated.requestId)
         }

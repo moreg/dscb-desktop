@@ -25,8 +25,8 @@ import type { ChapterMemoryCoordinator } from '../src/main/data/chapter-memory-c
 const goal = '陆安必须寻找失踪的母亲，不能无故放弃这个全书目标。'
 const bad = '陆安宣布永久放弃寻找母亲，从此只在街边卖画谋生。'
 const good = '陆安向船夫询问母亲的下落，随后沿着河岸继续寻找。'
-const cleared = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
-const rejected = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [
+const cleared = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+const rejected = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [
   { kind: 'mainline', message: '无转变依据直接放弃全书目标。', snippet: bad, reference: goal }
 ] })
 const check: ChapterSelfCheckReport = { schemaVersion: 1, chapterNumber: 1, generatedAt: '', ok: true, summary: '通过',
@@ -168,7 +168,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
     await new ProseRepo(dir).write(2,stale)
     await new ChapterSummaryRepo(dir).write({schemaVersion:1,chapterNumber:1,sourceHash:hashProse(previous),generatedAt:'',
       events:[],stateChanges:[],openThreads:[],continuity:[{kind:'item',subject:'原信',object:'',aspect:'持有者',value:'陆安，装在绸布封套内',evidence:previous}]})
-    verdict=JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[
+    verdict=JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[
       {kind:'item',message:'封套没有更换依据却恢复旧名',snippet:stale,reference:previous}
     ]})
     generate.mockImplementation(async (_prompt,opts)=>opts?.meta?.feature==='longformGuard'

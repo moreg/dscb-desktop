@@ -15,6 +15,37 @@ const mock = (response = JSON.stringify(cleared)) => ({ generateStream: vi.fn().
   getCacheIdentity: vi.fn().mockResolvedValue('model-v1') })
 
 describe('长篇写作交稿闸门', () => {
+  it('仅有章节细纲也强制核对边界，旧检查结果不能代替边界检查', async () => {
+    const source = { ...input, plan: '', history: '', boundary: '第850章才能查明内应身份。' }
+    const llm = mock()
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow('LONGFORM_REVIEW_INCOMPLETE')
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+    llm.generateStream.mockResolvedValue(JSON.stringify({ ...cleared, checked: [...cleared.checked, 'boundary'] }))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).resolves.toBeUndefined()
+  })
+
+  it('章节越界必须有正文及细纲双重证据，猜测和铺垫不能靠关键词判罪', async () => {
+    const source = { ...input, plan: '', history: '', boundary: '第850章才能查明内应身份。' }
+    const result = { ...cleared, checked: [...cleared.checked, 'boundary'], findings: [{
+      kind: 'boundary', message: '提前揭晓内应身份', snippet: '陆宁直接揭穿赵伯就是内应', reference: source.boundary
+    }] }
+    const llm = mock(JSON.stringify(result))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow('章节边界')
+    expect(() => parseLongformGuard(JSON.stringify(result), { ...source, boundary: '本章允许揭晓内应的身份。' })).toThrow('依据')
+    expect(() => parseLongformGuard(JSON.stringify(result), { ...source, content: '陆宁猜测内应或许是赵伯，却没有任何证据。' })).toThrow('依据')
+  })
+
+  it('边界变更使通过缓存失效；相同模型、正文与边界可复用', async () => {
+    const source = { ...input, boundary: '本章只找到密信，下一章才能读信。' }
+    const llm = mock(JSON.stringify({ ...cleared, checked: [...cleared.checked, 'boundary'] }))
+    const guard = new LongformGuard(llm as unknown as LlmService)
+    await guard.check(source)
+    await guard.check(source)
+    expect(llm.generateStream).toHaveBeenCalledTimes(1)
+    await guard.check({ ...source, boundary: source.boundary + '本章不得确认内应。' })
+    expect(llm.generateStream).toHaveBeenCalledTimes(2)
+  })
+
   it('逐项核对主线/人物知情/承诺，与可选深审开关无关', async () => {
     const llm = mock()
     await new LongformGuard(llm as unknown as LlmService).check(input)

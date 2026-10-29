@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { readChapterStatuses } from '../src/main/data/chapter-status-store'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'fs/promises'
@@ -55,7 +56,7 @@ describe('batch safety and recovery', () => {
     projectId = (await ps.create({ name: '测试小说', genre: '玄幻' })).id
     dir = await ps.resolveDir(projectId)
     llm = { generateStream: vi.fn().mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]}) : '[]') } as unknown as LlmService
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]}) : '[]') } as unknown as LlmService
     service = new WriteService(ps, llm, undefined, undefined, undefined, settings)
     summaryService = service as unknown as typeof summaryService
     vi.spyOn(summaryService, 'generateChapterSummaryChecked').mockImplementation(async (_pid, ch) => ({
@@ -100,7 +101,7 @@ describe('batch safety and recovery', () => {
     })
     vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => options?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] }) : foreshadowPatch)
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] }) : foreshadowPatch)
     const completed = vi.fn()
     const progress = await service.generateChaptersBatch(projectId, 1, 2, completed, null, {}, undefined, { autoContinue: true })
     expect(progress.status).toBe('completed')
@@ -165,6 +166,7 @@ describe('batch safety and recovery', () => {
   })
 
   it('resumes failed repair from saved prose and does not regenerate the chapter', async () => {
+    ;(service as unknown as { llm: LlmService }).llm = withPassingLongformGuard(llm)
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff))
@@ -194,6 +196,7 @@ describe('batch safety and recovery', () => {
   })
 
   it('keeps successfully saved repair on retry without inserting it twice', async () => {
+    ;(service as unknown as { llm: LlmService }).llm = withPassingLongformGuard(llm)
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     vi.mocked(flow.checkOutlineStream).mockResolvedValueOnce(JSON.stringify(foreshadowDiff)).mockResolvedValue('[]')
@@ -492,7 +495,7 @@ describe('batch safety and recovery', () => {
   const continuityPatch = JSON.stringify({ replacements: [{ before: '守门人核对印章后放他进门。', after: '守门人核对印章后，让他留在门外等候。' }] })
   function stubContinuityModel(): void {
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
-      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: true, issues: [] })
       return '[]'
@@ -505,7 +508,7 @@ describe('batch safety and recovery', () => {
     await writeFile(path.join(dir, '大纲', '大纲.md'), `# 大纲\n\n## 主线剧情走向\n\n${goal}`)
     vi.mocked(llm.generateStream).mockImplementation(async (prompt, opts) => {
       if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({
-        completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'],
+        completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'],
         findings: opts.meta.chapterNumber === 1 && (prompt.endsWith(content) || options.stillConflicts)
           ? [{ kind: 'mainline', message: '提前完成下一章进院节点，应保留门外等候。',
             snippet: prompt.endsWith(content) ? content : corrected, reference: goal }] : []
@@ -668,7 +671,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     let verification = 0
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
-      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') {
         expect(await new ProseRepo(dir).read(1)).toBe(content)
@@ -706,7 +709,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     const authorEdit = content + '作者新加的台词。'
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
-      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') return continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') {
         const file = (await readdir(path.join(dir, '正文'))).find(name => name.endsWith('.md'))!
@@ -727,7 +730,7 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     const controller = new AbortController()
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
-      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       if (options?.meta?.feature === 'continuityRepair') { controller.abort(); return continuityPatch }
       return '[]'
     })
@@ -804,6 +807,7 @@ describe('batch safety and recovery', () => {
   })
 
   function mockCoreChange(): void {
+    ;(service as unknown as { llm: LlmService }).llm = withPassingLongformGuard(llm)
     vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
       const result = resultFor(ch)
       if (ch === 1) result.outlineDiff.diffs = [{ type: 4, typeLabel: '核心事件改', priority: 'P1',

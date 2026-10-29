@@ -43,7 +43,8 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
         }
       : x)
     if (arr.some((x) => !x || typeof x !== 'object' ||
-      ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority))) {
+      ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority) ||
+      (x.boundaryViolation !== undefined && typeof x.boundaryViolation !== 'boolean'))) {
       return fail('细纲对照输出的差异项缺少有效的 type/priority')
     }
     const diffs: OutlineDiffItem[] = arr
@@ -53,6 +54,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
         const item: OutlineDiffItem = {
           type,
           typeLabel: labels[type] ?? '细节调整',
+          ...(typeof x.boundaryViolation === 'boolean' ? { boundaryViolation: x.boundaryViolation } : {}),
           outline: typeof x.outline === 'string' ? x.outline : undefined,
           actual: typeof x.actual === 'string' ? x.actual : undefined,
           suggestion: typeof x.suggestion === 'string' ? x.suggestion : '',
@@ -63,10 +65,11 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
               : defaultResolutionForType(type)
         }
         const outlinePatch = sanitizeOutlinePatch(x.outlinePatch)
-        if (outlinePatch) item.outlinePatch = outlinePatch
+        if (item.boundaryViolation) item.resolution = 'updateContent'
+        else if (outlinePatch) item.outlinePatch = outlinePatch
         return item
       })
-    const passed = !diffs.some((d) => d.priority === 'P0' || d.priority === 'P1')
+    const passed = !diffs.some((d) => d.boundaryViolation || d.priority === 'P0' || d.priority === 'P1')
     return { chapterNumber, diffs, passed }
   } catch {
     return fail('细纲对照输出的 JSON 格式错误')

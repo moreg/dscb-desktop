@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
@@ -120,7 +121,7 @@ describe('自动写作去 AI 味', () => {
         return deslopResult(POLISHED)
       })
     } as unknown as DeslopService
-    service = new WriteService(projects, llm, undefined, undefined, undefined, settings, undefined, deslop)
+    service = new WriteService(projects, withPassingLongformGuard(llm), undefined, undefined, undefined, settings, undefined, deslop)
     mockPrompt()
   })
 
@@ -626,7 +627,7 @@ describe('自动写作去 AI 味', () => {
   })
 
   it('缺少自动验收服务时保留原稿，不阻挡保存', async () => {
-    service = new WriteService(projects, llm)
+    service = new WriteService(projects, withPassingLongformGuard(llm))
     mockPrompt()
 
     await expect(service.generateChapterStream(projectId, 1)).resolves.toBe(RAW)

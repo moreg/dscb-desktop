@@ -15,8 +15,8 @@ import type { ChapterFlowResult } from '../src/shared/types'
 
 const goal = '陆安全书目标是找到失踪母亲，不会永久放弃寻找。'
 const content = '陆安宣布永久放弃寻找母亲，从此只在街边卖画谋生。'
-const clear = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
-const conflict = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [
+const clear = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+const conflict = JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [
   { kind: 'mainline', message: '主角无转变过程直接永久放弃全书目标。', snippet: content, reference: goal }
 ] })
 

@@ -30,7 +30,7 @@ beforeEach(async () => {
   await mkdir(join(dir, '大纲'), { recursive: true })
   generate = vi.fn(async (_prompt, opts) => {
     if (opts?.meta?.feature === 'outline-generate') return JSON.stringify({ plotSummary: '林远依照师父嘱咐守门，核对来客的身份。', charactersAppearing: [], foreshadowings: [] })
-    if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+    if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
     if (opts?.meta?.feature === 'chapterSummary') return JSON.stringify({ events: [{ text: '师父交出钥匙，林远守门。', evidence: previous }], stateChanges: [], openThreads: [], continuity: [] })
     return '林远抬起手，示意来客在门外等候。'
   })
@@ -235,7 +235,9 @@ describe('automatic writing context recovery', () => {
   })
 
   it('uses a sourced writing plan when outline generation cannot return JSON', async () => {
-    generate.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'outline-generate' ? '不是 JSON' : '林远守在山门。')
+    generate.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
+      : opts?.meta?.feature === 'outline-generate' ? '不是 JSON' : '林远守在山门。')
     await service.generateChapterStream(id, 1)
     expect(chapterPrompt()).toContain('自动补齐写作安排')
     expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'outline-generate')).toHaveLength(3)
@@ -280,7 +282,7 @@ describe('automatic writing context recovery', () => {
     await plan(1); await plan(2)
     await new ProseRepo(dir).write(1, previous)
     generate.mockImplementation(async (_prompt, opts) => {
-      if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
     if (opts?.meta?.feature === 'chapterSummary') throw new Error('提取暂时不可用')
       return '林远示意来客等候。'
     })

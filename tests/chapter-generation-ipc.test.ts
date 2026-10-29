@@ -25,17 +25,20 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
   const adjust = vi.fn<WriteService['adjustChapterStream']>()
   const repair = vi.fn<WriteService['repairChapterForeshadowings']>()
   const sync = vi.fn<WriteService['syncChapterAfterWrite']>()
+  const writeScope = vi.fn<(pid: string, chapter: number, action: () => Promise<unknown>) => Promise<unknown>>()
   const report: AutoDeslopResult = { status: 'applied', message: '已完成自动去 AI 味', remainingIssues: 0 }
   beforeEach(() => {
     handlers.clear()
     send.mockClear()
     clearAllStreams()
+    writeScope.mockReset().mockImplementation(async (_pid, _ch, action) => action())
     generate.mockReset()
     adjust.mockReset()
     sync.mockReset().mockResolvedValue(null)
     repair.mockReset().mockImplementation(async (_pid, _ch, content) => ({ content, report: { status: 'unchanged', message: '无遗漏' } }))
     registerWriteIpc({ generateChapterStream: generate, adjustChapterStream: adjust, repairChapterForeshadowings: repair,
-      syncChapterAfterWrite: sync } as unknown as WriteService)
+      syncChapterAfterWrite: sync,
+      runChapterWrite: writeScope } as unknown as WriteService)
   })
 
   it('重写检查超时仍返回失败和完整待复核稿，不发送成功完成事件', async () => {
@@ -129,6 +132,42 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     expect(await pending).toMatchObject({ ok: true, content: '本轮收尾。', fullContent: '已有正文。\n补入的伏笔。\n本轮收尾。',
       foreshadowRepair: { status: 'applied' } })
     expect(events).toEqual(['generated', 'checking', 'repaired'])
+    expect(activeStreamCount()).toBe(0)
+  })
+
+  it('生成和写后修复共用执行作用域，并以修复后的整章继续检查，不重复拼接旧前缀', async () => {
+    let inScope = false
+    writeScope.mockImplementation(async (_pid, _ch, action) => {
+      inScope = true
+      try { return await action() } finally { inScope = false }
+    })
+    generate.mockImplementation(async (_pid, _ch, _style, opts) => {
+      expect(inScope).toBe(true)
+      opts?.onConflictRepaired?.('已修正的开头。\n阶段收尾。')
+      return '已修正的开头。\n阶段收尾。'
+    })
+    repair.mockImplementation(async (_pid, _ch, content, opts) => {
+      expect(inScope).toBe(true)
+      expect(content).toBe('已修正的开头。\n阶段收尾。')
+      opts?.onAutoDeslopResult?.({ status: 'review_required', remainingIssues: 0, message: '边界已修复，表达待复核' })
+      return { content: '最终开头。\n最终阶段收尾。', report: { status: 'applied', message: '超纲已修复' } }
+    })
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, requestId: 'late-boundary', existingText: '旧开头。'
+    })
+    expect(result).toMatchObject({ ok: true, fullContent: '最终开头。\n最终阶段收尾。', autoDeslop: { status: 'review_required' } })
+    expect(writeScope).toHaveBeenCalledTimes(1)
+    expect(inScope).toBe(false)
+    expect(activeStreamCount()).toBe(0)
+  })
+
+  it('写后超纲修复失败不发送成功交稿事件', async () => {
+    generate.mockResolvedValue('已经生成的正文。')
+    repair.mockRejectedValue(new Error('LONGFORM_CONFLICT: 超纲修复未通过，CHAPTER_REPAIR_BUDGET'))
+    expect(await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, requestId: 'late-boundary-failed'
+    })).toMatchObject({ ok: false, error: expect.stringContaining('CHAPTER_REPAIR_BUDGET') })
+    expect(send.mock.calls.some(([channel, payload]) => channel === 'llm:token' && payload.done)).toBe(false)
     expect(activeStreamCount()).toBe(0)
   })
 

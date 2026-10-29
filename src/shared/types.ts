@@ -2301,6 +2301,8 @@ export type OutlineDiffPatch = Partial<
 >
 
 export interface OutlineDiffItem {
+  /** 明确违反本章禁区、提前揭示或抢写后章；不得自动回写细纲消除。 */
+  boundaryViolation?: boolean
   /** 1=漏写 2=超纲增量 3=细节调整 4=核心事件改 5=结构性偏离 */
   type: OutlineDiffType
   typeLabel: '漏写' | '超纲增量' | '细节调整' | '核心事件改' | '结构性偏离'

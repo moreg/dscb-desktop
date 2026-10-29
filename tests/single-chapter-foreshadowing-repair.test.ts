@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { join, resolve, sep } from 'path'
@@ -36,7 +37,7 @@ describe('单章续写的交稿前伏笔补写', () => {
     await writeFile(outlineFile, '# 细纲\n\n## 第 1 章：账册\n\n- **核心事件**：林远交出账册。\n- **伏笔铺设**：FB-001：埋设借条笔迹与父亲相同\n')
     await new ProseRepo(dir).write(1, '磁盘中尚未采用的旧正文。')
     generate = vi.fn().mockResolvedValue(patch)
-    service = new WriteService(projects, { generateStream: generate } as unknown as LlmService)
+    service = new WriteService(projects, withPassingLongformGuard({ generateStream: generate } as unknown as LlmService))
     flow = (service as unknown as { flow: WriteFlowService }).flow
     vi.spyOn(flow, 'verifyForeshadowingRepair').mockResolvedValue(undefined)
   })

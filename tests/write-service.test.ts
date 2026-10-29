@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -278,7 +279,7 @@ describe('WriteService', () => {
   it('generateChapterStream calls llm with assembled prompt', async () => {
     await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进门核对账册' })
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+    const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const full = await service.generateChapterStream(projectId, 1)
     expect(full).toBe('生成的正文')
     expect(llm.generateStream).toHaveBeenCalled()
@@ -297,7 +298,7 @@ describe('WriteService', () => {
       '</script>'
     ].join('\n'), 'utf-8')
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+    const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     await service.generateChapterStream(projectId, 1, { autoStrength: true })
     expect(llm.generateStream).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       strengthOverride: { temperature: 1.0, reasoningEffort: 'high' }
@@ -665,7 +666,7 @@ describe('WriteService', () => {
         prompt.includes('细纲联动校准器')
           ? JSON.stringify([2, 3, 4].map((ch) => ({ chapterNumber: ch, patch: { plotSummary: `承接正文${ch}` } })))
           : JSON.stringify({ patch: { plotSummary: '按正文重写的事件', title: '擅自改名' } }))
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -751,7 +752,7 @@ describe('WriteService', () => {
         )
       }
 
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, withPassingLongformGuard(mockLlm('')))
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章扩写正文`)
         result.outlineDiff = {
@@ -810,7 +811,7 @@ describe('WriteService', () => {
         reason: '承接上一章新结果',
         patch: { plotSummary: `承接改写后的核心事件${ch}` }
       }))))
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -857,7 +858,7 @@ describe('WriteService', () => {
         '# 细纲_第001章_测试章1.md\n\n## 第 1 章：测试章1\n\n- **核心事件**：原细纲事件\n',
         'utf-8'
       )
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, withPassingLongformGuard(mockLlm('')))
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         result.outlineDiff = {
@@ -1395,7 +1396,7 @@ describe('WriteService', () => {
      */
     it('passes generated content to all flow steps (not reloaded from disk)', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '这是步骤1生成的正文内容，尚未落盘。'
 
       // 创建细纲文件（DetailedOutlineMdRepo 读 细纲/第NN卷.md）
@@ -1482,7 +1483,7 @@ describe('WriteService', () => {
 
     it('isolates errors: one flow step failure does not abort others', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '正文内容'
 
       // 必须真有细纲，否则对照步骤根本不会被调用，"抛错也不影响其他步骤"就成了空跑

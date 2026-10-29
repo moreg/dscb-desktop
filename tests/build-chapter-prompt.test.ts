@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, writeFile } from 'fs/promises'
@@ -289,7 +290,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const raw = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
     const expected = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
     const llm = mockLlm(raw)
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     expect(await service.generateChapterStream(projectId, 1)).toBe(expected)
     expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain(expected)
     const sent = vi.mocked(llm.generateStream).mock.calls[0][1]?.systemPrompt ?? ''
@@ -304,7 +305,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const generateStream = vi.fn().mockResolvedValue('正文')
     const llm = { generateStream } as unknown as LlmService
 
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     const onAutoDeslopResult = vi.fn()
     await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe('正文')
     expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({
@@ -337,7 +338,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
 
     await new ProseRepo(dir).write(1, '师父带林远走到山门外，让他在此等候。')
     vi.spyOn(WriteFlowService.prototype, 'extractEndingState').mockResolvedValue({ chapterNumber: 1, characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     await expect(service.generateChapterStream(projectId, 2)).resolves.toBe('正文')
 
     const opts = vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'chapter')![1]!

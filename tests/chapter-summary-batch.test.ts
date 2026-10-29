@@ -27,7 +27,7 @@ describe('全书批量重新生成概要', () => {
     dir = await projects.resolveDir(id)
     summaryModel = vi.fn().mockResolvedValue(reply)
     llm = { generateStream: vi.fn().mockImplementation((prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]})
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       : summaryModel(prompt, opts)) } as unknown as LlmService
     service = new WriteService(projects, llm)
   })
@@ -51,7 +51,7 @@ describe('全书批量重新生成概要', () => {
     await seedIncomplete()
     let extractions = 0
     summaryModel.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
       : JSON.stringify(++extractions === 1 ? omitted : correct))
     const first = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
     expect(first.results[0].status).toBe('generated')
@@ -63,7 +63,7 @@ describe('全书批量重新生成概要', () => {
     expect(second.continuity).toEqual(correct.continuity)
     await seedIncomplete()
     summaryModel.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
+      ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
       : JSON.stringify(omitted))
     const failed = await run({ fromChapter: 640, toChapter: 640, onlyMissing: true })
     expect(failed.results[0]).toMatchObject({ status: 'failed', error: expect.stringContaining('MEMORY_KNOWLEDGE_INCOMPLETE') })
