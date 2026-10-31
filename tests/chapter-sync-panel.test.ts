@@ -30,6 +30,8 @@ const summary = { schemaVersion: 1, chapterNumber: 1, sourceHash: 'hash', genera
 const api = {
   getChapterSyncContext: vi.fn(), getChapterSummary: vi.fn(), generateChapterSummary: vi.fn(), syncMemoryIndex: vi.fn(),
   checkOutlineStream: vi.fn(), extractMemoryStream: vi.fn(), previewMemoryApply: vi.fn(), previewSettingsApply: vi.fn(),
+  listDetailedOutline: vi.fn(), autoResolveOutlineDiffs: vi.fn(), autoApplyExtractedMemory: vi.fn(),
+  autoRepairOutlineDifference: vi.fn(), commitOutlineLocalRepair: vi.fn(),
   getRhythm: vi.fn(), evaluateRhythmStream: vi.fn(), generateFigureStream: vi.fn(), applyRhythmEvaluation: vi.fn()
 }
 const abort = vi.fn(async () => ({ ok: true }))
@@ -68,27 +70,86 @@ beforeEach(() => {
   api.extractMemoryStream.mockImplementation((_p, _n, token) => { token(memoryJson, true); return stream() })
   api.previewMemoryApply.mockResolvedValue({ diffs: [], applicableCount: 0, confirmCount: 0 })
   api.previewSettingsApply.mockResolvedValue({ diffs: [], autoCount: 0, confirmCount: 0, suggestionCount: 0 })
+  api.listDetailedOutline.mockResolvedValue([{ chapterNumber: 1 }])
+  api.autoResolveOutlineDiffs.mockResolvedValue([])
+  api.autoRepairOutlineDifference.mockResolvedValue({ status: 'unresolved', reason: '需要更多证据。' })
+  api.commitOutlineLocalRepair.mockResolvedValue(undefined)
+  api.autoApplyExtractedMemory.mockResolvedValue({ memory: { applied: { characters: 0, locations: 0, items: 0, foreshadowings: 0, plotPoints: 0, stateChanges: 0, collected: 0 }, entitiesReviewed: true, errors: [] }, settings: { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }, extraction: { settingsPatches: [], settingsSuggestions: [] } })
   api.getRhythm.mockResolvedValue([{ chapter: 1, emotion: 5 }])
   api.evaluateRhythmStream.mockImplementation((_p, _n, token) => { token('{"actualEmotion":5,"reason":"自然"}', true); return stream() })
   api.generateFigureStream.mockImplementation((_p, _n, token) => { token('{"shouldGenerate":false,"reason":"普通场景"}', true); return stream() })
 })
-afterEach(() => { for (const cleanup of hooks.cleanup.values()) cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { for (const cleanup of hooks.cleanup.values()) cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('one-click incremental sync UI', () => {
+  it.each(['outline', 'prose'])('automatically repairs all seven findings across %s commits', async target => {
+    vi.useFakeTimers()
+    let pending = 7
+    api.checkOutlineStream.mockImplementation((_p, _n, _outline, _draft, token) => {
+      token(JSON.stringify(Array.from({ length: pending }, (_, i) => ({ type: 1, priority: 'P2',
+        outline: `遗漏事件${i}`, actual: '正文未写', suggestion: '按细纲补入正文' }))), true)
+      return stream()
+    })
+    api.autoRepairOutlineDifference.mockImplementation(async () => ({ status: 'candidate', token: 'verified', target,
+      content: props.draft + '补入事件。', reason: '按原细纲修复。' }))
+    api.commitOutlineLocalRepair.mockImplementation(async () => { pending-- })
+    props.onBeginAutoRepairCommit = vi.fn(() => true)
+    props.onFinishAutoRepairCommit = vi.fn((_original, content) => {
+      if (content) props = { ...props, draft: content }
+      return true
+    })
+    render(); await flush(); click('⟳ 一键同步'); await flush()
+    for (let i = 0; i < 20; i++) { render(); await flush(); await vi.advanceTimersByTimeAsync(1); await flush() }
+    expect(api.autoRepairOutlineDifference).toHaveBeenCalledTimes(7)
+    expect(api.commitOutlineLocalRepair).toHaveBeenCalledTimes(7)
+    expect(renderToStaticMarkup(render())).toContain('无差异')
+    expect(api.autoApplyExtractedMemory).toHaveBeenCalledTimes(1)
+  })
+  it('reports stalled repairs and offers a fresh automatic retry for missing prose', async () => {
+    vi.useFakeTimers()
+    api.checkOutlineStream.mockImplementation((_p, _n, _outline, _draft, token) => {
+      token(JSON.stringify([{ type: 1, priority: 'P2', outline: '张伟展示技能', actual: '未展示', suggestion: '补写展示' }]), true)
+      return stream()
+    })
+    api.autoRepairOutlineDifference.mockResolvedValue({ status: 'candidate', token: 'verified', target: 'outline', content: props.draft })
+    props.onBeginAutoRepairCommit = vi.fn(() => true)
+    props.onFinishAutoRepairCommit = vi.fn(() => true)
+    render(); await flush(); click('⟳ 一键同步'); await flush()
+    for (let i = 0; i < 8; i++) { await vi.advanceTimersByTimeAsync(1); await flush() }
+    expect(api.commitOutlineLocalRepair).toHaveBeenCalledTimes(3)
+    expect(renderToStaticMarkup(render())).toContain('连续 3 次复核后待处理项未减少')
+    api.autoRepairOutlineDifference.mockResolvedValue({ status: 'unresolved', reason: '缺少可定位证据。' })
+    click('自动修复剩余差异'); await flush()
+    expect(api.autoRepairOutlineDifference).toHaveBeenCalledTimes(4)
+    expect(renderToStaticMarkup(render())).toContain('缺少可定位证据。')
+  })
   it('runs core steps on one snapshot, reuses successful analysis, and supports explicit full reanalysis', async () => {
     render(); await flush(); click('⟳ 一键同步'); await flush()
     expect(api.extractMemoryStream.mock.calls[0].slice(3)).toEqual([props.draft, true])
     expect(api.evaluateRhythmStream).not.toHaveBeenCalled()
     expect(api.generateFigureStream).not.toHaveBeenCalled()
-    expect(renderToStaticMarkup(render())).toContain('分析完成，待确认')
+    expect(renderToStaticMarkup(render())).toContain('已自动处理')
+    expect(api.autoApplyExtractedMemory).toHaveBeenCalledTimes(1)
     click('⟳ 一键同步'); await flush()
     expect(api.checkOutlineStream).toHaveBeenCalledTimes(1)
     expect(api.extractMemoryStream).toHaveBeenCalledTimes(1)
     expect(api.generateChapterSummary).toHaveBeenCalledTimes(2)
-    expect(renderToStaticMarkup(render())).toContain('复用有效分析')
+    expect(api.autoApplyExtractedMemory).toHaveBeenCalledTimes(2)
     click('重新分析全部'); await flush()
     expect(api.extractMemoryStream.mock.calls.at(-1)?.slice(3)).toEqual([props.draft, false])
     expect(api.generateChapterSummary.mock.calls.at(-1)?.[3]).toBe(true)
+  })
+  it('keeps unresolved outline differences and held memory visible after automatic processing', async () => {
+    api.checkOutlineStream.mockImplementation((_p, _n, _outline, _draft, token) => {
+      token(JSON.stringify([{ type: 3, priority: 'P2', outline: '计划升级', actual: '实际升级', suggestion: '核对' }]), true)
+      return stream()
+    })
+    api.autoApplyExtractedMemory.mockResolvedValue({ memory: { applied: { characters: 0, locations: 0, items: 0, foreshadowings: 0, plotPoints: 0, stateChanges: 0, collected: 0 }, heldBack: ['缺少正文证据'], entitiesReviewed: false, errors: [] }, settings: { applied: 0, skipped: 0, errors: [], appliedDiffs: [] }, extraction: { settingsPatches: [], settingsSuggestions: [] } })
+    render(); await flush(); click('⟳ 一键同步'); await flush()
+    const html = renderToStaticMarkup(render())
+    expect(api.autoResolveOutlineDiffs).toHaveBeenCalledTimes(1)
+    expect(html).toContain('有待处理项')
+    expect(html).toContain('缺少正文证据')
   })
   it('refuses unsaved prose before any analysis or index writes', async () => {
     api.getChapterSyncContext.mockRejectedValue(new Error('请先保存正文再同步'))

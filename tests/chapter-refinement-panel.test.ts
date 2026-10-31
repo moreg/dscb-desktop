@@ -26,7 +26,7 @@ import Panel, { clampRefinementPanel } from '../src/renderer/src/ChapterRefineme
 const candidate: RefinementCandidate = { version: 1, id: 'candidate-1', input: { projectId: 'p', chapterNumber: 1, content: '原文句子。', goal: 'expression', instruction: '' },
   baseRevision: '', contextHash: '', candidate: '精修句子。', changes: ['改善表达'], attempts: 1, status: 'ready', updatedAt: '',
   verdict: { passed: true, factsPreserved: true, goalMet: true, assessment: '保留事实', issues: [], evidence: [{ before: '原文句子。', after: '精修句子。', reason: '精修' }] } }
-const refine = vi.fn(), load = vi.fn(), commit = vi.fn(), discard = vi.fn(), committed = vi.fn(), abort = vi.fn(), onOpen = vi.fn(), onBusy = vi.fn()
+const refine = vi.fn(), load = vi.fn(), commit = vi.fn(), discard = vi.fn(), rejectHunk = vi.fn(), committed = vi.fn(), abort = vi.fn(), onOpen = vi.fn(), onBusy = vi.fn()
 let props: Parameters<typeof Panel>[0]
 function render() {
   hooks.cursor = 0
@@ -56,12 +56,36 @@ beforeEach(() => {
   refine.mockReturnValue(handle(Promise.resolve({ ok: true, candidate: structuredClone(candidate) })))
   vi.stubGlobal('React', React)
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() })
-  vi.stubGlobal('window', { api: { refineChapter: refine, loadRefinement: load, commitRefinement: commit, discardRefinement: discard } })
+  vi.stubGlobal('window', { api: { refineChapter: refine, loadRefinement: load, commitRefinement: commit, discardRefinement: discard, rejectRefinementHunk: rejectHunk } })
   props = { projectId: 'p', chapterNumber: 1, content: candidate.input.content, selection: { start: 0, end: 4 }, open: true, disabled: false,
     autoTrigger: 0, autoAlreadyPolished: false, onOpen, onClose: vi.fn(), beforeRun: async () => true, onBusyChange: onBusy, onCommitted: committed, onUsage: vi.fn() }
 })
 afterEach(() => { for (const cleanup of hooks.cleanup.values()) cleanup(); vi.unstubAllGlobals() })
 describe('refinement panel behavior', () => {
+  it('does not let a slow initial load replace a newly generated candidate', async () => {
+    let finishLoad!: (value: RefinementCandidate | null) => void
+    load.mockReturnValueOnce(new Promise(resolve => { finishLoad = resolve }))
+    render()
+    button(render(), '生成精修候选').props.onClick(); await flush()
+    expect(renderToStaticMarkup(render())).toContain('精修句子。')
+    finishLoad(null); await flush()
+    expect(renderToStaticMarkup(render())).toContain('精修句子。')
+    expect(button(render(), '采用此条').props.disabled).toBe(false)
+  })
+  it('declines a single hunk without saving正文 and disables adoption when no changes remain', async () => {
+    load.mockResolvedValue(candidate)
+    rejectHunk.mockResolvedValue({ ...candidate, candidate: candidate.input.content })
+    render(); await flush()
+    props = { ...props, content: '已编辑' }
+    expect(button(render(), '不采纳此条').props.disabled).toBe(true)
+    props = { ...props, content: candidate.input.content }
+    button(render(), '不采纳此条').props.onClick(); await flush()
+    expect(rejectHunk).toHaveBeenCalledWith('p', 1, 'candidate-1', candidate.input.content, 0)
+    expect(committed).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+    expect(renderToStaticMarkup(render())).toContain('没有剩余改动')
+    expect(button(render(), '采用并保存').props.disabled).toBe(true)
+  })
   it('keeps candidates separate until adoption, passes selected scope and blocks stale drafts', async () => {
     render(); await flush()
     button(render(), '生成精修候选').props.onClick(); await flush()

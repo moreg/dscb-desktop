@@ -1,7 +1,7 @@
 import { BatchClock, formatBatchDuration, restoreBatchTiming, type BatchTiming } from '../../shared/batch-timing'
 import { batchQuality, BATCH_QUALITY_LABELS, type BatchQuality } from '../../shared/batch-quality'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoDeslopResult,
   ChapterMeta,
@@ -1691,14 +1691,14 @@ function BatchWriteDialog({
   const clockRef = useRef(new BatchClock(restoredSession?.timing))
   const sessionRef = useRef<SavedBatchSession | null>(restoredSession)
   const [timing, setTiming] = useState(() => clockRef.current.snapshot(performance.now()))
-  const persistSession = (session: SavedBatchSession): void => {
+  const persistSession = useCallback((session: SavedBatchSession): void => {
     const chapterRoute = session.chapterRoute ?? batchRouteRef.current ?? undefined
     const next: SavedBatchSession = { ...session, timing: clockRef.current.snapshot(performance.now()) }
     if (chapterRoute) next.chapterRoute = chapterRoute
     else delete next.chapterRoute
     sessionRef.current = next
     saveBatchSession(projectId, next)
-  }
+  }, [projectId])
   const [recovering, setRecovering] = useState(restoredSession?.interruptedChapter !== undefined)
   /**
    * 默认起点：第一个未写章节，而不是「当前最大章号 + 1」。
@@ -2005,7 +2005,7 @@ function BatchWriteDialog({
         chapterRoute: batchRouteRef.current ?? undefined
       })
     }
-  }, [projectId, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
+  }, [persistSession, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
 
   useEffect(() => {
     const chapter = restoredSession?.interruptedChapter

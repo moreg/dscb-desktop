@@ -1,5 +1,21 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ChapterSyncRunner, type SyncStep, type SyncTask } from '../src/renderer/src/chapter-sync-runner'
+import { ChapterSyncRunner, OutlineRepairProgress, type SyncStep, type SyncTask } from '../src/renderer/src/chapter-sync-runner'
+
+describe('outline repair progress', () => {
+  it('continues past three successful repairs while outstanding findings decrease', () => {
+    const progress = new OutlineRepairProgress()
+    for (const pending of [7, 6, 5, 4, 3, 2, 1]) expect(progress.next(pending)).toBeNull()
+  })
+  it('stops after three consecutive checks without improvement, including fluctuating counts', () => {
+    const progress = new OutlineRepairProgress()
+    for (const pending of [7, 6, 5, 4, 4, 5]) expect(progress.next(pending)).toBeNull()
+    expect(progress.next(4)).toContain('连续 3 次复核后待处理项未减少')
+  })
+  it('resets the stalled counter when findings fall below the previous best', () => {
+    const progress = new OutlineRepairProgress()
+    for (const pending of [7, 7, 7, 6, 6, 6, 5, 4, 3, 2, 1]) expect(progress.next(pending)).toBeNull()
+  })
+})
 
 describe('incremental chapter sync', () => {
   it('retries only failed analysis, still validates summary, and limits model concurrency to two', async () => {

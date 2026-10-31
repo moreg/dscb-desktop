@@ -93,6 +93,67 @@ describe('batch safety and recovery', () => {
   const foreshadowAddition = '账册封皮夹着半张借条，林远认出落款是父亲的笔迹。'
   const foreshadowPatch = JSON.stringify({ insertions: [{ after: -1, text: foreshadowAddition }] })
 
+  it.each([true, false])('handles a rejected insertion through the real joint review parser (retry passes=%s)', async retryPasses => {
+    stubPostProcess()
+    vi.mocked(flow.checkOutlineStream).mockRestore()
+    vi.mocked(flow.verifyForeshadowingRepair).mockRestore()
+    const verify = vi.spyOn(flow, 'verifyForeshadowingRepair')
+    const bad = '林远想起刚才父亲已经承认自己就是三皇子。'
+    const second = retryPasses ? foreshadowAddition : '林远已经回到宿舍，才想起刚才的院门。'
+    let repairs = 0
+    let reviews = 0
+    const originalOutline = await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')
+    vi.mocked(llm.generateStream).mockImplementation(async (prompt, options) => {
+      switch (options?.meta?.feature) {
+        case 'batchOutline':
+          return options.meta.chapterNumber === 1 ? JSON.stringify(foreshadowDiff) : '[]'
+        case 'batchForeshadowRepair': {
+          repairs++
+          // A rejected candidate must never reach the saved draft or memory.
+          expect(await new ProseRepo(dir).read(1)).toBe(content)
+          expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+          if (repairs === 2) {
+            expect(prompt).toContain('虚构此前谈话并提前揭底')
+            expect(prompt.split('当前完整正文（编号只用于定位）')[1]).not.toContain(bad)
+          }
+          return JSON.stringify({ insertions: [{ after: -1, text: repairs === 1 ? bad : second }] })
+        }
+        case 'foreshadowRepairReview': {
+          reviews++
+          const passed = reviews === 2 && retryPasses
+          return JSON.stringify({ diffs: [], verification: { passed, issues: passed ? [] : [{
+            message: reviews === 1 ? '虚构此前谈话并提前揭底' : '提前回到宿舍，越过章末停止位置',
+            evidence: reviews === 1 ? bad : second
+          }] } })
+        }
+        case 'longformGuard':
+          return JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+        default: throw new Error(`Unexpected model call: ${options?.meta?.feature}`)
+      }
+    })
+    const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, chapter) => {
+      if (chapter === 2) expect(await new ProseRepo(dir).read(1)).toBe(foreshadowAddition + '\n' + content)
+      return content
+    })
+    const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(repairs).toBe(2)
+    expect(reviews).toBe(2)
+    expect(verify).not.toHaveBeenCalled()
+    expect(await readFile(path.join(dir, '细纲', '细纲_第001章_交接1.md'), 'utf-8')).toBe(originalOutline)
+    if (retryPasses) {
+      expect(progress.status).toBe('completed')
+      expect(generate).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][2]).toBe(foreshadowAddition + '\n' + content)
+    } else {
+      expect(progress).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1, completed: [1] })
+      expect(progress.pauseReason).toContain('提前回到宿舍')
+      expect(generate).toHaveBeenCalledOnce()
+      expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+      expect(await new ProseRepo(dir).read(1)).toBe(content)
+      expect(await new ProseRepo(dir).read(2)).toBe('')
+    }
+  })
+
   it('automatically fills missing foreshadowing before syncing memory and generating the next chapter', async () => {
     stubPostProcess()
     const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, ch) => {
@@ -528,6 +589,9 @@ describe('batch safety and recovery', () => {
   it.each([false, true])('repairs a longform conflict and continues with fresh memory (recovered=%s)', async recovered => {
     stubPostProcess()
     await stubLongformConflict()
+    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: () => Promise<string> }
+    internal.deslopService = {}
+    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockRejectedValue(new Error('局部纠错后不应整章润色'))
     const nextOutline = await readFile(path.join(dir, '细纲', '细纲_第002章_交接2.md'), 'utf8')
     if (recovered) await new ProseRepo(dir).write(1, content)
     const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, n) => {
@@ -546,6 +610,7 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(summaryService.generateChapterSummaryChecked).mock.calls[0][2]).toBe(corrected)
     expect(vi.mocked(service.syncChapterAfterWrite).mock.calls.some(call => call[2] === content && call[1] === 1)).toBe(false)
     expect(await readFile(path.join(dir, '细纲', '细纲_第002章_交接2.md'), 'utf8')).toBe(nextOutline)
+    expect(polish).not.toHaveBeenCalled()
   })
 
   it.each(['longform', 'verify', 'outline'] as const)('retains the original draft when longform repair fails %s verification', async failure => {
@@ -562,7 +627,42 @@ describe('batch safety and recovery', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(content)
     expect(generate).toHaveBeenCalledOnce()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
-    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(2)
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(6)
+  })
+
+  it.each([true, false])('merges competing model summary patches without dropping prior events (complete=%s)', async complete => {
+    stubPostProcess()
+    await new ProseRepo(dir).write(1, content)
+    const outlineFile = path.join(dir, '细纲', '细纲_第001章_交接1.md')
+    const before = await readFile(outlineFile, 'utf8')
+    const summary = '林远递交账册，守门人核对印章后放他进门。'
+    vi.mocked(llm.generateStream).mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'proseOutlineRewrite') {
+        expect(prompt).toContain('不能只保留最后一条差异')
+        expect(prompt).toContain('递交账册')
+        expect(prompt).toContain('核对印章')
+        expect(prompt).toContain('原始事件1')
+        return JSON.stringify({ patch: complete ? { plotSummary: summary } : {} })
+      }
+      return JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+    })
+    const internal = service as unknown as { syncOutlineFromProse: (
+      id: string, chapter: number, prose: string, report: ChapterFlowResult['outlineDiff']
+    ) => Promise<ChapterFlowResult['outlineDiff']> }
+    const result = await internal.syncOutlineFromProse(projectId, 1, content, {
+      chapterNumber: 1, hasOutline: true, checked: true, passed: true, diffs: ['递交账册', '核对印章'].map(text => ({
+        type: 3, typeLabel: '细节调整', priority: 'P2', boundaryViolation: false, resolution: 'updateOutline',
+        actual: text, suggestion: '按正文调整', outlinePatch: { plotSummary: text }
+      }))
+    })
+    if (complete) {
+      expect(result.proseSynced).toBe(2)
+      expect(await readFile(outlineFile, 'utf8')).toContain(summary)
+    } else {
+      expect(result.checked).toBe(false)
+      expect(result.error).toContain('未返回完整合并结果')
+      expect(await readFile(outlineFile, 'utf8')).toBe(before)
+    }
   })
 
   it('does not overwrite an author edit made during longform repair', async () => {
@@ -626,6 +726,10 @@ describe('batch safety and recovery', () => {
   it('automatically repairs confirmed continuity conflicts and uses rechecked prose and fresh memory for the next chapter', async () => {
     stubPostProcess()
     stubContinuityModel()
+    // Even when polishing is available, local conflict repair must not invoke it.
+    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: () => Promise<string> }
+    internal.deslopService = {}
+    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockRejectedValue(new Error('不应整章润色'))
     const previous = '师父让林远在门外等候，没有允许他进院。'
     await new ProseRepo(dir).write(1, previous)
     vi.spyOn(flow, 'extractEndingState').mockResolvedValue({ chapterNumber: 1,
@@ -649,6 +753,8 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(flow.extractMemoryStream).mock.calls.map(call => call[0])).toContain(corrected)
     expect(vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'continuityRepair')?.[0]).toContain(previous)
     expect(stages.some(stage => stage.startsWith('continuity:'))).toBe(true)
+    expect(polish).not.toHaveBeenCalled()
+    expect(completed.mock.calls[0][1].autoDeslop).toMatchObject({ status: 'review_required' })
   })
 
   it.each(['logic_hole', 'character_breakdown'])('automatically repairs a confirmed %s from deep review before continuing', async (ruleId) => {

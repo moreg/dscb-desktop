@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WriteService } from '../src/main/data/write-service'
 import type { AutoDeslopResult, ChapterStreamResult } from '../src/shared/types'
 import { activeStreamCount, clearAllStreams } from '../src/main/data/stream-abort-registry'
-import { ChapterRewriteReviewError } from '../src/main/data/chapter-rewrite-review-error'
+import { ChapterWriteReviewError, ChapterRewriteReviewError, ChapterRepairReviewRequiredError } from '../src/main/data/chapter-rewrite-review-error'
 
 type Handler = (event: { sender: object }, payload: unknown) => Promise<ChapterStreamResult>
 const { handlers, send } = vi.hoisted(() => ({
@@ -47,6 +47,46 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
       projectId: 'project-1', chapterNumber: 1, content: '原稿', instruction: '调整', requestId: 'adjust-timeout'
     })).toEqual({ ok: false, error: 'LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT', retainedContent: '已完整生成的新稿。' })
     expect(send).not.toHaveBeenCalledWith('llm:token', expect.objectContaining({ done: true }))
+    expect(activeStreamCount()).toBe(0)
+  })
+
+  it('续写核对缺少依据时返回已保存精修整章，仍保持失败且不启动记忆同步', async () => {
+    const error = 'LONGFORM_REVIEW_INCOMPLETE: 缺少可定位的新稿与对照依据'
+    generate.mockRejectedValue(new ChapterWriteReviewError('已有开头。\n\n精修后的续写。', new Error(error)))
+    expect(await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 2, existingText: '已有开头。', requestId: 'retained-generation'
+    })).toEqual({ ok: false, error, retainedContent: '已有开头。\n\n精修后的续写。' })
+    expect(send).not.toHaveBeenCalledWith('llm:token', expect.objectContaining({ done: true }))
+    expect(sync).not.toHaveBeenCalled()
+    expect(repair).not.toHaveBeenCalled()
+    expect(activeStreamCount()).toBe(0)
+  })
+
+  it('结构修复候选只返回供作者对照，不能作为成功结果或同步记忆', async () => {
+    generate.mockRejectedValue(new ChapterWriteReviewError('保存的原稿。',
+      new ChapterRepairReviewRequiredError('保存的原稿。', '经过复核的候选稿。', 'structure')))
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, existingText: '保存的原稿。', repairOnly: true, requestId: 'review-structure'
+    })
+    expect(result).toMatchObject({ ok: false, retainedContent: '保存的原稿。', repairCandidate: {
+      original: '保存的原稿。', candidate: '经过复核的候选稿。', scope: 'structure'
+    } })
+    expect(sync).not.toHaveBeenCalled()
+    expect(repair).not.toHaveBeenCalled()
+  })
+
+  it('只修复模式透传并以整章回包，不把原稿重复拼接到修复稿前', async () => {
+    generate.mockImplementation(async (_pid, _chapter, _style, opts) => {
+      expect(opts).toMatchObject({ repairOnly: true, existingText: '已有正文。', tempContext: '保留章末' })
+      opts?.onConflictRepaired?.('修复后的整章。')
+      return '修复后的整章。'
+    })
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, existingText: '已有正文。', tempContext: '保留章末',
+      repairOnly: true, requestId: 'repair-existing'
+    })
+    expect(result).toMatchObject({ ok: true, fullContent: '修复后的整章。' })
+    expect(repair).toHaveBeenCalledWith('project-1', 1, '修复后的整章。', expect.any(Object))
     expect(activeStreamCount()).toBe(0)
   })
 
@@ -166,7 +206,7 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     repair.mockRejectedValue(new Error('LONGFORM_CONFLICT: 超纲修复未通过，CHAPTER_REPAIR_BUDGET'))
     expect(await handlers.get('write:generateChapter')!({ sender: {} }, {
       projectId: 'project-1', chapterNumber: 1, requestId: 'late-boundary-failed'
-    })).toMatchObject({ ok: false, error: expect.stringContaining('CHAPTER_REPAIR_BUDGET') })
+    })).toMatchObject({ ok: false, error: expect.stringContaining('CHAPTER_REPAIR_BUDGET'), retainedContent: '已经生成的正文。' })
     expect(send.mock.calls.some(([channel, payload]) => channel === 'llm:token' && payload.done)).toBe(false)
     expect(activeStreamCount()).toBe(0)
   })

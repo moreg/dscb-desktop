@@ -594,8 +594,15 @@ export class MemoryWriter {
       }
       for (const [chapter, chapterChanges] of ordered) {
         for (const change of chapterChanges) {
-          latestValues.set(`${change.characterId}:${change.key}`, change.value)
-          latestChapters.set(`${change.characterId}:${change.key}`, Number(chapter))
+          const stateKey = `${change.characterId}:${change.key}`
+          const priorValue = latestValues.get(stateKey)
+          // A chapter may record several separate possessions or pieces of knowledge.
+          // Preserve their order instead of silently replacing earlier observations.
+          const accumulated = ['持有物', '知情'].includes(change.key) && latestChapters.get(stateKey) === Number(chapter) && priorValue
+            ? (priorValue.split('；').includes(change.value) ? priorValue : `${priorValue}；${change.value}`)
+            : change.value
+          latestValues.set(stateKey, accumulated)
+          latestChapters.set(stateKey, Number(chapter))
           const entries = changesByCharacter.get(change.characterId) ?? []
           entries.push({ chapter, change })
           changesByCharacter.set(change.characterId, entries)
@@ -727,7 +734,7 @@ export class MemoryWriter {
 
     if (key === '身份') patch.identity = v
     else if (key === '性格') patch.personality = v
-    else if (key === '能力' || key === '境界' || key === '金手指') patch.abilities = v
+    else if (key === '能力' || key === '金手指') patch.abilities = v
     else if (key === '角色定位') patch.role = v
     else if (key === '当前状态') patch.synopsis = v
     else {
@@ -1061,7 +1068,8 @@ function readCharacterField(c: Character, field: string): string {
   const key = normalizeStateField(field)
   if (key === '身份') return c.identity?.trim() || ''
   if (key === '性格') return c.personality?.trim() || ''
-  if (key === '能力' || key === '境界' || key === '金手指') return c.abilities?.trim() || ''
+  if (key === '能力' || key === '金手指') return c.abilities?.trim() || ''
+  if (key === '境界') return fieldToPlain(c.customFields?.['境界'] ?? c.customFields?.['当前境界'] ?? c.customFields?.['当前修为']).trim()
   if (key === '角色定位') return c.role?.trim() || ''
   if (key === '当前状态') return c.synopsis?.trim() || ''
   const cf = c.customFields?.[key]
@@ -1174,7 +1182,7 @@ interface AutomaticStateLedger {
 }
 
 function cardFieldKey(field: string): string {
-  return ['能力', '境界', '金手指'].includes(field) ? '能力' : field
+  return ['能力', '金手指'].includes(field) ? '能力' : field
 }
 
 /** Upgrade only fields corroborated by the previous automatic history and trajectory. */

@@ -1,7 +1,7 @@
 export type SyncStepId = 'index' | 'outline' | 'memory' | 'summary' | 'rhythm' | 'figure'
 export interface SyncStep {
   id: SyncStepId
-  status: 'pending' | 'running' | 'preview' | 'written' | 'reused' | 'failed'
+  status: 'pending' | 'running' | 'preview' | 'handled' | 'written' | 'reused' | 'failed'
   elapsedMs: number
   startedAt?: number
   error?: string
@@ -11,6 +11,26 @@ export interface SyncTask {
   run: () => Promise<boolean | undefined>
   written?: boolean
   always?: boolean
+}
+
+/** One correction handles one finding, so the budget must cover the whole report. */
+export class OutlineRepairProgress {
+  private attempts = 0
+  private bestPending = Infinity
+  private stalled = 0
+  private limit = 0
+
+  next(pending: number): string | null {
+    if (!this.limit) this.limit = Math.min(60, Math.max(6, pending * 3))
+    if (pending < this.bestPending) {
+      this.bestPending = pending
+      this.stalled = 0
+    } else this.stalled++
+    if (this.stalled >= 3) return `已完成 ${this.attempts} 次局部修复，但连续 3 次复核后待处理项未减少，已暂停自动修复，请查看剩余差异。`
+    if (this.attempts >= this.limit) return `已完成 ${this.attempts} 次局部修复，达到本轮 ${this.limit} 次上限，可点击“自动修复剩余差异”继续。`
+    this.attempts++
+    return null
+  }
 }
 
 /** Successful analysis is reusable only while all source dependencies stay identical. */

@@ -37,7 +37,7 @@ const REFINEMENT_DIFF_CELL_LIMIT = 160000
 function diffOps(beforeUnits: string[], afterUnits: string[]): Op[] {
   const n = beforeUnits.length
   const m = afterUnits.length
-  const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0))
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1))
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
       if (beforeUnits[i] === afterUnits[j]) dp[i][j] = dp[i + 1][j + 1] + 1
@@ -109,6 +109,19 @@ function hunksFromOps(ops: Op[], beforeUnits: string[]): TextDiffHunk[] {
  * 标准 LCS 回溯，产出 eq / del / add 序列，再合并为改动块。
  */
 export function diffUnits(beforeUnits: string[], afterUnits: string[]): TextDiffHunk[] {
+  // 普通对比和改动摘要也会接收长文，不能只给精修入口限制矩阵大小。
+  if (beforeUnits.length * afterUnits.length > REFINEMENT_DIFF_CELL_LIMIT) {
+    let start = 0
+    let beforeEnd = beforeUnits.length
+    let afterEnd = afterUnits.length
+    while (start < beforeEnd && start < afterEnd && beforeUnits[start] === afterUnits[start]) start++
+    while (beforeEnd > start && afterEnd > start && beforeUnits[beforeEnd - 1] === afterUnits[afterEnd - 1]) {
+      beforeEnd--; afterEnd--
+    }
+    if (start === beforeEnd && start === afterEnd) return []
+    return [{ before: beforeUnits.slice(start, beforeEnd).join('\n\n'), after: afterUnits.slice(start, afterEnd).join('\n\n'),
+      index: beforeUnits.slice(0, start).reduce((offset, unit) => offset + unit.length + 2, 0), line: start + 1 }]
+  }
   return hunksFromOps(diffOps(beforeUnits, afterUnits), beforeUnits)
 }
 
@@ -142,18 +155,28 @@ function unitParts(text: string, units: string[]): { prefix: string; parts: Arra
  * 序号与 `listRefinementHunks(before, after)` 一致。
  */
 export function applyChangeHunks(before: string, after: string, selected: number[]): string {
+  return mergeChangeHunks(before, after, selected, false)
+}
+
+/** 按正向对比的序号恢复单条原文，保留候选中的其余改动。 */
+export function rejectChangeHunk(before: string, after: string, index: number): string {
+  return mergeChangeHunks(before, after, [index], true)
+}
+
+function mergeChangeHunks(before: string, after: string, selected: number[], reject: boolean): string {
   const unique = [...new Set(selected)].sort((a, b) => a - b)
   if (!unique.length) return before
   const beforeUnits = splitUnits(before)
   const afterUnits = splitUnits(after)
   if (beforeUnits.length * afterUnits.length > REFINEMENT_DIFF_CELL_LIMIT) {
     if (unique.length !== 1 || unique[0] !== 0) throw new Error('改动序号无效')
-    return after
+    return reject ? before : after
   }
   const ops = diffOps(beforeUnits, afterUnits)
   const hunks = hunksFromOps(ops, beforeUnits)
   const limit = Math.min(hunks.length, REFINEMENT_HUNK_LIMIT)
-  if (unique.some(index => index < 0 || index >= limit)) throw new Error('改动序号无效')
+  if (unique.some(index => !Number.isInteger(index) || index < 0 || index >= limit)) throw new Error('改动序号无效')
+  if (reject && hunks.length === 1) return before
   const selectedSet = new Set(unique)
   const left = unitParts(before, beforeUnits)
   const right = unitParts(after, afterUnits)
@@ -170,8 +193,9 @@ export function applyChangeHunks(before: string, after: string, selected: number
   }
   while (k < ops.length) {
     if (ops[k].type === 'eq') {
-      emitPrefix(false)
-      out.push(left.parts[i].unit, left.parts[i].sep)
+      emitPrefix(reject)
+      const part = reject ? right.parts[j] : left.parts[i]
+      out.push(part.unit, part.sep)
       i++
       j++
       k++
@@ -185,7 +209,7 @@ export function applyChangeHunks(before: string, after: string, selected: number
       if (ops[k].type === 'add') add++
       k++
     }
-    if (selectedSet.has(hunkIndex)) {
+    if (selectedSet.has(hunkIndex) !== reject) {
       emitPrefix(add > 0 && i === 0)
       for (let n = 0; n < add; n++, j++) out.push(right.parts[j].unit, right.parts[j].sep)
       i += del
@@ -197,7 +221,7 @@ export function applyChangeHunks(before: string, after: string, selected: number
   }
   if (!prefixEmitted) out.push(left.prefix)
   const merged = out.join('')
-  if (merged === before) throw new Error('这条改动没有产生变化')
+  if (merged === (reject ? after : before)) throw new Error('这条改动没有产生变化')
   return merged
 }
 

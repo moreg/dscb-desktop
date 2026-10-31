@@ -6,8 +6,37 @@ import {
   findFirstDiffWindow,
   listChangeHunks,
   listRefinementHunks,
-  applyChangeHunks
+  applyChangeHunks,
+  rejectChangeHunk
 } from '../src/shared/text-diff'
+
+describe('large text comparison', () => {
+  it('bounds diff memory for thousands of paragraphs and preserves the changed location', () => {
+    const before = Array.from({ length: 10000 }, (_, i) => `第${i}段。`)
+    const after = [...before]
+    after[5000] = '改后的段落。'
+    expect(diffUnits(before, after)).toEqual([{ before: before[5000], after: after[5000],
+      index: before.slice(0, 5000).reduce((n, line) => n + line.length + 2, 0), line: 5001 }])
+    expect(diffUnits(before, before)).toEqual([])
+    expect(listChangeHunks(before.join('\n\n'), after.join('\n\n'))).toHaveLength(1)
+  })
+})
+
+describe('rejectChangeHunk', () => {
+  it.each([
+    ['甲。\n\n乙。\n\n丙。', '甲改。\n\n乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。'],
+    ['甲。\n\n乙。\n\n丙。', '新增。\n\n甲。\n\n乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。'],
+    ['甲。\n\n乙。\n\n丙。', '乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。']
+  ])('restores only the selected replacement, insertion or deletion', (before, after, expected) => {
+    expect(rejectChangeHunk(before, after, 0)).toBe(expected)
+    expect(rejectChangeHunk(before, expected, 0)).toBe(before)
+  })
+  it('retains changes beyond the displayed limit', () => {
+    const before = Array.from({ length: 90 }, (_, i) => `原${i}。\n\n锚${i}。`).join('\n\n')
+    const after = before.replace(/原/g, '新')
+    expect(rejectChangeHunk(before, after, 0)).toBe(after.replace('新0。', '原0。'))
+  })
+})
 
 describe('splitUnits', () => {
   it('按空行切段', () => {

@@ -10,7 +10,7 @@ import { ChapterVersionRepository } from './chapter-version-repository'
 import { writeJsonAtomic } from './atomic'
 import { acquireBatchProject, activeBatchProjects } from './write-batch-lock'
 import { findJsonObject } from '../../shared/json-extract'
-import { applyChangeHunks } from '../../shared/text-diff'
+import { applyChangeHunks, rejectChangeHunk } from '../../shared/text-diff'
 import { REFINEMENT_GOALS, type RefinementInput, type RefinementCandidate, type RefinementVerdict,
   type RefinementStage, type RefinementCommit } from '../../shared/chapter-refinement'
 
@@ -153,6 +153,23 @@ export class ChapterRefinementService {
       const record = await this.load(projectId, chapter)
       if (record?.id !== id) throw new Error('精修记录已更新，请重新打开')
       await fs.rm(await this.file(projectId, chapter), { force: true })
+    } finally { release() }
+  }
+  async rejectHunk(projectId: string, chapter: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate> {
+    const release = acquireBatchProject(projectId)
+    try {
+      const record = await this.load(projectId, chapter)
+      if (!record || record.id !== id) throw new Error('精修记录已更新，请重新打开')
+      if (record.status !== 'ready' && record.status !== 'rejected') throw new Error('当前没有可挑选的改动')
+      const base = this.currentBase(record)
+      if (currentDraft !== base) throw new Error('编辑器正文已变化，请保留当前修改后重新精修')
+      const current = (await this.chapters.getChapter(projectId, chapter)).content
+      if (contentRevision(current) !== (record.adoptedRevision ?? record.baseRevision)) throw new Error('磁盘正文已变化，请重新读取后精修')
+      record.candidate = rejectChangeHunk(base, record.candidate, hunkIndex)
+      // 不采纳会重排改动序号；旧窗口不能再拿旧序号操作新版候选。
+      record.id = randomUUID()
+      await this.save(record)
+      return record
     } finally { release() }
   }
   private currentBase(record: RefinementCandidate): string {

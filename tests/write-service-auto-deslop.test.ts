@@ -154,11 +154,11 @@ describe('自动写作去 AI 味', () => {
     return vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:verify')
   }
 
-  it('单章续写所有修复共享预算，耗尽后仍保留原稿和失败原因', async () => {
+  it('单章表达润色有独立上限，耗尽后仍保留原稿和失败原因', async () => {
     const { trackChapterCall } = await import('../src/main/data/chapter-execution')
     const repair = vi.fn(async () => '候选')
     vi.mocked(deslop.deslop).mockImplementation(async () => {
-      for (const feature of ['deslop:scene-repair', 'chapter-scene-repair', 'continuityRepair', 'deslop:repair']) {
+      for (const feature of ['deslop:scene-repair', 'chapter-scene-repair', 'deslop:dialogue-repair', 'deslop:repair']) {
         await trackChapterCall(feature, repair)
       }
       return deslopResult(POLISHED)
@@ -170,19 +170,90 @@ describe('自动写作去 AI 味', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(RAW)
   })
 
+  it('润色用完三次后，已知剧情冲突仍能自动修复并独立核对', async () => {
+    const { trackChapterCall } = await import('../src/main/data/chapter-execution')
+    const internal = service as unknown as {
+      assertLongformConsistency: () => Promise<() => Promise<void>>
+      repairLongformConflict: () => Promise<string>
+    }
+    const fixed = POLISHED.replace('林远收好钥匙', '林远握住钥匙')
+    vi.spyOn(internal, 'assertLongformConsistency').mockResolvedValueOnce(async () => {})
+      .mockRejectedValueOnce(new Error('LONGFORM_CONFLICT: 钥匙状态不符')).mockResolvedValue(async () => {})
+    vi.mocked(deslop.deslop).mockImplementation(async () => {
+      for (const feature of ['deslop:scene-repair', 'chapter-scene-repair', 'deslop:repair']) {
+        await trackChapterCall(feature, async () => '修订')
+      }
+      return deslopResult(POLISHED)
+    })
+    const repair = vi.spyOn(internal, 'repairLongformConflict').mockImplementation(async () => {
+      await trackChapterCall('continuityRepair', async () => '第一次候选')
+      return trackChapterCall('continuityRepair', async () => fixed)
+    })
+    expect(await service.generateChapterStream(projectId, 1)).toBe(fixed)
+    expect(repair).toHaveBeenCalledOnce()
+    expect(await new ProseRepo(dir).read(1)).toBe(fixed)
+  })
+
+  it('重试修复只核对已保存稿，不追加正文或重复整章润色', async () => {
+    const internal = service as unknown as {
+      assertLongformConsistency: () => Promise<() => Promise<void>>
+      repairLongformConflict: () => Promise<string>
+    }
+    await new ProseRepo(dir).write(1, RAW)
+    vi.spyOn(internal, 'assertLongformConsistency').mockRejectedValueOnce(new Error('LONGFORM_CONFLICT: 已知冲突'))
+      .mockResolvedValue(async () => {})
+    const repair = vi.spyOn(internal, 'repairLongformConflict').mockResolvedValue(POLISHED)
+    const full = vi.fn()
+    expect(await service.generateChapterStream(projectId, 1, {
+      repairOnly: true, existingText: RAW, onConflictRepaired: full
+    })).toBe(POLISHED)
+    expect(full).toHaveBeenCalledWith(POLISHED)
+    expect(repair).toHaveBeenCalledWith(projectId, 1, RAW, 'LONGFORM_CONFLICT: 已知冲突', expect.any(Function), expect.any(Object))
+    expect(llm.generateStream).not.toHaveBeenCalled()
+    expect(deslop.deslop).not.toHaveBeenCalled()
+    expect(await new ProseRepo(dir).read(1)).toBe(POLISHED)
+  })
+
+  it('重试修复拒绝覆盖已在别处修改的正文', async () => {
+    await new ProseRepo(dir).write(1, '作者手改后的正文。')
+    await expect(service.generateChapterStream(projectId, 1, { repairOnly: true, existingText: RAW }))
+      .rejects.toThrow('待修正文与已保存稿不一致')
+    expect(llm.generateStream).not.toHaveBeenCalled()
+    expect(deslop.deslop).not.toHaveBeenCalled()
+    expect(await new ProseRepo(dir).read(1)).toBe('作者手改后的正文。')
+  })
+
+  it('重试修复仍不通过时返回原稿和失败，不偷偷降级为续写', async () => {
+    const internal = service as unknown as {
+      assertLongformConsistency: () => Promise<() => Promise<void>>
+      repairLongformConflict: () => Promise<string>
+    }
+    await new ProseRepo(dir).write(1, RAW)
+    vi.spyOn(internal, 'assertLongformConsistency').mockRejectedValue(new Error('LONGFORM_CONFLICT: 已知冲突'))
+    vi.spyOn(internal, 'repairLongformConflict').mockRejectedValue(new Error('修复候选复核未通过'))
+    const full = vi.fn()
+    await expect(service.generateChapterStream(projectId, 1, { repairOnly: true, existingText: RAW, onConflictRepaired: full }))
+      .rejects.toMatchObject({ retainedContent: RAW, message: expect.stringContaining('修复候选复核未通过') })
+    expect(full).not.toHaveBeenCalled()
+    expect(llm.generateStream).not.toHaveBeenCalled()
+    expect(deslop.deslop).not.toHaveBeenCalled()
+    expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+  })
+
   it('续写修复衔接后只复核最终稿，不重复整章润色，也不冒充表达验收通过', async () => {
     const internal = service as unknown as {
       assertLongformConsistency: () => Promise<() => Promise<void>>
       repairLongformConflict: () => Promise<string>
     }
     const repaired = POLISHED.replace('林远收好钥匙', '林远握住钥匙')
-    vi.spyOn(internal, 'assertLongformConsistency').mockRejectedValueOnce(new Error('LONGFORM_CONFLICT: 钥匙状态不符'))
+    vi.spyOn(internal, 'assertLongformConsistency').mockResolvedValueOnce(async () => {})
+      .mockRejectedValueOnce(new Error('LONGFORM_CONFLICT: 钥匙状态不符'))
       .mockResolvedValue(async () => {})
     vi.spyOn(internal, 'repairLongformConflict').mockResolvedValue(repaired)
     const { onAutoDeslopResult, reports } = results()
     expect(await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).toBe(repaired)
     expect(deslop.deslop).toHaveBeenCalledTimes(1)
-    expect(internal.assertLongformConsistency).toHaveBeenCalledTimes(2)
+    expect(internal.assertLongformConsistency).toHaveBeenCalledTimes(3)
     expect(await new ProseRepo(dir).read(1)).toBe(repaired)
     expect(reports.at(-1)).toMatchObject({ status: 'review_required', message: expect.stringContaining('表达尚未重新验收') })
   })

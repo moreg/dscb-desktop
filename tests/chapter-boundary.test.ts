@@ -13,6 +13,7 @@ import { parseOutlineDiffJson } from '../src/shared/parsers'
 import { readLongformPlan } from '../src/main/data/longform-plan'
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
+import { ChapterRepairReviewRequiredError } from '../src/main/data/chapter-rewrite-review-error'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 import type { OutlineDiffReport } from '../src/shared/types'
@@ -38,6 +39,41 @@ beforeEach(async () => {
     undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
 })
 afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }) })
+
+it('局部修复两次失败后升级场景，复核通过仍只交付候选并备份原稿', async () => {
+  const passage = '甲'.repeat(400)
+  const original = '开头。' + passage + '结尾。' + '其余正文。'.repeat(300)
+  const candidate = original.replace(passage, '乙'.repeat(400))
+  await new ProseRepo(dir).write(1, original)
+  vi.spyOn(service, 'buildChapterPrompt').mockResolvedValue({ user: '原计划', system: '' } as Awaited<ReturnType<WriteService['buildChapterPrompt']>>)
+  const flow = (service as unknown as { flow: WriteFlowService }).flow
+  vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
+  let rounds = 0
+  generate.mockImplementation(async (_prompt, opts) => {
+    if (opts?.meta?.feature === 'continuityRepair') {
+      rounds++
+      return JSON.stringify({ replacements: [{ before: passage, after: '乙'.repeat(400) }] })
+    }
+    if (opts?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: true, issues: [] })
+    if (opts?.meta?.feature === 'longformGuard') return clear
+    throw new Error(`unexpected ${opts?.meta?.feature}`)
+  })
+  const internal = service as unknown as { repairLongformConflict: (
+    pid: string, chapter: number, prose: string, issue: string, progress: () => void, opts: object
+  ) => Promise<string> }
+  await expect(internal.repairLongformConflict(id, 1, original, '人物状态错误', () => {}, {}))
+    .rejects.toMatchObject({ name: ChapterRepairReviewRequiredError.name, original, candidate, scope: 'scene' })
+  expect(rounds).toBe(3)
+  expect(await new ProseRepo(dir).read(1)).toBe(original)
+  const { readdir } = await import('fs/promises')
+  const files = await readdir(join(dir, '.cache', 'repair-proposals'))
+  const saved = JSON.parse(await readFile(join(dir, '.cache', 'repair-proposals', files[0]), 'utf8'))
+  expect(saved).toMatchObject({ original, candidate, scope: 'scene' })
+  expect(await service.getChapterRepairProposal(id, 1, original)).toEqual({ original, candidate, scope: 'scene' })
+  expect(await service.getChapterRepairProposal(id, 1, '过期原稿')).toBeNull()
+  await new ProseRepo(dir).write(1, '另一窗口修改后的正文。')
+  expect(await service.getChapterRepairProposal(id, 1, original)).toBeNull()
+})
 
 it('没有总纲也强制检查细纲边界，冲突稿保留但不能成功交稿或同步', async () => {
   generate.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard' ? scopeConflict : leaked)
@@ -72,7 +108,7 @@ it('即使长篇核对漏报，细纲对照的 P0 越界仍阻止交稿，不能
   vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue(JSON.stringify([violation]))
   await expect(service.repairChapterForeshadowings(id, 1, leaked)).rejects.toThrow('LONGFORM_CONFLICT')
   expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
-  expect(generate.mock.calls.map(([, opts]) => opts?.meta?.feature)).toEqual(['continuityRepair', 'continuityRepair'])
+  expect(generate.mock.calls.map(([, opts]) => opts?.meta?.feature)).toEqual(Array(6).fill('continuityRepair'))
 })
 
 it('明确越界不能由连续模式回写当前或未来细纲消除', async () => {
@@ -146,7 +182,7 @@ it.each([false, true])('越界局部修复必须重新过章节边界检查，�
     expect(await new ProseRepo(dir).read(1)).toBe(repaired)
     expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
   }
-  expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair').length).toBeLessThanOrEqual(2)
+  expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair').length).toBeLessThanOrEqual(stillConflicts ? 6 : 2)
   expect(generate.mock.calls.find(([, opts]) => opts?.meta?.feature === 'continuityRepair')![0]).toContain(future)
 })
 
@@ -164,11 +200,13 @@ it('生成过程中改变未来细纲时不采用旧边界生成稿', async () =
 
 it('最终润色引入越界仍被拦截，不能只检查生成原稿', async () => {
   const safe = '陆安接过母亲递来的药瓶，把它握在掌心，等她告诉自己该怎么服药。'
-  generate.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard' ? scopeConflict : safe)
+  generate.mockImplementation(async (prompt, opts) => opts?.meta?.feature === 'longformGuard'
+    ? (prompt.endsWith(safe) ? clear : scopeConflict) : safe)
   vi.spyOn(service as unknown as { autoDeslopGeneratedProse: () => Promise<string> }, 'autoDeslopGeneratedProse').mockResolvedValue(leaked)
   await expect(service.generateChapterStream(id, 1)).rejects.toThrow('LONGFORM_CONFLICT')
   const calls = generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')
-  expect(calls.length).toBeGreaterThan(0)
-  expect(calls.every(([prompt]) => prompt.endsWith(leaked))).toBe(true)
+  expect(calls.length).toBeGreaterThan(1)
+  expect(calls[0][0].endsWith(safe)).toBe(true)
+  expect(calls.slice(1).every(([prompt]) => prompt.endsWith(leaked))).toBe(true)
   expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
 })

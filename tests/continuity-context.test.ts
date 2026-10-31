@@ -9,6 +9,15 @@ import { buildContinuityContext, parseContinuityFacts, assertSummaryKnowledgeCov
 import type { ContinuityFact } from '../src/shared/types'
 
 describe('长期连续性记忆', () => {
+  it('已有知情台账但摘要误配动作引句时，反馈指出具体摘要和证据而不放行', () => {
+    const summary = { schemaVersion: 1 as const, chapterNumber: 3, sourceHash: '', generatedAt: '',
+      events: [], openThreads: [], stateChanges: [{ text: '张伟得知韩烁升至15级，随后进入游戏。', evidence: '张伟躺下，闭眼进入游戏。' }],
+      continuity: [{ kind: 'knowledge' as const, subject: '张伟', object: '韩烁的等级', aspect: '知情程度', value: '已知15级', evidence: '张伟看到等级榜，韩烁已经15级。' }] }
+    expect(() => assertSummaryKnowledgeCoverage(summary, [])).toThrow('当前摘要引句：张伟躺下，闭眼进入游戏。')
+    expect(() => assertSummaryKnowledgeCoverage(summary, [])).toThrow('已有该人物的 knowledge 条目')
+    summary.stateChanges[0].text = '张伟躺下重新进入游戏。'
+    expect(() => assertSummaryKnowledgeCoverage(summary, [])).not.toThrow()
+  })
   it('真实提取回归：不知情写在未结线索中也必须进入逐人台账', () => {
     const fact = { text: '陆宁仍在南关，尚未收到消息，仍不知道内应身份。', evidence: '陆宁此时仍在远处的南关，没有收到消息，仍不知道内应是谁。' }
     const summary = { schemaVersion: 1 as const, chapterNumber: 640, sourceHash: '', generatedAt: '',
@@ -111,7 +120,9 @@ describe('长期连续性记忆', () => {
   it('不接受无原文依据、错误主体结构和不完整条目', () => {
     const prose = '陆安把青铜钥匙交给妹妹陆宁。'
     expect(parseContinuityFacts([item('陆宁', prose)], prose)).toHaveLength(1)
-    expect(() => parseContinuityFacts([item('陆宁', '钥匙被赵伯夺走了。')], prose)).toThrow('依据')
+    const invalidEvidence = () => parseContinuityFacts([item('陆宁', '钥匙被赵伯夺走了。')], prose)
+    expect(invalidEvidence).toThrow('连续性记忆的依据与当前正文不符：item，青铜钥匙，持有者。')
+    expect(invalidEvidence).toThrow('无法定位的引句：钥匙被赵伯夺走了。')
     expect(() => parseContinuityFacts([{ ...item('陆宁', prose), object: '陆宁' }], prose)).toThrow('object')
     expect(() => parseContinuityFacts([{ ...item('陆宁', prose), evidence: '钥匙' }], prose)).toThrow('依据')
     expect(() => parseContinuityFacts([{ kind: 'knowledge' }], prose)).toThrow('字段')

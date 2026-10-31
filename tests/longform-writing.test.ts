@@ -44,10 +44,45 @@ describe('续写与连续批次的长篇约束', () => {
     expect(prompt.user).toContain('不能通过按正文回写细纲来消除')
   })
 
+  it('写作末尾强化本章情节点与禁区，长篇计划不盖过本章输出任务', async () => {
+    await writeFile(join(dir, '细纲', '细纲_第001章_寻信.md'), [
+      '# 细纲', '', '## 第 1 章：寻信', '- **核心事件**：陆安先取信，再向船夫问路。',
+      '- **章末钩子**：陆安发现信封上的红印。', '', '## 情节细化', '### 情节点序列',
+      '1. 陆安取回旧信。', '2. 陆安把旧信交给船夫查看。', '', '## 写作禁区', '不得提前揭示母亲身份。'
+    ].join('\n'))
+    await writeFile(join(dir, '细纲', '细纲_第002章_后续.md'), '# 细纲\n\n## 第 2 章：后续\n\n- **核心事件**：次日船夫确认母亲身份。')
+    const prompt = await service.buildChapterPrompt(id, 1)
+    const execution = prompt.user.indexOf('【本章执行清单：写完前逐项核对】')
+    const output = prompt.user.indexOf('# 现在请写第 1 章正文')
+    expect(execution).toBeGreaterThan(output)
+    expect(prompt.user.indexOf('【作者主线契约】')).toBeLessThan(output)
+    const finalInstructions = prompt.user.slice(execution)
+    expect(finalInstructions).toContain('陆安取回旧信')
+    expect(finalInstructions).toContain('陆安把旧信交给船夫查看')
+    expect(finalInstructions).toContain('不得提前揭示母亲身份')
+    expect(finalInstructions).toContain('本章停止位置：陆安发现信封上的红印')
+    expect(prompt.user).toContain('本章细纲明确安排的发现、行动和结果必须完成')
+    expect(prompt.user).not.toContain('本章细纲的章末钩子照常兑现，但只到触发信号')
+  })
+
   it('普通续写发现跑偏保留已生成原稿，不能成功交稿', async () => {
-    await expect(service.generateChapterStream(id, 1)).rejects.toThrow('LONGFORM_CONFLICT')
+    await expect(service.generateChapterStream(id, 1)).rejects.toMatchObject({
+      message: expect.stringContaining('LONGFORM_CONFLICT'), retainedContent: content
+    })
     expect(await new ProseRepo(dir).read(1)).toContain('永久放弃寻找母亲')
     expect(generate.mock.calls.some(([, opts]) => opts?.meta?.feature === 'longformGuard')).toBe(true)
+  })
+
+  it('生成精修后核对失败，把精修整章附在错误中，磁盘正文仍在', async () => {
+    const polished = '陆安向船夫询问母亲的下落，随后沿着河岸继续寻找。'
+    vi.spyOn(service as unknown as { autoDeslopGeneratedProse: () => Promise<string> },
+      'autoDeslopGeneratedProse').mockResolvedValue(polished)
+    generate.mockImplementation(async (prompt, opts) => opts?.meta?.feature === 'longformGuard'
+      ? (prompt.endsWith(content) ? clear : '{}') : content)
+    await expect(service.generateChapterStream(id, 1)).rejects.toMatchObject({
+      message: expect.stringContaining('LONGFORM_REVIEW_INCOMPLETE'), retainedContent: polished
+    })
+    expect(await new ProseRepo(dir).read(1)).toBe(polished)
   })
 
   it('写后同步同样核对主线，冲突稿不能提取/提交记忆', async () => {

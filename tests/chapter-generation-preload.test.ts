@@ -51,6 +51,15 @@ describe('正文 preload 阶段事件与最终内容', () => {
     expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({ autoStrength: true }))
   })
 
+  it('重试修复选项及原稿透传到 IPC，仍复用可取消的阶段事件', async () => {
+    invoke.mockResolvedValue({ ok: true, fullContent: '修复后的正文。' })
+    await api.generateChapterStream('project-1', 1, null, '保留章末', '原稿。', vi.fn(), vi.fn(), false, true)
+    expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({
+      repairOnly: true, existingText: '原稿。', tempContext: '保留章末'
+    }))
+    expect(listeners.get('write:generationStage')?.size).toBe(0)
+  })
+
   it.each(['generateChapterStream', 'adjustChapterStream'] as const)('%s 原稿 done 不结束最终回包等待，阶段只通知本次请求', async (method) => {
     let finish!: (value: unknown) => void
     invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))

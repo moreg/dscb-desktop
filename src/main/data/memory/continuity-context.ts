@@ -35,7 +35,10 @@ export function assertSummaryKnowledgeCoverage(summary: ChapterSummary, vocabula
       if (!/得知|知道|知晓|不知|不晓|误以为|误认|怀疑|猜测|认定|获知/.test(clause)) continue
       if (!summary.continuity.some(f => f.kind === 'knowledge' && f.subject === subject &&
           (f.evidence.includes(fact.evidence) || fact.evidence.includes(f.evidence)))) {
-        throw new Error(`MEMORY_KNOWLEDGE_INCOMPLETE: 章节概要中${subject}的知情事实缺少对应连续性台账；请根据同一原文补齐 knowledge，不得只写进 events、stateChanges 或 openThreads`)
+        throw new Error(`MEMORY_KNOWLEDGE_INCOMPLETE: 章节概要中${subject}的知情事实缺少对应连续性台账；请根据同一原文补齐 knowledge，不得只写进 events、stateChanges 或 openThreads。\n待校正摘要：${fact.text}\n当前摘要引句：${fact.evidence}\n${
+          summary.continuity.some(f => f.kind === 'knowledge' && f.subject === subject)
+            ? '已有该人物的 knowledge 条目，但引句与这条摘要未对应。先核实摘要引句是否真的支持所述知情事实；纯行动引句不能支持得知或误信。请改用正文中直接支持知情的原句，或将摘要缩为该引句实际支持的行动，保留已有的有效知情台账；不要反复新增相同条目，也不要把纯行动伪写成知情。'
+            : '这条知情事实不能仅保留在短摘要中；补齐有直接原文依据的逐人台账。'}`)
       }
     }
   }
@@ -61,7 +64,7 @@ export function parseContinuityFacts(value: unknown, prose: string): ContinuityF
     if (kind === 'item' && fact.object) throw new Error('道具连续性记忆的 object 必须留空，归属写入 value')
     if (kind === 'thread' && fact.object) throw new Error('剧情线连续性记忆的 object 必须留空')
     const location = locateMemoryEvidence(prose, fact.evidence)
-    if (!location) throw new Error('连续性记忆的依据与当前正文不符')
+    if (!location) throw new Error(`连续性记忆的依据与当前正文不符：${fact.kind}，${fact.subject}${fact.object ? ` → ${fact.object}` : ''}，${fact.aspect}。\n无法定位的引句：${fact.evidence}\n请逐字复制本章中支持这条事实的连续原句，不要拼接、改写引句；找不到直接依据时删除该条事实。`)
     return { ...fact, evidence: prose.slice(location.start, location.end) }
   })
 }

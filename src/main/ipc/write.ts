@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
-import { ChapterRewriteReviewError } from '../data/chapter-rewrite-review-error'
+import { ChapterWriteReviewError, ChapterRepairReviewRequiredError } from '../data/chapter-rewrite-review-error'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import { activeBatchProjects } from '../data/write-batch-lock'
 import { safeHandle, safeSend } from './safe-handle'
@@ -25,6 +25,10 @@ import { postWriteProgressLabel } from '../../shared/generation-progress'
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
 export function registerWriteIpc(service: WriteService): void {
+  safeHandle('write:getChapterRepairProposal', async (_event, raw: unknown) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema, content: chapterContentSchema }), raw)
+    return service.getChapterRepairProposal(input.projectId, input.chapterNumber, input.content)
+  })
   safeHandle('write:syncContext', async (_event, raw: unknown) => {
     const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema, content: chapterContentSchema }), raw)
     return service.getChapterSyncContext(input.projectId, input.chapterNumber, input.content)
@@ -114,10 +118,12 @@ export function registerWriteIpc(service: WriteService): void {
         tempContext?: string
         existingText?: string
         autoStrength?: boolean
+        repairOnly?: boolean
         requestId: string
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
+      let retainedContent: string | undefined
       try {
         const validated = validateInput(
           z.object({
@@ -127,6 +133,7 @@ export function registerWriteIpc(service: WriteService): void {
             tempContext: z.string().optional(),
             existingText: z.string().optional(),
             autoStrength: z.boolean().optional(),
+            repairOnly: z.boolean().optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -150,6 +157,7 @@ export function registerWriteIpc(service: WriteService): void {
                 tempContext: validated.tempContext,
                 existingText: validated.existingText,
                 autoStrength: validated.autoStrength === true,
+                repairOnly: validated.repairOnly === true,
                 signal,
                 onGenerationStage: (stage) =>
                   safeSend(win, 'write:generationStage', {
@@ -176,6 +184,7 @@ export function registerWriteIpc(service: WriteService): void {
                   })
               }
             )
+            retainedContent = conflictRepaired ?? formatChapterProse(joinContinuation(validated.existingText ?? '', content))
             const repaired = await service.repairChapterForeshadowings(
               validated.projectId,
               validated.chapterNumber,
@@ -205,7 +214,12 @@ export function registerWriteIpc(service: WriteService): void {
           endStream(validated.requestId)
         }
       } catch (err) {
-        return { ok: false, error: (err as Error).message }
+        if (err instanceof ChapterWriteReviewError) retainedContent = err.retainedContent
+        const review = err instanceof ChapterRepairReviewRequiredError ? err :
+          err instanceof Error && err.cause instanceof ChapterRepairReviewRequiredError ? err.cause : undefined
+        return { ok: false, error: (err as Error).message,
+          ...(review ? { repairCandidate: { original: review.original, candidate: review.candidate, scope: review.scope } } : {}),
+          ...(retainedContent?.trim() ? { retainedContent } : {}) }
       }
     }
   )
@@ -326,7 +340,7 @@ export function registerWriteIpc(service: WriteService): void {
           endStream(validated.requestId)
         }
       } catch (err) {
-        if (err instanceof ChapterRewriteReviewError) {
+        if (err instanceof ChapterWriteReviewError) {
           return { ok: false, error: err.message, retainedContent: err.retainedContent }
         }
         return { ok: false, error: (err as Error).message }
@@ -554,6 +568,19 @@ export function registerWriteIpc(service: WriteService): void {
       }
     }
   )
+
+  safeHandle('write:commitOutlineLocalRepair', async (_e, payload: { projectId: string; chapterNumber: number; token: string }) => {
+    return service.commitOutlineLocalRepair(payload.projectId, payload.chapterNumber, payload.token)
+  })
+  safeHandle('write:autoRepairOutlineDifference', async (_e, payload: { projectId: string; chapterNumber: number; content: string; report: import('../../shared/types').OutlineDiffReport }) => {
+    return service.autoRepairOutlineDifference(payload.projectId, payload.chapterNumber, payload.content, payload.report)
+  })
+  safeHandle('write:autoResolveOutlineDiffs', async (_e, payload: { projectId: string; chapterNumber: number; content: string; report: import('../../shared/types').OutlineDiffReport }) => {
+    return service.autoResolveOutlineDiffs(payload.projectId, payload.chapterNumber, payload.content, payload.report)
+  })
+  safeHandle('write:autoApplyExtractedMemory', async (_e, payload: { projectId: string; chapterNumber: number; content: string; extraction: MemoryExtraction }) => {
+    return service.autoApplyExtractedMemory(payload.projectId, payload.chapterNumber, payload.content, payload.extraction)
+  })
 
   safeHandle(
     'write:applyMemory',

@@ -83,7 +83,7 @@ it('同时缺少伏笔时先修越界，再补伏笔，不以删掉伏笔要求�
 it('修复自评通过但细纲复核仍报越界时停止，不交付错误候选', async () => {
   vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify([violation]))
   await expect(service.repairChapterForeshadowings(id, 1, original)).rejects.toThrow('LONGFORM_CONFLICT')
-  expect(model.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')).toHaveLength(2)
+  expect(model.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')).toHaveLength(6)
   expect(await new ProseRepo(dir).read(1)).toBe(original)
   expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
 })
@@ -100,7 +100,7 @@ it('越界修好后伏笔补写失败，也不能将原超纲稿作为成功结�
   expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
 })
 
-it.each([false, true])('正文生成和写后修复共享三次预算，不在后续步骤重置（仍越界=%s）', async stillConflicts => {
+it.each([false, true])('正文生成和写后修复共享同一执行范围，表达与剧情预算分开（仍越界=%s）', async stillConflicts => {
   if (stillConflicts) vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify([violation]))
   const write = service.runChapterWrite(id, 1, async () => {
     await trackChapterCall('deslop:scene-repair', async () => '第一次表达修复')
@@ -108,14 +108,14 @@ it.each([false, true])('正文生成和写后修复共享三次预算，不在�
     const generated = await service.generateChapterStream(id, 1)
     return service.repairChapterForeshadowings(id, 1, generated)
   })
-  if (stillConflicts) await expect(write).rejects.toThrow('CHAPTER_REPAIR_BUDGET')
+  if (stillConflicts) await expect(write).rejects.toThrow('LONGFORM_CONFLICT')
   else expect(await write).toMatchObject({ content: candidate, report: { status: 'applied' } })
-  expect(model.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')).toHaveLength(1)
+  expect(model.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')).toHaveLength(stillConflicts ? 6 : 1)
   const files = await readdir(join(dir, '.cache', 'chapter-runs'))
   expect(files).toHaveLength(1)
   const trace = JSON.parse(await readFile(join(dir, '.cache', 'chapter-runs', files[0]), 'utf8'))
-  expect(trace.repairs).toBe(3)
-  expect(trace.calls.some((call: { outcome: string }) => call.outcome === 'budget_exhausted')).toBe(stillConflicts)
+  expect(trace.repairsByKind).toEqual({ content: stillConflicts ? 6 : 1, expression: 2 })
+  expect(trace.calls.some((call: { outcome: string }) => call.outcome === 'budget_exhausted')).toBe(false)
 })
 
 it.each(['prose', 'outline'])('修复期间作者改动 %s 时丢弃候选，不覆盖作者改稿', async target => {

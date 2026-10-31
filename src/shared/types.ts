@@ -542,8 +542,10 @@ export interface SavedChapterPolishResult {
 export interface ChapterStreamResult {
   ok: boolean
   error?: string
-  /** 重写已完成但后续核对失败的整章稿，仅供复核；不得自动同步记忆。 */
+  /** 续写或重写已生成但后续处理失败的完整整章稿，仅供复核；不得自动同步记忆。 */
   retainedContent?: string
+  /** 通过自动复核的大范围候选，必须由作者对照后决定是否采用。 */
+  repairCandidate?: { original: string; candidate: string; scope: 'scene' | 'structure' }
   /** 自动精修后的最终新生成片段，不含续写前已有正文。 */
   content?: string
   /** 伏笔可能补入已有正文中段；有此字段时直接采用整章，不再拼接旧稿。 */
@@ -589,6 +591,7 @@ export interface RendererApi {
   refineChapter(input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void): StreamHandleOf<RefinementResult>
   loadRefinement(projectId: string, chapterNumber: number): Promise<RefinementCandidate | null>
   discardRefinement(projectId: string, chapterNumber: number, id: string): Promise<void>
+  rejectRefinementHunk(projectId: string, chapterNumber: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate>
   commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit>
   getAppUpdateState(): Promise<AppUpdateState>
   checkAppUpdate(): Promise<AppUpdateState>
@@ -870,8 +873,11 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void,
     onGenerationStage?: (stage: ChapterGenerationStage) => void,
     /** 按本章节奏临时调整本次续写的生成强度。 */
-    autoStrength?: boolean
+    autoStrength?: boolean,
+    /** 只修复并核对已保存稿，不生成续写。 */
+    repairOnly?: boolean
   ) => ChapterStreamHandle
+  getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterStreamResult['repairCandidate'] | null>
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
     projectId: string,
@@ -940,6 +946,11 @@ export interface RendererApi {
     reuse?: boolean
   ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
+  autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport) => Promise<
+    { status: 'unresolved'; reason: string } | { status: 'candidate'; token: string; target: 'prose' | 'outline'; content: string; reason: string }>
+  commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) => Promise<void>
+  autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport) => Promise<number[]>
+  autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) => Promise<{ memory: MemoryApplyResult; settings: SettingsApplyResult; extraction: MemoryExtraction }>
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
   invalidateChapterMemorySync: (projectId: string, chapterNumber: number) => Promise<void>
   /**

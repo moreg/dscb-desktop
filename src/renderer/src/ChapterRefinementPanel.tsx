@@ -103,7 +103,7 @@ export default function ChapterRefinementPanel(props: Props) {
   const sourceChanged = source !== props.content
   const hunks = useMemo(() => record?.candidate && view === 'changes' ? changes(record.adoptedContent ?? record.input.content, record.candidate) : [], [record, view])
   const canPickHunk = !busy && !props.disabled && !stale && !!record?.candidate && (record.status === 'ready' || record.status === 'rejected')
-  const canAdopt = canPickHunk && record?.status === 'ready' && !!record.verdict?.passed
+  const canAdopt = canPickHunk && record?.status === 'ready' && !!record.verdict?.passed && record.candidate !== baseline
   const canUndo = !busy && !stale && !props.disabled && (record?.status === 'accepted' || typeof record?.adoptedContent === 'string')
 
   useEffect(() => {
@@ -117,13 +117,14 @@ export default function ChapterRefinementPanel(props: Props) {
   useEffect(() => {
     if (!props.open || busyRef.current) return
     let alive = true
+    const requestRun = runId.current
     setSource(current.current.content)
     setScope(current.current.selection ? 'selection' : 'chapter')
     void window.api.loadRefinement(props.projectId, props.chapterNumber).then(value => {
-      if (!alive || busyRef.current) return
+      if (!alive || busyRef.current || requestRun !== runId.current) return
       setRecord(value)
       if (value) { setGoal(value.input.goal); setInstruction(value.input.instruction); setPlan(value.input.content === current.current.content ? value.input.plan ?? '' : '') }
-    }).catch(e => { if (alive) setError(String(e.message || e)) })
+    }).catch(e => { if (alive && requestRun === runId.current) setError(String(e.message || e)) })
     return () => { alive = false }
   }, [props.open, props.projectId, props.chapterNumber])
   useEffect(() => {
@@ -240,6 +241,7 @@ export default function ChapterRefinementPanel(props: Props) {
 
   async function commit(undo: boolean, hunkIndex?: number): Promise<void> {
     if (!record || busyRef.current || props.disabled || stale) return
+    ++runId.current
     const before = current.current.content
     setWorking(true, true); setError(''); setNotice('')
     try {
@@ -259,8 +261,21 @@ export default function ChapterRefinementPanel(props: Props) {
     } catch (e) { if (mounted.current) setError((e as Error).message) }
     finally { if (mounted.current) setWorking(false) }
   }
+  async function rejectHunk(hunkIndex: number): Promise<void> {
+    if (!record || busyRef.current || !canPickHunk) return
+    ++runId.current
+    setWorking(true); setError(''); setNotice('')
+    try {
+      const next = await window.api.rejectRefinementHunk(props.projectId, props.chapterNumber, record.id, current.current.content, hunkIndex)
+      if (!mounted.current) return
+      setRecord(next)
+      setNotice(`已不采纳第 ${hunkIndex + 1} 条，保留该处原文。其余改动仍可继续挑选。`)
+    } catch (e) { if (mounted.current) setError((e as Error).message) }
+    finally { if (mounted.current) setWorking(false) }
+  }
   async function discard(): Promise<void> {
     if (!record || busyRef.current) return
+    ++runId.current
     const kept = typeof record.adoptedContent === 'string'
     setWorking(true); setError('')
     try { await window.api.discardRefinement(props.projectId, props.chapterNumber, record.id); if (mounted.current) { setRecord(null); setNotice(kept ? '已放弃剩余候选，已采用的改动保留在正文中。' : '已放弃候选，正文保持不变。') } }
@@ -311,11 +326,17 @@ export default function ChapterRefinementPanel(props: Props) {
         </div>}
         {record.candidate && <><div className="refinement-actions" aria-label="对比视图">
           <button className="btn btn-sm" aria-pressed={view === 'changes'} onClick={() => setView('changes')}>修改位置</button><button className="btn btn-sm" aria-pressed={view === 'full'} onClick={() => setView('full')}>完整对比</button></div>
-          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。核验未通过时也可以单条采用。</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}><summary><span>改动 {i + 1}</span>{(record.status === 'ready' || record.status === 'rejected') && <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`采用改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void commit(false, i) }}>采用此条</button>}</summary><div><section><h4>原文</h4><pre>{hunk.before || '（新增）'}</pre></section><section><h4>候选</h4><pre>{hunk.after || '（删除）'}</pre></section></div></details>) : <p>候选与原文相同。</p>}</>
+          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。每条可单独采用或不采纳，核验未通过时也可以单条采用。</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}>
+            <summary><span>改动 {i + 1}</span>{(record.status === 'ready' || record.status === 'rejected') && <span className="refinement-actions">
+              <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`不采纳改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void rejectHunk(i) }}>不采纳此条</button>
+              <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`采用改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void commit(false, i) }}>采用此条</button>
+            </span>}</summary>
+            <div><section><h4>原文</h4><pre>{hunk.before || '（新增）'}</pre></section><section><h4>候选</h4><pre>{hunk.after || '（删除）'}</pre></section></div>
+          </details>) : <p>没有剩余改动，候选与当前正文相同。</p>}</>
             : <div className="refinement-full"><section><h4>原文</h4><pre>{record.adoptedContent ?? record.input.content}</pre></section><section><h4>候选</h4><pre>{record.candidate}</pre></section></div>}</>}
       </section>}
     </div>
-    <footer className="refinement-footer"><span className="desc">每条改动都能单独采用。整章采用需核验通过。采用前原文不会自动替换。</span><div className="refinement-actions">
+    <footer className="refinement-footer"><span className="desc">每条改动都能单独采用或不采纳，不采纳时保留该处原文。整章采用需核验通过。</span><div className="refinement-actions">
       {record?.status === 'accepted' ? <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销本次精修</button> : <>
         {typeof record?.adoptedContent === 'string' && <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销已采用条目</button>}
         {record && <button className="btn" disabled={busy} onClick={() => { body.current?.scrollTo({ top: 0, behavior: 'smooth' }); setNotice('修改目标或补充要求后重新生成。新一轮仍以原文为事实基线。') }}>继续调整</button>}

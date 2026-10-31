@@ -3,6 +3,12 @@ import { parseForeshadowReceipt } from '../../shared/parsers'
 import type { ChapterStreamResult } from '../../shared/types'
 import { isEarlyAgentNarration } from '../../main/data/agent-meta-detect'
 
+/** A completed draft awaiting review must be repaired, not extended again. */
+export function shouldRepairChapterOnRetry(result: ChapterStreamResult, retained: string): boolean {
+  return !result.ok && !!retained.trim() && (!!result.retainedContent?.trim() ||
+    /LONGFORM_CONFLICT|LONGFORM_REVIEW_INCOMPLETE|CHAPTER_REPAIR_BUDGET/.test(result.error ?? ''))
+}
+
 /** 外层检查错误优先，不能被内部 LLM_TIMEOUT 吞成「生成超时」。 */
 export function chapterReviewFailureMessage(error: string): string | undefined {
   if (error.includes('LONGFORM_REVIEW_INCOMPLETE')) {
@@ -20,16 +26,23 @@ export function failedChapterRewriteDraft(initial: string, result: ChapterStream
     ? formatChapterProse(result.retainedContent) : initial
 }
 
+/** 失败回包中的整章稿优先于流式原稿，不能再次拼接前缀或回滚成空稿。 */
+export function failedChapterContinuationDraft(initial: string, preview: string, result: ChapterStreamResult): string {
+  return !result.ok && result.retainedContent?.trim()
+    ? formatChapterProse(result.retainedContent)
+    : interruptedChapterDraft(initial, preview, result.error ?? '')
+}
+
 /** 中断稿仅保留小说预览；流程旁白和其他错误仍回滚，且不触发写后记忆。 */
 export function interruptedChapterDraft(initial: string, preview: string, error: string): string {
-  if (!/LLM_TIMEOUT|LLM_ABORTED|LLM_OUTPUT_TRUNCATED/.test(error) || isEarlyAgentNarration(preview)) return initial
+  if (!/LLM_TIMEOUT|LLM_ABORTED|LLM_OUTPUT_TRUNCATED|LONGFORM_|CHAPTER_REPAIR_BUDGET/.test(error) || isEarlyAgentNarration(preview)) return initial
   const prose = parseForeshadowReceipt(preview).stripped
   return prose.trim() ? formatChapterProse(joinContinuation(initial, prose)) : initial
 }
 
 export function interruptedChapterRetryMessage(error: string, hasRetainedProse: boolean): string | undefined {
   const reviewError = chapterReviewFailureMessage(error)
-  if (reviewError) return reviewError
+  if (reviewError) return reviewError + (hasRetainedProse ? ' 已生成的正文已保留，待核对通过后再同步记忆。' : '')
   if (/LLM_OUTPUT_TRUNCATED/.test(error)) {
     return hasRetainedProse
       ? '模型输出中断，已生成的正文已保留。重试将从当前草稿继续写。'

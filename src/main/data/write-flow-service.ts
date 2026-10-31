@@ -5,6 +5,7 @@ import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
+import { ForeshadowingRepairRejectedError } from './foreshadowing-repair'
 import { parseOutlineDiffJson, parseMemoryExtractionJson } from '../../shared/parsers'
 import type { MemoryExtraction } from '../../shared/types'
 
@@ -54,16 +55,16 @@ export class WriteFlowService {
       throw new Error('伏笔补写专项核验未返回有效结论')
     }
     if (obj.passed) return
-    const messages: string[] = []
+    const issues: { message: string; evidence: string }[] = []
     for (const issue of obj.issues) {
       if (!issue || typeof issue.message !== 'string' || !issue.message.trim() ||
         typeof issue.evidence !== 'string' || !issue.evidence.trim() || !input.candidate.includes(issue.evidence) ||
         !input.inserted.some((addition) => addition.includes(issue.evidence) || issue.evidence.includes(addition))) {
         throw new Error('伏笔补写专项核验缺少新增正文证据')
       }
-      messages.push(issue.message)
+      issues.push({ message: issue.message, evidence: issue.evidence })
     }
-    throw new Error(`伏笔补写引入新的剧情偏离：${messages.join('；')}`)
+    throw new ForeshadowingRepairRejectedError(issues)
   }
 
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {

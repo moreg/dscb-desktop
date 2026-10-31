@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from '../src/renderer/src/chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from '../src/renderer/src/chapter-generation-finalize'
+
+describe('失败后的重试方向', () => {
+  it.each(['LONGFORM_CONFLICT: 冲突', 'LONGFORM_REVIEW_INCOMPLETE: 核对超时', 'CHAPTER_REPAIR_BUDGET: 剧情纠错耗尽'])('%s 只修复当前稿', error => {
+    expect(shouldRepairChapterOnRetry({ ok: false, error }, '已保存的正文。')).toBe(true)
+    expect(shouldRepairChapterOnRetry({ ok: false, error }, '')).toBe(false)
+  })
+  it('完整稿的后处理超时走补检，真正的生成中断继续续写', () => {
+    expect(shouldRepairChapterOnRetry({ ok: false, error: 'LLM_TIMEOUT', retainedContent: '完整稿。' }, '完整稿。')).toBe(true)
+    expect(shouldRepairChapterOnRetry({ ok: false, error: 'LLM_TIMEOUT' }, '半稿。')).toBe(false)
+    expect(shouldRepairChapterOnRetry({ ok: true }, '完整稿。')).toBe(false)
+  })
+})
 
 describe('重写后检查失败', () => {
   it('保留后端确认完整的稿件，未完成生成仍退回原稿', () => {
@@ -16,6 +28,21 @@ describe('重写后检查失败', () => {
 })
 
 describe('中断续写保留草稿', () => {
+  it.each(['LONGFORM_REVIEW_INCOMPLETE: 缺少可定位的新稿与对照依据', 'LONGFORM_CONFLICT: 冲突', 'CHAPTER_REPAIR_BUDGET'])('%s 保留完整精修稿，不重复拼接前文', error => {
+    expect(failedChapterContinuationDraft('原有前文。', '流式原稿。', {
+      ok: false, error, retainedContent: '原有前文。\n\n完整精修稿。'
+    })).toBe('原有前文。\n\n完整精修稿。')
+    expect(failedChapterContinuationDraft('', '流式原稿。', {
+      ok: false, error, retainedContent: '完整精修稿。'
+    })).toBe('完整精修稿。')
+  })
+  it('旧后端未附完整稿时，核对失败仍保留小说预览而不是清空', () => {
+    const error = 'LONGFORM_REVIEW_INCOMPLETE: 缺少可定位的新稿与对照依据'
+    expect(failedChapterContinuationDraft('', '他把门推开，屋内空无一人。', { ok: false, error }))
+      .toBe('他把门推开，屋内空无一人。')
+    expect(interruptedChapterRetryMessage(error, true)).toContain('正文已保留')
+    expect(failedChapterContinuationDraft('原稿。', '', { ok: false, error })).toBe('原稿。')
+  })
   it.each(['LLM_TIMEOUT', 'LLM_ABORTED', 'LLM_OUTPUT_TRUNCATED'])('%s 保留已有正文和新增正文', error => {
     expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n\n“你来了。”')
   })

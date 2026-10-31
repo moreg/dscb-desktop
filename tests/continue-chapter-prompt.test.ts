@@ -309,7 +309,7 @@ describe('续写 prompt', () => {
     expect(cont.user).not.toContain('本章开头必须对接')
     expect(cont.user).toContain('不要回头改开头')
     expect(cont.user).toContain('前部若已回应就不要再回应一遍')
-    expect(cont.user).toContain('整章含已写前部必须处理')
+    expect(cont.user).toContain('只处理本章细纲安排承接的事项')
 
     // 非续写路径保持原措辞
     const fresh = await service.buildChapterPrompt(projectId, 2)

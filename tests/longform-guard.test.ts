@@ -15,6 +15,25 @@ const mock = (response = JSON.stringify(cleared)) => ({ generateStream: vi.fn().
   getCacheIdentity: vi.fn().mockResolvedValue('model-v1') })
 
 describe('长篇写作交稿闸门', () => {
+  it('允许边界核对引用远期卷纲节点，但不能用历史替代计划依据', () => {
+    const result = { ...cleared, checked: [...cleared.checked, 'boundary'], findings: [{
+      kind: 'boundary', message: '提前揭晓内应身份', snippet: '陆宁直接揭穿赵伯就是内应', reference: '第850章才能查明内应身份。'
+    }] }
+    const source = { ...input, boundary: '本章只找到密信，下一章才能读信。' }
+    expect(parseLongformGuard(JSON.stringify(result), source)).toHaveLength(1)
+    expect(() => parseLongformGuard(JSON.stringify(result), { ...source, plan: '', history: input.plan })).toThrow('对照依据')
+  })
+
+  it('引用失败后告知具体来源要求，重新检查仍保留真实冲突', async () => {
+    const llm = mock(JSON.stringify({ ...cleared, findings: [finding] }))
+    llm.generateStream.mockResolvedValueOnce(JSON.stringify({ ...cleared, findings: [{ ...finding, reference: '材料中不存在的转述引句。' }] }))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(input)).rejects.toThrow('LONGFORM_CONFLICT')
+    const retry = llm.generateStream.mock.calls[1][0]
+    expect(retry).toContain('上次结果的程序校验反馈')
+    expect(retry).toContain('knowledge 的 reference 必须连续引用本章之前的历史与逐人认知')
+    expect(retry).toContain('不能为了通过格式校验而省略真实冲突')
+  })
+
   it('仅有章节细纲也强制核对边界，旧检查结果不能代替边界检查', async () => {
     const source = { ...input, plan: '', history: '', boundary: '第850章才能查明内应身份。' }
     const llm = mock()

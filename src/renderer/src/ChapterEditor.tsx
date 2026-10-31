@@ -2,7 +2,7 @@ import ChapterRefinementPanel from './ChapterRefinementPanel'
 import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from './chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
@@ -487,7 +487,19 @@ export default function ChapterEditor({
   const [generating, setGenerating] = useState(false)
   const [generationStage, setGenerationStage] = useState<ChapterGenerationStage | null>(null)
   const [generationElapsed, setGenerationElapsed] = useState(0)
-  const [generationRetry, setGenerationRetry] = useState<{ context?: string; message: string } | null>(null)
+  const [generationRetry, setGenerationRetry] = useState<{ context?: string; message: string; repairOnly?: boolean } | null>(null)
+  const [repairReviewCandidate, setRepairReviewCandidate] = useState<NonNullable<import('../../shared/types').ChapterStreamResult['repairCandidate']> | null>(null)
+  useEffect(() => {
+    const source = data?.content
+    if (!source || !window.api.getChapterRepairProposal) return
+    let cancelled = false
+    void window.api.getChapterRepairProposal(projectId, chapterNumber, source).then(proposal => {
+      if (!cancelled && proposal && draftRef.current === source) setRepairReviewCandidate(proposal)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [projectId, chapterNumber, data?.content])
+  const retryExistingDraft = !!generationRetry && (generationRetry.repairOnly ??
+    shouldRepairChapterOnRetry({ ok: false, error: generationRetry.message }, draft))
   const generationContextRef = useRef<string | undefined>(undefined)
   const generationPreviewRef = useRef('')
   useEffect(() => {
@@ -924,6 +936,7 @@ export default function ChapterEditor({
   const [castApplied, setCastApplied] = useState(false)
   const [showCastPanel, setShowCastPanel] = useState(false)
   const [flowPanelOpen, setFlowPanelOpen] = useState(false)
+  const [autoRepairCommitting, setAutoRepairCommitting] = useState(false)
   const [outlinePanelOpen, setOutlinePanelOpen] = useState(true) // 细纲展开/收起
   const [fullOutlineOpen, setFullOutlineOpen] = useState(false) // 完整细纲弹窗
   const [autoAudit, setAutoAudit] = useState<AuditReport | null>(null)
@@ -1236,6 +1249,7 @@ export default function ChapterEditor({
     setGenerating(false)
     setGenerationStage(null)
     setGenerationRetry(null)
+    setRepairReviewCandidate(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
     setAutoForeshadowRepair(null)
@@ -1395,10 +1409,14 @@ export default function ChapterEditor({
       if (e.projectId !== projectId) return
       if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'progress') return
       refreshChapterNavigation()
-      if (dirty) return // 用户有未保存输入，跳过，保存后会重新读盘
+      if (dirty || streamBusyRef.current) return
+      const refreshEpoch = sessionEpochRef.current
+      const refreshDraft = draftRef.current
       void window.api
         .getChapter(projectId, chapterNumber)
         .then((c) => {
+          // 文件事件可能在生成开始前发起，回包时不能覆盖流式正文、手动编辑或另一章。
+          if (sessionEpochRef.current !== refreshEpoch || streamBusyRef.current || draftRef.current !== refreshDraft) return
           setData(c)
           setDraft(c.content, { captureScroll: false })
           setSessionStartWords(c.meta.wordCount)
@@ -1996,7 +2014,7 @@ export default function ChapterEditor({
     return error === 'LLM_ABORTED' || error.includes('LLM_ABORTED')
   }
 
-  const aiGenerate = async (tempContextVal?: string) => {
+  const aiGenerate = async (tempContextVal?: string, repairOnly = false) => {
     if (streamBusyRef.current || generating || adjusting || adjustPlanning) return
     const myEpoch = sessionEpochRef.current
     const targetProjectId = projectId
@@ -2024,6 +2042,7 @@ export default function ChapterEditor({
     streamCompletedRef.current = false
     setGenerating(true)
     setGenerationRetry(null)
+    setRepairReviewCandidate(null)
     generationContextRef.current = tempContextVal
     generationPreviewRef.current = ''
     setGenerationStage('preparing')
@@ -2092,8 +2111,15 @@ export default function ChapterEditor({
         (stage) => {
           if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch || editorFinalized) return
           setGenerationStage(stage)
+          if (stage === 'preparing:已按已确认前文修正细纲，修改依据和原文已保存') {
+            void window.api.listDetailedOutline(targetProjectId).then(items => {
+              if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+              setChapterOutline(items.find(item => item.chapterNumber === targetChapter) ?? null)
+            }).catch(error => console.error('[ChapterEditor] 刷新自动修正的细纲失败', error))
+          }
         },
-        autoContinueStrength
+        autoContinueStrength,
+        repairOnly
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -2107,21 +2133,23 @@ export default function ChapterEditor({
       if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
       editorFinalized = true
       if (!result.ok) {
-        // 超时或输出截断保留小说预览，其他失败仍回滚错误旁白。
-        const retained = interruptedChapterDraft(initialDraft, finalDraft, result.error ?? '')
+        // 后端已经落盘/润色的整章稿优先；核对失败不能抹掉已生成的正文。
+        const retained = failedChapterContinuationDraft(initialDraft, finalDraft, result)
         setDraft(retained)
+        if (result.repairCandidate) setRepairReviewCandidate(result.repairCandidate)
         setDirty(retained !== data?.content)
         releaseIfMine()
         const interruptionMessage = interruptedChapterRetryMessage(result.error ?? '', retained !== initialDraft)
-        if (interruptionMessage) {
-          setGenerationRetry({ context: tempContextVal, message: interruptionMessage })
+        if (interruptionMessage || result.retainedContent?.trim()) {
+          setGenerationRetry({ context: tempContextVal, repairOnly: repairOnly || shouldRepairChapterOnRetry(result, retained), message: interruptionMessage ??
+            `已生成的正文已保留，后续处理未完成：${friendlyLlmError(result.error)}` })
           try {
             await window.api.saveDraft(targetProjectId, targetChapter, retained)
           } catch {
             if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setAlertInfo({ message: '中断草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
           }
         } else if (!isStreamAbortError(result.error)) {
-          setGenerationRetry({ context: tempContextVal, message: friendlyLlmError(result.error) })
+          setGenerationRetry({ context: tempContextVal, repairOnly, message: friendlyLlmError(result.error) })
         }
         return
       }
@@ -2170,7 +2198,7 @@ export default function ChapterEditor({
         const retained = interruptedChapterDraft(initialDraft, finalDraft, error)
         setDraft(retained)
         setDirty(retained !== data?.content)
-        setGenerationRetry({ context: tempContextVal, message: interruptedChapterRetryMessage(error, retained !== initialDraft) ?? friendlyLlmError(error) })
+        setGenerationRetry({ context: tempContextVal, repairOnly: repairOnly || shouldRepairChapterOnRetry({ ok: false, error }, retained), message: interruptedChapterRetryMessage(error, retained !== initialDraft) ?? friendlyLlmError(error) })
         void window.api.saveDraft(targetProjectId, targetChapter, retained).catch(() => {
           if (sessionEpochRef.current === myEpoch && genRef.current === myGen) {
             setAlertInfo({ message: '草稿保留在编辑器中，但写入磁盘失败，请手动保存。' })
@@ -5006,9 +5034,28 @@ export default function ChapterEditor({
       </div> : null}
       {generationRetry && !generating && !adjusting && !adjustPlanning ? <div className="meta" style={{ marginBottom: 8 }}>
         <span role="status">{generationRetry.message}</span>{' '}
-        <button className="btn btn-primary btn-sm" onClick={() => void aiGenerate(generationRetry.context)}>重试续写</button>
+        <button className="btn btn-primary btn-sm" onClick={() => void aiGenerate(generationRetry.context, retryExistingDraft)}>{retryExistingDraft ? '重试修复当前稿' : '重试续写'}</button>
         <button className="btn btn-ghost btn-sm" onClick={() => setGenerationRetry(null)}>关闭提示</button>
       </div> : null}
+      {repairReviewCandidate && !generating ? <section style={{ marginBottom: 12, border: '1px solid var(--border)', padding: 12 }}>
+        <strong>{repairReviewCandidate.scope === 'structure' ? '章节结构修复候选' : '场景修复候选'}，请对照后决定是否载入。</strong>
+        <p>候选生成时通过自动核对，原稿和候选已单独保留。若细纲或前文后来有变化，请重新核对；载入后仍需你保存。</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+          <label>原稿<textarea className="textarea" readOnly value={repairReviewCandidate.original} style={{ width: '100%', minHeight: 220 }} /></label>
+          <label>修复候选<textarea className="textarea" readOnly value={repairReviewCandidate.candidate} style={{ width: '100%', minHeight: 220 }} /></label>
+        </div>
+        <button className="btn btn-primary btn-sm" onClick={() => {
+          if (draftRef.current !== repairReviewCandidate.original) {
+            setUndoToast({ message: '正文已变化，请重新核对后再载入候选。', type: 'warning' })
+            return
+          }
+          setDraft(repairReviewCandidate.candidate)
+          setDirty(true)
+          setGenerationRetry(null)
+          setRepairReviewCandidate(null)
+        }}>载入候选供编辑</button>{' '}
+        <button className="btn btn-sm" onClick={() => setRepairReviewCandidate(null)}>保留原稿</button>
+      </section> : null}
       {isDeslopStage(generationStage) && (generating || adjusting) ? (
         <div className="meta" role="status" style={{ marginBottom: 8 }}>
           生成原稿已保存 · {deslopProgressLabel(generationStage)}
@@ -5304,6 +5351,24 @@ export default function ChapterEditor({
           }
           undoAutoSyncLoading={undoSyncLoading}
           onOutlineUpdated={(item) => setChapterOutline(item)}
+          onBeginAutoRepairCommit={(original) => {
+            if (draftRef.current !== original || (textareaRef.current && textareaRef.current.value !== original)) return false
+            if (textareaRef.current) textareaRef.current.readOnly = true
+            setAutoRepairCommitting(true)
+            return true
+          }}
+          onFinishAutoRepairCommit={(original, content) => {
+            const unchanged = draftRef.current === original && (!textareaRef.current || textareaRef.current.value === original)
+            if (unchanged && content !== null) {
+              setDraft(content)
+              setData(previous => previous ? { ...previous, content } : previous)
+              setDirty(false)
+              setLastSavedAt(Date.now())
+            }
+            if (textareaRef.current) textareaRef.current.readOnly = false
+            setAutoRepairCommitting(false)
+            return unchanged
+          }}
           onRunAudit={reAudit}
           onJumpToOffset={jumpToOffset}
           onApplyRewrite={(snippet, rewritten, violationKey) => {
@@ -5610,7 +5675,7 @@ export default function ChapterEditor({
           defaultValue={draft}
           // 流式生成期间锁定输入：每个 token 都会整体覆写 el.value，
           // 此时用户手打的内容会被下一个 token 无提示冲掉
-          readOnly={generating || adjusting || refinementCommitting}
+          readOnly={generating || adjusting || refinementCommitting || autoRepairCommitting}
           onScroll={handleEditorScroll}
           onKeyDown={handleEditorKeyDown}
           onChange={handleEditorChange}

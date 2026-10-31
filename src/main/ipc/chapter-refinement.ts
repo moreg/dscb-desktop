@@ -32,6 +32,13 @@ export function registerChapterRefinementIpc(service: ChapterRefinementService):
     const value = validateInput(address.extend({ id: z.string().uuid() }), payload)
     await service.discard(value.projectId, value.chapterNumber, value.id)
   })
+  safeHandle('refinement:reject-hunk', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({
+      id: z.string().uuid(), currentDraft: chapterContentSchema,
+      hunkIndex: z.number().int().nonnegative().max(79)
+    }), payload)
+    return service.rejectHunk(value.projectId, value.chapterNumber, value.id, value.currentDraft, value.hunkIndex)
+  })
   safeHandle('refinement:commit', async (_event, payload: unknown) => {
     const value = validateInput(address.extend({
       id: z.string().uuid(), currentDraft: chapterContentSchema, undo: z.boolean(),

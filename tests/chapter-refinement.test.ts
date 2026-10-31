@@ -52,6 +52,46 @@ describe('independent chapter refinement', () => {
     expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
     expect((await restarted.load(input.projectId, 1))?.status).toBe('undone')
   })
+  it('persists a declined hunk without changing正文 and excludes it from later adoption', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    const rewritten = '甲段改。\n\n乙段。\n\n丙段改。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: rewritten, changes: ['改甲段。', '改丙段。'] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。'))
+    const result = await service.generate(input)
+    await expect(service.rejectHunk(input.projectId, 1, result.id, '过期正文', 0)).rejects.toThrow('编辑器正文已变化')
+    await expect(service.rejectHunk(input.projectId, 1, result.id, source, 2)).rejects.toThrow('改动序号无效')
+    const next = await service.rejectHunk(input.projectId, 1, result.id, source, 0)
+    expect(next.id).not.toBe(result.id)
+    await expect(service.commit(input.projectId, 1, result.id, source, false, 0)).rejects.toThrow('精修记录已更新')
+    await expect(service.rejectHunk(input.projectId, 1, result.id, source, 0)).rejects.toThrow('精修记录已更新')
+    expect(next.candidate).toBe('甲段。\n\n乙段。\n\n丙段改。')
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(source)
+    const restarted = make()
+    expect((await restarted.load(input.projectId, 1))?.candidate).toBe(next.candidate)
+    const adopted = await restarted.commit(input.projectId, 1, next.id, source)
+    expect(adopted.content).toBe(next.candidate)
+    await restarted.commit(input.projectId, 1, next.id, adopted.content, true)
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(source)
+  })
+  it('retains the ability to undo adopted changes after declining the last remaining hunk', async () => {
+    const source = '甲段。\n\n乙段。\n\n丙段。'
+    await chapters.updateContent(input.projectId, 1, source)
+    input.content = source
+    call.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ text: '甲段改。\n\n乙段。\n\n丙段改。', changes: [] }))
+      .mockResolvedValueOnce(verdict('甲段。', '甲段改。'))
+    const result = await service.generate(input)
+    const first = await service.commit(input.projectId, 1, result.id, source, false, 0)
+    const next = await service.rejectHunk(input.projectId, 1, result.id, first.content, 0)
+    expect(next.candidate).toBe(first.content)
+    expect(next.adoptedContent).toBe(first.content)
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(first.content)
+    const undone = await make().commit(input.projectId, 1, next.id, first.content, true)
+    expect(undone.content).toBe(source)
+  })
   it('edits only the selected range and validates quotes from that range', async () => {
     const prefix = '屋外下着雨。\n\n', suffix = '\n\n屋里无人说话。'
     await chapters.updateContent(input.projectId, 1, prefix + original + suffix)

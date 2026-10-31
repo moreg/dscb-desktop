@@ -39,9 +39,17 @@ export function parseLongformGuard(raw: string, input: LongformGuardInput): Find
       typeof f.snippet !== 'string' || typeof f.reference !== 'string' ||
       f.snippet.length > 500 || f.reference.length > 500) throw new Error('长篇一致性核对条目无效')
     const hit = locateMemoryEvidence(input.content, f.snippet)
-    if (!hit || (input.continuationStart !== undefined && hit.end <= input.continuationStart) ||
-      !locateMemoryEvidence(f.kind === 'boundary' ? input.boundary ?? '' : f.kind === 'mainline' ? input.plan : input.history, f.reference)) {
-      throw new Error('长篇一致性核对缺少可定位的新稿与对照依据')
+    if (!hit) throw new Error('长篇一致性核对缺少可定位的新稿依据：snippet 必须引用本章实际正文，不能改写或拼接')
+    if (input.continuationStart !== undefined && hit.end <= input.continuationStart) {
+      throw new Error('长篇一致性核对缺少新增部分依据：snippet 位于只读旧稿，请核对新增部分')
+    }
+    // Future chapter nodes also appear in the volume plan. They are valid boundary
+    // evidence even when outside the nearby chapter-detail window; history is not.
+    const references = f.kind === 'boundary' ? [input.boundary ?? '', input.plan]
+      : [f.kind === 'mainline' ? input.plan : input.history]
+    if (!references.some(source => locateMemoryEvidence(source, f.reference))) {
+      throw new Error(`长篇一致性核对缺少可定位的对照依据：${f.kind} 的 reference 必须连续引用${
+        f.kind === 'boundary' ? '章节边界契约或作者主线与卷纲计划' : f.kind === 'mainline' ? '作者主线与卷纲计划' : '本章之前的历史与逐人认知'}，不能改写或拼接`)
     }
     return { kind: f.kind, message: f.message.trim(), snippet: f.snippet, reference: f.reference }
   })
@@ -68,10 +76,12 @@ export class LongformGuard {
       '必须逐项检查 mainline（主线/本卷目标和禁止提前完成的节点）、knowledge（逐人知情边界）、thread（实际承诺/目标的长期进展）、item（跨章道具身份与状态）。',
       ...(input.boundary ? [
         '还必须独立检查 boundary（章节边界），并在 checked 中包含 "boundary"；只有主线检查不能代替章节边界检查。',
-        '按本章细纲逐项核对允许推进的事件、明确禁区、揭示范围和停止位置，并对照后章计划：不得提前完成后章核心事件、人物状态变化或身份揭晓。发现违反时 kind="boundary"，reference 必须引用本章或后章细纲原文。',
+        '按本章细纲逐项核对允许推进的事件、明确禁区、揭示范围和停止位置，并对照后章计划：不得提前完成后章核心事件、人物状态变化或身份揭晓。发现违反时 kind="boundary"，reference 必须引用章节边界契约或作者主线与卷纲计划中的原文。',
         '章末钩子与后章事件重叠时，本章只到触发信号或征兆出现，完成、见效、揭晓和结果留给后章。既有正文中的猜测、提及或开始治疗不等于已经揭晓、复明或治愈。',
         '不同章节可以延续同一事件；本章明确安排的阶段可以完成，后章重复提及不代表本章禁止。须指出被提前兑现的具体后续结果，不能把共同人物、地点或同一调查主题当作抢写。',
-        '本章未完成的任务与明确禁止提前完成的任务必须区分。分轮续写不要求补齐所有情节点；合理扩写场景、配角和过程不是越界。只有明确边界被违反才报冲突，不按关键词判罪，也不以修改未来细纲消除冲突。'
+        '比较提前兑现时必须对齐事件主体、行为和完成状态。人物通过已建立的预知、后台查询等能力看到待发生结果，不等于另一人物已经抽取、获得或使用该结果；后章计划写某人获得某物，也不自动禁止当前视角人物预先看到信息。只有明确限制首次揭示时点、该信息超出既有能力，或正文确实提前完成了相同事件时才报冲突。',
+        '本章未完成的任务与明确禁止提前完成的任务必须区分。分轮续写不要求补齐所有情节点；合理扩写场景、配角和过程不是越界。只有明确边界被违反才报冲突，不按关键词判罪，也不以修改未来细纲消除冲突。',
+        '章节边界核对不代替完整的细纲执行对照。标价、成交方式、一般出场顺序等执行细节的差异，若没有违反明确禁区、规定的时间节点、必须保留的核心结果、人物知情或跨章既成事实，交给后续细纲对照处理，不一概标为 boundary。若金额、对象或方式本身被明确设为不可更改的限制，或其变化破坏后续既定结果，仍必须报告并指出具体限制及后果。'
       ] : []),
       '只报告有新稿原文和对照原文双重依据的明确冲突。正文人物获知新信息、改变目标或兑现承诺，若有合理过程允许变化；不能把提及、猜测、谎言、部分进展当作已完成或客观真相。',
       '主线只核对明确目标被替换、计划节点提前完成、终局抢写。必要支线、日常、情绪消化及阶段铺垫不等于跑偏，不要求每章完成总目标。细纲/卷纲的过去节点只是计划，不能补造历史。',
@@ -98,14 +108,19 @@ export class LongformGuard {
     if (key && this.passed.has(key)) { abort(); return }
     let findings: Finding[] | undefined
     let failure: unknown
+    let retryFeedback = ''
     for (let attempt = 0; attempt < 2; attempt++) {
       abort()
       try {
-        const raw = await this.llm.generateStream(prompt, { ...opts, onToken: undefined, maxTokens: 3000,
+        const raw = await this.llm.generateStream(prompt + retryFeedback, { ...opts, onToken: undefined, maxTokens: 3000,
           systemPrompt: '你是长篇小说连续性编辑，严格按原文与作者计划核对，输出完整JSON。',
           meta: { ...opts.meta, feature: 'longformGuard', chapterNumber: input.chapterNumber } })
         abort()
-        findings = parseLongformGuard(raw, input)
+        try { findings = parseLongformGuard(raw, input) }
+        catch (error) {
+          retryFeedback = `\n\n【上次结果的程序校验反馈】\n${(error as Error).message}\n请重新完成全部检查，修正证据来源与引用后输出完整 JSON。不能为了通过格式校验而省略真实冲突；无双重原文依据的推测不能作为冲突。`
+          throw error
+        }
         break
       } catch (error) {
         abort()

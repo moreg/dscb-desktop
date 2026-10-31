@@ -383,8 +383,8 @@ describe('buildChapterPrompt with structured prev ending state (Phase 12 Task 1)
     expect(user).toContain('深夜')
     expect(user).toContain('门外脚步声')
     expect(user).toContain('师父留下的玉佩')
-    expect(user).toContain('本章必须回应')
-    expect(user).toContain('本章必须处理')
+    expect(user).toContain('按本章细纲回应或延续')
+    expect(user).toContain('仅作为承接线索；按本章细纲安排处理')
   })
 
   it('omits structured state section when prevTail is empty', async () => {

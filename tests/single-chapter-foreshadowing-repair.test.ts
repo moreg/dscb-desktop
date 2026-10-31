@@ -75,6 +75,52 @@ describe('单章续写的交稿前伏笔补写', () => {
     expect(generate).not.toHaveBeenCalled()
   })
 
+  it('整章漏掉关键剧情时不能当作伏笔无遗漏而放行同步', async () => {
+    vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue(JSON.stringify([{
+      type: 1, priority: 'P1', outline: '守门人要求林远出示通行凭证', actual: '正文未出现这次核验', suggestion: '补上核验过程'
+    }]))
+    const internal = service as unknown as { repairLongformConflict: () => Promise<string> }
+    const repair = vi.spyOn(internal, 'repairLongformConflict').mockRejectedValue(new Error('候选未通过复核'))
+    await expect(service.repairChapterForeshadowings(projectId, 1, prose)).rejects.toThrow('必需剧情漏写')
+    expect(repair).toHaveBeenCalledOnce()
+    expect(await new ProseRepo(dir).read(1)).toBe('磁盘中尚未采用的旧正文。')
+  })
+
+  it('分轮续写仅按已推进场景核对，发现该范围内遗漏时仍需修复', async () => {
+    vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue(JSON.stringify([{
+      type: 1, priority: 'P1', outline: '守门人核对凭证', actual: '已推进的交接场景中遗漏核验', suggestion: '补上核验'
+    }]))
+    const internal = service as unknown as { repairLongformConflict: () => Promise<string> }
+    const repair = vi.spyOn(internal, 'repairLongformConflict').mockRejectedValue(new Error('未通过'))
+    await expect(service.repairChapterForeshadowings(projectId, 1, prose, { partialChapter: true })).rejects.toThrow('必需剧情漏写')
+    expect(repair).toHaveBeenCalledOnce()
+    expect(vi.mocked(flow.checkOutlineStream).mock.calls[0][3]?.partialChapter).toBe(true)
+  })
+
+  it('真实联合复核否决后自动重补，交付通过的候选而不提前落盘', async () => {
+    const bad = '他想起刚才父亲已经承认自己就是三皇子。'
+    const onProgress = vi.fn()
+    const before = await readFile(outlineFile, 'utf-8')
+    vi.mocked(flow.verifyForeshadowingRepair).mockRestore()
+    generate.mockReset()
+      .mockResolvedValueOnce(missing)
+      .mockResolvedValueOnce(JSON.stringify({ insertions: [{ after: 1, text: bad }] }))
+      .mockResolvedValueOnce(JSON.stringify({ diffs: [], verification: { passed: false,
+        issues: [{ message: '虚构此前谈话并提前揭底', evidence: bad }] } }))
+      .mockResolvedValueOnce(patch)
+      .mockResolvedValueOnce(JSON.stringify({ diffs: [], verification: { passed: true, issues: [] } }))
+    const result = await service.repairChapterForeshadowings(projectId, 1, prose, { onProgress })
+    expect(result.report.status).toBe('applied')
+    expect(result.content).toContain(addition)
+    expect(result.content).not.toContain(bad)
+    expect(generate).toHaveBeenCalledTimes(5)
+    expect(generate.mock.calls[3][0]).toContain('虚构此前谈话并提前揭底')
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: 'generate', round: 2,
+      detail: expect.stringContaining('根据核验意见重新补写') }))
+    expect(await new ProseRepo(dir).read(1)).toBe('磁盘中尚未采用的旧正文。')
+    expect(await readFile(outlineFile, 'utf-8')).toBe(before)
+  })
+
   it('专项核验失败时保留本轮正文，不将候选稿交给记忆同步', async () => {
     vi.spyOn(flow, 'checkOutlineStream').mockResolvedValueOnce(missing).mockResolvedValue('[]')
     vi.mocked(flow.verifyForeshadowingRepair).mockRejectedValue(new Error('伏笔补写专项核验缺少新增正文证据'))

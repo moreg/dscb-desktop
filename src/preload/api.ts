@@ -145,6 +145,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('refinement:load', { projectId, chapterNumber }),
     discardRefinement: (projectId: string, chapterNumber: number, id: string): Promise<void> =>
       ipcRenderer.invoke('refinement:discard', { projectId, chapterNumber, id }),
+    rejectRefinementHunk: (projectId: string, chapterNumber: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate> =>
+      ipcRenderer.invoke('refinement:reject-hunk', { projectId, chapterNumber, id, currentDraft, hunkIndex }),
     commitRefinement: (projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit> =>
       ipcRenderer.invoke('refinement:commit', { projectId, chapterNumber, id, currentDraft, undo, hunkIndex }),
     brainstormLongStory: (input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
@@ -433,6 +435,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     /** 取消进行中的流式生成（传 generate/adjust 返回对象上的 requestId） */
     abortStream: (requestId: string) =>
       ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>,
+    getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) =>
+      ipcRenderer.invoke('write:getChapterRepairProposal', { projectId, chapterNumber, content }),
     generateChapterStream: (
       projectId: string,
       chapterNumber: number,
@@ -441,7 +445,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       existingText: string | undefined,
       onToken: (token: string, done: boolean) => void,
       onGenerationStage?: (stage: ChapterGenerationStage) => void,
-      autoStrength?: boolean
+      autoStrength?: boolean,
+      repairOnly?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -466,6 +471,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           tempContext,
           existingText,
           autoStrength,
+          repairOnly,
           requestId
         })
         .finally(() => {
@@ -696,6 +702,14 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }>
       return makeStreamHandle(result, requestId)
     },
+    commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) =>
+      ipcRenderer.invoke('write:commitOutlineLocalRepair', { projectId, chapterNumber, token }),
+    autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport) =>
+      ipcRenderer.invoke('write:autoRepairOutlineDifference', { projectId, chapterNumber, content, report }),
+    autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport) =>
+      ipcRenderer.invoke('write:autoResolveOutlineDiffs', { projectId, chapterNumber, content, report }),
+    autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) =>
+      ipcRenderer.invoke('write:autoApplyExtractedMemory', { projectId, chapterNumber, content, extraction }),
     applyMemory: (projectId: string, extraction: MemoryExtraction) =>
       ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
     invalidateChapterMemorySync: (projectId: string, chapterNumber: number) =>

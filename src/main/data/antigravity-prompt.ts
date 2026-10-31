@@ -89,6 +89,26 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
   const merge = (user: string) => preamble + (system?.trim() ? `${system}\n\n---\n\n${user}` : user)
   const original = merge(prompt)
   if (original.length <= AGY_PROMPT_BUDGET) return original
+  // Continuity repair has a large optional context between the precise issue
+  // and the full draft. Generic middle truncation can remove the chapter plan.
+  const contextMarker = '--- 前文、细纲、记忆及作者要求（按来源使用） ---'
+  const draftMarker = '--- 当前原稿（本轮所有替换均基于此稿） ---'
+  const contextAt = prompt.indexOf(contextMarker)
+  const draftAt = prompt.indexOf(draftMarker, contextAt + contextMarker.length)
+  if (contextAt >= 0 && draftAt > contextAt && prompt.includes('--- 最初确认的问题 ---')) {
+    const before = prompt.slice(0, contextAt + contextMarker.length)
+    const context = prompt.slice(contextAt + contextMarker.length, draftAt)
+    const draft = prompt.slice(draftAt)
+    const task = sections(context, 1).find(part => /^# 第 \d+ 章 写作任务$/.test(part.title))?.text ?? ''
+    const background = task ? context.replace(task, '') : context
+    const fixed = [before, task, draft].filter(Boolean).join('\n')
+    const available = AGY_PROMPT_BUDGET - merge(fixed).length - 2
+    if (available < 0) throw new Error('AGY_REPAIR_CONTEXT_TOO_LARGE: 本章修复任务、细纲与完整正文超过模型输入上限，未开始修复。')
+    const packed = [before, task, excerpt(background, available, 0.65), draft].filter(Boolean).join('\n')
+    const result = merge(packed)
+    if (result.length > AGY_PROMPT_BUDGET) throw new Error('AGY_REPAIR_CONTEXT_TOO_LARGE: 本章修复任务、细纲与完整正文超过模型输入上限，未开始修复。')
+    return result
+  }
   const parts = sections(prompt, 1)
   if (!parts.some((part) => /^# 第 \d+ 章 写作任务$/.test(part.title)) ||
       !parts.some((part) => /^# 现在请写第 \d+ 章正文$/.test(part.title))) return capPrompt(original)
@@ -101,7 +121,16 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
   const essential = parts.filter((part) => !background(part))
   const fixedCost = merge('').length + essential.reduce((sum, part) => sum + part.text.length, 0) + parts.length
   const budget = AGY_PROMPT_BUDGET - fixedCost
-  if (budget <= optional.length * 150) return capPrompt(original)
+  // Never truncate the current chapter task, prohibitions, existing draft or
+  // final instructions. If those alone exceed the transport limit, fail
+  // explicitly rather than asking the model to invent from missing material.
+  if (budget <= optional.length * 150) {
+    const essentialOnly = merge(parts.filter((part) => !background(part)).map(part => part.text).join('\n'))
+    if (essentialOnly.length > AGY_PROMPT_BUDGET) {
+      throw new Error('AGY_WRITING_CONTEXT_TOO_LARGE: 本章细纲、已写正文和必要指令超过模型输入上限，无法完整提交；请缩短本章细纲或分段续写，未开始生成。')
+    }
+    return essentialOnly
+  }
   // Allocate by section, then by individual setting/character document.
   const allocations = fit(optional.map((part) => part.text), budget)
   let index = 0
@@ -115,5 +144,11 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
     }
     return fitBackground(part, allocation)
   }).join('\n')
-  return capPrompt(merge(user))
+  const merged = merge(user)
+  if (merged.length <= AGY_PROMPT_BUDGET) return merged
+  const essentialOnly = merge(essential.map(part => part.text).join('\n'))
+  if (essentialOnly.length > AGY_PROMPT_BUDGET) {
+    throw new Error('AGY_WRITING_CONTEXT_TOO_LARGE: 本章细纲、已写正文和必要指令超过模型输入上限，无法完整提交；请缩短本章细纲或分段续写，未开始生成。')
+  }
+  return essentialOnly
 }
