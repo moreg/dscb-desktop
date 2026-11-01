@@ -851,10 +851,11 @@ export interface RendererApi {
   ) => Promise<DetailedOutlineItem[]>
   getRhythm: (projectId: string) => Promise<RhythmEntry[]>
   getVolumes: (projectId: string) => Promise<Volume[]>
-  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；用户取消保存对话框时 canceled=true */
+  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；onlyUnexported 只导出未导出过的章节（从未导出或导出后正文又改过）；用户取消保存对话框时 canceled=true */
   exportChapters: (
     projectId: string,
-    volumeNumber?: number
+    volumeNumber?: number,
+    onlyUnexported?: boolean
   ) => Promise<{ canceled: boolean; path?: string }>
   getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
   getVolumeOutlines: (projectId: string) => Promise<VolumeOutline[]>

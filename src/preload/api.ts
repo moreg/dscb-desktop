@@ -423,8 +423,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('outline:generateDetailedRange', id, fromChapter, count) as Promise<DetailedOutlineItem[]>,
     getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
     getVolumes: (id: string) => ipcRenderer.invoke('outline:getVolumes', id),
-    exportChapters: (projectId: string, volumeNumber?: number) =>
-      ipcRenderer.invoke('export:chapters', { projectId, volumeNumber }),
+    exportChapters: (projectId: string, volumeNumber?: number, onlyUnexported?: boolean) =>
+      ipcRenderer.invoke('export:chapters', { projectId, volumeNumber, onlyUnexported }),
     getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
     getVolumeOutlines: (id: string) => ipcRenderer.invoke('outline:getVolumeOutlines', id),
     getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),

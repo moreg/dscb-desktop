@@ -112,7 +112,7 @@ export async function startBackend(userData: string, windows: ProjectWindowActio
   const outlineService = new OutlineService(projectService, llmService)
   registerOutlineIpc(outlineService)
 
-  const exportService = new ExportService(chapterService, outlineService)
+  const exportService = new ExportService(chapterService, outlineService, projectService)
   registerExportIpc(exportService, projectService)
 
   const teardownRoot = join(userData, 'teardown-library')

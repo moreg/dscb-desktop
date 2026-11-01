@@ -193,8 +193,8 @@ export default function ChapterListPage({
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
   const [filter, setFilter] = useState<'all' | ChapterListBucket>('all')
   const [page, setPage] = useState(1)
-  // 导出正文：'all' 表示导出全书，number 表示导出该卷；null 表示当前没有导出在进行
-  const [exporting, setExporting] = useState<'all' | number | null>(null)
+  // 导出正文：'all' 表示导出全书，number 表示导出该卷，'new' 表示只导出未导出过的章节；null 表示当前没有导出在进行
+  const [exporting, setExporting] = useState<'all' | number | 'new' | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   const [exportError, setExportError] = useState('')
 
@@ -431,12 +431,12 @@ export default function ChapterListPage({
     }
   }
 
-  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷 */
-  const handleExport = async (volumeNumber?: number): Promise<void> => {
+  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；onlyNew 只导出未导出过的章节 */
+  const handleExport = async (volumeNumber?: number, onlyNew?: boolean): Promise<void> => {
     setExportError('')
-    setExporting(volumeNumber ?? 'all')
+    setExporting(volumeNumber ?? (onlyNew ? 'new' : 'all'))
     try {
-      const exported = await window.api.exportChapters(projectId, volumeNumber)
+      const exported = await window.api.exportChapters(projectId, volumeNumber, onlyNew)
       if (!exported.canceled) openServerExport(exported.path)
     } catch (err) {
       console.error('[ChapterListPage] Failed to export chapters:', err)
@@ -532,6 +532,18 @@ export default function ChapterListPage({
               title={chapters.length === 0 ? '需先创建章节' : '导出全书正文为 txt 文件'}
             >
               {exporting === 'all' ? '导出中…' : '导出全书 TXT'}
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => void handleExport(undefined, true)}
+              disabled={exporting !== null || exportingPackage || chapters.length === 0}
+              title={
+                chapters.length === 0
+                  ? '需先创建章节'
+                  : '只导出没导出过的章节（从未导出，或导出后正文又改过）；保存成功后自动标记为已导出'
+              }
+            >
+              {exporting === 'new' ? '导出中…' : '导出未导出章节'}
             </button>
             <button className="btn btn-primary" onClick={() => setShowNew(true)}>
               + 新章
