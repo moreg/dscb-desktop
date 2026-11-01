@@ -205,6 +205,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       return () => { ipcRenderer.removeListener('updates:state', handler) }
     },
     listProjects: (query?: ListProjectsQuery) => ipcRenderer.invoke('library:list', query ?? {}),
+    openProjectDirectory: (projectId: string) => ipcRenderer.invoke('library:openDirectory', { projectId }) as Promise<void>,
     setProjectArchived: (projectId: string, archived: boolean) =>
       ipcRenderer.invoke('library:setArchived', { projectId, archived }),
     getMobileServerStatus: () =>

@@ -127,6 +127,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     }
   }
 
+  const openProjectDirectory = async (project: ProjectMeta) => {
+    setArchiveError('')
+    try {
+      await window.api.openProjectDirectory(project.id)
+    } catch (error) {
+      setArchiveError(packageErrorText(error, '打开作品文件夹失败'))
+    }
+  }
+
   useEffect(() => {
     void loadProjects(true)
     // 这是请求序号而非 DOM ref；卸载时递增可使尚未完成的请求失效。
@@ -371,7 +380,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 tabIndex={0}
                 onClick={() => onOpenProject(p.id)}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
+                  if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
                     event.preventDefault()
                     onOpenProject(p.id)
                   }
@@ -398,6 +407,12 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 <div className="pc-foot">
                   <span>翻开 {formatRelative(p.lastOpenedAt)}</span>
                   <div className="pc-actions">
+                    {!isWebClient() && (
+                      <button type="button" className="open-window" title="在系统文件管理器中打开作品文件夹"
+                        onClick={(event) => { event.stopPropagation(); void openProjectDirectory(p) }}>
+                        作品文件夹
+                      </button>
+                    )}
                     {isProjectArchived(p) ? (
                       <button
                         type="button"

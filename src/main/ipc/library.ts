@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { dialog } from 'electron'
+import { dialog, shell } from 'electron'
 import { safeHandle } from './safe-handle'
 import { validateInput, projectIdSchema } from './validation'
 import { ProjectService } from '../data/project-service'
@@ -28,6 +28,11 @@ export function registerLibraryIpc(service: ProjectService): void {
     return service.listProjects(query)
   })
   safeHandle('library:scan', async () => service.scanProjects())
+  safeHandle('library:openDirectory', async (_e, payload: unknown) => {
+    const { projectId } = validateInput(z.object({ projectId: projectIdSchema }), payload)
+    const error = await shell.openPath(await service.resolveDir(projectId))
+    if (error) throw new Error(`无法打开作品文件夹：${error}`)
+  })
   safeHandle('library:setArchived', async (_e, payload: unknown) => {
     const validated = validateInput(setArchivedSchema, payload)
     return service.setArchived(validated.projectId, validated.archived)

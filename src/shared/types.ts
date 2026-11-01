@@ -612,6 +612,7 @@ export interface RendererApi {
   exportShortStory(id: string): Promise<{ canceled: boolean; path?: string }>
   openShortStoryDirectory(id: string): Promise<{ ok: boolean }>
   listProjects: (query?: ListProjectsQuery) => Promise<ProjectMeta[]>
+  openProjectDirectory: (projectId: string) => Promise<void>
   /** 归档/移回书案。归档不删文件，只从书案列表隐藏。 */
   setProjectArchived: (projectId: string, archived: boolean) => Promise<ProjectMeta>
   getMobileServerStatus: () => Promise<MobileServerStatus>
