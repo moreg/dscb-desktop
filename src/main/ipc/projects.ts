@@ -30,9 +30,9 @@ const createProjectSchema = z.object({
 
 const updateProjectInfoSchema = z.object({
   projectId: projectIdSchema,
-  name: projectNameSchema,
+  name: projectNameSchema.optional(),
   description: z.string().max(5000).optional()
-})
+}).refine(value => value.name !== undefined || value.description !== undefined, '请提供书名或简介')
 
 const addTitleCandidateSchema = z.object({
   projectId: projectIdSchema,
@@ -72,11 +72,11 @@ export function registerProjectsIpc(service: ProjectService): () => void {
   })
   safeHandle(
     'projects:updateInfo',
-    async (_e, payload: { projectId: string; name: string; description?: string }) => {
+    async (_e, payload: { projectId: string; name?: string; description?: string }) => {
       const validated = validateInput(updateProjectInfoSchema, payload)
       const info = {
-        name: validated.name.trim(),
-        description: validated.description?.trim() || undefined
+        ...(validated.name !== undefined ? { name: validated.name.trim() } : {}),
+        ...(validated.description !== undefined ? { description: validated.description.trim() } : {})
       }
       // Windows 上监听着的目录改不了名，先松开，保存完再听新路径。
       const affected = [...watchers.values()].filter((watcher) => watcher.watchingProjectId() === validated.projectId)

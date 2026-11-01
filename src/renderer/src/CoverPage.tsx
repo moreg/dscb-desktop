@@ -1060,7 +1060,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
                 }}
                 onClick={() => void handleExtractPrompt()}
                 disabled={extracting || buildingPrompt || generationBusy || !canBuild}
-                title="读本书的简介、大纲、人物卡与开篇正文，提炼出专属画面后重写为中文提示词（只调文本模型，不消耗图像额度）"
+                title="根据当前书名、作品题材和简介提炼专属画面；简介缺失时参考其他小说资料（只调文本模型，不消耗图像额度）"
               >
                 {extracting ? (
                   <>
@@ -1123,7 +1123,7 @@ function CoverPageContent({ projectId }: Props): React.ReactElement {
           <details style={{ marginTop: 10 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12 }}>学习规则与版本</summary>
             <p className="meta">当前提示词使用：{promptContext?.libraryVersion ?? '未记录'} · 学习库来源总数 {promptContext?.sourceSampleCount ?? 0} 张（含历史记录）</p>
-            <p className="meta">默认生成会先读取本书的简介、大纲、人物卡和开篇正文，画面来自故事，学习库只提供绘制与设计语言。手动编辑完整提示词后按编辑内容生成；「换个方案」会重新结合小说内容设计，并避免重复上一张。</p>
+            <p className="meta">默认结合当前书名、作品题材和简介设计封面；简介缺失时参考大纲、人物卡和正文等可用资料。学习库只提供绘制与设计语言。手动编辑完整提示词后按编辑内容生成；「换个方案」会重新设计画面，并避免重复上一张。</p>
             <button type="button" className="btn btn-ghost" onClick={() => void refreshLearningContext()} disabled={!canBuild}>
               检查最新学习规则
             </button>

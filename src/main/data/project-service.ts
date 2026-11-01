@@ -125,8 +125,13 @@ export class ProjectService {
    */
   async updateProjectInfo(
     projectId: string,
-    info: { name: string; description?: string }
+    info: { name?: string; description?: string }
   ): Promise<ProjectData> {
+    if (info.name === undefined) {
+      const next = await this.updateProjectData(projectId, { description: info.description })
+      await this.library.update(projectId, { description: next.description })
+      return next
+    }
     const folderName = toFolderName(info.name)
     if (!folderName) throw new Error('这个名称不能用作文件夹名')
 
@@ -135,7 +140,7 @@ export class ProjectService {
     try {
       const next = await this.updateProjectData(projectId, {
         name: folderName,
-        description: info.description
+        ...(info.description !== undefined ? { description: info.description } : {})
       })
       await writeFolderTitle(nextDir, folderName)
       await this.library.update(projectId, {

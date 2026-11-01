@@ -177,6 +177,18 @@ describe('ProjectService', () => {
     expect(core).toContain('- **书名**：抽到的新书名')
   })
 
+  it('分别保存书名和简介时保留另一项', async () => {
+    const meta = await service.create({ name: '旧书名', description: '旧简介' })
+    const renamed = await service.updateProjectInfo(meta.id, { name: '新书名' })
+    expect(renamed).toMatchObject({ name: '新书名', description: '旧简介' })
+    const dir = await service.resolveDir(meta.id)
+    const redescribed = await service.updateProjectInfo(meta.id, { description: '新简介' })
+    expect(redescribed).toMatchObject({ name: '新书名', description: '新简介' })
+    expect(await service.resolveDir(meta.id)).toBe(dir)
+    expect(await service.getProjectData(meta.id)).toMatchObject({ name: '新书名', description: '新简介' })
+    expect((await service.listProjects())[0]).toMatchObject({ name: '新书名', description: '新简介', path: dir })
+  })
+
   it('只改简介时，文件夹已经是书名就不再改名', async () => {
     const meta = await service.create({ name: '旧书名', description: '旧简介' })
     await service.updateProjectInfo(meta.id, { name: '已对齐的书名', description: '旧简介' })

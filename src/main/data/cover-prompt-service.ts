@@ -151,7 +151,7 @@ export class CoverPromptService {
     input: ExtractCoverPromptInput,
     signal?: AbortSignal
   ): Promise<CoverPromptDraft> {
-    const material = await this.collectMaterial(input.projectId)
+    const material = await this.collectMaterial(input.projectId, input.bookName)
     if (material.sources.length === 0) {
       throw new Error(
         'COVER_PROMPT_NO_MATERIAL: 项目里还没有简介、大纲、人物卡或正文，无法提炼封面提示词'
@@ -197,7 +197,7 @@ export class CoverPromptService {
         : inferGenre(input.bookName || material.bookName))
 
     // 构图：用户锁定 > 模型判定 > closeup 兜底
-    const learned = loadedLibrary && this.learningLibrary
+    const learned = loadedLibrary && this.learningLibrary && input.stylePreset && input.stylePreset !== 'auto'
       ? this.learningLibrary.resolveStyle(loadedLibrary.library, input.stylePreset, genre)
       : undefined
     const selectedPreset = learned?.definition ?? explicitStyle
@@ -260,7 +260,7 @@ export class CoverPromptService {
       styleHint,
       ...(direction ? { visualDirection: direction } : {}),
       scene
-    })
+    }) + (material.genre || material.description ? `\n\n【作品画面依据】\n结合书名、作品题材和简介呈现符合题材与故事气质的封面，依据本书内容选择有辨识度的视觉风格；题材和简介仅供画面参考，不要将其文字印在封面上。${input.genreOverride ? '封面页手动选定的题材优先，作品题材中不冲突的细分信息可作补充。' : ''}\n${[material.genre ? `作品题材：${material.genre}` : '', material.description ? `作品简介：${truncate(material.description, MAX_SYNOPSIS)}` : ''].filter(Boolean).join('\n')}` : '')
 
     return {
       prompt,
@@ -283,26 +283,41 @@ export class CoverPromptService {
    * （新项目往往只有简介，老项目才有正文）。
    */
   private async collectMaterial(
-    projectId: string
-  ): Promise<{ bookName: string; blocks: string[]; sources: string[] }> {
+    projectId: string,
+    requestedBookName: string
+  ): Promise<{ bookName: string; genre: string; description: string; blocks: string[]; sources: string[] }> {
     const blocks: string[] = []
     const sources: string[] = []
     let bookName = ''
+    let genre = ''
+    let description = ''
 
     // 项目元信息
     try {
       const project = await this.projectService.getProjectData(projectId)
-      bookName = project.name ?? ''
+      bookName = requestedBookName.trim() || project.name || ''
+      genre = project.genre?.trim() ?? ''
+      description = project.description?.trim() ?? ''
       const meta = [
-        `书名：${project.name}`,
-        project.genre ? `题材标签：${project.genre}` : '',
-        project.description ? `简介：${project.description}` : ''
+        `书名：${bookName}`,
+        genre ? `题材标签：${genre}` : '',
+        description ? `简介：${description}` : ''
       ].filter(Boolean)
       blocks.push(`【作品信息】\n${meta.join('\n')}`)
-      if (project.description) sources.push('作品简介')
+      if (bookName) sources.push('书名')
+      if (genre) sources.push('作品题材')
+      if (description) sources.push('作品简介')
     } catch (err) {
       console.warn('[cover-prompt] 读取项目信息失败:', err)
+      bookName = requestedBookName.trim()
+      if (bookName) {
+        blocks.push(`【作品信息】\n书名：${bookName}`)
+        sources.push('书名')
+      }
     }
+
+    // 有简介时以书名和简介为画面依据，避免其他资料抢占作品定位。
+    if (description) return { bookName, genre, description, blocks, sources }
 
     // 主线大纲
     try {
@@ -373,7 +388,7 @@ export class CoverPromptService {
       console.warn('[cover-prompt] 读取正文失败:', err)
     }
 
-    return { bookName, blocks, sources }
+    return { bookName, genre, description, blocks, sources }
   }
 
   /* =========================================================
@@ -402,7 +417,7 @@ export class CoverPromptService {
       ? visual.medium
         ? `界面当前视觉风格是“${selectedStyle.label}”（${selectedStyle.description}），只给方向没写到的细节做参考，优先级低于作者画面方向。`
         : `视觉风格已锁定为“${selectedStyle.label}”：${selectedStyle.description} 只约束绘制媒介与视觉语言，不提供固定人物、服装、场景、道具或构图。画面内容必须来自小说。`
-      : '视觉风格未锁定，请按作品题材和目标平台选择最合适的商业封面表达。'
+      : '视觉风格未锁定，请依据书名和简介为本书自主选择有辨识度的艺术媒介、材质、色彩、光线与构图。可以选择摄影、绘画、版画、水墨、拼贴、图形设计或混合媒介，不要默认人物特写、金色大字和统一的商业海报。'
     const baseMediumRequirement = !visual.medium && input.stylePreset
       ? COVER_STYLE_MEDIUM_REQUIREMENTS[input.stylePreset]
       : undefined
@@ -460,13 +475,14 @@ ${input.previousPrompt ?? '暂无上一张记录'}
 
 【任务】
 ${taskBody}
+先从书名与简介中提炼一个独特的视觉概念，选择能表现该概念的媒介、材质、镜头距离与构图，并具体写入画面字段。仅在资料支持时使用人物肖像、特效或常见题材符号；人物不是每本书的必选项。避免泛化的精美、震撼、电影感堆词，让配色、光影和背景共同服务于作品气质。明确指定的风格、构图、频道和作者方向仍然优先。
 先确定小说的核心冲突与具体叙事瞬间，再决定人物、动作、环境、道具和构图。summaryZh 要说明画面对应哪段故事或哪个核心卖点。资料未支持的豪车、酒杯、高楼、西装或花瓣不能因为题材标签而添加。场景与人物资料是内容依据，学习库只影响如何表现。
 
 【题材与核心卖点的视觉转译，未填写作者方向时也必须完成】
-先读作品简介、题材标签和全书主线，再用人物卡与章节核实细节。开篇节选只提供场景证据，不能让一次宴会、一次受伤或一段争吵取代全书定位。genre 只是检索分类，不代表作品只有一个题材。
+优先结合当前书名、作品题材和简介确定人物、核心卖点与画面气质；简介缺失时才利用其他可用资料补充。资料不足时围绕书名和现有信息设计，不编造确定的故事事实。genre 只是检索分类，不代表作品只有一个题材。
 依次完成以下设计，并在 JSON 对应字段中交付：
 1. genreSignal：主类型＋真正影响读者预期的融合类型＋阅读情绪。区分恋爱、女强、冒险、经营、悬疑、喜剧等内容承诺；动漫或写实只是绘制媒介，不等于题材或固定年龄、表情、配色。
-2. sellingPoint：从资料找出一个最有辨识度的阅读回报（能力兑现、身份反差、关系反转、经营成果或谜团）。先比较至少两个有依据的场面，选择最能体现全书卖点的一幕，而非最容易画的开篇插图。比较过程、资料依据和选择理由只放 summaryZh；sellingPoint 只写选定画面的可见主体动作、结果或反差，不复述未选中的场景。画面应让读者看见谁在做什么、造成什么结果；不要只列标签、摆武器、堆特效或依靠解释文字。
+2. sellingPoint：从书名和简介找出最有辨识度的阅读回报（能力兑现、身份反差、关系反转、经营成果或谜团），选择有依据且最能体现卖点的画面。资料依据和选择理由只放 summaryZh；sellingPoint 只写选定画面的可见主体动作、结果或反差。画面应让读者看见谁在做什么、造成什么结果；不要只列标签、摆武器、堆特效或依靠解释文字。
 3. visualHierarchy：确定主角的第一视觉焦点和主动动作，配角与背景承担辅助信息。人物大小、前后、俯仰、眼神与手势必须符合故事的主动权和能力关系。女强不能自动画成仰望强势男性的被保护者，双强不能画成单方支配；弱势开局、恐怖或悲剧也不能硬改成自信爽文。无人物方案用物件状态和空间关系呈现同一卖点。
 4. compositionGuide：在所选构图内决定站位、取景与动作；duo 表示双人关系，可以并肩、前后错位、协作、对抗或对视，不能默认相对站立。细节只保留一个主卖点和一至两个题材线索，避免为交代剧情把每个道具都塞入画面。
 5. 将以上结论落实到 characterDesc、backgroundDesc、keyProps、colorPalette、lighting 和 styleHintZh，不能只在说明中声称突出卖点。配色和光线服从作品情绪，不因学习样本低饱和就默认灰暗，也不因动漫就一律明亮可爱。缩略图下先看清主角正在兑现的卖点，再看清辅助世界观。

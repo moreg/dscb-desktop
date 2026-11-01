@@ -640,10 +640,10 @@ export interface RendererApi {
   cancelProseImport: () => Promise<void>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
-  /** 更新小说名称和简介；不改项目目录，避免破坏工作区路径。 */
+  /** 更新小说名称或简介；修改名称时同步项目文件夹。 */
   updateProjectInfo: (
     projectId: string,
-    info: { name: string; description?: string }
+    info: { name?: string; description?: string }
   ) => Promise<ProjectData>
   /** 设置项目的对标书列表（拆文库中的书名，写作时召回方法论） */
   setBenchmarkBooks: (projectId: string, books: string[]) => Promise<string[]>

@@ -242,7 +242,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }>,
     createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
     getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
-    updateProjectInfo: (projectId: string, info: { name: string; description?: string }) =>
+    updateProjectInfo: (projectId: string, info: { name?: string; description?: string }) =>
       ipcRenderer.invoke('projects:updateInfo', { projectId, ...info }),
     setBenchmarkBooks: (projectId: string, books: string[]) =>
       ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
