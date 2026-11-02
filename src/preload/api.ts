@@ -141,6 +141,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         .finally(() => ipcRenderer.removeListener('refinement:stage', handler))
       return makeStreamHandle(result, requestId)
     },
+    recordRefinementDetection: (projectId: string, chapterNumber: number, id: string, testedContent: string,
+      result: { status: 'green' | 'flagged'; score?: number; note: string }): Promise<RefinementCandidate> =>
+      ipcRenderer.invoke('refinement:record-detection', { projectId, chapterNumber, id, testedContent, result }),
     loadRefinement: (projectId: string, chapterNumber: number): Promise<RefinementCandidate | null> =>
       ipcRenderer.invoke('refinement:load', { projectId, chapterNumber }),
     discardRefinement: (projectId: string, chapterNumber: number, id: string): Promise<void> =>

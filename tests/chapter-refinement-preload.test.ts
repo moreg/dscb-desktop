@@ -17,3 +17,11 @@ it('isolates progress per request, supports abort and removes listeners on compl
   const rejection = expect(second).rejects.toThrow('stopped'); fail(new Error('stopped')); await rejection
   expect(listeners.size).toBe(0)
 })
+
+it('forwards manual recheck content and result without inferring green from a local verdict', async () => {
+  const invoke = vi.fn().mockResolvedValue({ id: 'candidate' })
+  const api = createRendererApi({ invoke, on: vi.fn(), removeListener: vi.fn() })
+  const result = { status: 'flagged' as const, score: 55, note: '概率升高。' }
+  expect(await api.recordRefinementDetection('project', 1, 'candidate', '送检的完整候选。', result)).toEqual({ id: 'candidate' })
+  expect(invoke).toHaveBeenCalledWith('refinement:record-detection', { projectId: 'project', chapterNumber: 1, id: 'candidate', testedContent: '送检的完整候选。', result })
+})

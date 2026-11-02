@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import { REFINEMENT_GOALS, type RefinementInput, type RefinementCandidate, type RefinementGoal,
   type RefinementResult, type RefinementStage } from '../../shared/chapter-refinement'
 import type { StreamHandleOf } from '../../shared/types'
+import { detectionRanges } from '../../shared/refinement-detection'
 import { listRefinementHunks, type TextDiffHunk } from '../../shared/text-diff'
 import './chapter-refinement.css'
 
@@ -83,6 +84,12 @@ export default function ChapterRefinementPanel(props: Props) {
   const [source, setSource] = useState(props.content)
   const [goal, setGoal] = useState<RefinementGoal>('expression')
   const [instruction, setInstruction] = useState('')
+  const [excerpts, setExcerpts] = useState<string[]>([''])
+  const [baselineScore, setBaselineScore] = useState('')
+  const [testStatus, setTestStatus] = useState<'green' | 'flagged'>('flagged')
+  const [testScore, setTestScore] = useState('')
+  const [testNote, setTestNote] = useState('')
+  const [testConfirmed, setTestConfirmed] = useState(false)
   const [scope, setScope] = useState<'chapter' | 'selection'>(props.selection ? 'selection' : 'chapter')
   const [plan, setPlan] = useState('')
   const [record, setRecord] = useState<RefinementCandidate | null>(null)
@@ -123,7 +130,7 @@ export default function ChapterRefinementPanel(props: Props) {
     void window.api.loadRefinement(props.projectId, props.chapterNumber).then(value => {
       if (!alive || busyRef.current || requestRun !== runId.current) return
       setRecord(value)
-      if (value) { setGoal(value.input.goal); setInstruction(value.input.instruction); setPlan(value.input.content === current.current.content ? value.input.plan ?? '' : '') }
+      if (value) { setExcerpts(value.input.detection?.excerpts ?? ['']); setBaselineScore(value.input.detection?.score?.toString() ?? ''); setGoal(value.input.goal); setInstruction(value.input.instruction); setPlan(value.input.content === current.current.content ? value.input.plan ?? '' : '') }
     }).catch(e => { if (alive && requestRun === runId.current) setError(String(e.message || e)) })
     return () => { alive = false }
   }, [props.open, props.projectId, props.chapterNumber])
@@ -147,7 +154,9 @@ export default function ChapterRefinementPanel(props: Props) {
     if (!automatic && text !== current.current.content) { setError('正文已变化，请先点击“使用当前正文重新开始”。'); return }
     const input: RefinementInput = { projectId: props.projectId, chapterNumber: props.chapterNumber, content: text,
       goal: automatic ? 'expression' : goal, instruction: automatic ? '' : instruction,
-      selection: automatic ? undefined : selected, plan: automatic ? undefined : plan.trim() || undefined, styleProfileId: props.styleProfileId }
+      selection: automatic || goal === 'detection' ? undefined : selected,
+      detection: !automatic && goal === 'detection' ? { excerpts, ...(baselineScore.trim() ? { score: Number(baselineScore) } : {}) } : undefined, plan: automatic ? undefined : plan.trim() || undefined, styleProfileId: props.styleProfileId }
+    try { detectionRanges(input) } catch (e) { setError((e as Error).message); return }
     if (input.goal === 'custom' && !input.instruction.trim()) { setError('请填写具体精修要求。'); return }
     if (action === 'generate' && input.goal === 'scene' && !input.plan) { setError('场景精修请先生成并确认修改方案。'); return }
     const id = ++runId.current
@@ -161,7 +170,7 @@ export default function ChapterRefinementPanel(props: Props) {
       if (!mounted.current || id !== runId.current) return
       if (!result.ok) setError(result.error?.includes('LLM_ABORTED') ? '已停止，正文未修改。' : result.error || '精修未完成')
       if (result.plan) setPlan(result.plan)
-      if (result.candidate) { setRecord(result.candidate); setSource(input.content); setView('changes') }
+      if (result.candidate) { setTestConfirmed(false); setTestStatus('flagged'); setTestScore(''); setTestNote(''); setRecord(result.candidate); setSource(input.content); setView('changes') }
       current.current.onUsage()
     } catch (e) { if (mounted.current && id === runId.current) setError((e as Error).message) }
     finally {
@@ -284,6 +293,23 @@ export default function ChapterRefinementPanel(props: Props) {
   }
   if (!props.open) return null
   const floating = position && !compact
+  async function copyDetectionCandidate(): Promise<void> {
+    if (!record?.candidate) return
+    try { await navigator.clipboard.writeText(record.candidate); setNotice('已复制完整候选。请到朱雀复测，再登记真实结果。') }
+    catch { setError('复制失败，请切换“完整对比”手动复制完整候选。') }
+  }
+  async function recordDetection(): Promise<void> {
+    if (!record || busyRef.current || props.disabled || !testConfirmed) return
+    const id = ++runId.current
+    setWorking(true); setError('')
+    try {
+      const updated = await window.api.recordRefinementDetection(props.projectId, props.chapterNumber, record.id, record.candidate,
+        { status: testStatus, ...(testScore.trim() ? { score: Number(testScore) } : {}), note: testNote })
+      if (mounted.current && id === runId.current) { setRecord(updated); setTestConfirmed(false); setNotice('已保存人工复测结果，仅适用于这份完整候选。') }
+    } catch (e) { if (mounted.current && id === runId.current) setError((e as Error).message) }
+    finally { if (mounted.current && id === runId.current) setWorking(false) }
+  }
+
   return <aside ref={panelRef} className={`refinement-panel${dragging ? ' refinement-dragging' : ''}${floating ? ' refinement-floating' : ''}`}
     role="dialog" aria-label="正文精修" aria-modal="false"
     style={floating ? { left: position.left, top: position.top, right: 'auto', bottom: 'auto', width: position.width, height: position.height } : undefined}
@@ -294,11 +320,19 @@ export default function ChapterRefinementPanel(props: Props) {
     <div className="refinement-body" ref={body}>
       <p className="desc">原文保留，采用后才替换。默认保留剧情事实、人物关系和章节结局。</p>
       <fieldset disabled={busy || props.disabled} className="refinement-controls"><legend>本次精修</legend>
-        <label>范围<select value={scope} onChange={e => { setScope(e.target.value as typeof scope); setPlan('') }}>
+        <label>范围<select disabled={goal === 'detection'} value={goal === 'detection' ? 'chapter' : scope} onChange={e => { setScope(e.target.value as typeof scope); setPlan('') }}>
           <option value="chapter">整章 · {source.length} 字符</option><option value="selection" disabled={!props.selection}>选区{props.selection ? ` · ${props.selection.end - props.selection.start} 字符` : '（请先选中文字）'}</option></select></label>
         <label>主要目标<select value={goal} onChange={e => { setGoal(e.target.value as RefinementGoal); setPlan('') }}>
           {Object.entries(REFINEMENT_GOALS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
         <p className="desc">{REFINEMENT_GOALS[goal].description}</p>
+        {goal === 'detection' && <section aria-label="朱雀标黄反馈">
+          <p className="desc">从当前正文逐字复制标黄片段，每个输入框一段，支持多个相隔片段。其余文字逐字保留。每个片段至少 8 字符，重复出现的短句请附上相邻原文。</p>
+          {excerpts.map((excerpt, index) => <label key={index}>标黄原文 {index + 1}<textarea className="textarea" rows={3} maxLength={40000} value={excerpt}
+            onChange={e => { setExcerpts(values => values.map((value, i) => i === index ? e.target.value : value)); setPlan('') }} />
+            {excerpts.length > 1 && <button type="button" className="btn btn-sm" onClick={() => { setExcerpts(values => values.filter((_, i) => i !== index)); setPlan('') }}>移除片段 {index + 1}</button>}</label>)}
+          <button type="button" className="btn btn-sm" disabled={excerpts.length >= 20} onClick={() => { setExcerpts(values => [...values, '']); setPlan('') }}>添加标黄片段</button>
+          <label>原稿 AI 生成概率（0–100，选填）<input type="number" min={0} max={100} value={baselineScore} onChange={e => setBaselineScore(e.target.value)} /></label>
+        </section>}
         <label>补充要求{goal !== 'custom' && '（可选）'}<textarea className="textarea" rows={3} maxLength={10000} value={instruction} onChange={e => { setInstruction(e.target.value); setPlan('') }} placeholder="例如：保留双方和解的结果，减少直白解释，让试探更自然。" /></label>
         {plan && <label>修改方案 · 可编辑，生成候选即按此方案执行<textarea className="textarea" rows={6} maxLength={20000} value={plan} onChange={e => setPlan(e.target.value)} /></label>}
         <div className="refinement-actions"><button className="btn" onClick={() => void run('plan')} disabled={sourceChanged}>先看修改方案</button>
@@ -316,7 +350,7 @@ export default function ChapterRefinementPanel(props: Props) {
       {notice && <div className="refinement-notice" role="status">{notice}</div>}
       {record && <section className="refinement-result">
         <div className="refinement-result-heading"><h3>候选与核验</h3><span className={`chip ${record.status === 'ready' ? 'refinement-passed' : ''}`}>{STATUS[record.status]}</span></div>
-        <p className="desc">{REFINEMENT_GOALS[record.input.goal].label} · {record.input.selection ? '选区' : '整章'} · 已修订 {record.attempts} 次</p>
+        <p className="desc">{REFINEMENT_GOALS[record.input.goal].label} · {record.input.goal === 'detection' ? `${record.input.detection?.excerpts.length ?? 0} 个标黄片段，其余文字保留` : record.input.selection ? '选区' : '整章'} · 已修订 {record.attempts} 次</p>
         {!!record.changes.length && <ul>{record.changes.map((change, i) => <li key={i}>{change}</li>)}</ul>}
         {record.error && <div className="refinement-warning">{record.error}</div>}
         {record.verdict && <div className="refinement-verdict"><strong>独立核验</strong><p>{record.verdict.assessment}</p>
@@ -324,10 +358,26 @@ export default function ChapterRefinementPanel(props: Props) {
           {!!record.verdict.issues.length && <ul>{record.verdict.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul>}
           <details><summary>查看核验依据</summary>{record.verdict.evidence.map((e, i) => <div key={i}><p>原文：{e.before}</p><p>候选：{e.after}</p><p className="desc">{e.reason}</p></div>)}</details>
         </div>}
+        {record.input.goal === 'detection' && record.candidate && <section className="refinement-verdict" aria-label="朱雀候选复测">
+          <strong>朱雀候选复测 · 人工登记</strong>
+          <p>{record.detectionCheck ? `人工登记：${record.detectionCheck.status === 'green' ? '全绿' : '仍有标黄'}${record.detectionCheck.score === undefined ? '' : `，分数 ${record.detectionCheck.score}`}；登记时间 ${record.detectionCheck.recordedAt}` : '候选尚未登记朱雀复测；本地核验只评价保真与表达。'}</p>
+          {record.detectionCheck?.note && <p>{record.detectionCheck.note}</p>}
+          {record.input.detection?.score !== undefined && <p>原稿分数：{record.input.detection.score}{record.detectionCheck?.score === undefined ? '' : `；候选分数：${record.detectionCheck.score}；变化：${record.detectionCheck.score - record.input.detection.score > 0 ? '+' : ''}${record.detectionCheck.score - record.input.detection.score}（数值越低越好）`}</p>}
+          {record.input.detection?.score !== undefined && record.detectionCheck?.score !== undefined && record.detectionCheck.score >= record.input.detection.score && <p role="status">本轮概率未下降，建议保留原稿并检查修改效果。不会自动追加修订。</p>}
+          <p className="desc">结果绑定完整候选；当前正文{props.content === record.candidate ? '与候选一致' : '与候选不同，当前稿需单独检测'}。新一轮标黄请按复测原文重新指定范围。</p>
+          <button className="btn" disabled={busy} onClick={() => void copyDetectionCandidate()}>复制完整候选去朱雀复测</button>
+          <fieldset className="refinement-controls" disabled={busy || props.disabled || !['ready', 'rejected', 'accepted'].includes(record.status)}><legend>登记实际复测结果</legend>
+            <label>结果<select value={testStatus} onChange={e => setTestStatus(e.target.value as typeof testStatus)}><option value="flagged">仍有标黄</option><option value="green">全绿</option></select></label>
+            <label>候选 AI 生成概率（0–100，选填）<input type="number" min={0} max={100} value={testScore} onChange={e => setTestScore(e.target.value)} /></label>
+            <label>复测说明（选填）<textarea className="textarea" rows={2} maxLength={2000} value={testNote} onChange={e => setTestNote(e.target.value)} /></label>
+            <label><input type="checkbox" checked={testConfirmed} onChange={e => setTestConfirmed(e.target.checked)} />我已将这份完整候选送到朱雀，以上为实际结果</label>
+            <button className="btn" disabled={!testConfirmed || busy} onClick={() => void recordDetection()}>保存人工复测结果</button>
+          </fieldset>
+        </section>}
         {record.candidate && <><div className="refinement-actions" aria-label="对比视图">
           <button className="btn btn-sm" aria-pressed={view === 'changes'} onClick={() => setView('changes')}>修改位置</button><button className="btn btn-sm" aria-pressed={view === 'full'} onClick={() => setView('full')}>完整对比</button></div>
-          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。每条可单独采用或不采纳，核验未通过时也可以单条采用。</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}>
-            <summary><span>改动 {i + 1}</span>{(record.status === 'ready' || record.status === 'rejected') && <span className="refinement-actions">
+          {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。{record.input.goal === 'detection' ? '标黄精修须通过核验后整体采用；需要缩小范围时请调整片段后重新生成。' : '每条可单独采用或不采纳，核验未通过时也可以单条采用。'}</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}>
+            <summary><span>改动 {i + 1}</span>{record.input.goal !== 'detection' && (record.status === 'ready' || record.status === 'rejected') && <span className="refinement-actions">
               <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`不采纳改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void rejectHunk(i) }}>不采纳此条</button>
               <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`采用改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void commit(false, i) }}>采用此条</button>
             </span>}</summary>
@@ -336,7 +386,7 @@ export default function ChapterRefinementPanel(props: Props) {
             : <div className="refinement-full"><section><h4>原文</h4><pre>{record.adoptedContent ?? record.input.content}</pre></section><section><h4>候选</h4><pre>{record.candidate}</pre></section></div>}</>}
       </section>}
     </div>
-    <footer className="refinement-footer"><span className="desc">每条改动都能单独采用或不采纳，不采纳时保留该处原文。整章采用需核验通过。</span><div className="refinement-actions">
+    <footer className="refinement-footer"><span className="desc">{record?.input.goal === 'detection' ? '标黄精修核验通过后整体采用，朱雀结果以手动复测为准。' : '每条改动都能单独采用或不采纳，不采纳时保留该处原文。整章采用需核验通过。'}</span><div className="refinement-actions">
       {record?.status === 'accepted' ? <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销本次精修</button> : <>
         {typeof record?.adoptedContent === 'string' && <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销已采用条目</button>}
         {record && <button className="btn" disabled={busy} onClick={() => { body.current?.scrollTo({ top: 0, behavior: 'smooth' }); setNotice('修改目标或补充要求后重新生成。新一轮仍以原文为事实基线。') }}>继续调整</button>}

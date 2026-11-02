@@ -26,7 +26,7 @@ import Panel, { clampRefinementPanel } from '../src/renderer/src/ChapterRefineme
 const candidate: RefinementCandidate = { version: 1, id: 'candidate-1', input: { projectId: 'p', chapterNumber: 1, content: '原文句子。', goal: 'expression', instruction: '' },
   baseRevision: '', contextHash: '', candidate: '精修句子。', changes: ['改善表达'], attempts: 1, status: 'ready', updatedAt: '',
   verdict: { passed: true, factsPreserved: true, goalMet: true, assessment: '保留事实', issues: [], evidence: [{ before: '原文句子。', after: '精修句子。', reason: '精修' }] } }
-const refine = vi.fn(), load = vi.fn(), commit = vi.fn(), discard = vi.fn(), rejectHunk = vi.fn(), committed = vi.fn(), abort = vi.fn(), onOpen = vi.fn(), onBusy = vi.fn()
+const refine = vi.fn(), load = vi.fn(), commit = vi.fn(), discard = vi.fn(), rejectHunk = vi.fn(), committed = vi.fn(), abort = vi.fn(), onOpen = vi.fn(), onBusy = vi.fn(), recordDetection = vi.fn()
 let props: Parameters<typeof Panel>[0]
 function render() {
   hooks.cursor = 0
@@ -56,7 +56,7 @@ beforeEach(() => {
   refine.mockReturnValue(handle(Promise.resolve({ ok: true, candidate: structuredClone(candidate) })))
   vi.stubGlobal('React', React)
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() })
-  vi.stubGlobal('window', { api: { refineChapter: refine, loadRefinement: load, commitRefinement: commit, discardRefinement: discard, rejectRefinementHunk: rejectHunk } })
+  vi.stubGlobal('window', { api: { refineChapter: refine, loadRefinement: load, commitRefinement: commit, discardRefinement: discard, rejectRefinementHunk: rejectHunk, recordRefinementDetection: recordDetection } })
   props = { projectId: 'p', chapterNumber: 1, content: candidate.input.content, selection: { start: 0, end: 4 }, open: true, disabled: false,
     autoTrigger: 0, autoAlreadyPolished: false, onOpen, onClose: vi.fn(), beforeRun: async () => true, onBusyChange: onBusy, onCommitted: committed, onUsage: vi.fn() }
 })
@@ -183,4 +183,47 @@ describe('refinement panel behavior', () => {
     expect(renderToStaticMarkup(render())).toContain('已采用第 1 条并保存')
     expect(renderToStaticMarkup(render())).toContain('采用剩余并保存')
   })
+})
+
+function field(node: React.ReactNode, name: string): React.ReactElement<{ onChange: (event: { target: { value: string; checked?: boolean } }) => void }> {
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    const children = React.Children.toArray(node.props.children)
+    if (node.type === 'label' && children.filter(value => typeof value === 'string').join('').startsWith(name)) {
+      const control = children.find(child => React.isValidElement(child) && ['input', 'textarea', 'select'].includes(child.type as string))
+      if (control) return control as ReturnType<typeof field>
+    }
+    for (const child of children) { try { return field(child, name) } catch { /* continue */ } }
+  }
+  throw new Error(`missing field ${name}`)
+}
+it('uses pasted detection excerpts instead of the editor selection and rejects missing or stale feedback', async () => {
+  props = { ...props, content: '绿色开头。这里是需要定向精修的标黄原文。绿色结尾。' }
+  render(); await flush()
+  field(render(), '主要目标').props.onChange({ target: { value: 'detection' } })
+  button(render(), '生成精修候选').props.onClick(); await flush()
+  expect(refine).not.toHaveBeenCalled()
+  field(render(), '标黄原文').props.onChange({ target: { value: '这段标黄并不存在于当前原文。' } })
+  button(render(), '生成精修候选').props.onClick(); await flush()
+  expect(refine).not.toHaveBeenCalled()
+  field(render(), '标黄原文').props.onChange({ target: { value: '这里是需要定向精修的标黄原文。' } })
+  button(render(), '生成精修候选').props.onClick(); await flush()
+  expect(refine.mock.calls[0][0]).toMatchObject({ goal: 'detection', detection: { excerpts: ['这里是需要定向精修的标黄原文。'] } })
+  expect(refine.mock.calls[0][0].selection).toBeUndefined()
+})
+it('separates local verification from manual detector status, and reports old candidate results as different from current prose', async () => {
+  const detected: RefinementCandidate = { ...candidate, input: { ...candidate.input, goal: 'detection', detection: { excerpts: [candidate.input.content], score: 30 } } }
+  load.mockResolvedValue(detected)
+  render(); await flush()
+  expect(renderToStaticMarkup(render())).toContain('候选尚未登记朱雀复测')
+  expect(button(render(), '保存人工复测结果').props.disabled).toBe(true)
+  expect(() => button(render(), '采用此条')).toThrow()
+  recordDetection.mockResolvedValue({ ...detected, detectionCheck: { source: 'manual', status: 'green', score: 0, note: '人工复测', contentHash: 'hash', recordedAt: 'today' } })
+  field(render(), '我已将这份完整候选').props.onChange({ target: { value: '', checked: true } })
+  field(render(), '结果').props.onChange({ target: { value: 'green' } })
+  button(render(), '保存人工复测结果').props.onClick(); await flush()
+  expect(recordDetection).toHaveBeenCalledWith('p', 1, 'candidate-1', candidate.candidate, { status: 'green', note: '' })
+  const html = renderToStaticMarkup(render())
+  expect(html).toContain('人工登记：全绿')
+  expect(html).toContain('与候选不同，当前稿需单独检测')
+  expect(button(render(), '保存人工复测结果').props.disabled).toBe(true)
 })

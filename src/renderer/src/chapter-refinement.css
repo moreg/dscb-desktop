@@ -11,7 +11,7 @@
 .refinement-controls { border: 1px solid var(--line, #ddd5c9); border-radius: 10px; margin: 18px 0; padding: 14px; }
 .refinement-controls legend { padding: 0 6px; font-weight: 600; }
 .refinement-controls label { display: block; margin: 10px 0; font-size: 13px; }
-.refinement-controls select, .refinement-controls textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; padding: 8px; color: inherit; background: var(--surface, #fffdf7); border: 1px solid var(--line, #ddd5c9); border-radius: 6px; }
+.refinement-controls select, .refinement-controls textarea, .refinement-controls input[type="number"] { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; padding: 8px; color: inherit; background: var(--surface, #fffdf7); border: 1px solid var(--line, #ddd5c9); border-radius: 6px; }
 .refinement-actions, .refinement-result-heading, .refinement-progress { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .refinement-result-heading { justify-content: space-between; }
 .refinement-warning, .refinement-notice, .refinement-progress { padding: 12px; margin: 12px 0; border-radius: 8px; border: 1px solid var(--line, #ddd5c9); }

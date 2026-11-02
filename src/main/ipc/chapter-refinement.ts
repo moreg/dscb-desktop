@@ -6,11 +6,17 @@ import { beginStream, endStream } from '../data/stream-abort-registry'
 import type { ChapterRefinementService } from '../data/chapter-refinement-service'
 
 const address = z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema })
-const inputSchema = address.extend({ content: chapterContentSchema, goal: z.enum(['expression', 'dialogue', 'pacing', 'scene', 'custom']),
+const inputSchema = address.extend({ content: chapterContentSchema, goal: z.enum(['expression', 'detection', 'dialogue', 'pacing', 'scene', 'custom']),
   instruction: z.string().max(10000), plan: z.string().max(20000).optional(),
+  detection: z.object({ excerpts: z.array(z.string().min(8).max(40000)).min(1).max(20), score: z.number().min(0).max(100).optional() }).optional(),
   styleProfileId: z.string().max(255).nullable().optional(),
   selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional() })
 export function registerChapterRefinementIpc(service: ChapterRefinementService): void {
+  safeHandle('refinement:record-detection', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({ id: z.string().uuid(), testedContent: chapterContentSchema,
+      result: z.object({ status: z.enum(['green', 'flagged']), score: z.number().min(0).max(100).optional(), note: z.string().max(2000) }) }), payload)
+    return service.recordDetection(value.projectId, value.chapterNumber, value.id, value.testedContent, value.result)
+  })
   safeHandle('refinement:run', async (event, payload: unknown) => {
     const value = validateInput(z.object({ input: inputSchema, action: z.enum(['plan', 'generate']), requestId: z.string().uuid() }), payload)
     const signal = beginStream(value.requestId)

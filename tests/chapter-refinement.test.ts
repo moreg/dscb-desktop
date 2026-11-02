@@ -183,6 +183,7 @@ describe('independent chapter refinement', () => {
   it('refuses fabricated verifier evidence and malformed verdicts', () => {
     expect(() => parseRefinementVerdict(verdict('不存在的引文'), original, candidate)).toThrow('引文')
     expect(() => parseRefinementVerdict('{}', original, candidate)).toThrow('不完整')
+    expect(() => parseRefinementVerdict(verdict('守门人', '守门人'), original, candidate)).toThrow('引文')
   })
   it('adopts a single hunk, keeps remaining candidate, then adopts the rest or undoes', async () => {
     const source = '甲段。\n\n乙段。\n\n丙段。'

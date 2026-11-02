@@ -590,6 +590,7 @@ export interface MobileServerStatus {
 export interface RendererApi {
   refineChapter(input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void): StreamHandleOf<RefinementResult>
   loadRefinement(projectId: string, chapterNumber: number): Promise<RefinementCandidate | null>
+  recordRefinementDetection(projectId: string, chapterNumber: number, id: string, testedContent: string, result: { status: 'green' | 'flagged'; score?: number; note: string }): Promise<RefinementCandidate>
   discardRefinement(projectId: string, chapterNumber: number, id: string): Promise<void>
   rejectRefinementHunk(projectId: string, chapterNumber: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate>
   commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit>
