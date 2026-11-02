@@ -88,6 +88,63 @@ describe('batch safety and recovery', () => {
     }))
   }
 
+  it.each(['single', 'batch', 'recovered'] as const)('必需事件漏写先修正文并复核，保留原细纲（%s）', async mode => {
+    stubPostProcess()
+    const repaired = content.replace('放他进门。', '让他签收，然后放他进门。')
+    const missing = [{ type: 1, priority: 'P1', boundaryViolation: false,
+      outline: '放行前必须签收账册。', actual: '没有签收过程。', suggestion: '补写签收再放行。' }]
+    const file = path.join(dir, '细纲', '细纲_第001章_交接1.md')
+    const originalOutline = await readFile(file, 'utf8')
+    vi.mocked(flow.checkOutlineStream).mockImplementation(async (_outline, text) => JSON.stringify(text.includes('让他签收') ? [] : missing))
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'continuityRepair') return JSON.stringify({ replacements: [{ before: '放他进门。', after: '让他签收，然后放他进门。' }] })
+      if (opts?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: true, issues: [] })
+      return JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+    })
+    if (mode === 'single') {
+      await new ProseRepo(dir).write(1, content)
+      const result = await service.repairChapterForeshadowings(projectId, 1, content)
+      expect(result).toMatchObject({ content: repaired, report: { status: 'applied' } })
+      expect(await new ProseRepo(dir).read(1)).toBe(content)
+    } else {
+      if (mode === 'recovered') await new ProseRepo(dir).write(1, content)
+      const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, ch) => {
+        if (ch === 2) expect(await new ProseRepo(dir).read(1)).toBe(repaired)
+        return ch === 1 ? content : repaired
+      })
+      const result = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {},
+        mode === 'recovered' ? { fromChapter: 1, total: 2, completed: [1], pendingPostProcessChapter: 1 } : undefined,
+        { autoContinue: true })
+      expect(result.status, result.pauseReason).toBe('completed')
+      expect(await new ProseRepo(dir).read(1)).toBe(repaired)
+      expect(generate.mock.calls.map(call => call[1])).toEqual(mode === 'recovered' ? [2] : [1, 2])
+      expect(vi.mocked(service.syncChapterAfterWrite).mock.calls.filter(call => call[1] === 1).every(call => call[2] === repaired)).toBe(true)
+    }
+    expect(await readFile(file, 'utf8')).toBe(originalOutline)
+  })
+
+  it.each(['verification', 'omission'] as const)('漏写修复仍未通过时保留正文和细纲，不同步或推进（%s）', async failure => {
+    stubPostProcess()
+    const missing = [{ type: 1, priority: 'P1', boundaryViolation: false,
+      outline: '放行前必须签收账册。', actual: '没有签收过程。', suggestion: '补写签收再放行。' }]
+    const file = path.join(dir, '细纲', '细纲_第001章_交接1.md')
+    const originalOutline = await readFile(file, 'utf8')
+    vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify(missing))
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'continuityRepair') return JSON.stringify({ replacements: [{ before: '放他进门。', after: '让他签收，然后放他进门。' }] })
+      if (opts?.meta?.feature === 'continuityRepairVerify') return JSON.stringify({ passed: failure !== 'verification', issues: failure === 'verification' ? ['仍缺签收证据'] : [] })
+      return JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+    })
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    const result = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(result).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1 })
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(await readFile(file, 'utf8')).toBe(originalOutline)
+    expect(await new ProseRepo(dir).read(2)).toBe('')
+    expect(generate).toHaveBeenCalledOnce()
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+  })
+
   const foreshadowDiff = [{ type: 1, typeLabel: '漏写', priority: 'P1',
     outline: 'FB-001：账册夹着父亲留下的半张借条', actual: '没有伏笔线索', suggestion: '补写伏笔' }]
   const foreshadowAddition = '账册封皮夹着半张借条，林远认出落款是父亲的笔迹。'

@@ -3,8 +3,8 @@ import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { writeJsonAtomic } from './atomic'
 
-export const CHAPTER_REPAIR_LIMIT = 12
-export const CHAPTER_EXPRESSION_REPAIR_LIMIT = 3
+import { CHAPTER_REPAIR_LIMIT, CHAPTER_EXPRESSION_REPAIR_LIMIT } from '../../shared/chapter-repair-limits'
+export { CHAPTER_REPAIR_LIMIT, CHAPTER_EXPRESSION_REPAIR_LIMIT } from '../../shared/chapter-repair-limits'
 type RepairKind = 'content' | 'expression'
 interface CallRecord { feature: string; durationMs: number; outcome: 'succeeded' | 'failed' | 'budget_exhausted' }
 interface Execution {

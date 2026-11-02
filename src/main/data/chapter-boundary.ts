@@ -1,5 +1,6 @@
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import type { ChapterDetail, OutlineDiffReport } from '../../shared/types'
+import { missingForeshadowings } from './foreshadowing-repair'
 
 function boundaryText(detail: ChapterDetail): string {
   // Keep literal text (not JSON escapes) so evidence quotes can be located exactly.
@@ -37,5 +38,20 @@ export function assertOutlineBoundary(report: OutlineDiffReport): void {
     )
   ))
   if (violations.length) throw new Error(`LONGFORM_CONFLICT: 章节边界核对发现越界，已暂停交稿与同步；须修正文，不能回写细纲消除：\n${violations.map(diff =>
+    `细纲：${diff.outline ?? ''}\n正文：${diff.actual ?? ''}\n修正：${diff.suggestion}`).join('\n')}`)
+}
+
+/** Single and batch writing must repair required events before accepting or rebasing prose. */
+export function requiredChapterEventOmissions(report: OutlineDiffReport, plans: readonly string[] = [],
+  allowForeshadowOmissions = false): OutlineDiffReport['diffs'] {
+  const clues = allowForeshadowOmissions ? missingForeshadowings(report, plans) : []
+  return report.diffs.filter(diff => diff.type === 1 && diff.priority !== 'P2' && !clues.includes(diff))
+}
+
+export function assertChapterOutlineRequirements(report: OutlineDiffReport, plans: readonly string[] = [],
+  allowForeshadowOmissions = false): void {
+  assertOutlineBoundary(report)
+  const missing = requiredChapterEventOmissions(report, plans, allowForeshadowOmissions)
+  if (missing.length) throw new Error(`LONGFORM_CONFLICT: 本章细纲必需剧情漏写，须先补正文并复核，不能删改细纲消除：\n${missing.map(diff =>
     `细纲：${diff.outline ?? ''}\n正文：${diff.actual ?? ''}\n修正：${diff.suggestion}`).join('\n')}`)
 }

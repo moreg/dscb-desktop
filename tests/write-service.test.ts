@@ -650,7 +650,7 @@ describe('WriteService', () => {
       spy.mockRestore()
     })
 
-    it.each(['P0', 'omission', 'core', 'structure'])('autoContinue rewrites the outline from prose on outline issue %s and keeps writing', async (issue) => {
+    it.each(['P0', 'omission', 'core', 'structure'])('autoContinue blocks required omissions and only rebases acceptable differences (%s)', async (issue) => {
       const dir = await ps.resolveDir(projectId)
       const { mkdir, writeFile, readFile } = await import('fs/promises')
       await mkdir(path.join(dir, '细纲'), { recursive: true })
@@ -676,6 +676,14 @@ describe('WriteService', () => {
         return result
       })
       const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+      if (issue === 'P0' || issue === 'omission') {
+        expect(progress.status).toBe('paused')
+        expect(progress.pendingPostProcessChapter).toBe(1)
+        expect(progress.pauseReason).toContain('必需剧情漏写')
+        expect(await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')).toContain('原细纲事件1')
+        expect(await new ProseRepo(dir).read(2)).toBe('')
+        return
+      }
       expect(progress.status).toBe('completed')
       expect(progress.completed).toEqual([1, 2])
       const first = await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')

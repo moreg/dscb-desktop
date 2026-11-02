@@ -1,3 +1,4 @@
+import { CHAPTER_REPAIR_LIMIT, CHAPTER_EXPRESSION_REPAIR_LIMIT } from '../../shared/chapter-repair-limits'
 import { BatchClock, formatBatchDuration, restoreBatchTiming, type BatchTiming } from '../../shared/batch-timing'
 import { batchQuality, BATCH_QUALITY_LABELS, type BatchQuality } from '../../shared/batch-quality'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
@@ -2275,9 +2276,9 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章先保存生成原稿，再自动去 AI 味并核对事实。每章每轮各类自动修复合计最多 3 次，独立核验仍须完成。表达验收未通过则保留原稿，章节仍显示为正文，验收结果标记为待修订；事实冲突未解决时暂停，不进入下一章。流程完成不代表正文质量验收通过。
+          逐章先保存生成原稿，再自动去 AI 味并核对事实。每章每轮剧情纠错最多 {CHAPTER_REPAIR_LIMIT} 次、表达润色最多 {CHAPTER_EXPRESSION_REPAIR_LIMIT} 次，分别计数，独立核验仍须完成。表达验收未通过则保留原稿，章节仍显示为正文，验收结果标记为待修订；事实冲突未解决时暂停，不进入下一章。流程完成不代表正文质量验收通过。
           {autoContinue
-            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。细纲缺失、同步失败或阻断性冲突未解决时暂停，已保存的正文保留，可随时点停止。'
+            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先修复必需剧情和伏笔遗漏并复核，再将合理差异回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。细纲缺失、同步失败或阻断性冲突未解决时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
         </p>
 
@@ -2450,7 +2451,7 @@ function BatchWriteDialog({
           <span>
             连续写作，以正文为准更新细纲和记忆
             <span className="meta" style={{ display: 'block', fontSize: 12 }}>
-              每章正文保存后，所有细纲差异（含漏写、P0、卷级变化）都按正文回写并校准后续细纲，记忆按正文同步（不受自动记忆开关影响）。剩余的正文自检提示只记在逐章小结里；细纲缺失或同步失败时暂停。可随时点「⏹ 停止」。
+              每章正文保存后，先修复必需剧情和伏笔遗漏并复核，再回写合理的细纲差异、校准后续细纲，记忆按正文同步（不受自动记忆开关影响）。剩余的正文自检提示只记在逐章小结里；细纲缺失或同步失败时暂停。可随时点「⏹ 停止」。
             </span>
           </span>
         </label>

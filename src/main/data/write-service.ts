@@ -63,7 +63,7 @@ import { ItemRepo } from './memory/item-repo'
 import { findItemMaterialDrift, renderItemDriftHints } from './memory/item-drift'
 import { LongformGuard, needsLongformGuard } from './longform-guard'
 import { readLongformPlan } from './longform-plan'
-import { readChapterBoundary, assertOutlineBoundary } from './chapter-boundary'
+import { readChapterBoundary, assertOutlineBoundary, assertChapterOutlineRequirements, requiredChapterEventOmissions } from './chapter-boundary'
 import { readLongformReviewState, markLongformPending, clearLongformPending,
   blockedLongformChapters, markBatchReviewPending, clearBatchReviewPending, removeStaleLongformEntries } from './longform-review-state'
 import { setChapterStatus } from './chapter-status-store'
@@ -1277,16 +1277,7 @@ export class WriteService {
       const plans = detail?.foreshadowings ?? []
       const repairBoundary = async (text: string, report: OutlineDiffReport): Promise<{ content: string; report: OutlineDiffReport }> => {
         try {
-          assertOutlineBoundary(report)
-          // A completed chapter must not be reported as checked when a required
-          // plot event is missing just because it is not labeled foreshadowing.
-          const missingClues = missingForeshadowings(report, plans)
-          // In a partial continuation the checker is already constrained to
-          // scenes reached so far; omissions it reports still need attention.
-          const missingEvents = report.diffs.filter(diff => diff.type === 1 &&
-            (diff.priority === 'P0' || diff.priority === 'P1') && !missingClues.includes(diff))
-          if (missingEvents.length) throw new Error(`LONGFORM_CONFLICT: 本章细纲必需剧情漏写：\n${missingEvents.map(diff =>
-            `细纲：${diff.outline ?? ''}\n正文：${diff.actual ?? ''}\n修正：${diff.suggestion ?? ''}`).join('\n')}`)
+          assertChapterOutlineRequirements(report, plans, true)
           return { content: text, report }
         }
         catch (error) {
@@ -3463,7 +3454,8 @@ export class WriteService {
         const boundaries = checked.diffs.filter(diff => diff.boundaryViolation === true || (diff.boundaryViolation === undefined && diff.priority !== 'P2' &&
           (diff.type === 2 || ([4, 5].includes(diff.type) && diff.resolution === 'updateContent'))))
         const unresolvedBoundary = blocking.some(diff => diff.boundaryViolation !== false)
-        if (boundaries.length || unresolvedBoundary || ((!opts.proseFirst || broadScope !== undefined) && (blocking.length || (checked.passed === false && omissions.length === 0)))) {
+        const required = requiredChapterEventOmissions(checked, reviewOptions.foreshadowPlans, reviewOptions.foreshadowPlans !== undefined)
+        if (required.length || boundaries.length || unresolvedBoundary || ((!opts.proseFirst || broadScope !== undefined) && (blocking.length || (checked.passed === false && omissions.length === 0)))) {
           const diffs = [...new Set([...boundaries, ...blocking])]
           if (!diffs.length) throw new Error(`长篇修复后的细纲复核未通过：${checked.error || '未通过细纲检查'}`)
           throw new FinalRepairFindings(diffs.map(diff => `最终细纲复核发现的问题：\n细纲：${diff.outline ?? ''}\n正文：${diff.actual ?? ''}\n修正：${diff.suggestion}`))
@@ -3512,6 +3504,7 @@ export class WriteService {
           partialChapter: reviewOptions.partialChapter, tempContext: opts.tempContext }, signal)
         assertOutlineBoundary(checked)
         const omissions = reviewOptions.foreshadowPlans ? missingForeshadowings(checked, reviewOptions.foreshadowPlans) : []
+        assertChapterOutlineRequirements(checked, reviewOptions.foreshadowPlans, reviewOptions.foreshadowPlans !== undefined)
         if (checked.checked !== true || checked.hasOutline === false) {
           throw new Error(`长篇修复后的细纲复核未完成：${checked.error ?? '缺少有效检查结果'}`)
         }
@@ -3864,6 +3857,9 @@ export class WriteService {
       return true
     }
     await repairContinuityIfNeeded()
+    const requiredPlans = (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings ?? []
+    // Required non-foreshadow events enter the same verified repair path as single writing.
+    assertChapterOutlineRequirements(outlineDiff, requiredPlans, true)
     if (proseFirst && outlineDiff.checked !== false && outlineDiff.hasOutline !== false) {
       const detail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       const plans = detail?.foreshadowings ?? []
@@ -3922,7 +3918,7 @@ export class WriteService {
       }
     }
     await repairContinuityIfNeeded()
-    assertOutlineBoundary(outlineDiff)
+    assertChapterOutlineRequirements(outlineDiff, requiredPlans)
     await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
     if (outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
 
@@ -3958,7 +3954,7 @@ export class WriteService {
       onProgress('outlineSync')
       outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
     }
-    assertOutlineBoundary(outlineDiff)
+    assertChapterOutlineRequirements(outlineDiff, requiredPlans)
     if (proseFirst || await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
     const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
       { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore, tempContext: opts.tempContext,
@@ -4537,10 +4533,10 @@ export class WriteService {
   }
 
   /**
-   * 连续写作的正文优先细纲回写：本章正文即定稿，细纲跟着正文走。
+   * 连续写作的细纲回写：先修复必需事件，再以验收后的正文同步合理差异。
    *
-   * 伏笔漏写先补正文，不允许通过删细纲消除差异。其他差异回写，包括 P0、卷级变化和类型 1：有 outlinePatch
-   * 的直接合并；没有补丁的（多为漏写）交给模型按正文重写本章相关字段。人物/伏笔/
+   * 必需剧情与伏笔漏写先补正文并复核，不允许通过删细纲消除差异。其他已确认的合理差异：有 outlinePatch
+   * 的直接合并；没有补丁的交给模型按正文重写本章相关字段。人物/伏笔/
    * 核心结构变化再向后校准同卷未写章节。任一步失败返回 checked=false，本章细纲
    * 保持原样，重试时能重新发现差异。
    */
@@ -4555,7 +4551,7 @@ export class WriteService {
     if (report.hasOutline === false || report.checked === false) return report
     try {
       throwIfAborted(signal)
-      assertOutlineBoundary(report)
+      assertChapterOutlineRequirements(report)
       // Check against the original author plan before accepting/rebasing any prose deviation.
       const confirmLongform = await this.assertLongformConsistency(projectId, chapterNumber, content, { signal, instruction })
       if (report.diffs.length === 0) return { ...report, proseSynced: 0 }
@@ -4625,7 +4621,7 @@ export class WriteService {
     const prompt = [
       `你是网络小说细纲校准器。第 ${chapterNumber} 章正文已定稿，一切以正文为准。`,
       `下面列出本章细纲与正文的差异（多为细纲写了、正文没写）。请改写本章细纲中与这些差异相关的字段，`,
-      `让细纲如实描述正文实际发生的内容：正文没写的从细纲删去，正文实际写了的替换进来。`,
+      `让细纲如实描述正文实际发生的合理变化。禁止删除、延期或弱化原细纲必需事件及伏笔；若仍有必需剧情漏写，应先修正文，不得生成补丁消除。`,
       `硬性禁止：不得修改章号、标题、情绪值、爽点等级、所属卷；不得编造正文里没有的剧情。`,
       `可写字段仅限：plotSummary, coolPoint, hook, charactersAppearing, foreshadowings, goldenLine。`,
       `plotSummary 若改，必须写完整核心事件而不是增量；charactersAppearing / foreshadowings 若改，给出完整列表。`,

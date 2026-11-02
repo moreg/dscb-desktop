@@ -6,7 +6,7 @@ import { mapMemoryFiles, memoryFileFingerprint } from './memory/repository-cache
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 // Bump when stage prompts, parsers or acceptance rules change.
-const REVISION = 'batch-stages-2-boundary'
+const REVISION = 'batch-stages-3-required-events'
 const excluded = new Set(['.cache', '.git', '.versions', '.longform-review.json', '.chapter-status.json'])
 const fileDigests = new Map<string, { fingerprint: string; digest: string }>()
 const pendingDigests = new Map<string, Promise<string>>()

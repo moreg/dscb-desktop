@@ -767,7 +767,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
   })
 
   it.each([
-    { proseFirst: true, boundaryViolation: false, passes: true },
+    { proseFirst: true, boundaryViolation: false, passes: false },
     { proseFirst: false, boundaryViolation: false, passes: false },
     { proseFirst: true, boundaryViolation: true, passes: false }
   ])('局部冲突修复遵守正文优先策略及边界：%j', async ({ proseFirst, boundaryViolation, passes }) => {
