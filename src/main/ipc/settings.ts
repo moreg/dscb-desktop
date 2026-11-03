@@ -21,6 +21,12 @@ export function registerSettingsIpc(
   defaultProjectsRoot: string
 ): void {
   const defaultChartCoversRoot = join(app.getPath('userData'), 'covers')
+  safeHandle('settings:getChapterCompletionNotification', async () => (await repo.get()).chapterCompletionNotification === true)
+  safeHandle('settings:setChapterCompletionNotification', async (_event, input: unknown) => {
+    const enabled = validateInput(z.boolean(), input)
+    await repo.update({ chapterCompletionNotification: enabled })
+    return enabled
+  })
   safeHandle('settings:getChartCoversRoot', async () => {
     return (await repo.get()).chartCoversRoot || defaultChartCoversRoot
   })

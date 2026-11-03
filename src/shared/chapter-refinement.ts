@@ -39,6 +39,7 @@ export interface RefinementCandidate {
   id: string
   input: RefinementInput
   baseRevision: string
+  routingHash?: string
   contextHash: string
   candidate: string
   changes: string[]

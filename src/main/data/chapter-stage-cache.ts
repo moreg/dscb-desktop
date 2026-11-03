@@ -1,3 +1,4 @@
+import { recordChapterStage } from './chapter-execution'
 import { createHash } from 'crypto'
 import { createReadStream, promises as fs } from 'fs'
 import { join, resolve } from 'path'
@@ -6,7 +7,7 @@ import { mapMemoryFiles, memoryFileFingerprint } from './memory/repository-cache
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 // Bump when stage prompts, parsers or acceptance rules change.
-const REVISION = 'batch-stages-3-required-events'
+const REVISION = 'chapter-stages-4-agent-workflow'
 const excluded = new Set(['.cache', '.git', '.versions', '.longform-review.json', '.chapter-status.json'])
 const fileDigests = new Map<string, { fingerprint: string; digest: string }>()
 const pendingDigests = new Map<string, Promise<string>>()
@@ -95,9 +96,13 @@ export class ChapterStageCache {
   async run<T>(stage: string, action: () => Promise<T>, valid: (value: T) => boolean): Promise<T> {
     const key = await this.fingerprint()
     const cached = await this.readWithKey(stage, key, valid)
-    if (cached !== undefined) return cached
+    if (cached !== undefined) { recordChapterStage({ stage, verdict: 'cached' }); return cached }
     const start = Date.now()
-    const value = await action()
+    let value: T
+    try { value = await action() } catch (error) {
+      recordChapterStage({ stage, verdict: 'incomplete', durationMs: Date.now() - start }); throw error
+    }
+    recordChapterStage({ stage, verdict: valid(value) ? 'passed' : 'incomplete', durationMs: Date.now() - start })
     if (key && valid(value) && key === await this.fingerprint()) await this.write(stage, key, value, Date.now() - start)
     return value
   }

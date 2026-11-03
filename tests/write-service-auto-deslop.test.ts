@@ -145,6 +145,58 @@ describe('自动写作去 AI 味', () => {
     })
   }
 
+  it('后端单章交稿先保存补写剧情，再仅运行一次表达修订', async () => {
+    const steps: string[] = []
+    const addition = '守门人又指了指东屋的方向。'
+    vi.spyOn(service, 'repairChapterForeshadowings').mockImplementation(async (_pid, _chapter, content, options) => {
+      expect(options?.deferExpression).toBe(true)
+      expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+      steps.push('story')
+      return { content: content + '\n' + addition, report: { status: 'applied', message: '补写完成' } }
+    })
+    const flow = (service as unknown as { flow: WriteFlowService }).flow
+    vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue('[]')
+    vi.mocked(deslop.deslop).mockImplementation(async text => {
+      steps.push('expression')
+      expect(text).toContain(addition)
+      expect(await new ProseRepo(dir).read(1)).toBe(text)
+      return deslopResult(text.replace('缓缓推开', '推开'))
+    })
+    const result = await service.deliverChapter(projectId, 1)
+    expect(result.ok).toBe(true)
+    expect(result.saved?.content).toContain(addition)
+    expect(result.saved?.content).not.toContain('缓缓推开')
+    expect(steps).toEqual(['story', 'expression'])
+    expect(deslop.deslop).toHaveBeenCalledOnce()
+  })
+
+  it('后端集中表达验收失败仍交回实际保存的正文与失败报告', async () => {
+    vi.spyOn(service, 'repairChapterForeshadowings').mockImplementation(async (_pid, _chapter, content) =>
+      ({ content, report: { status: 'unchanged', message: '剧情检查通过' } }))
+    vi.mocked(deslop.deslop).mockRejectedValue(new Error('LLM_TIMEOUT'))
+    const result = await service.deliverChapter(projectId, 1)
+    expect(result.ok).toBe(true)
+    expect(result.saved?.content).toBe(RAW)
+    expect(result.saved?.meta.autoDeslop?.status).toBe('failed')
+    expect(await new ProseRepo(dir).read(1)).toBe(RAW)
+    expect(deslop.deslop).toHaveBeenCalledOnce()
+  })
+
+  it('最终细纲核对失败保留润色正文并重新隔离事实提交', async () => {
+    const { readLongformReviewState } = await import('../src/main/data/longform-review-state')
+    const { contentRevision } = await import('../src/main/data/chapter-revision')
+    await mkdir(path.join(dir, '细纲'), { recursive: true })
+    await writeFile(path.join(dir, '细纲', '第01卷.md'), '# 第1卷\n\n## 第1章：院门交接\n\n**剧情概要**：林远交账册后进入东屋。\n')
+    vi.spyOn(service, 'repairChapterForeshadowings').mockImplementation(async (_pid, _chapter, content) =>
+      ({ content, report: { status: 'unchanged', message: '剧情检查通过' } }))
+    const flow = (service as unknown as { flow: WriteFlowService }).flow
+    vi.spyOn(flow, 'checkOutlineStream').mockRejectedValue(new Error('FINAL_OUTLINE_UNAVAILABLE'))
+    await expect(service.deliverChapter(projectId, 1)).rejects.toThrow()
+    const saved = await new ProseRepo(dir).read(1)
+    expect(saved).toBe(POLISHED)
+    expect((await readLongformReviewState(dir)).pending['1'].sourceHash).toBe(contentRevision(saved))
+  })
+
   function results(): { onAutoDeslopResult: ReturnType<typeof vi.fn>; reports: AutoDeslopResult[] } {
     const reports: AutoDeslopResult[] = []
     return { reports, onAutoDeslopResult: vi.fn((report: AutoDeslopResult) => reports.push(report)) }
@@ -153,6 +205,50 @@ describe('自动写作去 AI 味', () => {
   function verificationCalls(): Parameters<LlmService['generateStream']>[] {
     return vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'deslop:verify')
   }
+
+  it('续写表达未通过且关闭自动同步，仍自动保存整章并保留版本对应的待修订报告', async () => {
+    const { joinContinuation, formatChapterProse } = await import('../src/shared/format-chapter-prose')
+    const { draftPath, saveDraftText } = await import('../src/main/data/draft')
+    const prefix = '林远沿着石阶走到院门前。'
+    const chapters = new ChapterService(projects)
+    await chapters.updateContent(projectId, 1, prefix)
+    Object.assign(settings, { get: async () => ({ autoMemorySync: false, autoPostWritePipeline: 'off' }) })
+    vi.mocked(deslop.deslop).mockRejectedValue(new Error('自动去 AI 味失败'))
+    mockPrompt('extend')
+    const { reports, onAutoDeslopResult } = results()
+    const tail = await service.generateChapterStream(projectId, 1, { existingText: prefix, onAutoDeslopResult })
+    const whole = formatChapterProse(joinContinuation(prefix, tail))
+    await saveDraftText(draftPath(dir, 1), whole)
+    const saved = await service.saveGeneratedChapter(projectId, 1, whole, whole, reports.at(-1))
+    expect(saved.content).toBe(formatChapterProse(joinContinuation(prefix, RAW)))
+    expect(saved.meta.autoDeslop?.status).toBe('failed')
+    expect((await new ChapterService(projects).getChapter(projectId, 1)).meta.autoDeslop?.status).toBe('failed')
+    expect(saved.meta.status).toBe('draft')
+    await expect(import('fs/promises').then(fs => fs.readFile(draftPath(dir, 1), 'utf8'))).rejects.toThrow('ENOENT')
+  })
+
+  it('写后补写的最终整章也保存，旧表达通过结果不能覆盖新版本待复核状态', async () => {
+    const { reports, onAutoDeslopResult } = results()
+    await service.generateChapterStream(projectId, 1, { onAutoDeslopResult })
+    const final = POLISHED + '\n守门人指了指账册上的签收栏。'
+    const saved = await service.saveGeneratedChapter(projectId, 1, POLISHED, final, reports.at(-1))
+    expect(saved.content).toBe(final)
+    expect(saved.meta.autoDeslop?.status).toBe('review_required')
+    expect((await new ProseRepo(dir).read(1))).toBe(final)
+  })
+
+  it('自动保存使用生成稿版本检查，不覆盖他人的正文或新恢复草稿', async () => {
+    const { draftPath, saveDraftText } = await import('../src/main/data/draft')
+    const { readFile } = await import('fs/promises')
+    const chapters = new ChapterService(projects)
+    await chapters.updateContent(projectId, 1, RAW)
+    await saveDraftText(draftPath(dir, 1), '作者新写的草稿。')
+    await service.saveGeneratedChapter(projectId, 1, RAW, RAW)
+    expect(await readFile(draftPath(dir, 1), 'utf8')).toBe('作者新写的草稿。')
+    await chapters.updateContent(projectId, 1, '作者另一窗口保存的正文。')
+    await expect(service.saveGeneratedChapter(projectId, 1, RAW, POLISHED)).rejects.toThrow('CHAPTER_REVISION_CONFLICT')
+    expect(await new ProseRepo(dir).read(1)).toBe('作者另一窗口保存的正文。')
+  })
 
   it('单章表达润色有独立上限，耗尽后仍保留原稿和失败原因', async () => {
     const { trackChapterCall } = await import('../src/main/data/chapter-execution')
@@ -613,7 +709,7 @@ describe('自动写作去 AI 味', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(POLISHED)
     expect(audit).toHaveBeenCalledWith(projectId, POLISHED)
     expect(outline).toHaveBeenCalledWith(expect.any(String), POLISHED, 1, expect.any(Object))
-    expect(memory).toHaveBeenCalledWith(POLISHED, 1, expect.any(Array), expect.any(Object), expect.any(Array))
+    expect(memory).toHaveBeenCalledWith(POLISHED, 1, expect.any(Array), expect.any(Object), expect.any(Array), expect.any(Object))
     expect(sync).toHaveBeenCalledWith(projectId, 1, POLISHED, expect.any(Object))
     expect(onProgress.mock.calls.map(([step]) => step)).toContain('deslop')
   })

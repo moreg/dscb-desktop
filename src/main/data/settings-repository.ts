@@ -104,6 +104,8 @@ export interface AppSettings {
    * - full：记忆同步 + 细纲/节奏/图解（不再二次 extract 记忆）
    */
   autoPostWritePipeline?: 'off' | 'memory_only' | 'full'
+  /** Windows 桌面版本轮续写完成后的系统通知，默认开启。 */
+  chapterCompletionNotification?: boolean
 }
 
 export type AutoPostWritePipeline = 'off' | 'memory_only' | 'full'
@@ -153,6 +155,7 @@ const DEFAULTS: AppSettings = {
   reviewRules: DEFAULT_REVIEW_RULES,
   settingsEvolution: 'auto_high',
   autoMemorySync: true,
+  chapterCompletionNotification: true,
   autoPostWritePipeline: 'memory_only'
 }
 
@@ -443,6 +446,7 @@ function normalizeAppSettings(stored: AppSettings): AppSettings {
     deslopRules: sanitizeDeslopRules(stored.deslopRules),
     settingsEvolution,
     autoPostWritePipeline,
+    chapterCompletionNotification: typeof stored.chapterCompletionNotification === 'boolean' ? stored.chapterCompletionNotification : true,
     autoMemorySync
   }
 }

@@ -18,11 +18,9 @@ it('validates scope and IDs before starting model work', async () => {
 })
 it('propagates early cancellation and cleans up its request registry', async () => {
   const requestId = randomUUID(); abortStream(requestId)
-  generate.mockImplementationOnce(async (_input, signal, progress) => {
-    expect(signal.aborted).toBe(true); progress('verifying'); throw new Error('LLM_ABORTED')
-  })
   expect(await handlers.get('refinement:run')!({ sender: {} }, { input, action: 'generate', requestId })).toEqual({ ok: false, error: 'LLM_ABORTED' })
-  expect(send).toHaveBeenCalledWith(expect.anything(), 'refinement:stage', { requestId, stage: 'verifying' })
+  expect(generate).not.toHaveBeenCalled()
+  expect(send).not.toHaveBeenCalled()
   expect(activeStreamCount()).toBe(0)
 })
 it('commits only a server-side candidate ID and passes the editor baseline for conflict checking', async () => {

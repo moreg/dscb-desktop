@@ -1,8 +1,12 @@
+import { ChapterFactSnapshot } from './chapter-fact-snapshot'
+import { MemorySyncService } from './memory/sync-service'
+import type { ChapterSyncOptions, ChapterSyncResult, ChapterSyncStep } from '../../shared/chapter-workflow'
+import { ChapterWorkflow, type ChapterWorkflowMode } from './chapter-workflow'
 import { randomBytes as repairRandomBytes } from 'crypto'
 import { repairOutlineDifference } from './outline-local-repair'
 import { adjudicateOutlineDiffs } from './outline-sync-agent'
 import { batchQuality } from '../../shared/batch-quality'
-import { runChapterExecution } from './chapter-execution'
+import { discardDraftText, draftPath } from './draft'
 import { ChapterStageCache, chapterDependencyHash } from './chapter-stage-cache'
 import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import { PLANNING_RULES, buildPlanningPlatformRules } from './skill-prompts/opening/planning-rules'
@@ -148,6 +152,8 @@ import type {
 } from '../../shared/types'
 import {
   parseMemoryExtractionJson,
+  parseRhythmEvaluationJson,
+  parseFigureDraftJson,
   parseOutlineDiffJson
 } from '../../shared/parsers'
 import {
@@ -190,6 +196,7 @@ export interface BatchState {
 }
 
 interface ChapterPostWriteOptions {
+  deferExpression?: boolean
   signal?: AbortSignal
   partialChapter?: boolean
   tempContext?: string
@@ -290,6 +297,8 @@ export function needsDownstreamOutlineAdjustment(diff: OutlineDiffItem): boolean
  * 这些编排回调在下发给 LlmService 前被剔除，不进 provider 层。
  */
 export interface ChapterGenerateOptions extends GenerateOptions {
+  /** Backend delivery runs expression work after required story repairs. */
+  deferExpression?: boolean
   /** 复用已保存正文，只补跑冲突修复与核对，不追加正文或重跑整章润色。 */
   repairOnly?: boolean
   /** 连续流程允许明确非边界差异在后处理中按正文同步；事实和章节边界仍须通过。 */
@@ -467,7 +476,7 @@ export class WriteService {
     let key: string | null = null
     try {
       const project = await this.projectService.getProjectData(projectId)
-      const identities = await Promise.all(['outlineCheck', 'memoryExtract', 'rhythmEval', 'figureGen', 'autoMemorySync']
+      const identities = await Promise.all(['outlineCheck', 'memoryExtract', 'rhythmEval', 'figureGen', 'autoMemorySync', 'chapterSummary', 'longformGuard', 'continuityRepair', 'continuityRepairVerify', 'outlineLocalRepair', 'outlineLocalRepairVerify', 'outlineSyncDecision', 'outlineSyncVerify']
         .map(feature => this.llm.getCacheIdentity?.(feature)))
       if (this.settings && identities.every(Boolean) && !project.benchmarkBooks?.length) {
         const config = await Promise.all([this.settings.get(), this.settings.getReviewRules(), this.settings.getDeslopRules()])
@@ -541,6 +550,7 @@ export class WriteService {
         '一条 text 只能概括其 evidence 直接支持的信息；不同来源的动作、知情和数值变化应拆开。不能用“躺下登录”等纯动作引句支撑“得知等级或怀疑开挂”，也不能把一段中的多件事全部概括后只引用最后一句。知情摘要与对应 knowledge 条目应使用能相互定位的直接证据。',
         '历史台账仅供沿用同一人物、秘密主题、道具和任务的稳定名称及维度；不要复制旧状态，不把旧记录写成本章发生。只提取本章实际支持的新变化及本章明确重申的知情状态；明确同一事项时沿用命名，不能因措辞相近合并不同秘密或承诺。',
         ...vocabulary,
+        await new ChapterFactSnapshot(dir, chapterNumber, content).context(),
         '--- 本章正文 ---', content
       ].join('\n')
       let summary: ChapterSummary | undefined
@@ -616,6 +626,9 @@ export class WriteService {
         }
         await confirmLongform()
         await repo.write(validatedSummary)
+        await new ChapterFactSnapshot(dir, chapterNumber, content).remember('summary', undefined, undefined,
+          [...validatedSummary.events, ...validatedSummary.stateChanges, ...validatedSummary.openThreads,
+            ...(validatedSummary.continuity ?? [])].map(item => item.evidence))
       })
       this.summaryWriteQueue.set(key, commit)
       try { await commit } finally {
@@ -835,9 +848,135 @@ export class WriteService {
       () => this.generateChapterStreamInExecution(projectId, chapterNumber, styleProfileIdOrOpts, maybeOpts))
   }
 
+  /** Desktop, web and batch delivery share story-first, one-pass expression semantics. */
+  async deliverChapter(projectId: string, chapterNumber: number, styleProfileId?: string | null,
+    opts: ChapterGenerateOptions = {}): Promise<import('../../shared/types').ChapterStreamResult> {
+    return this.runChapterWrite(projectId, chapterNumber, async () => {
+      let full: string | undefined
+      let conflictRepaired = false
+      let autoDeslop: AutoDeslopResult | undefined
+      let promptMeta: ChapterPromptMeta | undefined
+      let retained: string | undefined
+      try {
+        const content = await this.generateChapterStream(projectId, chapterNumber, styleProfileId, { ...opts, deferExpression: true,
+          onPromptMeta: meta => { promptMeta = meta; opts.onPromptMeta?.(meta) },
+          onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) },
+          onFinalProseReady: async text => { full = text; await opts.onFinalProseReady?.(text) },
+          onConflictRepaired: text => { full = text; conflictRepaired = true; opts.onConflictRepaired?.(text) }
+        })
+        retained = full ?? formatChapterProse(joinContinuation(opts.existingText ?? '', content))
+        const repaired = await ChapterWorkflow.stage('story-repair', retained, () => this.repairChapterForeshadowings(
+          projectId, chapterNumber, retained!, { signal: opts.signal, tempContext: opts.tempContext, styleProfileId,
+            partialChapter: promptMeta?.continueMode === 'extend', deferExpression: true,
+            onStart: () => opts.onGenerationStage?.('foreshadowRepair'),
+            onProgress: progress => opts.onGenerationStage?.(`foreshadow:${postWriteProgressLabel(progress)}`),
+            onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
+          }), result => result.report.status === 'failed' ? 'incomplete' : 'passed')
+        const candidate = repaired.report.status === 'applied' ? repaired.content : retained
+        throwIfAborted(opts.signal)
+        let saved = await this.saveGeneratedChapter(projectId, chapterNumber, retained, candidate, autoDeslop)
+        retained = saved.content
+        if (!opts.repairOnly) {
+          const final = await this.polishChapterDelivery(projectId, chapterNumber, retained, { ...opts, styleProfileId,
+            isTail: promptMeta?.continueMode !== 'extend' })
+          saved = final.saved
+          retained = saved.content
+          if (candidate !== retained) {
+            const dir = await this.projectService.resolveDir(projectId)
+            try {
+              const checked = await this.checkOutlineWithRetry(chapterNumber, await this.loadChapterOutlineText(dir, chapterNumber),
+                retained, { signal: opts.signal, partialChapter: promptMeta?.continueMode === 'extend', tempContext: opts.tempContext,
+                  meta: { feature: 'outlineCheck', projectId, chapterNumber } }, opts.signal ?? new AbortController().signal)
+              throwIfAborted(opts.signal)
+              if (checked.hasOutline && checked.checked !== true) {
+                throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 最终细纲核验未完成，${checked.error ?? '请稍后补跑核对'}`)
+              }
+              assertChapterOutlineRequirements(checked, (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings,
+                promptMeta?.continueMode === 'extend')
+            } catch (error) {
+              if (await new ProseRepo(dir).read(chapterNumber) === retained) {
+                await markLongformPending(dir, chapterNumber, hashProse(retained))
+              }
+              throw error
+            }
+          }
+        }
+        return { ok: true, content, fullContent: saved.content, saved, autoDeslop: saved.meta.autoDeslop,
+          continueMode: promptMeta?.continueMode, wordBudget: promptMeta,
+          ...(conflictRepaired ? { conflictRepaired: true } : {}), foreshadowRepair: repaired.report }
+      } catch (error) {
+        if (error instanceof ChapterWriteReviewError) throw error
+        if (retained?.trim()) throw new ChapterWriteReviewError(retained, error)
+        throw error
+      }
+    }, opts.repairOnly ? 'repair' : opts.existingText?.trim() ? 'continue' : 'generate')
+  }
+
+  /** Expression failure preserves the last factual body; final fact checking is never skipped. */
+  async polishChapterDelivery(projectId: string, chapterNumber: number, content: string,
+    opts: ChapterGenerateOptions & { styleProfileId?: string | null; isTail?: boolean } = {}) {
+    throwIfAborted(opts.signal)
+    let report: AutoDeslopResult | undefined
+    let candidate = content
+    try {
+      if (ChapterWorkflow.claimExpression()) {
+        const prefix = opts.existingText && content.startsWith(opts.existingText) ? opts.existingText : ''
+        const body = prefix ? formatChapterProse(content.slice(prefix.length)) : content
+        const polished = await ChapterWorkflow.stage('expression', content, () => this.autoDeslopGeneratedProse(projectId, chapterNumber,
+          body, opts.styleProfileId ?? null, { signal: opts.signal, existingText: prefix || undefined, isTail: opts.isTail ?? true,
+            reviewInstruction: opts.tempContext, onGenerationStage: opts.onGenerationStage,
+            onAutoDeslopResult: value => { report = value; opts.onAutoDeslopResult?.(value) } }),
+        () => report?.status === 'failed' ? 'incomplete' : report?.status === 'review_required' ? 'rejected' : 'passed')
+        candidate = formatChapterProse(joinContinuation(prefix, polished))
+      } else {
+        report = { status: 'review_required', remainingIssues: 0, message: '本轮已执行过自动表达修订，保留当前正文；可在精修中继续处理。' }
+        opts.onAutoDeslopResult?.(report)
+      }
+      throwIfAborted(opts.signal)
+      let saved = await this.saveGeneratedChapter(projectId, chapterNumber, content, candidate, report)
+      const verified = await ChapterWorkflow.stage('final-facts', candidate, () => this.assertLongformConsistencyAutoRepaired(
+        projectId, chapterNumber, candidate, { signal: opts.signal, instruction: opts.tempContext, skipRepolish: true,
+          onGenerationStage: opts.onGenerationStage, onAutoDeslopResult: opts.onAutoDeslopResult }))
+      if (verified !== candidate) saved = await this.chapterService.getChapter(projectId, chapterNumber)
+      if (saved.content !== verified) throw new Error('CHAPTER_REVISION_CONFLICT: 交稿期间正文已变化')
+      if (saved.content !== content) await opts.onFinalProseReady?.(saved.content)
+      return { content: saved.content, autoDeslop: saved.meta.autoDeslop ?? report, saved }
+    } catch (error) {
+      const dir = await this.projectService.resolveDir(projectId)
+      if (await new ProseRepo(dir).read(chapterNumber) === candidate) await markLongformPending(dir, chapterNumber, hashProse(candidate))
+      throw new ChapterWriteReviewError(candidate, error)
+    }
+  }
+
+  /** Save the authoritative whole chapter regardless of expression grade, using the generated source as a CAS baseline. */
+  async saveGeneratedChapter(projectId: string, chapterNumber: number, expectedContent: string, content: string,
+    report?: AutoDeslopResult): Promise<import('../../shared/types').ChapterContent> {
+    content = formatChapterProse(content)
+    const existing = await this.chapterService.getChapter(projectId, chapterNumber)
+    if (existing.content !== content || expectedContent !== content) {
+      await this.chapterService.updateContent(projectId, chapterNumber, content, contentRevision(expectedContent),
+        { source: 'ai', note: '续写完成自动保存正文（表达验收结果独立保留）' })
+    }
+    let saved = await this.chapterService.getChapter(projectId, chapterNumber)
+    if (saved.content !== content) throw new Error('CHAPTER_REVISION_CONFLICT: 自动保存后正文已变化，请核对当前稿。')
+    const finalReport = saved.meta.autoDeslop ?? (report && (expectedContent === content
+      ? report : { status: 'review_required' as const, remainingIssues: 0, message: '写后修复正文已自动保存，表达尚待复核。' }))
+    if (finalReport) {
+      await this.chapterService.setAutoDeslopReport(projectId, chapterNumber, content, finalReport)
+    }
+    saved = await this.chapterService.getChapter(projectId, chapterNumber)
+    if (saved.content !== content) throw new Error('CHAPTER_REVISION_CONFLICT: 自动保存后正文已变化，请核对当前稿。')
+    try {
+      const file = draftPath(await this.projectService.resolveDir(projectId), chapterNumber)
+      await discardDraftText(file, expectedContent)
+      await discardDraftText(file, content)
+    } catch { console.warn('[chapter-save] 正文已保存，旧草稿清理未完成') }
+    return saved
+  }
+
   /** Keep generation and its post-write repairs in one budget and one audit scope. */
-  async runChapterWrite<T>(projectId: string, chapterNumber: number, action: () => Promise<T>): Promise<T> {
-    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber,
+  async runChapterWrite<T>(projectId: string, chapterNumber: number, action: () => Promise<T>, mode: ChapterWorkflowMode = 'generate'): Promise<T> {
+    return ChapterWorkflow.run(await this.projectService.resolveDir(projectId), chapterNumber, mode,
       () => this.longformOperation.run(this.longformOperation.getStore() ?? new Set(), action))
   }
 
@@ -864,7 +1003,7 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const { autoStrength, repairOnly, proseFirst, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
+    const { deferExpression, autoStrength, repairOnly, proseFirst, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
     const onGenerationStage = (stage: ChapterGenerationStage): void => {
       if (!opts.signal?.aborted) reportStage?.(stage)
     }
@@ -978,6 +1117,13 @@ export class WriteService {
           await onFinalProseReady?.(proseForPolish)
           onConflictRepaired?.(proseForPolish)
         }
+      }
+      if (deferExpression) {
+        const ready = formatChapterProse(joinContinuation(opts.existingText ?? '', proseForPolish))
+        const verified = await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, ready, consistencyOptions)
+        if (verified !== ready) await onFinalProseReady?.(verified)
+        return opts.existingText && verified.startsWith(opts.existingText)
+          ? formatChapterProse(verified.slice(opts.existingText.length)) : verified
       }
       const polishSource = formatChapterProse(joinContinuation(opts.existingText ?? '', proseForPolish))
       const polished = await this.autoDeslopGeneratedProse(projectId, chapterNumber, proseForPolish, styleProfileId, {
@@ -1344,9 +1490,10 @@ export class WriteService {
       throwIfAborted(signal)
       const bounded = await repairBoundary(repaired.content, repaired.report)
       if (this.deslopService) opts.onProgress?.({ stage: 'dialogue' })
-      let finalContent = this.deslopService
+      let finalContent = this.deslopService && !opts.deferExpression
         ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, bounded.content, opts.styleProfileId ?? null, {
           signal, isTail: !opts.partialChapter, reviewInstruction: opts.tempContext, previousDraft: workingContent,
+          onAutoDeslopResult: opts.onAutoDeslopResult,
           onGenerationStage: stage => opts.onProgress?.({ stage: 'dialogue', detail: stage.startsWith('deslop:') ? stage.slice(7) : undefined })
         }) : bounded.content
       let finalReport = bounded.report
@@ -1777,7 +1924,7 @@ export class WriteService {
     projectId: string,
     content: string,
     chapterNumber: number,
-    opts: GenerateOptions = {}
+    opts: GenerateOptions & { reviewScope?: 'facts' | 'editorial' | 'all' } = {}
   ): Promise<AuditViolation[]> {
     let genre: string | undefined
     let enabledChecks: ReviewCheckId[] | undefined
@@ -1824,6 +1971,13 @@ export class WriteService {
         console.warn('[runDeepReview] Failed to read reviewRules:', err)
       }
     }
+    const factual = new Set<ReviewCheckId>(['logic_hole', 'character_breakdown', 'quote_contradiction', 'spoiler'])
+    if (opts.reviewScope && opts.reviewScope !== 'all') {
+      const all: ReviewCheckId[] = enabledChecks ?? ['character_breakdown', 'logic_hole', 'spoiler', 'low_iq_plot', 'emotion_cliff', 'hook_grade', 'style_match', 'cool_point', 'quote_contradiction']
+      enabledChecks = all.filter(check => opts.reviewScope === 'facts' ? factual.has(check) : !factual.has(check))
+      if (opts.reviewScope === 'facts') customLlmChecks = []
+    }
+    const { reviewScope: _scope, ...reviewOptions } = opts
     // 预加载角色卡 / 细纲（用于语义对照）
     if (dir) {
       try {
@@ -1884,7 +2038,7 @@ export class WriteService {
     return this.reviewFlow.runDeepReview(
       content,
       { chapterNumber, genre, enabledChecks, characterCards, outline, customLlmChecks, continuityContext },
-      { ...opts, meta: { feature: 'deepReview', projectId, ...opts.meta } }
+      { ...reviewOptions, meta: { feature: 'deepReview', projectId, ...opts.meta } }
     )
   }
 
@@ -2067,7 +2221,7 @@ export class WriteService {
     }
     const knownForeshadowings = await new ForeshadowingMdRepo(dir).list()
     return this.flow.extractMemoryStream(content, chapterNumber, knownCharacters, { ...opts,
-      meta: { feature: 'memoryExtract', ...opts.meta, projectId, chapterNumber } }, knownForeshadowings)
+      meta: { feature: 'memoryExtract', ...opts.meta, projectId, chapterNumber } }, knownForeshadowings, new ChapterFactSnapshot(dir, chapterNumber, content))
   }
 
   /**
@@ -2075,10 +2229,120 @@ export class WriteService {
    * - 自动应用：状态变化 + 情节追加 + 伏笔回收
    * - 新增内容（角色/地点/伏笔）：由 UI 调 applyNewCharacters/Locations/Foreshadowings
    */
-  async autoRepairOutlineDifference(projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport) {
+  /** One-click sync is a backend workflow; the UI never decides repair order or write eligibility. */
+  async syncChapterWorkflow(projectId: string, chapterNumber: number, source: string,
+    opts: ChapterSyncOptions, signal?: AbortSignal, progress?: (step: ChapterSyncStep) => void): Promise<ChapterSyncResult> {
     const dir = await this.projectService.resolveDir(projectId)
-    const options = (feature: string) => ({ maxTokens: 4096, meta: { feature, projectId, chapterNumber } })
+    return ChapterWorkflow.run(dir, chapterNumber, 'sync', () => this.longformOperation.run(new Set(), async () => {
+      let content = source
+      const result: ChapterSyncResult = { steps: [] }
+      const checkSource = async (): Promise<void> => {
+        throwIfAborted(signal)
+        if (await new ProseRepo(dir).read(chapterNumber) !== content) throw new Error('LONGFORM_CONTEXT_CHANGED: 正文已变化，请保存后重新同步。')
+      }
+      const step = async <T>(id: ChapterSyncStep['id'], action: () => Promise<T>,
+        status: (value: T) => ChapterSyncStep['status'] = () => 'written'): Promise<T> => {
+        await checkSource()
+        const started = Date.now()
+        const update = (value: ChapterSyncStep): void => {
+          const index = result.steps.findIndex(item => item.id === id)
+          if (index >= 0) result.steps[index] = value; else result.steps.push(value)
+          progress?.(value)
+        }
+        update({ id, status: 'running', elapsedMs: 0 })
+        try {
+          const value = await ChapterWorkflow.stage(`sync:${id}`, content, action)
+          await checkSource()
+          update({ id, status: status(value), elapsedMs: Date.now() - started })
+          return value
+        } catch (error) {
+          update({ id, status: 'failed', elapsedMs: Date.now() - started, error: (error as Error).message })
+          throw error
+        }
+      }
+      try {
+        await checkSource()
+        await step('index', async () => {
+          const index = await this.memoryCoordinator.exclusive(projectId, () => new MemorySyncService(dir).syncAll())
+          if (index.errors.length) throw new Error(index.errors.map(item => item.message).join('；'))
+        })
+        const cache = new ChapterStageCache(dir, chapterNumber, () => this.getChapterSyncContext(projectId, chapterNumber, content))
+        await step('outline', async () => {
+          // Original plans remain fixed while fact repair runs; optional expression never starts here.
+          content = await this.assertLongformConsistencyAutoRepaired(projectId, chapterNumber, content, { signal, skipRepolish: true })
+          let previousIssues = Infinity
+          let stalled = 0
+          for (let round = 0; ; round++) {
+            await checkSource()
+            const outline = await this.loadChapterOutlineText(dir, chapterNumber)
+            const inspect = () => this.checkOutlineWithRetry(chapterNumber, outline, content,
+              { signal, meta: { feature: 'outlineCheck', projectId, chapterNumber } }, signal ?? new AbortController().signal)
+            const report = opts.force ? await inspect() : await cache.run('sync-outline', inspect,
+              value => value.checked === true && value.hasOutline !== false)
+            result.outline = report
+            if (report.checked !== true || report.hasOutline === false) throw new Error(report.error ?? '细纲核验未完成')
+            const resolved = await this.autoResolveOutlineDiffs(projectId, chapterNumber, content, report, signal)
+            report.diffs = report.diffs.filter((_item, index) => !resolved.includes(index))
+            report.passed = !report.diffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)
+            if (!report.diffs.length) return
+            if (report.diffs.length >= previousIssues) stalled++; else stalled = 0
+            previousIssues = Math.min(previousIssues, report.diffs.length)
+            if (round >= 12 || stalled >= 3) return
+            const repair = await this.autoRepairOutlineDifference(projectId, chapterNumber, content, report, signal)
+            if (repair.status === 'unresolved') return
+            await checkSource()
+            await this.commitOutlineLocalRepair(projectId, chapterNumber, repair.token)
+            content = repair.content
+          }
+        }, () => result.outline?.diffs.length ? 'preview' : 'handled')
+        await checkSource()
+        if (result.outline?.diffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)) {
+          throw new Error('正文或细纲仍有关键差异，已保存当前稿；概要和记忆暂不提交，请查看待处理项。')
+        }
+        // Both consume the same immutable factual manuscript; neither waits on optional expression work.
+        const jobs: Promise<unknown>[] = [step('summary', async () => {
+          result.summary = await this.generateChapterSummary(projectId, chapterNumber, content, {
+            signal, force: opts.force, requireContinuity: true, expectedRevision: contentRevision(content)
+          })
+        })]
+        if (!opts.skipMemory) jobs.push(step('memory', async () => {
+          result.memory = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
+            { skipIfDisabled: false, signal }) ?? undefined
+        }, () => result.memory?.memory.errors.length || result.memory?.memory.reviewRequired?.length ||
+          result.memory?.memory.heldBack?.length || result.memory?.settings.errors.length ? 'preview' : 'handled'))
+        const outcomes = await Promise.allSettled(jobs)
+        const failed = outcomes.find(item => item.status === 'rejected')
+        if (failed?.status === 'rejected') throw failed.reason
+        if (opts.extras) {
+          await Promise.allSettled([
+            step('rhythm', async () => {
+              const expected = ((await new RhythmHtmlRepo(dir).read()) ?? []).find(item => item.chapter === chapterNumber)?.emotion ?? 5
+              const parsed = parseRhythmEvaluationJson(await this.evaluateRhythmStream(projectId, chapterNumber, { signal }), chapterNumber, expected)
+              if (!parsed) throw new Error('节奏评估未返回有效结果')
+              result.rhythm = parsed
+            }, () => 'preview'),
+            step('figure', async () => { result.figure = parseFigureDraftJson(await this.generateFigureStream(projectId, chapterNumber,
+              { signal }), chapterNumber) }, () => 'preview')
+          ])
+        }
+      } catch (error) { result.error = (error as Error).message }
+      // Even a cancelled run can return its own already-committed local repair for editor recovery.
+      const saved = await this.chapterService.getChapter(projectId, chapterNumber)
+      if (saved.content === content) result.saved = saved
+      return result
+    }))
+  }
+
+  async autoRepairOutlineDifference(projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, signal?: AbortSignal) {
+    return this.runChapterWrite(projectId, chapterNumber, () => this.prepareOutlineLocalRepair(projectId, chapterNumber, content, report, signal))
+  }
+
+  private async prepareOutlineLocalRepair(projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, signal?: AbortSignal) {
+    throwIfAborted(signal)
+    const dir = await this.projectService.resolveDir(projectId)
+    const options = (feature: string) => ({ signal, maxTokens: 4096, meta: { feature, projectId, chapterNumber } })
     const result = await repairOutlineDifference(dir, chapterNumber, content, report, {
+      signal,
       decide: prompt => this.llm.generateStream(prompt, options('outlineLocalRepair')),
       verify: prompt => this.llm.generateStream(prompt, options('outlineLocalRepairVerify')),
       check: async (target, candidate) => {
@@ -2090,7 +2354,7 @@ export class WriteService {
         const nextBlocking = checked.diffs.filter(d => d.priority !== 'P2' || d.boundaryViolation === true).length
         if (nextBlocking > baselineBlocking) throw new Error('修复后出现新的严重差异或章节越界，候选未采用。')
         if (target === 'prose') {
-          const confirm = await this.assertLongformConsistency(projectId, chapterNumber, candidate, {})
+          const confirm = await this.assertLongformConsistency(projectId, chapterNumber, candidate, { signal })
           await confirm()
         }
       },
@@ -2116,11 +2380,12 @@ export class WriteService {
     await candidate.commit()
   }
 
-  async autoResolveOutlineDiffs(projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport): Promise<number[]> {
+  async autoResolveOutlineDiffs(projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, signal?: AbortSignal): Promise<number[]> {
     const dir = await this.projectService.resolveDir(projectId)
     const generate = (feature: string) => (prompt: string) => this.llm.generateStream(prompt, {
-      maxTokens: 4096, meta: { feature, projectId, chapterNumber }
+      signal, maxTokens: 4096, meta: { feature, projectId, chapterNumber }
     })
+    throwIfAborted(signal)
     return adjudicateOutlineDiffs(dir, chapterNumber, content, report,
       generate('outlineSyncDecision'), generate('outlineSyncVerify'))
   }
@@ -2509,7 +2774,26 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts?: { skipIfDisabled?: boolean; tempContext?: string; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
+    opts?: { signal?: AbortSignal; skipIfDisabled?: boolean; tempContext?: string; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
+      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean
+      /** 以正文为准：正文自检失败不再整章拦下记忆（逐条证据校验照旧） */
+      proseFirst?: boolean; onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void }
+  ): Promise<{
+    memory: MemoryApplyResult
+    settings: SettingsApplyResult
+    extraction: MemoryExtraction
+    selfCheck?: ChapterSelfCheckReport | null
+    deepReview?: AuditViolation[]
+  } | null> {
+    return ChapterWorkflow.run(await this.projectService.resolveDir(projectId), chapterNumber, 'sync',
+      () => this.syncChapterAfterWriteInExecution(projectId, chapterNumber, content, opts))
+  }
+
+  private async syncChapterAfterWriteInExecution(
+    projectId: string,
+    chapterNumber: number,
+    content: string,
+    opts?: { signal?: AbortSignal; skipIfDisabled?: boolean; tempContext?: string; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
       deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean
       /** 以正文为准：正文自检失败不再整章拦下记忆（逐条证据校验照旧） */
       proseFirst?: boolean; onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void }
@@ -2521,6 +2805,9 @@ export class WriteService {
     deepReview?: AuditViolation[]
   } | null> {
     const ticket = opts?.ticket ?? this.memoryCoordinator.begin(projectId, chapterNumber)
+    const cancel = (): void => { ticket.controller.abort() }
+    opts?.signal?.addEventListener('abort', cancel, { once: true })
+    if (opts?.signal?.aborted) cancel()
     try {
     const dir = await this.projectService.resolveDir(projectId)
     const sourceHash = hashProse(content)
@@ -2614,7 +2901,7 @@ export class WriteService {
         chapterNumber,
         knownCharacters,
         { signal: ticket.controller.signal, meta: { feature: 'autoMemorySync', projectId, chapterNumber } },
-        await new ForeshadowingMdRepo(dir).list()
+        await new ForeshadowingMdRepo(dir).list(), new ChapterFactSnapshot(dir, chapterNumber, content)
       )
       let extraction = normalizeMemoryEvidence(content, opts?.extraction ?? parseMemoryExtractionJson(memRaw, chapterNumber))
 
@@ -2624,7 +2911,7 @@ export class WriteService {
           const rules = await this.settings.getReviewRules()
           if (rules.enabled && rules.autoDeepReview && this.memoryCoordinator.current(ticket)) {
             opts?.onProgress?.({ stage: 'deepReview' })
-            deepReview = await this.runDeepReview(projectId, content, chapterNumber, { signal: ticket.controller.signal })
+            deepReview = await this.runDeepReview(projectId, content, chapterNumber, { signal: ticket.controller.signal, reviewScope: 'facts' })
           }
         } catch {
           deepReview = [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:memory',
@@ -2645,7 +2932,7 @@ export class WriteService {
       const gateCheck = opts?.proseFirst && selfCheck
         ? { ...selfCheck, items: selfCheck.items.filter((item) => item.verdict !== 'fail' || item.category === 'continuity') }
         : selfCheck
-      const gateReview = opts?.proseFirst ? deepReview.filter(isBlockingContinuityReview) : deepReview
+      const gateReview = opts?.proseFirst ? deepReview.filter(item => isBlockingContinuityReview(item) || item.ruleId?.startsWith('review_incomplete:')) : deepReview
       let partition = partitionMemoryCandidate(
         content,
         extraction,
@@ -2829,6 +3116,7 @@ export class WriteService {
       }
     }
     } finally {
+      opts?.signal?.removeEventListener('abort', cancel)
       this.memoryCoordinator.finish(ticket)
     }
   }
@@ -3318,7 +3606,7 @@ export class WriteService {
     onProgress: (step: string, detail?: string) => void,
     opts: ChapterFlowOptions = {}
   ): Promise<ChapterFlowResult> {
-    return runChapterExecution(await this.projectService.resolveDir(projectId), chapterNumber, () => this.longformOperation.run(this.longformOperation.getStore() ?? new Set(), async () => {
+    return ChapterWorkflow.run(await this.projectService.resolveDir(projectId), chapterNumber, 'generate', () => this.longformOperation.run(this.longformOperation.getStore() ?? new Set(), async () => {
       for (const key of this.postProcessCache.keys()) {
         if (key.startsWith(`${projectId}:${chapterNumber}:`)) this.postProcessCache.delete(key)
       }
@@ -3406,7 +3694,7 @@ export class WriteService {
     const checkpointFingerprint = async (): Promise<string | null> => {
       try {
         if (!this.settings) return null
-        const identities = await Promise.all(['continuityRepair', 'continuityRepairVerify', 'longformGuard', 'batchOutline']
+        const identities = await Promise.all(['continuityRepair', 'continuityRepairPlan', 'continuityRepairVerify', 'longformGuard', 'batchOutline']
           .map(async feature => await this.llm.getCacheIdentity?.(feature) ?? await this.llm.getOperationIdentity?.(feature)))
         if (identities.some(identity => !identity)) return null
         const project = await this.projectService.getProjectData(projectId)
@@ -3679,8 +3967,9 @@ export class WriteService {
         onStart: () => onProgress('continuity:正在核对恢复稿的长期记忆、人物知情与道具')
       })
     }
+    const originalRevision = hashProse(await new ProseRepo(dir).read(chapterNumber))
     let content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
-      ...generateOpts, proseFirst,
+      ...generateOpts, proseFirst, deferExpression: true,
       onGenerationStage: (stage) => {
         onProgress(stage)
         opts.onGenerationStage?.(stage)
@@ -3713,13 +4002,10 @@ export class WriteService {
         opts.onAutoDeslopResult?.(report)
       }
     }
-    if (contentOverride !== undefined && this.deslopService && !priorPolish && !rejectedPolish && !localRepairOnly) {
-      content = await this.autoDeslopGeneratedProse(projectId, chapterNumber, content, opts.styleProfileId ?? null, {
-        signal: opts.signal, isTail: true, reviewInstruction: opts.tempContext, onGenerationStage: stage => onProgress(stage),
-        onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
-      })
-    }
     await onContentGenerated?.(content)
+    if (!onContentGenerated && await new ProseRepo(dir).read(chapterNumber) !== content) {
+      await this.chapterService.updateContent(projectId, chapterNumber, content, originalRevision, { source: 'ai', note: '保存章节原稿' })
+    }
     if (autoDeslop && polishPassed(autoDeslop)) await stages.remember('polish', autoDeslop)
     // 批量正文已保存，必须绑定本次稿件，不能把保存后的另一窗口改稿误当成允许提交的基线。
     let savedBefore = onContentGenerated ? hashProse(content) : hashProse(await new ProseRepo(dir).read(chapterNumber))
@@ -3764,8 +4050,10 @@ export class WriteService {
     }
 
     // 原稿的只读检查仍并行。发现遗漏后丢弃旧稿结果，补写复核完成前不回写细纲、不提交记忆。
+    let readyForMemory = false
     const runPostChecks = (): Promise<[MemoryExtraction, AuditViolation[]]> => Promise.all([
-      cached.memory
+      !readyForMemory ? { chapterNumber, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [],
+        newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [] } : cached.memory
         ? structuredClone(cached.memory)
         : stages.run('memory', () => this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters, flowOpts('batchMemory'), memoryTicket.controller.signal), value => !!value && !value.parseError && Array.isArray(value.newPlotPoints))
           .then((extraction) => {
@@ -3894,12 +4182,7 @@ export class WriteService {
         // 保存同样使用正文版本检查；另一窗口改稿时不能覆盖。
         const previousContent = content
         // 写后补伏笔也会改变对白占比，最终落盘前必须重新验收。
-        const repairedContent = this.deslopService
-          ? await this.autoDeslopGeneratedProse(projectId, chapterNumber, repaired.content, opts.styleProfileId ?? null, {
-            signal: memoryTicket.controller.signal, isTail: true, reviewInstruction: opts.tempContext, previousDraft: previousContent,
-            onGenerationStage: stage => onProgress(stage),
-            onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
-          }) : repaired.content
+        const repairedContent = repaired.content
         await this.chapterService.updateContent(projectId, chapterNumber, repairedContent, savedBefore, {
           source: 'ai', note: '自动补写遗漏伏笔'
         })
@@ -3919,6 +4202,29 @@ export class WriteService {
     }
     await repairContinuityIfNeeded()
     assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+    await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
+    if (!priorPolish && !rejectedPolish && !localRepairOnly) {
+      const beforeExpression = content
+      const delivery = await this.polishChapterDelivery(projectId, chapterNumber, content, {
+        ...opts, onGenerationStage: stage => onProgress(stage),
+        onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) }
+      })
+      content = delivery.content
+      autoDeslop = delivery.autoDeslop
+      savedBefore = hashProse(content)
+      if (content !== beforeExpression) {
+        await onContentGenerated?.(content)
+        outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+        assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+        audit = await this.auditChapter(projectId, content)
+        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+        this.postProcessCache.delete(postProcessCacheKey(projectId, chapterNumber, beforeExpression))
+        cacheKey = postProcessCacheKey(projectId, chapterNumber, content)
+        cached = {}
+        ;[memory, deepReview] = await runPostChecks()
+      }
+      if (autoDeslop && polishPassed(autoDeslop)) await stages.remember('polish', autoDeslop)
+    }
     await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
     if (outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
 
@@ -3955,6 +4261,8 @@ export class WriteService {
       outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
     }
     assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+    readyForMemory = true
+    ;[memory, deepReview] = await runPostChecks()
     if (proseFirst || await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
     const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
       { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore, tempContext: opts.tempContext,
@@ -4041,7 +4349,7 @@ export class WriteService {
     for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS && !signal.aborted; attempt++) {
       try {
         const memRaw = await this.flow.extractMemoryStream(
-          content, chapterNumber, knownCharacters, opts, await new ForeshadowingMdRepo(dir).list()
+          content, chapterNumber, knownCharacters, opts, await new ForeshadowingMdRepo(dir).list(), new ChapterFactSnapshot(dir, chapterNumber, content)
         )
         memory = parseMemoryExtractionJson(memRaw, chapterNumber)
         if (!memory.parseError) break
@@ -4070,7 +4378,7 @@ export class WriteService {
     try {
       const rules = await this.settings.getReviewRules()
       if (!rules.enabled || !rules.autoDeepReview) return []
-      return await this.runDeepReview(projectId, content, chapterNumber, opts)
+      return await this.runDeepReview(projectId, content, chapterNumber, { ...opts, reviewScope: 'facts' })
     } catch (err) {
       console.warn('[runFullFlowForChapter] Failed to run deep review:', err)
       return [{ category: 'llm_review', severity: 'warn', ruleId: 'review_incomplete:batch',
@@ -4391,7 +4699,8 @@ export class WriteService {
         const persistContent = async (content: string): Promise<void> => {
           generatedContent = content
           batchReviewToken = await markBatchReviewPending(dir, ch, hashProse(content))
-          await this.chapterService.updateContent(projectId, ch, content, savedRevision, {
+          const currentContent = await new ProseRepo(dir).read(ch)
+          await this.chapterService.updateContent(projectId, ch, content, currentContent === content ? contentRevision(content) : savedRevision, {
             source: 'ai', note: resumingPostProcess ? '恢复批量章节检查' : '批量生成正文'
           })
           savedRevision = contentRevision(content)
@@ -5688,7 +5997,19 @@ export class WriteService {
    * 上一章被改动后 key 自然失效。失败不缓存，下次仍会重试。
    */
   private readonly endingStateCache = new Map<string, PrevEndingState>()
+  private readonly endingStateVersions = new Map<string, string>()
   private readonly endingStateRequests = new Map<string, Promise<PrevEndingState | undefined>>()
+
+  private cacheEndingState(key: string, state: PrevEndingState): void {
+    if (!this.endingStateCache.has(key) && this.endingStateCache.size >= ENDING_STATE_CACHE_MAX) {
+      const oldest = this.endingStateCache.keys().next().value
+      if (oldest !== undefined) {
+        this.endingStateCache.delete(oldest)
+        this.endingStateVersions.delete(oldest)
+      }
+    }
+    this.endingStateCache.set(key, state)
+  }
 
   /**
    * 记录本次会话里哪些 key 的提取真的尝试过但失败了（跟 endingStateCache 同一套 key）。
@@ -5726,16 +6047,32 @@ export class WriteService {
     signal?: AbortSignal
   ): Promise<PrevEndingState | undefined> {
     const key = this.endingStateKey(dir, chapterNumber, prevTail)
-    const hit = this.endingStateCache.get(key)
+    const source = await new ProseRepo(dir).read(chapterNumber - 1)
+    const snapshot = new ChapterFactSnapshot(dir, chapterNumber - 1, source)
+    const identity = await this.llm.getCacheIdentity?.('endingState').catch(() => null)
+    const projectionKey = identity ? hashProse(JSON.stringify(['ending-v2', identity, prevTail])) : null
+    const stored = await snapshot.read<PrevEndingState>('ending', projectionKey, value => !!value && value.rawTail === undefined &&
+      value.chapterNumber === chapterNumber - 1 && Array.isArray(value.characterPositions) && Array.isArray(value.characterStates) &&
+      Array.isArray(value.unfinished) && Array.isArray(value.props) && typeof value.timePoint === 'string' && typeof value.suspense === 'string')
+    if (stored) { this.cacheEndingState(key, stored); this.endingStateVersions.set(key, hashProse(JSON.stringify([snapshot.revision, projectionKey]))); return stored }
+    const version = hashProse(JSON.stringify([snapshot.revision, projectionKey]))
+    const hit = this.endingStateVersions.get(key) === version ? this.endingStateCache.get(key) : undefined
     if (hit) return hit
-    const pending = this.endingStateRequests.get(key)
+    const requestKey = key + '::' + version
+    const pending = this.endingStateRequests.get(requestKey)
     if (pending) return pending
     const request = this.extractEndingStateCached(key, chapterNumber, prevTail, signal)
-    this.endingStateRequests.set(key, request)
+    this.endingStateRequests.set(requestKey, request)
     try {
-      return await request
+      const state = await request
+      if (state) this.endingStateVersions.set(key, version)
+      if (state && state.rawTail === undefined && projectionKey === (await this.llm.getCacheIdentity?.('endingState').catch(() => null)
+        ? hashProse(JSON.stringify(['ending-v2', await this.llm.getCacheIdentity?.('endingState'), prevTail])) : null)) {
+        await snapshot.remember('ending', projectionKey, state)
+      }
+      return state
     } finally {
-      if (this.endingStateRequests.get(key) === request) this.endingStateRequests.delete(key)
+      if (this.endingStateRequests.get(requestKey) === request) this.endingStateRequests.delete(requestKey)
     }
   }
 
@@ -5758,11 +6095,7 @@ export class WriteService {
       if (!state) throw failure
 
       // 上限很小：同一会话里也就在几章之间来回切
-      if (this.endingStateCache.size >= ENDING_STATE_CACHE_MAX) {
-        const oldest = this.endingStateCache.keys().next().value
-        if (oldest !== undefined) this.endingStateCache.delete(oldest)
-      }
-      this.endingStateCache.set(key, state)
+      this.cacheEndingState(key, state)
       // 之前失败过、这次成功了：失败标记跟着清掉，别让旧失败误导之后的自检提示
       this.endingStateExtractionFailures.delete(key)
       return state
@@ -7464,13 +7797,14 @@ export function parseAdjustPlanCompliance(
 
 /** Only confirmed contradictions block; keyword/location warnings remain review hints. */
 function isBlockingContinuityReview(item: AuditViolation): boolean {
-  return item.severity === 'error' && ['logic_hole', 'character_breakdown', 'quote_contradiction'].includes(item.ruleId ?? '')
+  return item.severity === 'error' && !!item.snippet?.trim() && !!item.evidence?.reference.trim() &&
+    ['logic_hole', 'character_breakdown', 'quote_contradiction'].includes(item.ruleId ?? '')
 }
 function blockingContinuityIssue(report: ChapterSelfCheckReport | null | undefined, review: AuditViolation[]): string {
   return [
     ...(report?.items ?? []).filter(item => item.category === 'continuity' && item.verdict === 'fail')
       .map(item => item.detail),
-    ...review.filter(isBlockingContinuityReview).map(item => item.message)
+    ...review.filter(isBlockingContinuityReview).map(item => `${item.ruleId}：${item.message}\n本章：${item.snippet}\n依据：${item.evidence!.reference}\n版本：${item.evidence!.sourceRevision}`)
   ].join('；')
 }
 

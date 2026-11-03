@@ -1,3 +1,4 @@
+import type { ChapterFactSnapshot } from './chapter-fact-snapshot'
 import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import { createHash } from 'crypto'
 import type { LlmService, GenerateOptions } from './llm-service'
@@ -257,7 +258,8 @@ export class WriteFlowService {
     chapterNumber: number,
     knownCharacters: string[],
     opts: GenerateOptions & { reuseMemory?: boolean } = {},
-    knownForeshadowings: Foreshadowing[] = []
+    knownForeshadowings: Foreshadowing[] = [],
+    snapshot?: ChapterFactSnapshot
   ): Promise<string> {
     // 空提取会替换同章自动记忆，不能在漏掉中段的情况下声称提取完整。
     if (content.length > 40_000) throw new Error('记忆提取正文超过 40000 字符，请分章后同步；未清理原有记忆')
@@ -317,7 +319,9 @@ export class WriteFlowService {
       opts.onToken?.(cached)
       return cached
     }
-    const raw = await this.llm.generateStream(prompt, {
+    const prior = await snapshot?.read<string>('memory', key, value => typeof value === 'string' && !parseMemoryExtractionJson(value, chapterNumber).parseError)
+    if (prior !== undefined) { opts.onToken?.(prior); return prior }
+    const raw = await this.llm.generateStream(prompt + '\n' + (await snapshot?.context() ?? ''), {
       ...generateOpts,
       // 默认 8192 对「多数组 JSON」在部分模型上仍会被 max_tokens 截断；提取单独抬高
       maxTokens: opts.maxTokens ?? 12_288,
@@ -326,6 +330,11 @@ export class WriteFlowService {
     if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
     if (key && !parseMemoryExtractionJson(raw, chapterNumber).parseError &&
       identity === await this.llm.getCacheIdentity?.(feature).catch(() => null)) {
+      const extraction = parseMemoryExtractionJson(raw, chapterNumber)
+      await snapshot?.remember('memory', key, raw, [
+        ...extraction.newPlotPoints, ...extraction.characterStateChanges, ...(extraction.itemStateChanges ?? []),
+        ...extraction.collectedForeshadowings, ...(extraction.settingsPatches ?? [])
+      ].flatMap(item => item.evidence ? [item.evidence] : []))
       this.memoryAnalyses.delete(key)
       this.memoryAnalyses.set(key, raw)
       if (this.memoryAnalyses.size > 24) this.memoryAnalyses.delete(this.memoryAnalyses.keys().next().value!)

@@ -114,7 +114,7 @@ describe('automatic continuity repair', () => {
     const generate = vi.fn().mockResolvedValueOnce('{}').mockResolvedValue(patch('他把钥匙还给师父', '他把钥匙收进袖口'))
     const verify = vi.fn().mockRejectedValueOnce(new Error('尚未对齐前文')).mockResolvedValue(undefined)
     const check = vi.fn().mockResolvedValue('通过')
-    const result = await repairContinuity(input, { generate, verify, check })
+    const result = await repairContinuity({ ...input, maxRounds: 3 }, { generate, verify, check })
     expect(generate).toHaveBeenCalledTimes(3)
     expect(verify).toHaveBeenCalledTimes(2)
     expect(check).toHaveBeenCalledOnce()
@@ -146,13 +146,13 @@ describe('automatic continuity repair', () => {
     expect(check).toHaveBeenCalledWith(prepared)
     expect(result.content).toBe(prepared)
   })
-  it('backs off and automatically proceeds past three rejected rounds without asking for a manual repair', async () => {
+  it('honors an explicit four-attempt budget with cancellable backoff', async () => {
     vi.useFakeTimers()
     try {
       const generate = vi.fn().mockResolvedValue(patch('林远留在门外', '林远等在门外'))
       const verify = vi.fn().mockRejectedValueOnce(new Error('仍有矛盾')).mockRejectedValueOnce(new Error('仍有矛盾'))
         .mockRejectedValueOnce(new Error('仍有矛盾')).mockResolvedValue(undefined)
-      const task = repairContinuity(input, { generate, verify, check: vi.fn().mockResolvedValue('通过') })
+      const task = repairContinuity({ ...input, maxRounds: 4 }, { generate, verify, check: vi.fn().mockResolvedValue('通过') })
       await vi.advanceTimersByTimeAsync(5_000)
       await expect(task).resolves.toMatchObject({ check: '通过' })
       expect(generate).toHaveBeenCalledTimes(4)

@@ -288,7 +288,7 @@ export class CoverPromptService {
   ): Promise<{ bookName: string; genre: string; description: string; blocks: string[]; sources: string[] }> {
     const blocks: string[] = []
     const sources: string[] = []
-    let bookName = ''
+    let bookName: string
     let genre = ''
     let description = ''
 

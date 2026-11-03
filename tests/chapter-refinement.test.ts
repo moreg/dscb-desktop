@@ -39,6 +39,27 @@ describe('independent chapter refinement', () => {
     service = make()
     call.mockResolvedValueOnce(JSON.stringify({ text: candidate, changes: ['压缩重复动作说明。'] })).mockResolvedValueOnce(verdict())
   })
+  it('continues from the same-version automatic expression report without treating its rejected candidate as truth', async () => {
+    await chapters.setAutoDeslopReport(input.projectId, 1, original, { status: 'review_required', remainingIssues: 1,
+      message: '重复核验没有推进', issues: ['守门人的接话重复解释印章'],
+      dialogueQuality: { passed: false, beforeRatio: 0, afterRatio: 0, attempts: 2, issues: ['接话缺少推进'], pendingDraft: '尚未通过的旧候选' } })
+    const result = await service.generate(input)
+    expect(result.status).toBe('ready')
+    const prompt = call.mock.calls[0][0] as string
+    expect(prompt).toContain('守门人的接话重复解释印章')
+    expect(prompt).toContain('原文仍是唯一事实基线')
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
+  })
+  it('invalidates adoption if the generation or verification route changes', async () => {
+    let route = 'original-route'
+    const llm = (service as unknown as { llm: LlmService }).llm
+    llm.getRoutingIdentity = async () => route
+    const result = await service.generate(input)
+    expect(result.status).toBe('ready')
+    route = 'new-review-route'
+    await expect(service.commit(input.projectId, 1, result.id, original)).rejects.toThrow('模型配置已变化')
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
+  })
   it('persists a verified candidate without touching正文; a new service can adopt and undo it', async () => {
     const result = await service.generate(input)
     expect(result.status).toBe('ready')

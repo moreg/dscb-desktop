@@ -17,3 +17,22 @@ it('passes one snapshot and explicit memory reuse through the cancellable stream
   expect(invoke.mock.calls.at(-1)?.[1]).not.toHaveProperty('content')
   expect(invoke.mock.calls.at(-1)?.[1]).not.toHaveProperty('reuse')
 })
+
+it('binds backend sync progress and cancellation to one request and cleans up its listener', async () => {
+  let complete!: (value: unknown) => void
+  const invoke = vi.fn((channel: string, _payload?: unknown) => channel === 'llm:abort' ? Promise.resolve({ ok: true }) : new Promise(resolve => { complete = resolve }))
+  const listeners = new Map<string, (...args: unknown[]) => void>()
+  const removeListener = vi.fn()
+  const api = createRendererApi({ invoke, on: (channel, callback) => { listeners.set(channel, callback) }, removeListener })
+  const onStep = vi.fn()
+  const request = api.syncChapterWorkflow('p', 1, '正文快照', { force: true }, onStep)
+  const payload = invoke.mock.calls[0][1] as unknown as { requestId: string }
+  listeners.get('write:syncStep')?.({}, { requestId: 'other', step: { id: 'outline' } })
+  expect(onStep).not.toHaveBeenCalled()
+  listeners.get('write:syncStep')?.({}, { requestId: payload.requestId, step: { id: 'outline', status: 'running' } })
+  expect(onStep).toHaveBeenCalledOnce()
+  await request.abort()
+  expect(invoke).toHaveBeenLastCalledWith('llm:abort', payload.requestId)
+  complete({ steps: [] }); await request
+  expect(removeListener).toHaveBeenCalledWith('write:syncStep', expect.any(Function))
+})

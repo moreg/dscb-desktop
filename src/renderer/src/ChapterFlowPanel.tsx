@@ -1,4 +1,4 @@
-import { ChapterSyncRunner, OutlineRepairProgress, type SyncStep, type SyncStepId } from './chapter-sync-runner'
+import { ChapterSyncRunner, type SyncStep, type SyncStepId } from './chapter-sync-runner'
 import { formatBatchDuration } from '../../shared/batch-timing'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
@@ -111,6 +111,7 @@ interface Props {
   /** 以正文回写细纲成功后，把最新细纲同步到编辑器 */
   onOutlineUpdated?: (item: DetailedOutlineItem) => void
   /** Lock the editor only during the final, version-checked commit. */
+  onSyncSaved?: (saved: import('../../shared/types').ChapterContent) => void
   onBeginAutoRepairCommit?: (original: string) => boolean
   onFinishAutoRepairCommit?: (original: string, content: string | null) => boolean
   /** 记忆提取完成后回调 */
@@ -971,165 +972,62 @@ export default function ChapterFlowPanel(props: Props) {
    * @param opts.skipMemory 为 true 时不跑记忆 extract（外部已 syncChapterAfterWrite）
    */
   const syncBusyRef = useRef(false)
-  const pendingRepairRetry = useRef<{ projectId: string; chapterNumber: number; content: string; progress: OutlineRepairProgress } | null>(null)
-  const runAllSync = async (opts?: { skipMemory?: boolean; force?: boolean; repairProgress?: OutlineRepairProgress }) => {
+  const activeSync = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const runAllSync = async (opts?: { skipMemory?: boolean; force?: boolean }) => {
     if (!draft.trim() || syncBusyRef.current || outlineChecking || memoryExtracting || memoryApplying || settingsApplying ||
       rhythmEvaluating || rhythmApplying || figureGenerating || figureSaving || summaryGenerating || outlineApplying) return
+    if (!onBeginAutoRepairCommit?.(draft)) { setSyncError('编辑器正文已变化，请保存后同步。'); return }
     syncBusyRef.current = true
-    const repairProgress = opts?.repairProgress ?? new OutlineRepairProgress()
-    setSyncRunning(true)
-    setSyncError('')
-    setSyncElapsed(0)
+    setSyncRunning(true); setSyncError(''); setSyncElapsed(0)
     syncStarted.current = performance.now()
     const epoch = flowEpochRef.current
     const current = () => epoch === flowEpochRef.current && latestSource.current.draft === draft
-    let checkingContext: Promise<string | null> | null = null
-    const context = () => checkingContext ??= window.api.getChapterSyncContext(projectId, chapterNumber, draft)
-      .finally(() => { checkingContext = null })
-    const tasks = [
-      { id: 'index' as const, written: true, always: true, run: async () => {
-        const result = await window.api.syncMemoryIndex(projectId)
-        if (result.errors?.length) throw new Error(result.errors.map(item => item.message).join('；'))
-        return true
-      } },
-      { id: 'outline' as const, run: runOutlineCheck },
-      ...(!opts?.skipMemory ? [{ id: 'memory' as const, run: () => runMemoryExtract(draft, !opts?.force) }] : []),
-      { id: 'summary' as const, written: true, always: true, run: () => runSummaryGenerate(!!opts?.force) },
-      ...(syncExtras ? [
-        { id: 'rhythm' as const, run: () => runRhythmEvaluate(draft) },
-        { id: 'figure' as const, run: () => runFigureGenerate(draft) }
-      ] : [])
-    ]
-    setSyncSteps(tasks.map(task => ({ id: task.id, status: 'pending', elapsedMs: 0 })))
-    const finished = new Map<SyncStepId, SyncStep['status']>()
-    let retryOutline = false
+    let committed: string | null = null
+    let receipt: import('../../shared/types').ChapterContent | undefined
     try {
-      await syncRunnerRef.current.run(tasks, context, current, step => {
-        finished.set(step.id, step.status)
-        if (current()) setSyncSteps(previous => previous.map(item => item.id === step.id ? step : item))
-      }, opts?.force)
-      if (!current()) throw new Error('正文或章节已变化，请重新同步。')
-      let hasBlockingOutline = finished.get('outline') === 'failed'
-      const mark = (id: SyncStepId, status: SyncStep['status'], error?: string) => {
-        if (current()) setSyncSteps(previous => previous.map(step => step.id === id ? { ...step, status, error } : step))
+      const handle = window.api.syncChapterWorkflow(projectId, chapterNumber, draft,
+        { force: opts?.force, skipMemory: opts?.skipMemory, extras: syncExtras }, step => {
+          if (!current()) return
+          setSyncSteps(previous => {
+            const item = { ...step, ...(step.status === 'running' ? { startedAt: performance.now() } : {}) }
+            return previous.some(value => value.id === step.id) ? previous.map(value => value.id === step.id ? item : value) : [...previous, item]
+          })
+        })
+      activeSync.current = handle
+      setSyncSteps([])
+      const result = await trackStream(handle)
+      if (!current()) return
+      receipt = result.saved
+      committed = result.saved?.content ?? null
+      setSyncSteps(result.steps)
+      setSyncError(result.error ? friendlyFlowError(result.error) : '')
+      if (result.outline) { setOutlineDiff(result.outline); lastOutlineRef.current = result.outline }
+      if (result.summary) { setChapterSummary(result.summary); setSummaryContent(committed ?? draft) }
+      if (result.memory) {
+        const sync = result.memory
+        setMemoryExtraction(sync.extraction); lastExtractionRef.current = sync.extraction
+        setMemoryResult(sync.memory); setSettingsResult(sync.settings)
+        setMemoryError([...(sync.memory.errors ?? []), ...(sync.memory.reviewRequired ?? []), ...(sync.memory.heldBack ?? [])].join('；'))
+        if (sync.settings.errors.length) setSyncError(sync.settings.errors.join('；'))
+        onCompleteMemory?.()
       }
-      const report = lastOutlineRef.current
-      if (report && finished.get('outline') !== 'failed' && report.checked !== false && report.hasOutline !== false) {
-        try {
-          mark('outline', 'running')
-          const details = await window.api.listDetailedOutline(projectId)
-          if (!details.some(item => item.chapterNumber === chapterNumber)) throw new Error('没有本章细纲，无法自动判断。')
-          const resolved = report.diffs.length ? await window.api.autoResolveOutlineDiffs(projectId, chapterNumber, draft, report) : []
-          if (!current()) throw new Error('正文已变化，请重新同步。')
-          const remaining = report.diffs.filter((diff, index) => !resolved.includes(index) && !isOutlineResolved(diff))
-          const longformDiff: OutlineDiffItem[] = summaryConflictRef.current ? [{ type: 2, typeLabel: '超纲增量', priority: 'P1', boundaryViolation: true, resolution: 'updateContent', suggestion: summaryConflictRef.current }] : []
-          const repairDiffs = [...longformDiff, ...remaining]
-          hasBlockingOutline = repairDiffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)
-          const updated = { ...report, diffs: repairDiffs, passed: recomputeOutlineDiffPassed(repairDiffs, []) }
-          lastOutlineRef.current = updated
-          setOutlineDiff(updated)
-          mark('outline', repairDiffs.length ? 'preview' : 'handled')
-          const stopReason = repairDiffs.length ? repairProgress.next(repairDiffs.length) : null
-          if (repairDiffs.length && !stopReason && onBeginAutoRepairCommit && onFinishAutoRepairCommit) {
-            mark('outline', 'running')
-            const repair = await window.api.autoRepairOutlineDifference(projectId, chapterNumber, draft, updated)
-            if (!current()) throw new Error('正文已变化，请重新同步。')
-            if (repair.status === 'unresolved') {
-              mark('outline', 'preview')
-              setOutlineApplyError(`自动修复未完成：${repair.reason}`)
-            } else {
-              if (!onBeginAutoRepairCommit(draft)) throw new Error('编辑器正文已变化，未应用自动修复。')
-              let committed = false
-              let applied: boolean
-              try {
-                await window.api.commitOutlineLocalRepair(projectId, chapterNumber, repair.token)
-                committed = true
-              } finally {
-                applied = onFinishAutoRepairCommit(draft, committed && repair.target === 'prose' ? repair.content : null)
-              }
-              if (!applied) throw new Error('修复已保存，但编辑器有新输入，请检查保存版本。')
-              syncRunnerRef.current.invalidate()
-              if (repair.target === 'prose') {
-                pendingRepairRetry.current = { projectId, chapterNumber, content: repair.content, progress: repairProgress }
-              } else {
-                const currentOutline = await loadCurrentOutline()
-                if (currentOutline) onOutlineUpdated?.(currentOutline)
-                retryOutline = true
-              }
-              setSyncError('局部修复已保存，正在重新核对细纲和记忆。')
-              return
-            }
-          } else if (stopReason) {
-            setOutlineApplyError(stopReason)
-          }
-        } catch (error) {
-          if (!current()) throw error
-          setOutlineApplyError(`自动判断未完成：${friendlyFlowError((error as Error).message)}`)
-          mark('outline', 'preview')
-        }
-      }
-      const extraction = lastExtractionRef.current
-      if (summaryConflictRef.current || hasBlockingOutline) {
-        setMemoryError('正文或细纲仍有未解决的关键冲突，记忆暂不写入。')
-        mark('memory', 'preview')
-        return
-      }
-      if (!opts?.skipMemory && extraction && finished.get('memory') !== 'failed') {
-        try {
-          mark('memory', 'running')
-          const syncResult = await window.api.autoApplyExtractedMemory(projectId, chapterNumber, draft, extraction)
-          const result = syncResult.memory
-          const settings = syncResult.settings
-          if (!current()) throw new Error('正文已变化，请重新同步。')
-          setMemoryResult(result)
-          setSettingsResult(settings)
-          setSettingsPreview(previous => previous ? { ...previous, diffs: settings.appliedDiffs, autoCount: settings.applied } : previous)
-          setMemoryPreview(previous => previous ? { ...previous, diffs: result.appliedDiffs ?? [], applicableCount: result.appliedDiffs?.length ?? 0, confirmCount: result.entitiesReviewed ? 0 : previous.confirmCount } : previous)
-          const pending = [...(result.reviewRequired ?? []), ...(result.heldBack ?? []), ...(result.errors ?? [])]
-          if (result.superseded) pending.push('正文或同步任务已变化，请重新同步。')
-          const settingsPreview = lastSettingsPreviewRef.current
-          const proposedPatches = syncResult.extraction.settingsPatches?.length ?? 0
-          if ((settingsPreview?.confirmCount ?? 0) > 0 || (syncResult.extraction.settingsSuggestions?.length ?? 0) > 0 ||
-              (proposedPatches > settings.applied + settings.skipped)) pending.push('部分设定变更建议仍需确认。')
-          pending.push(...settings.errors)
-          if (!result.entitiesReviewed && (extraction.newCharacters.length + extraction.newLocations.length + extraction.newItems.length + extraction.newForeshadowings.length > 0)) pending.push('新增实体仍需确认。')
-          setMemoryError(pending.join('；'))
-          mark('memory', pending.length ? 'preview' : 'handled')
-          if (settings.applied > 0 || Object.values(result.applied).some(count => count > 0)) syncRunnerRef.current.invalidate()
-        } catch (error) {
-          if (!current()) throw error
-          setMemoryError(`自动应用未完成：${friendlyFlowError((error as Error).message)}`)
-          mark('memory', 'preview')
-        }
-      }
+      if (result.rhythm) setRhythmEvaluation(result.rhythm)
+      if (result.figure) setFigureDraft(result.figure)
+      const outline = await loadCurrentOutline()
+      if (current() && outline) onOutlineUpdated?.(outline)
     } catch (error) {
-      if (current()) {
-        syncRunnerRef.current.invalidate()
-        setOutlineDiff(null); setMemoryExtraction(null); setMemoryPreview(null); setSettingsPreview(null)
-        setMemoryResult(null); setSettingsResult(null); setChapterSummary(null)
-        setRhythmEvaluation(null); setFigureDraft(null)
-        const message = friendlyFlowError((error as Error).message)
-        setSyncError(message)
-        setSyncSteps(previous => previous.map(step => step.id === 'index' && step.status === 'written' ? step : {
-          ...step, status: 'failed', error: message,
-          elapsedMs: step.startedAt !== undefined && step.status === 'running' ? performance.now() - step.startedAt : step.elapsedMs
-        }))
-      }
+      if (current()) setSyncError(friendlyFlowError((error as Error).message))
     } finally {
+      activeSync.current = null
+      if (current()) {
+        const applied = onFinishAutoRepairCommit?.(draft, committed)
+        if (applied && receipt) props.onSyncSaved?.(receipt)
+      } else onFinishAutoRepairCommit?.(draft, null)
       syncBusyRef.current = false
       setSyncRunning(false)
-      if (current()) setSyncElapsed(performance.now() - syncStarted.current)
-      if (retryOutline && current()) setTimeout(() => void runAllSync({ force: true, repairProgress }), 0)
+      setSyncElapsed(performance.now() - syncStarted.current)
     }
   }
-
-  useEffect(() => {
-    const retry = pendingRepairRetry.current
-    if (!retry || syncRunning || retry.projectId !== projectId || retry.chapterNumber !== chapterNumber || retry.content !== draft) return
-    pendingRepairRetry.current = null
-    const timer = setTimeout(() => void runAllSync({ force: true, repairProgress: retry.progress }), 0)
-    return () => clearTimeout(timer)
-  }, [projectId, chapterNumber, draft, syncRunning]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * 外部自动同步结果回填：展示 extraction / 已应用 diffs，避免重复 extract。
@@ -1224,6 +1122,7 @@ export default function ChapterFlowPanel(props: Props) {
           >
             {syncRunning ? '同步中…' : '⟳ 一键同步'}
           </button>
+          {syncRunning && <button className="btn btn-ghost btn-sm" onClick={() => void activeSync.current?.abort()}>停止同步</button>}
           <button className="btn btn-ghost btn-sm" onClick={onClose}>
             收起
           </button>

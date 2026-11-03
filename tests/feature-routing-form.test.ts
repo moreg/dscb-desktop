@@ -23,7 +23,7 @@ describe('FeatureRoutingForm', () => {
       createElement(FeatureRoutingForm, { providers: [provider], onSaved() {} })
     )
     expect(html).toContain('精修正文')
-    expect(html).toContain('候选稿 / 修改方案 / 独立核验')
+    expect(html).toContain('候选稿 / 修改方案 / 补救')
     expect(html.indexOf('正文生成')).toBeLessThan(html.indexOf('精修正文'))
     expect(html.indexOf('精修正文')).toBeLessThan(html.indexOf('审稿质检'))
   })

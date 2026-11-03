@@ -68,6 +68,11 @@ export function finalizeChapterContinuation(initial: string, preview: string, re
   }
 }
 
+/** A saved receipt only applies to the exact final body and chapter, never to a preview or failed operation. */
+export function savedChapterContinuation(result: ChapterStreamResult, content: string, chapter: number) {
+  return result.ok && result.saved?.content === content && result.saved.meta.chapterNumber === chapter ? result.saved : undefined
+}
+
 /** 无论最终稿是否等于生成前正文，都要覆盖流式预览。 */
 export function finalizeChapterRewrite(content: string, commit: (text: string) => void): string {
   const formatted = formatChapterProse(content)

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { WriteService } from '../src/main/data/write-service'
-import type { AutoDeslopResult, ChapterStreamResult } from '../src/shared/types'
-import { activeStreamCount, clearAllStreams } from '../src/main/data/stream-abort-registry'
+import { WriteService } from '../src/main/data/write-service'
+import type { AutoDeslopResult, ChapterStreamResult, ChapterMeta } from '../src/shared/types'
+import { activeStreamCount, clearAllStreams, abortStream } from '../src/main/data/stream-abort-registry'
 import { ChapterWriteReviewError, ChapterRewriteReviewError, ChapterRepairReviewRequiredError } from '../src/main/data/chapter-rewrite-review-error'
 
 type Handler = (event: { sender: object }, payload: unknown) => Promise<ChapterStreamResult>
@@ -24,6 +24,8 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
   const generate = vi.fn<WriteService['generateChapterStream']>()
   const adjust = vi.fn<WriteService['adjustChapterStream']>()
   const repair = vi.fn<WriteService['repairChapterForeshadowings']>()
+  const notify = vi.fn().mockResolvedValue(undefined)
+  const saveGenerated = vi.fn<WriteService['saveGeneratedChapter']>()
   const sync = vi.fn<WriteService['syncChapterAfterWrite']>()
   const writeScope = vi.fn<(pid: string, chapter: number, action: () => Promise<unknown>) => Promise<unknown>>()
   const report: AutoDeslopResult = { status: 'applied', message: '已完成自动去 AI 味', remainingIssues: 0 }
@@ -32,13 +34,25 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     send.mockClear()
     clearAllStreams()
     writeScope.mockReset().mockImplementation(async (_pid, _ch, action) => action())
+    notify.mockReset().mockResolvedValue(undefined)
+    saveGenerated.mockReset().mockImplementation(async (_pid, ch, _base, content, autoDeslop) => ({ content, meta: { chapterNumber: ch, autoDeslop } as ChapterMeta }))
     generate.mockReset()
     adjust.mockReset()
     sync.mockReset().mockResolvedValue(null)
     repair.mockReset().mockImplementation(async (_pid, _ch, content) => ({ content, report: { status: 'unchanged', message: '无遗漏' } }))
-    registerWriteIpc({ generateChapterStream: generate, adjustChapterStream: adjust, repairChapterForeshadowings: repair,
-      syncChapterAfterWrite: sync,
-      runChapterWrite: writeScope } as unknown as WriteService)
+    let expression: AutoDeslopResult | undefined
+    const fake = {
+      generateChapterStream: async (pid: string, ch: number, style: string | null | undefined, opts: Parameters<WriteService['deliverChapter']>[3]) =>
+        generate(pid, ch, style, { ...opts, onAutoDeslopResult: value => { expression = value; opts?.onAutoDeslopResult?.(value) } }),
+      adjustChapterStream: adjust, repairChapterForeshadowings: async (...args: Parameters<WriteService['repairChapterForeshadowings']>) => repair(...args.slice(0, 3) as [string, number, string], { ...args[3], onAutoDeslopResult: value => { expression = value; args[3]?.onAutoDeslopResult?.(value) } }), syncChapterAfterWrite: sync,
+      saveGeneratedChapter: saveGenerated, runChapterWrite: writeScope,
+      polishChapterDelivery: async (pid: string, ch: number, content: string) => {
+        const saved = await saveGenerated(pid, ch, content, content, expression)
+        return { content, saved, autoDeslop: expression }
+      }
+    } as unknown as WriteService
+    fake.deliverChapter = WriteService.prototype.deliverChapter.bind(fake)
+    registerWriteIpc(fake, notify)
   })
 
   it('重写检查超时仍返回失败和完整待复核稿，不发送成功完成事件', async () => {
@@ -243,4 +257,79 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     expect(activeStreamCount()).toBe(0)
     expect(send).not.toHaveBeenCalled()
   })
+  it('完成通知等待交稿前核对结束，每次成功请求只发送一次', async () => {
+    let finish!: () => void
+    generate.mockResolvedValue('生成正文。')
+    repair.mockImplementation(async (_pid, _chapter, text) => {
+      await new Promise<void>(resolve => { finish = resolve })
+      return { content: text, report: { status: 'unchanged', message: '核对完成' } }
+    })
+    const pending = handlers.get('write:generateChapter')!({ sender: {} }, { projectId: 'project-1', chapterNumber: 7, requestId: 'notify-success' })
+    await vi.waitFor(() => expect(repair).toHaveBeenCalledOnce())
+    expect(notify).not.toHaveBeenCalled()
+    finish()
+    expect(await pending).toMatchObject({ ok: true })
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith(7, expect.anything(), expect.any(AbortSignal))
+  })
+  it.each(['failed', 'skipped', 'cancelled', 'rejected', 'repairOnly'])('不把未完成检查、取消或单独修复当作续写完成（%s）', async mode => {
+    generate.mockResolvedValue('生成正文。')
+    if (mode === 'rejected') repair.mockRejectedValue(new Error('LONGFORM_CONFLICT: 未通过'))
+    else repair.mockImplementation(async (_pid, _ch, text) => {
+      if (mode === 'cancelled') abortStream('notify-negative')
+      return { content: text, report: { status: mode === 'failed' ? 'failed' : mode === 'skipped' ? 'skipped' : 'unchanged', message: '检查结果' } }
+    })
+    await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, requestId: 'notify-negative', repairOnly: mode === 'repairOnly'
+    })
+    expect(notify).not.toHaveBeenCalled()
+  })
+  it('系统通知失败仍保留成功交稿', async () => {
+    generate.mockResolvedValue('生成正文。')
+    notify.mockRejectedValue(new Error('操作系统拒绝通知'))
+    expect(await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, requestId: 'notification-error'
+    })).toMatchObject({ ok: true, content: '生成正文。' })
+    expect(activeStreamCount()).toBe(0)
+  })
+
+  it.each(['failed', 'review_required'] as const)('表达%s时保存最终整章，再通知完成，保存与表达验收独立', async status => {
+    const pending: AutoDeslopResult = { status, message: '表达待修订', remainingIssues: 1 }
+    generate.mockImplementation(async (_pid, _ch, _style, opts) => { opts?.onAutoDeslopResult?.(pending); return '生成的尾段。' })
+    repair.mockResolvedValue({ content: '已有开头。\n补写内容。\n生成的尾段。', report: { status: 'applied', message: '补写完成' } })
+    let finishSave!: () => void
+    saveGenerated.mockImplementationOnce(async (_pid, ch, _base, content, autoDeslop) => {
+      await new Promise<void>(resolve => { finishSave = resolve })
+      return { content, meta: { chapterNumber: ch, autoDeslop } as ChapterMeta }
+    })
+    const task = handlers.get('write:generateChapter')!({ sender: {} }, { projectId: 'project-1', chapterNumber: 1, existingText: '已有开头。', requestId: 'save-pending' })
+    await vi.waitFor(() => expect(saveGenerated).toHaveBeenCalledOnce())
+    expect(notify).not.toHaveBeenCalled()
+    finishSave()
+    const result = await task
+    expect(result).toMatchObject({ ok: true, saved: { content: '已有开头。\n补写内容。\n生成的尾段。', meta: { autoDeslop: pending } } })
+    expect(saveGenerated.mock.calls[0][2]).toBe('已有开头。\n\n生成的尾段。')
+    expect(notify).toHaveBeenCalledOnce()
+  })
+  it('自动保存失败保留完整稿供恢复，不发送成功通知或虚构保存回执', async () => {
+    generate.mockResolvedValue('生成正文。')
+    saveGenerated.mockRejectedValue(new Error('磁盘空间不足'))
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, { projectId: 'project-1', chapterNumber: 1, requestId: 'save-error' })
+    expect(result).toMatchObject({ ok: false, error: '磁盘空间不足', retainedContent: '生成正文。' })
+    expect(result.saved).toBeUndefined()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('早期冲突修复后又润色变稿时，以最新完整稿作为保存基线，不能保存旧修复版本', async () => {
+    generate.mockImplementation(async (_pid, _ch, _style, opts) => {
+      opts?.onConflictRepaired?.('初次修复的旧稿。')
+      await opts?.onFinalProseReady?.('修复后又润色的最终正文。')
+      return '修复后又润色的最终正文。'
+    })
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, { projectId: 'project-1', chapterNumber: 1, requestId: 'latest-final-source' })
+    expect(repair.mock.calls[0][2]).toBe('修复后又润色的最终正文。')
+    expect(saveGenerated.mock.calls[0][2]).toBe('修复后又润色的最终正文。')
+    expect(result.fullContent).toBe('修复后又润色的最终正文。')
+  })
+
 })

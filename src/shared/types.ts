@@ -1,3 +1,4 @@
+import type { ChapterSyncResult, ChapterSyncOptions, ChapterSyncStep } from './chapter-workflow'
 import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from './chapter-refinement'
 import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from './prose-import'
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
@@ -135,6 +136,7 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
 export type FeatureCategory =
   | 'chapter'
   | 'refine'
+  | 'refineReview'
   | 'review'
   | 'humanize'
   | 'opening'
@@ -541,6 +543,8 @@ export interface SavedChapterPolishResult {
  */
 export interface ChapterStreamResult {
   ok: boolean
+  /** 最终正文实际落盘后的回执；表达待修订也可保存，不表示验收通过。 */
+  saved?: ChapterContent
   error?: string
   /** 续写或重写已生成但后续处理失败的完整整章稿，仅供复核；不得自动同步记忆。 */
   retainedContent?: string
@@ -940,6 +944,8 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void
   ) => StreamHandle
   /** 记忆提取（流式）：从正文提取新增角色/地点/情节/伏笔/状态变化 */
+  syncChapterWorkflow: (projectId: string, chapterNumber: number, content: string,
+    options: Omit<ChapterSyncOptions, 'requestId'>, onStep: (step: ChapterSyncStep) => void) => StreamHandleOf<ChapterSyncResult>
   getChapterSyncContext: (projectId: string, chapterNumber: number, content: string) => Promise<string | null>
   extractMemoryStream: (
     projectId: string,
@@ -949,10 +955,10 @@ export interface RendererApi {
     reuse?: boolean
   ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
-  autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport) => Promise<
+  autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, requestId?: string) => Promise<
     { status: 'unresolved'; reason: string } | { status: 'candidate'; token: string; target: 'prose' | 'outline'; content: string; reason: string }>
   commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) => Promise<void>
-  autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport) => Promise<number[]>
+  autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, requestId?: string) => Promise<number[]>
   autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) => Promise<{ memory: MemoryApplyResult; settings: SettingsApplyResult; extraction: MemoryExtraction }>
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
   invalidateChapterMemorySync: (projectId: string, chapterNumber: number) => Promise<void>
@@ -1233,6 +1239,8 @@ export interface RendererApi {
   setSettingsEvolution: (mode: SettingsEvolutionMode) => Promise<SettingsEvolutionMode>
   /** 续写完成后自动同步记忆与设定（默认 true；派生自 autoPostWritePipeline !== off） */
   getAutoMemorySync: () => Promise<boolean>
+  getChapterCompletionNotification: () => Promise<boolean>
+  setChapterCompletionNotification: (enabled: boolean) => Promise<boolean>
   setAutoMemorySync: (enabled: boolean) => Promise<boolean>
   /**
    * 续写成功后自动后处理：
@@ -1930,6 +1938,8 @@ export type AuditCategory =
   | 'llm_review'
 
 export interface AuditViolation {
+  /** Only version-bound, locatable facts may enter automatic story repair. */
+  evidence?: { sourceRevision: string; reference: string; scope: 'chapter' | 'history' }
   category: AuditCategory
   severity: AuditSeverity
   /** 用户可读的简短描述（如"章末未以对话或事件结尾"） */

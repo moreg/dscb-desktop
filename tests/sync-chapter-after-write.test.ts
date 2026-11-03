@@ -96,7 +96,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
       5,
       expect.any(Array),
       expect.any(Object),
-      expect.any(Array)
+      expect.any(Array), expect.any(Object)
     )
 
     const dir = await ps.resolveDir(projectId)

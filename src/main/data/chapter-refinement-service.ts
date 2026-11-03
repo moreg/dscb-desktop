@@ -1,3 +1,5 @@
+import { ChapterWorkflow } from './chapter-workflow'
+import { recordChapterStage } from './chapter-execution'
 import { detectionRanges, applyDetectionEdits } from '../../shared/refinement-detection'
 import { SCENE_NATURALNESS_RULES, DIALOGUE_FACT_PRESERVATION_RULES } from './skill-prompts/scene-naturalness'
 import { assertNovelProse } from './agent-meta-detect'
@@ -24,6 +26,10 @@ export class ChapterRefinementService {
   constructor(private projects: ProjectService, private chapters: ChapterService,
     private llm: LlmService, private context: ContextBuilder) {}
 
+  private async routingHash(): Promise<string | undefined> {
+    const identities = await Promise.all(['chapter-refine', 'chapter-refine-verify'].map(feature => this.llm.getRoutingIdentity ? this.llm.getRoutingIdentity(feature) : this.llm.getOperationIdentity?.(feature)))
+    return identities.every(Boolean) ? contentRevision(JSON.stringify(identities)) : undefined
+  }
   private async file(projectId: string, chapter: number): Promise<string> {
     return join(await this.projects.resolveDir(projectId), '.cache', 'chapter-refinement', `${chapter}.json`)
   }
@@ -84,6 +90,9 @@ export class ChapterRefinementService {
       '【本章原文，仅指定范围允许修改】', input.content, '【指定修改范围】', this.target(input)].join('\n\n')
   }
   async plan(input: RefinementInput, signal?: AbortSignal): Promise<string> {
+    return ChapterWorkflow.run(await this.projects.resolveDir(input.projectId), input.chapterNumber, 'refine', () => this.planInWorkflow(input, signal))
+  }
+  private async planInWorkflow(input: RefinementInput, signal?: AbortSignal): Promise<string> {
     const release = acquireBatchProject(input.projectId)
     try {
       this.target(input); guard(signal)
@@ -99,19 +108,28 @@ export class ChapterRefinementService {
     } finally { release() }
   }
   async generate(input: RefinementInput, signal?: AbortSignal, progress?: (stage: RefinementStage) => void): Promise<RefinementCandidate> {
+    return ChapterWorkflow.run(await this.projects.resolveDir(input.projectId), input.chapterNumber, 'refine', () => this.generateInWorkflow(input, signal, progress))
+  }
+  private async generateInWorkflow(input: RefinementInput, signal?: AbortSignal, progress?: (stage: RefinementStage) => void): Promise<RefinementCandidate> {
     const release = acquireBatchProject(input.projectId)
     let record: RefinementCandidate | undefined
     try {
       const target = this.target(input)
       if (input.goal === 'scene' && !input.plan?.trim()) throw new Error('场景精修请先查看并确认修改方案')
       guard(signal)
-      const before = (await this.chapters.getChapter(input.projectId, input.chapterNumber)).content
+      const savedSource = await this.chapters.getChapter(input.projectId, input.chapterNumber)
+      const before = savedSource.content
       const context = await this.context(input)
       guard(signal)
       record = { version: 1, id: randomUUID(), input: structuredClone(input), baseRevision: contentRevision(before),
-        contextHash: contentRevision(context), candidate: '', changes: [], attempts: 0, status: 'generating', updatedAt: '' }
+        contextHash: contentRevision(context), routingHash: await this.routingHash(), candidate: '', changes: [], attempts: 0, status: 'generating', updatedAt: '' }
       await this.save(record)
-      const common = this.request(input, context)
+      const prior = savedSource.content === input.content ? savedSource.meta.autoDeslop : undefined
+      const resume = prior && ['failed', 'review_required'].includes(prior.status) && input.goal !== 'detection'
+        ? ['【同版本自动表达修订的待处理项，不表示已经确认的事实】', prior.message,
+          ...(prior.issues ?? []), ...(prior.dialogueQuality?.issues ?? []),
+          ...(prior.dialogueQuality?.pendingDraft ? ['【尚未通过核验的旧候选，仅供定位失败改法；原文仍是唯一事实基线】', prior.dialogueQuality.pendingDraft] : [])].join('\n') : ''
+      const common = this.request(input, context) + '\n' + resume
       for (let attempt = 0; attempt < 2; attempt++) {
         guard(signal)
         record.attempts = attempt + 1
@@ -159,6 +177,8 @@ export class ChapterRefinementService {
           verdict.passed = false; verdict.goalMet = false
           verdict.issues.push('核验未覆盖全部标黄片段的实际改动，需要逐段复核。')
         }
+        recordChapterStage({ stage: 'refinement-verification', verdict: verdict.passed ? 'passed' : 'rejected',
+          inputRevision: contentRevision(input.content), outputRevision: contentRevision(record.candidate), attemptKind: 'verification' })
         record.verdict = verdict
         record.status = verdict.passed ? 'ready' : 'rejected'
         await this.save(record)
@@ -268,6 +288,7 @@ export class ChapterRefinementService {
       const current = (await this.chapters.getChapter(projectId, chapter)).content
       const expectedRevision = undo ? contentRevision(liveContent) : (record.adoptedRevision ?? record.baseRevision)
       if (contentRevision(current) !== expectedRevision) throw new Error('磁盘正文已变化，未覆盖当前内容，请重新读取后精修')
+      if (!undo && record.routingHash && await this.routingHash() !== record.routingHash) throw new Error('精修模型配置已变化，请重新生成并核验')
       if (!undo && contentRevision(await this.context(record.input)) !== record.contextHash) throw new Error('参考上下文或规则已变化，请重新生成并核验')
       let content: string
       let note: string

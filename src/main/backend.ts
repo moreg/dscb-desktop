@@ -32,7 +32,7 @@ import { registerTrackingIpc } from './ipc/tracking'
 import { registerLlmIpc } from './ipc/llm'
 import { registerOutlineIpc } from './ipc/outline'
 import { registerExportIpc } from './ipc/export'
-import { registerWriteIpc } from './ipc/write'
+import { registerWriteIpc, type ChapterCompletedNotifier } from './ipc/write'
 import { registerSettingsIpc } from './ipc/settings'
 import { registerUsageIpc } from './ipc/usage'
 import { registerDiagnosticsIpc } from './ipc/diagnostics'
@@ -72,7 +72,8 @@ export interface WritingBackend {
  * 组装写作服务并注册 IPC。桌面版在 Electron ready 之后调用；
  * Web 版用同一入口，窗口行为由调用方提供。
  */
-export async function startBackend(userData: string, windows: ProjectWindowActions): Promise<WritingBackend> {
+export async function startBackend(userData: string, windows: ProjectWindowActions,
+  notify?: (settings: SettingsRepository) => ChapterCompletedNotifier): Promise<WritingBackend> {
   const libraryFile = join(userData, 'library.json')
   const defaultProjectsRoot = join(userData, 'projects')
   const settingsFile = join(userData, 'config', 'settings.json')
@@ -132,7 +133,7 @@ export async function startBackend(userData: string, windows: ProjectWindowActio
     benchmarkResolver,
     deslopService
   )
-  registerWriteIpc(writeService)
+  registerWriteIpc(writeService, notify?.(settings))
   registerChapterRefinementIpc(new ChapterRefinementService(projectService, chapterService, llmService, async input => {
     const prompt = await writeService.buildAdjustChapterPrompt(input.projectId, input.chapterNumber,
       input.content, input.instruction || '保留剧情事实，改善表达', input.styleProfileId, input.plan)

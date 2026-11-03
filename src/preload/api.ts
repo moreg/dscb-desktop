@@ -1,3 +1,4 @@
+import type { ChapterSyncOptions, ChapterSyncResult, ChapterSyncStep } from '../shared/chapter-workflow'
 import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from '../shared/chapter-refinement'
 import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from '../shared/prose-import'
 import type { AppUpdateState } from '../shared/app-update'
@@ -131,6 +132,17 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
   }
 
   const api = {
+    syncChapterWorkflow: (projectId: string, chapterNumber: number, content: string,
+      options: Omit<ChapterSyncOptions, 'requestId'>, onStep: (step: ChapterSyncStep) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_event: unknown, value: { requestId: string; step: ChapterSyncStep }) => {
+        if (value.requestId === requestId) onStep(value.step)
+      }
+      ipcRenderer.on('write:syncStep', handler)
+      const result = (ipcRenderer.invoke('write:syncChapterWorkflow', { projectId, chapterNumber, content, ...options, requestId }) as Promise<ChapterSyncResult>)
+        .finally(() => ipcRenderer.removeListener('write:syncStep', handler))
+      return makeStreamHandle(result, requestId)
+    },
     refineChapter: (input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void) => {
       const requestId = crypto.randomUUID()
       const handler = (_event: unknown, value: { requestId: string; stage: RefinementStage }) => {
@@ -708,8 +720,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     },
     commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) =>
       ipcRenderer.invoke('write:commitOutlineLocalRepair', { projectId, chapterNumber, token }),
-    autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport) =>
-      ipcRenderer.invoke('write:autoRepairOutlineDifference', { projectId, chapterNumber, content, report }),
+    autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport, requestId?: string) =>
+      ipcRenderer.invoke('write:autoRepairOutlineDifference', { projectId, chapterNumber, content, report, requestId }),
     autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport) =>
       ipcRenderer.invoke('write:autoResolveOutlineDiffs', { projectId, chapterNumber, content, report }),
     autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) =>
@@ -1186,6 +1198,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('settings:getAutoPostWritePipeline') as Promise<
         'off' | 'memory_only' | 'full'
       >,
+    getChapterCompletionNotification: () => ipcRenderer.invoke('settings:getChapterCompletionNotification') as Promise<boolean>,
+    setChapterCompletionNotification: (enabled: boolean) => ipcRenderer.invoke('settings:setChapterCompletionNotification', enabled) as Promise<boolean>,
     setAutoPostWritePipeline: (mode: 'off' | 'memory_only' | 'full') =>
       ipcRenderer.invoke('settings:setAutoPostWritePipeline', mode) as Promise<
         'off' | 'memory_only' | 'full'

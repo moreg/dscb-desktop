@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import ChapterNotificationSetting from './ChapterNotificationSetting'
 import type {
   UsageSummary,
   ListProvidersResult,
@@ -214,6 +215,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
     { id: 'appearance', label: '外观' },
     { id: 'storage', label: '保存位置' },
     { id: 'updates', label: '应用更新' },
+    { id: 'notifications', label: '通知' },
     { id: 'model', label: '模型服务' },
     { id: 'usage', label: '用量与费用' },
     { id: 'aiwords', label: 'AI 高频词' },
@@ -662,7 +664,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
         <div className="page-head-row">
           <div>
             <h1>设置</h1>
-            <p className="desc">外观、保存位置、模型服务、用量与写作节奏</p>
+            <p className="desc">外观、保存位置、通知、模型服务、用量与写作节奏</p>
           </div>
         </div>
       </div>
@@ -681,6 +683,12 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
         </nav>
         <div className="settings-content">
           {activeTab === 'updates' && <AppUpdatePanel />}
+          {activeTab === 'notifications' && (
+            <div className="card" style={{ maxWidth: 900 }}>
+              <h3 className="sub">通知</h3>
+              <ChapterNotificationSetting />
+            </div>
+          )}
           {/* 全局消息提示 */}
           {msg ? (
             <p

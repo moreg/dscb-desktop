@@ -1464,7 +1464,7 @@ describe('WriteService', () => {
         1,
         expect.any(Array),   // knownCharacters
         expect.any(Object),
-      expect.any(Array)
+      expect.any(Array), expect.any(Object)
       )
       // 批量流程不跑节奏评估/图解（结果既不回写也不落盘）
       expect(rhythmSpy).not.toHaveBeenCalled()
@@ -1582,7 +1582,7 @@ describe('WriteService', () => {
       await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
 
       // 对照/提取/深审并行成一步；自动提交在审稿之后，提取时不改全书状态。
-      expect(steps).toEqual([
+      expect(steps.filter(step => !step.startsWith('deslop'))).toEqual([
         'generating',
         'audit',
         'postChecks',

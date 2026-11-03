@@ -39,9 +39,9 @@ export async function planLongformRepairTasks(input: {
     '--- 所有待处理事项及原始依据 ---', JSON.stringify(items)
   ].join('\n')
   try {
-    // Existing review route is intentional: no user-specific model routing changes.
+    // Planning has its own task identity and retains the review model route.
     const raw = await llm.generateStream(prompt, { ...opts, maxTokens: 4096,
-      meta: { ...opts.meta, feature: 'continuityRepairVerify' } })
+      meta: { ...opts.meta, feature: 'continuityRepairPlan' } })
     abort()
     const parsed = findJsonObject(raw)
     if (!parsed || !Array.isArray(parsed.groups) || !parsed.groups.length) return fallback()

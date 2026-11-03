@@ -1,3 +1,6 @@
+import { AsyncLimiter } from './async-limiter'
+import { contentRevision } from './chapter-revision'
+import { recordChapterStage } from './chapter-execution'
 import { PLANNING_RULES } from './skill-prompts/opening/planning-rules'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { AuditSeverity, AuditViolation, CustomReviewCheck, ReviewCheckId } from '../../shared/types'
@@ -23,6 +26,7 @@ interface RawFinding {
   snippet?: string
   offset?: number
   suggestion?: string
+  reference?: string
 }
 
 /** 单次 LLM 调用的输入描述（每类检查一个） */
@@ -134,13 +138,14 @@ export interface DeepReviewContext {
 }
 
 export class ReviewFlowService {
+  private readonly limiter = new AsyncLimiter(2)
   private readonly completed = new Map<string, { expiresAt: number; findings: AuditViolation[] }>()
   private readonly inFlight = new Map<string, Promise<AuditViolation[]>>()
 
   constructor(private readonly llm: LlmService) {}
 
   /**
-   * 跑深度审稿：按 enabledChecks 串行调用启用的 LLM 检查，汇总 findings。
+   * 跑深度审稿：按 enabledChecks 最多并发两个独立 LLM 检查，汇总 findings。
    * 每块失败返回未完成诊断，其余块继续；不会把未检查当作无问题。
    * 返回的 AuditViolation 全部 category='llm_review'，ruleId=checkId。
    */
@@ -194,16 +199,15 @@ export class ReviewFlowService {
         this.llm.getCacheIdentity(opts.meta?.feature ?? `deepReview:${spec.checkId}`)))
       if (models.some((model) => !model)) return null
       return createHash('sha256').update(JSON.stringify({
-        version: 'deep-review-v2', content, ctx, opts, specs, models,
+        version: 'deep-review-v3-evidence', content, ctx, opts, specs, models,
         chunkSize: REVIEW_CHUNK_SIZE, overlap: REVIEW_CHUNK_OVERLAP, fullLimit: FULL_CONSISTENCY_LIMIT
       })).digest('hex')
     } catch { return null }
   }
 
   private async runChecks(content: string, ctx: DeepReviewContext, opts: GenerateOptions, specs: CheckSpec[]): Promise<AuditViolation[]> {
-    const all: AuditViolation[] = []
-    const seen = new Set<string>()
-    for (const spec of specs) {
+    const groups = await Promise.all(specs.map(async spec => {
+      const all: AuditViolation[] = []
       const chunks = spec.checkId === 'hook_grade'
         ? [{ text: content.slice(-REVIEW_CHUNK_SIZE), offset: Math.max(0, content.length - REVIEW_CHUNK_SIZE) }]
         : (spec.checkId === 'logic_hole' || spec.checkId === 'spoiler') && content.length <= FULL_CONSISTENCY_LIMIT
@@ -224,15 +228,22 @@ export class ReviewFlowService {
           return all
         }
         try {
-          const findings = await this.runOneCheck(spec, chunk, content.length, ctx, opts)
+          const findings = await this.limiter.run(() => this.runOneCheck(spec, chunk, content.length, ctx, opts), opts.signal)
           for (const f of findings) {
             const incomplete = f.checkId.startsWith('review_incomplete:')
             const local = incomplete ? 0 : locateFinding(chunk.text, f)
             const offset = local === undefined ? undefined : chunk.offset + local
-            const violation = toViolation(f, offset)
+            let violation = toViolation(f, offset)
+            if (!incomplete && f.severity === 'error' && ['logic_hole', 'character_breakdown', 'quote_contradiction'].includes(spec.checkId)) {
+              const reference = f.reference?.trim()
+              const validReference = reference && reference.length >= 4 && [content, ctx.characterCards, ctx.outline, ctx.continuityContext]
+                .some(source => source?.includes(reference))
+              if (!f.snippet?.trim() || local === undefined || !validReference) {
+                violation = toViolation(incompleteFinding(spec.checkId, '问题缺少本章引文或可定位的对照证据，未交给自动纠错'), chunk.offset)
+              } else violation.evidence = { sourceRevision: contentRevision(content), reference, scope: 'chapter' }
+            }
             if (incomplete) violation.message += `（第 ${chunk.offset + 1}—${chunk.offset + chunk.text.length} 字）`
-            const key = `${violation.ruleId}:${offset ?? ''}:${f.snippet ?? f.message}`
-            if (!seen.has(key)) { all.push(violation); seen.add(key) }
+            all.push(violation)
           }
         } catch (err) {
           console.warn(`[runDeepReview] check ${spec.checkId} at ${chunk.offset} failed:`, err)
@@ -240,8 +251,16 @@ export class ReviewFlowService {
             `调用失败，第 ${chunk.offset + 1}—${chunk.offset + chunk.text.length} 字未完成检查`), chunk.offset))
         }
       }
-    }
-    return all
+      recordChapterStage({ stage: `review:${spec.checkId}`, inputRevision: contentRevision(content),
+        verdict: all.some(item => item.ruleId?.startsWith('review_incomplete:')) ? 'incomplete' : all.length ? 'rejected' : 'passed', attemptKind: 'verification' })
+      return all
+    }))
+    const seen = new Set<string>()
+    return groups.flat().filter(item => {
+      const key = JSON.stringify([item.ruleId, item.offset, item.snippet ?? item.message])
+      if (seen.has(key)) return false
+      seen.add(key); return true
+    })
   }
 
   /** 单次 LLM 调用：片段正文与上下文分开，偏移按片段计算后由调用者归回全文。 */
@@ -279,6 +298,7 @@ export class ReviewFlowService {
       `      "severity": "error" | "warn" | "info",`,
       `      "message": "一句话说明问题（≤40字）",`,
       `      "snippet": "命中原文片段（可选，≤60字）",`,
+      `      "reference": "事实问题必须逐字引用本章其他位置、角色卡、细纲或历史证据中与之矛盾的连续原句",`,
       `      "offset": 数字或null（命中位置在本片段中的字符偏移，从0开始，不确定给null）,`,
       `      "suggestion": "具体修改建议（可选）"`,
       `    }`,
@@ -378,6 +398,7 @@ export function parseFindingsJson(raw: string, fallbackCheckId: ReviewCheckId): 
         severity,
         message,
         snippet: typeof f.snippet === 'string' && f.snippet.trim() ? f.snippet.trim() : undefined,
+        reference: typeof f.reference === 'string' ? f.reference.trim() : undefined,
         offset: typeof f.offset === 'number' && Number.isFinite(f.offset) ? Math.max(0, Math.floor(f.offset)) : undefined,
         suggestion:
           typeof f.suggestion === 'string' && f.suggestion.trim() ? f.suggestion.trim() : undefined

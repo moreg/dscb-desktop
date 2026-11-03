@@ -2,7 +2,7 @@ import { BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { safeHandle, safeSend } from './safe-handle'
 import { projectIdSchema, chapterNumberSchema, chapterContentSchema, validateInput } from './validation'
-import { beginStream, endStream } from '../data/stream-abort-registry'
+import { chapterRequest } from './chapter-request'
 import type { ChapterRefinementService } from '../data/chapter-refinement-service'
 
 const address = z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema })
@@ -19,16 +19,14 @@ export function registerChapterRefinementIpc(service: ChapterRefinementService):
   })
   safeHandle('refinement:run', async (event, payload: unknown) => {
     const value = validateInput(z.object({ input: inputSchema, action: z.enum(['plan', 'generate']), requestId: z.string().uuid() }), payload)
-    const signal = beginStream(value.requestId)
-    try {
+    try { return await chapterRequest(event, value.requestId, async signal => {
       const progress = (stage: string): void => safeSend(BrowserWindow.fromWebContents(event.sender), 'refinement:stage', { requestId: value.requestId, stage })
       if (value.action === 'plan') {
         progress('planning')
         return { ok: true, plan: await service.plan(value.input, signal) }
       }
       return { ok: true, candidate: await service.generate(value.input, signal, progress) }
-    } catch (error) { return { ok: false, error: (error as Error).message } }
-    finally { endStream(value.requestId) }
+    }) } catch (error) { return { ok: false, error: (error as Error).message } }
   })
   safeHandle('refinement:load', async (_event, payload: unknown) => {
     const value = validateInput(address, payload)

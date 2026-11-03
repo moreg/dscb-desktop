@@ -141,7 +141,7 @@ export async function repairContinuity<Check>(input: {
           (error as Error).message?.includes('CHAPTER_REPAIR_BUDGET') ||
           (error as Error).message?.includes('AGY_REPAIR_CONTEXT_TOO_LARGE')) throw error
       feedback = (error as Error).message
-      if (input.maxRounds !== undefined && round >= input.maxRounds) throw new Error(`自动修复复核未通过：${feedback}`, { cause: error })
+      if (round >= (input.maxRounds ?? 2)) throw new Error(`自动修复复核未通过：${feedback}`, { cause: error })
       if (round % REPAIR_ROUNDS_BEFORE_BACKOFF === 0) {
         dependencies.onProgress?.(round, 'retry', feedback)
         await waitForRetry(Math.min(30_000, 5_000 * (round / REPAIR_ROUNDS_BEFORE_BACKOFF)), input.signal)

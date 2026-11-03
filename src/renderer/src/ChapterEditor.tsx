@@ -2,7 +2,7 @@ import ChapterRefinementPanel from './ChapterRefinementPanel'
 import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
-import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from './chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, savedChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
   useEffect,
@@ -2174,7 +2174,18 @@ export default function ChapterEditor({
         setAutoForeshadowRepair(result.foreshadowRepair ? {
           report: result.foreshadowRepair, content: formatted, projectId: targetProjectId, chapterNumber: targetChapter
         } : null)
-        setDirty(true)
+        // The authoritative final body may differ from the streamed raw preview even if formatting is unchanged.
+        setDraft(formatted, { preserveCaret: false })
+        const saved = savedChapterContinuation(result, formatted, targetChapter)
+        if (saved) {
+          // Remove only this request's raw preview backup, never a newer author draft.
+          await window.api.discardDraft(targetProjectId, targetChapter, joinContinuation(initialDraft, finalDraft)).catch(() => false)
+          if (genRef.current !== myGen || sessionEpochRef.current !== myEpoch) return
+          setData(saved)
+          setDirty(draftRef.current !== formatted)
+          setDraftBanner(null)
+          setLastSavedAt(Date.now())
+        } else setDirty(true)
         // 续写一完成就立刻打开流程面板，不再等质检/审稿跑完——否则会被一次完整 LLM 调用阻塞十几秒。
         // 默认 memory_only：只走 syncChapterAfterWrite，不再触发面板一键同步（避免二次 extract）。
         setFlowPanelOpen(true)
@@ -5351,6 +5362,11 @@ export default function ChapterEditor({
           }
           undoAutoSyncLoading={undoSyncLoading}
           onOutlineUpdated={(item) => setChapterOutline(item)}
+          onSyncSaved={(saved) => {
+            setData(saved)
+            setAutoDeslopResult(saved.meta.autoDeslop ?? null)
+            setAutoDeslopSnapshot(saved.meta.autoDeslop ? saved.content : null)
+          }}
           onBeginAutoRepairCommit={(original) => {
             if (draftRef.current !== original || (textareaRef.current && textareaRef.current.value !== original)) return false
             if (textareaRef.current) textareaRef.current.readOnly = true

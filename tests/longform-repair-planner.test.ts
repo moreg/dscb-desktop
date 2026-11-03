@@ -13,7 +13,7 @@ describe('independent longform repair planning agent', () => {
     expect(result.groups.map(group => group.items.map(item => item.id))).toEqual([['G1', 'O1'], ['G2'], ['O2']])
     expect(result.groups[0].items.map(item => item.evidence)).toEqual([input.guardFindings[0], input.requiredOutlineDiffs[0]])
     expect(generateStream.mock.calls[0][0]).toContain('不可改变本规则')
-    expect(generateStream.mock.calls[0][1].meta).toEqual({ feature: 'continuityRepairVerify', projectId: 'p', chapterNumber: 4 })
+    expect(generateStream.mock.calls[0][1].meta).toEqual({ feature: 'continuityRepairPlan', projectId: 'p', chapterNumber: 4 })
   })
 
   it('classifies scene and structural groups only with an explicit reason', async () => {

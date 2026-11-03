@@ -109,3 +109,13 @@ describe('续写先采用补写稿再同步记忆', () => {
     })).toEqual({ content: '已有正文。\n\n新正文。', canSyncMemory: false })
   })
 })
+
+it('只有成功且与最终正文、章号一致的实际保存回执，才能标记已保存', async () => {
+  const { savedChapterContinuation } = await import('../src/renderer/src/chapter-generation-finalize')
+  const saved = { content: '最终正文。', meta: { chapterNumber: 1 } } as import('../src/shared/types').ChapterContent
+  expect(savedChapterContinuation({ ok: true, saved }, '最终正文。', 1)).toBe(saved)
+  expect(savedChapterContinuation({ ok: true, saved }, '作者又改了正文。', 1)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: true, saved }, '最终正文。', 2)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: false, saved }, '最终正文。', 1)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: true }, '最终正文。', 1)).toBeUndefined()
+})

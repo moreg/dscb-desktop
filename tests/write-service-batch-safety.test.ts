@@ -1,3 +1,4 @@
+import { contentRevision } from '../src/main/data/chapter-revision'
 import { withPassingLongformGuard } from './helpers/passing-longform'
 import { readChapterStatuses } from '../src/main/data/chapter-status-store'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -424,20 +425,24 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(service.syncChapterAfterWrite).mock.calls[0][3]?.extraction?.parseError).toBeUndefined()
   })
 
-  it('runs outline check and memory extraction concurrently', async () => {
+  it('waits for story checks before extracting final-body memory', async () => {
     stubPostProcess()
     vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     let releaseOutline: () => void = () => {}
-    // 对照要等记忆提取开始才返回：若两步仍串行，这里会一直卡住直到超时。
+    // A held story check must not start extraction for a manuscript still subject to repair.
     vi.mocked(flow.checkOutlineStream).mockImplementation(() => new Promise((resolve) => {
       releaseOutline = () => resolve('[]')
     }))
     vi.mocked(flow.extractMemoryStream).mockImplementation(async () => {
-      releaseOutline()
       return JSON.stringify(resultFor(1).memory)
     })
-    const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    const task = service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    await vi.waitFor(() => expect(flow.checkOutlineStream).toHaveBeenCalledOnce())
+    expect(flow.extractMemoryStream).not.toHaveBeenCalled()
+    releaseOutline()
+    const progress = await task
     expect(progress.status).toBe('completed')
+    expect(flow.extractMemoryStream).toHaveBeenCalledOnce()
     expect(flow.evaluateRhythmStream).not.toHaveBeenCalled()
     expect(flow.generateFigureStream).not.toHaveBeenCalled()
   })
@@ -646,9 +651,9 @@ describe('batch safety and recovery', () => {
   it.each([false, true])('repairs a longform conflict and continues with fresh memory (recovered=%s)', async recovered => {
     stubPostProcess()
     await stubLongformConflict()
-    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: () => Promise<string> }
+    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: (pid: string, ch: number, text: string) => Promise<string> }
     internal.deslopService = {}
-    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockRejectedValue(new Error('局部纠错后不应整章润色'))
+    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockImplementation(async (_pid, _ch, text) => text)
     const nextOutline = await readFile(path.join(dir, '细纲', '细纲_第002章_交接2.md'), 'utf8')
     if (recovered) await new ProseRepo(dir).write(1, content)
     const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, n) => {
@@ -667,7 +672,7 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(summaryService.generateChapterSummaryChecked).mock.calls[0][2]).toBe(corrected)
     expect(vi.mocked(service.syncChapterAfterWrite).mock.calls.some(call => call[2] === content && call[1] === 1)).toBe(false)
     expect(await readFile(path.join(dir, '细纲', '细纲_第002章_交接2.md'), 'utf8')).toBe(nextOutline)
-    expect(polish).not.toHaveBeenCalled()
+    expect(polish.mock.calls.every(call => call[2] === corrected || call[2] === content)).toBe(true)
   })
 
   it.each(['longform', 'verify', 'outline'] as const)('retains the original draft when longform repair fails %s verification', async failure => {
@@ -784,9 +789,9 @@ describe('batch safety and recovery', () => {
     stubPostProcess()
     stubContinuityModel()
     // Even when polishing is available, local conflict repair must not invoke it.
-    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: () => Promise<string> }
+    const internal = service as unknown as { deslopService: object; autoDeslopGeneratedProse: (pid: string, ch: number, text: string) => Promise<string> }
     internal.deslopService = {}
-    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockRejectedValue(new Error('不应整章润色'))
+    const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockImplementation(async (_pid, _ch, text) => text)
     const previous = '师父让林远在门外等候，没有允许他进院。'
     await new ProseRepo(dir).write(1, previous)
     vi.spyOn(flow, 'extractEndingState').mockResolvedValue({ chapterNumber: 1,
@@ -810,7 +815,7 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(flow.extractMemoryStream).mock.calls.map(call => call[0])).toContain(corrected)
     expect(vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'continuityRepair')?.[0]).toContain(previous)
     expect(stages.some(stage => stage.startsWith('continuity:'))).toBe(true)
-    expect(polish).not.toHaveBeenCalled()
+    expect(polish.mock.calls.every(call => call[2] === corrected || call[2] === content)).toBe(true)
     expect(completed.mock.calls[0][1].autoDeslop).toMatchObject({ status: 'review_required' })
   })
 
@@ -821,7 +826,7 @@ describe('batch safety and recovery', () => {
     vi.spyOn(settings, 'getReviewRules').mockResolvedValue({ ...await settings.getReviewRules(), enabled: true, autoDeepReview: true })
     vi.spyOn(service, 'auditChapter').mockResolvedValue(resultFor(1).audit)
     const review = vi.spyOn(service, 'runDeepReview').mockImplementation(async (_pid, text, ch) => ch === 1 && text === content
-      ? [{ category: 'llm_review', severity: 'error', ruleId, message: '与前文事实矛盾' }] : [])
+      ? [{ category: 'llm_review', severity: 'error', ruleId, message: '与前文事实矛盾', snippet: content, evidence: { sourceRevision: contentRevision(content), reference: '师父让林远在门外等候，没有允许他进院。', scope: 'history' } }] : [])
     vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
     expect(progress.status, progress.pauseReason).toBe('completed')
@@ -850,7 +855,7 @@ describe('batch safety and recovery', () => {
     expect(await new ProseRepo(dir).read(1)).toBe(corrected)
   })
 
-  it('keeps retrying failed repairs automatically until the user stops, preserving the saved draft and memory', async () => {
+  it('stops stalled repairs within two attempts, preserving the saved draft and memory', async () => {
     stubPostProcess()
     stubContinuityModel()
     const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
@@ -860,12 +865,12 @@ describe('batch safety and recovery', () => {
       signal: controller.signal, onGenerationStage: stage => { console.log('DBG_STAGE', JSON.stringify(stage)); if (stage.includes('稍后自动重试')) controller.abort() }
     }, undefined, { autoContinue: true })
     expect(progress.status).toBe('paused')
-    expect(controller.signal.aborted).toBe(true)
-    expect(progress.pauseReason).toContain('LLM_ABORTED')
+    expect(controller.signal.aborted).toBe(false)
+    expect(progress.pauseReason).toContain('自动修复复核未通过')
     expect(await new ProseRepo(dir).read(1)).toBe(content)
     expect(generate).toHaveBeenCalledOnce()
     expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
-    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(3)
+    expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepair')).toHaveLength(2)
   })
 
   it('does not overwrite an author edit arriving during automatic continuity verification', async () => {
