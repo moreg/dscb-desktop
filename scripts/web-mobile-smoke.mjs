@@ -30,6 +30,42 @@ const server = await createServer({ configFile: resolve('vite.web-renderer.confi
 let browser
 const output = process.env.MOBILE_SMOKE_OUTPUT || '/tmp/dscb-mobile-smoke'
 const passed = []
+
+async function checkRefinement(page, width) {
+  const panel = page.locator('.refinement-panel')
+  await panel.getByRole('tab', { name: '精修设置' }).click()
+  await panel.getByLabel('补充要求', { exact: false }).fill('保留结果，让表达更自然。')
+  await panel.getByRole('button', { name: '生成精修候选', exact: true }).click()
+  await panel.locator('#refinement-result:not([hidden])').waitFor()
+  check(await panel.getByRole('button', { name: '采用并保存', exact: true }).isEnabled(), `${width}: verified candidate opens in comparison tab`)
+  await panel.getByRole('button', { name: '完整对比', exact: true }).click()
+  check(await panel.locator('.refinement-full').isVisible(), `${width}: full manuscript comparison available`)
+  check(await panel.locator('.refinement-body').evaluate(el => el.scrollWidth <= el.clientWidth + 1), `${width}: comparison has no horizontal overflow`)
+  await page.screenshot({ path: `${output}/refinement-result-${width}.png` })
+  await panel.getByRole('tab', { name: '精修设置' }).click()
+  check(await panel.getByLabel('补充要求', { exact: false }).inputValue() === '保留结果，让表达更自然。', `${width}: settings survive tab switching`)
+  await panel.getByLabel('主要目标', { exact: false }).selectOption('detection')
+  await panel.getByLabel('标黄原文 1', { exact: false }).waitFor()
+  await page.screenshot({ path: `${output}/refinement-detection-${width}.png` })
+  await panel.getByLabel('主要目标', { exact: false }).selectOption('expression')
+  await page.evaluate(() => { window.__refineReject = true })
+  await panel.getByRole('button', { name: '重新生成候选', exact: true }).click()
+  await panel.locator('#refinement-result:not([hidden])').waitFor()
+  check(await panel.getByRole('button', { name: '采用并保存', exact: true }).isDisabled(), `${width}: rejected candidate cannot be adopted wholesale`)
+  await panel.getByRole('tab', { name: '精修设置' }).focus()
+  await page.keyboard.press('ArrowRight')
+  check(await panel.getByRole('tab', { name: '候选对照' }).getAttribute('aria-selected') === 'true', `${width}: comparison tabs support keyboard navigation`)
+  if (width > 1024) {
+    const bounds = await panel.boundingBox()
+    await page.mouse.move(bounds.x + 100, bounds.y + 25); await page.mouse.down()
+    await page.mouse.move(bounds.x + 100, 990); await page.mouse.up()
+    const moved = await panel.boundingBox()
+    check(moved.y + moved.height <= 1000, 'desktop dragging keeps footer inside the viewport')
+    await page.evaluate(() => document.documentElement.classList.add('dark'))
+    await page.screenshot({ path: `${output}/refinement-dark.png` })
+  }
+}
+
 const check = (value, message) => { assert.ok(value, message); passed.push(message); console.log(`PASS ${message}`) }
 try {
   await server.listen()
@@ -59,6 +95,13 @@ try {
         getUsageSummary: () => ({ today: { cost: 0 }, month: { cost: 0 }, total: { cost: 0 } }),
         listProviders: () => ({ activeId: null, providers: [], featureRouting: {} }),
         readDraft: () => null, loadRefinement: () => null, getChapterSummary: () => null,
+        refineChapter: (input, action) => Object.assign(Promise.resolve(action === 'plan' ? { ok: true, plan: '保留交接结果，减少直白解释。' } : { ok: true, candidate: {
+          version: 1, id: 'ui-candidate', input, baseRevision: '', contextHash: '', candidate: input.content + '\n\n他合上账册，等对方先开口。',
+          changes: ['调整句式，让行动自然衔接。'], attempts: 1, status: window.__refineReject ? 'rejected' : 'ready', updatedAt: '',
+          verdict: { passed: !window.__refineReject, factsPreserved: !window.__refineReject, goalMet: true,
+            assessment: window.__refineReject ? '候选包含待确认的行为变化，请对照后决定。' : '保留原文信息，句式与衔接更自然。',
+            issues: window.__refineReject ? ['存在待确认改动'] : [], evidence: [{ before: input.content, after: '他合上账册，等对方先开口。', reason: '调整接话节奏。' }] }
+        } }), { abort: async () => ({ ok: true }) }),
         auditChapter: () => ({ violations: [], counts: { error: 0, warn: 0, info: 0 }, wordCount: 16 }),
         getReviewRules: () => ({ config: { enabled: false }, custom: [] }), getAutoPostWritePipeline: () => 'off',
         getWritingRequirementTemplates: () => [], getDeslopRules: () => ({}), getRhythm: () => [],
@@ -67,6 +110,7 @@ try {
       }
       window.api = new Proxy(api, { get: (target, key) => {
         if (String(key).startsWith('on')) return () => () => {}
+        if (key === 'refineChapter') return target[key]
         if (key in target) return async (...args) => target[key](...args)
         return async () => []
       } })
@@ -127,6 +171,8 @@ try {
       const panel = await page.locator('.refinement-panel').boundingBox()
       check(panel.x >= 0 && panel.x + panel.width <= width + 1 && panel.y + panel.height <= height + 1, `${width}: refinement fits the viewport`)
       await page.screenshot({ path: `${output}/refinement-${width}.png` })
+      await checkRefinement(page, width)
+
       // Deterministic keyboard viewport simulation; physical IME behavior still needs device testing.
       await page.evaluate(() => {
         Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 250 })
@@ -135,12 +181,18 @@ try {
       await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--web-viewport-height') === '250px')
       const keyboardPanel = await page.locator('.refinement-panel').boundingBox()
       check(keyboardPanel.height <= 251, `${width}: refinement follows keyboard viewport`)
+      check(await page.locator('.refinement-body').evaluate(el => el.clientHeight > 60), `${width}: keyboard leaves a scrollable comparison area`)
+      check(await page.locator('.refinement-footer').evaluate(el => { const panel = el.closest('.refinement-panel').getBoundingClientRect(); return el.getBoundingClientRect().bottom <= panel.bottom + 1 }), `${width}: keyboard keeps actions reachable`)
     } else {
       check(await page.locator('.web-mobile-bar').count() === 0, `${desktop ? 'Electron' : 'wide web'}: desktop navigation preserved`)
       await page.locator('.project-card').first().click()
       await page.locator('.chapter-row').first().click()
       await page.locator('textarea.editor-text').waitFor()
       check(!await page.locator('.mobile-tools-toggle').isVisible(), `${desktop ? 'Electron' : 'wide web'}: editor toolbar unchanged`)
+      if (!desktop) {
+        await page.getByRole('button', { name: '精修正文', exact: true }).click()
+        await checkRefinement(page, width)
+      }
     }
     check(errors.length === 0, `${width}${desktop ? ' Electron' : ''}: no runtime errors (${errors.join('; ')})`)
     await context.close()
