@@ -404,13 +404,24 @@ export async function decryptPrivateChars(
         const fontPath = path.join(cacheDir, 'fonts', `${hash}.woff`)
         await fs.mkdir(path.dirname(fontPath), { recursive: true })
         await fs.writeFile(fontPath, fontBytes)
-        fontLibrary?.use(family, [fontPath])
-        loadedFamilies.add(family)
+        try {
+          fontLibrary?.use(family, [fontPath])
+          loadedFamilies.add(family)
+        } catch {
+          // Linux 上 skia-canvas 不能解码番茄私有 woff（不存在于系统的 PUA cmap）。
+          // 跳过就好，下面的 restore 会在 service 的 glyphDecodeFailed 分支处理。
+        }
       }
       onProgress?.(`正在还原 ${missing.length} 个加密字`)
       for (const [index, ch] of missing.entries()) {
         const code = String(ch.charCodeAt(0))
-        const rendered = renderGlyph(draw, ch, family)
+        let rendered: { vec: Float32Array; sig: Uint8Array; coarse?: Float32Array } | null = null
+        try {
+          rendered = renderGlyph(draw, ch, family)
+        } catch {
+          // 番茄私有 woff 在部分环境的 skia-canvas 里走 renderGlyph 会掇，
+          // 直接当未还原字处理
+        }
         saved[code] = rendered ? matchGlyph(rendered, standards) ?? '' : ''
         if (index > 0 && index % 30 === 0) await new Promise((resolve) => setImmediate(resolve))
       }

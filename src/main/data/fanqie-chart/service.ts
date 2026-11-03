@@ -241,14 +241,18 @@ export class FanqieChartService {
       : new Map<number, string>()
     const books = rawBooks.map((book) => restoreBook(book, map))
     const readable = books.filter((book) => !book.garbled && hasCjk(book.title))
-    if (readable.length < MIN_BOOKS) {
+    // web 部检下，番茄私有 woff 在 skia-canvas 里无法解码，会导致所有书名还原失败。
+    // 这里不抱“全部乱码”，但不括报，并给出可辨识的部分状态。
+    const glyphDecodeFailed = map.size === 0 && privateChars.length > 0
+    if (readable.length < MIN_BOOKS && !glyphDecodeFailed) {
       throw new Error(`只还原出 ${readable.length} 本书名，这次抓取不可用`)
     }
     const garbledCount = books.length - readable.length
     const short = books.length < FANQIE_TARGET_BOOKS
     const partialReason = [
       short ? `这期抓到 ${books.length} 本，少于 ${FANQIE_TARGET_BOOKS} 本` : '',
-      garbledCount ? `${garbledCount} 本书名没能还原` : ''
+      garbledCount ? `${garbledCount} 本书名没能还原` : '',
+      glyphDecodeFailed ? '服务器环境无法解码番茄私有字体，书名均为源页面原始乱码' : ''
     ]
       .filter(Boolean)
       .join('；')
@@ -265,7 +269,7 @@ export class FanqieChartService {
       status: keepDerived && existing?.analysis ? 'analyzed' : 'fetched',
       targetCount: FANQIE_TARGET_BOOKS,
       actualCount: readable.length,
-      isPartial: short || garbledCount > 0,
+      isPartial: short || garbledCount > 0 || glyphDecodeFailed,
       partialReason,
       sourceHash: hash,
       fetchedAt: now,
