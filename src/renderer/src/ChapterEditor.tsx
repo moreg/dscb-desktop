@@ -361,6 +361,7 @@ export default function ChapterEditor({
     void window.api.invalidateChapterMemorySync(projectId, chapterNumber).catch(console.error)
   }, [projectId, chapterNumber])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
   const [refinementOpen, setRefinementOpen] = useState(false)
   const [refinementBusy, setRefinementBusy] = useState(false)
   const [refinementCommitting, setRefinementCommitting] = useState(false)
@@ -4602,7 +4603,7 @@ export default function ChapterEditor({
       ) : null}
 
       {/* 操作工具栏 */}
-      <div className="editor-toolbar">
+      <div className={`editor-toolbar${mobileToolsOpen ? ' mobile-tools-open' : ''}`} id="chapter-editor-tools">
         {chapterProvider ? (
           <div
             className="row"
@@ -4860,7 +4861,7 @@ export default function ChapterEditor({
           </div>
         ) : null}
         <button
-          className="btn btn-sm"
+          className="btn btn-sm mobile-primary-action"
           onClick={saveAndClearDraft}
           disabled={!dirty || saving}
         >
@@ -4916,7 +4917,7 @@ export default function ChapterEditor({
         >
           格式化
         </button>
-        <button className="btn btn-sm" onClick={openRefinement}
+        <button className="btn btn-sm mobile-primary-action" onClick={openRefinement}
           disabled={!draft.trim() || generating || adjusting || adjustPlanning || saving}
           title="为选区或整章生成独立精修候选，核验后对比采用">
           {refinementBusy ? '精修处理中…' : '精修正文'}
@@ -4954,7 +4955,7 @@ export default function ChapterEditor({
         </button>
         {generating || adjusting || adjustPlanning ? (
           <button
-            className="btn btn-danger btn-sm"
+            className="btn btn-danger btn-sm mobile-primary-action"
             onClick={cancelActiveStream}
             title={generating ? '停止当前生成并保留已有草稿' : '停止当前修改，并恢复开始前的正文'}
           >
@@ -4962,7 +4963,7 @@ export default function ChapterEditor({
           </button>
         ) : (
           <button
-            className="btn btn-primary btn-sm"
+            className="btn btn-primary btn-sm mobile-primary-action"
             onClick={() => {
               const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
               if (skip) {
@@ -4986,12 +4987,20 @@ export default function ChapterEditor({
           </button>
         ) : null}
         <button
-          className={`btn btn-sm${flowPanelOpen ? ' btn-primary' : ''}`}
+          className={`btn btn-sm mobile-primary-action${flowPanelOpen ? ' btn-primary' : ''}`}
           onClick={() => setFlowPanelOpen((open) => !open)}
           title="展开或收起可拖动的续写流程面板"
         >
           流程面板
         </button>
+        <button type="button" className="btn btn-sm mobile-tools-toggle" aria-expanded={mobileToolsOpen}
+          aria-controls="chapter-editor-tools" onClick={() => setMobileToolsOpen(open => !open)}>
+          {mobileToolsOpen ? '收起工具' : '更多工具'}
+        </button>
+        <button type="button" className="btn btn-sm mobile-jump-editor" onClick={() => {
+          textareaRef.current?.scrollIntoView({ block: 'start' })
+          textareaRef.current?.focus({ preventScroll: true })
+        }}>写正文 ↓</button>
         <span className="spacer" />
         {/* P11-A：保存指示器 */}
         {lastSavedAt !== null ? (
@@ -5051,7 +5060,7 @@ export default function ChapterEditor({
       {repairReviewCandidate && !generating ? <section style={{ marginBottom: 12, border: '1px solid var(--border)', padding: 12 }}>
         <strong>{repairReviewCandidate.scope === 'structure' ? '章节结构修复候选' : '场景修复候选'}，请对照后决定是否载入。</strong>
         <p>候选生成时通过自动核对，原稿和候选已单独保留。若细纲或前文后来有变化，请重新核对；载入后仍需你保存。</p>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: 12 }}>
           <label>原稿<textarea className="textarea" readOnly value={repairReviewCandidate.original} style={{ width: '100%', minHeight: 220 }} /></label>
           <label>修复候选<textarea className="textarea" readOnly value={repairReviewCandidate.candidate} style={{ width: '100%', minHeight: 220 }} /></label>
         </div>
@@ -6380,7 +6389,7 @@ export default function ChapterEditor({
                         <div style={{ fontSize: 12, color: 'var(--ink-2)', marginBottom: 6 }}>
                           改动 #{i + 1} · 约第 {h.line} 段
                         </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                        <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                           <div>
                             <strong style={{ fontSize: 12, color: 'var(--vermilion)' }}>改写前</strong>
                             <pre
@@ -6422,7 +6431,7 @@ export default function ChapterEditor({
                     ))}
                   </div>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                     <div>
                       <strong style={{ fontSize: 12 }}>
                         改写前

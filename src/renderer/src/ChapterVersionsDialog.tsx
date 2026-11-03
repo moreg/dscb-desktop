@@ -229,9 +229,10 @@ export default function ChapterVersionsDialog({
         ) : null}
 
         {/* 主体区域：左右分栏（左侧版本倒序列表，右侧预览与恢复） */}
-        <div style={{ display: 'flex', gap: 16, flex: 1, minHeight: 380, maxHeight: '60vh', overflow: 'hidden' }}>
+        <div className="chapter-versions-layout" style={{ display: 'flex', gap: 16, flex: 1, minHeight: 380, maxHeight: '60vh', overflow: 'hidden' }}>
           {/* 左侧：版本列表（倒序） */}
           <div
+            className="chapter-versions-list"
             style={{
               width: 310,
               flexShrink: 0,

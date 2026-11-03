@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import { recordCrash, type StorageLike } from './crash-log'
 import './design.css'
+import { installWebViewport } from './web-viewport'
 
 // 已知的良性运行时警告：浏览器规范行为或第三方库噪声，不应让渲染进程崩溃。
 // ResizeObserver loop：回调里又改了被观察元素尺寸，浏览器抛 warning（非致命），
@@ -136,6 +137,7 @@ try {
   if (webPage) {
     window.__DSCB_WEB__ = true
     document.documentElement.classList.add('dscb-web')
+    installWebViewport()
     void import('./web-gate')
       .then(({ default: WebGate }) => mount(<WebGate />))
       .catch((error: unknown) => showCrashScreen(error))

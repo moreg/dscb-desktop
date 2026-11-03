@@ -795,7 +795,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                   style={{
                     marginTop: 12,
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 360px), 1fr))',
                     gap: 10,
                     alignItems: 'start'
                   }}
@@ -2280,7 +2280,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
 
               {showAddForm && (
                 <div style={{ marginTop: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface-2)' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label style={{ fontSize: 12.5 }}>名称</label>
                       <input
@@ -2435,7 +2435,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
               <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
                 阈值
               </h4>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
+              <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
                 {(
                   [
                     ['maxParagraphLen', '段落长度上限', 1, 10000],

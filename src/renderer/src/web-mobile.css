@@ -252,3 +252,129 @@
 .app-shell.web-mobile pre {
   overflow-x: auto;
 }
+
+/* Mobile-only tools stay out of the Electron and wide web layouts. */
+.editor-toolbar .mobile-tools-toggle,
+.editor-toolbar .mobile-jump-editor { display: none; }
+
+html.dscb-web.dscb-mobile {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+html.dscb-web.dscb-mobile body,
+html.dscb-web.dscb-mobile #root { min-height: 0; height: 100%; overflow: hidden; }
+
+.dscb-mobile .app-shell.web-mobile {
+  position: fixed;
+  inset: var(--web-viewport-top, 0px) 0 auto;
+  height: var(--web-viewport-height, 100dvh);
+  min-height: 0;
+  width: 100%;
+}
+.dscb-mobile .web-mobile .sidebar {
+  top: var(--web-viewport-top, 0px);
+  height: var(--web-viewport-height, 100dvh);
+  padding-top: env(safe-area-inset-top);
+  overscroll-behavior: contain;
+}
+.dscb-mobile .web-mobile .web-mobile-title { flex: 1; }
+.dscb-mobile .web-mobile .main-content { overscroll-behavior-y: contain; scroll-padding-block: 112px 24px; }
+.dscb-mobile .web-mobile.web-nav-open .main-content { overflow: hidden; }
+.dscb-mobile .web-mobile .main-inner { padding-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right)); }
+
+.dscb-mobile .web-mobile :is(.btn, .filter-chip, .settings-tab, .web-mobile-close, .editor-title-action, .toolbar-more-item) {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+.dscb-mobile .web-mobile :is(.input, .select, input[type="text"], input[type="password"]) { min-height: 44px; }
+.dscb-mobile .web-mobile :is(.card, .field, .row > *, .page-head-row > *, .settings-content, .chapter-workbench) { min-width: 0; }
+.dscb-mobile .web-mobile :is(input, select, textarea) { max-width: 100%; }
+.dscb-mobile .web-mobile :is(.select, .editor-title-input) { min-width: 0 !important; }
+.dscb-mobile .web-mobile :is(.chapter-row .ch-foot, .chapter-row .ch-top, .editor-title-candidate, .ep-head) { flex-wrap: wrap; }
+.dscb-mobile .web-mobile :is(.card, .dialog, .dialog-card, .refinement-panel) { overflow-wrap: anywhere; }
+.dscb-mobile .web-mobile .strength-hint { white-space: normal !important; text-align: left; }
+.dscb-mobile .web-mobile .chapter-workbench { grid-template-columns: minmax(0, 1fr); }
+.dscb-mobile .web-mobile .chapter-splitter { display: none; }
+.dscb-mobile .web-mobile .chapter-main-pane,
+.dscb-mobile .web-mobile .chapter-side-block { grid-column: 1; grid-row: auto; }
+.dscb-mobile .web-mobile .chapter-main-pane { grid-row: 1; }
+.dscb-mobile .web-mobile .chapter-main-pane > .chapter-outline-panel-above { order: 2; margin-top: 16px; }
+
+/* The sticky writing controls share the original handlers and save/stop state. */
+.dscb-mobile .web-mobile .editor-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  background: var(--bg);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  gap: 6px;
+}
+.dscb-mobile .web-mobile .editor-toolbar:not(.mobile-tools-open) > :not(.mobile-primary-action):not(.mobile-tools-toggle):not(.mobile-jump-editor) { display: none; }
+.dscb-mobile .web-mobile :is(.mobile-tools-toggle, .mobile-jump-editor) { display: inline-flex; }
+.dscb-mobile .web-mobile .editor-toolbar.mobile-tools-open { max-height: min(340px, calc(var(--web-viewport-height, 100dvh) / 2)); overflow-y: auto; }
+.dscb-mobile .web-mobile .toolbar-more-menu { position: static; }
+.dscb-mobile .web-mobile .editor-toolbar .mobile-primary-action { order: -2; }
+.dscb-mobile .web-mobile :is(.mobile-tools-toggle, .mobile-jump-editor) { order: -1; }
+.dscb-mobile .web-mobile .chapter-main-pane .editor-text {
+  padding: 16px 14px;
+  min-height: 300px;
+  height: max(300px, calc(var(--web-viewport-height, 100dvh) - 190px));
+  max-height: none;
+  resize: none;
+  scroll-margin-top: 114px;
+}
+.dscb-mobile .web-mobile .editor-line-gutter { padding-block: 16px; width: 36px; min-width: 36px; }
+.dscb-mobile .web-mobile .editor-text-wrapper.with-line-numbers .editor-text { margin-left: 36px; }
+
+/* Use the visual viewport for sheets and dialogs, including portalled confirmations. */
+.dscb-mobile :is(.dialog-overlay, .confirm-dialog-overlay) {
+  top: var(--web-viewport-top, 0px) !important;
+  bottom: auto !important;
+  height: var(--web-viewport-height, 100dvh);
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.dscb-mobile :is(.dialog, .dialog-card, .confirm-dialog) {
+  min-width: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  padding: 16px !important;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.dscb-mobile :is(.dialog, .dialog-card, .confirm-dialog) :is(input, select, textarea) { font-size: 16px !important; }
+.dscb-mobile :is(.dialog-card, .dialog) > header { flex-wrap: wrap; gap: 8px; padding: 8px 0 !important; }
+.dscb-mobile .chapter-versions-layout { flex-direction: column; min-height: 0 !important; max-height: none !important; overflow: visible !important; }
+.dscb-mobile .chapter-versions-list { width: 100% !important; max-height: 180px; border-right: 0 !important; border-bottom: 1px solid var(--line); padding: 0 0 12px !important; }
+.dscb-mobile .web-mobile .chapter-flow-panel {
+  left: max(8px, env(safe-area-inset-left)) !important;
+  right: max(8px, env(safe-area-inset-right)) !important;
+  top: calc(var(--web-viewport-top, 0px) + 8px) !important;
+  bottom: auto !important;
+  width: auto;
+  max-height: calc(var(--web-viewport-height, 100dvh) - 16px - env(safe-area-inset-bottom));
+}
+.dscb-mobile .web-mobile .chapter-flow-panel .ep-head { cursor: default; padding: 10px 12px; }
+.dscb-mobile .web-mobile .refinement-panel,
+.dscb-mobile .web-mobile .refinement-panel.refinement-floating {
+  inset: var(--web-viewport-top, 0px) 0 auto !important;
+  width: 100% !important;
+  height: var(--web-viewport-height, 100dvh) !important;
+  max-height: var(--web-viewport-height, 100dvh);
+  border-radius: 0;
+  padding-top: env(safe-area-inset-top);
+}
+.dscb-mobile .refinement-header { cursor: default; touch-action: auto; padding: 10px 12px; }
+.dscb-mobile .refinement-header h2 { font-size: 18px; }
+.dscb-mobile .refinement-body { padding-inline: 12px; overscroll-behavior: contain; }
+.dscb-mobile .refinement-footer { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+.dscb-mobile :is(.refinement-diff > div, .refinement-full, .mobile-stack-grid) { grid-template-columns: minmax(0, 1fr) !important; }
+.dscb-mobile .web-mobile .preview-inline-card { left: 8px !important; max-width: calc(100vw - 16px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell.web-mobile .sidebar { transition: none; }
+}
