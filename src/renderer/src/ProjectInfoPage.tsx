@@ -71,7 +71,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
     try {
       const updated = await window.api.updateProjectInfo(projectId, {
         name: nextName,
-        description: nextDescription || undefined
+        description: nextDescription
       })
       setName(updated.name)
       setDescription(updated.description ?? '')
@@ -88,9 +88,9 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
     }
   }
 
-  const applyCandidate = (candidate: ProjectTitleCandidate) => {
-    setName(candidate.name)
-    setDescription(candidate.description)
+  const applyCandidate = (candidate: ProjectTitleCandidate, field: 'name' | 'description' | 'both') => {
+    if (field !== 'description') setName(candidate.name)
+    if (field !== 'name') setDescription(candidate.description)
     setError('')
     setMessage('已填入候选，确认后点击“保存作品信息”生效')
   }
@@ -194,7 +194,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
             <span className="project-info-tip-icon" aria-hidden>🎲</span>
             <div>
               <strong>与灵感抽签同步</strong>
-              <p>在“灵感抽签”点击“保存为项目书名与简介”会直接写到这里；点击“加入候选”则先收进下方候选列表。</p>
+              <p>在“灵感抽签”可分别保存书名或简介，也可加入候选后在这里选用。</p>
             </div>
           </div>
 
@@ -220,13 +220,15 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
                     >
                       {removingId === candidate.id ? '移除中…' : '移除'}
                     </button>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => applyCandidate(candidate, 'name')} disabled={saving || brainstormBusy || candidate.name === name.trim()}>使用书名</button>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => applyCandidate(candidate, 'description')} disabled={saving || brainstormBusy || candidate.description === description.trim()}>使用简介</button>
                     <button
                       type="button"
                       className="btn btn-primary btn-sm"
-                      onClick={() => applyCandidate(candidate)}
+                      onClick={() => applyCandidate(candidate, 'both')}
                       disabled={saving || brainstormBusy || isCurrent(candidate)}
                     >
-                      {isCurrent(candidate) ? '当前使用' : '使用这个'}
+                      {isCurrent(candidate) ? '当前使用' : '两项都使用'}
                     </button>
                   </div>
                 </article>

@@ -1,3 +1,6 @@
+import type { ChapterSyncResult, ChapterSyncOptions, ChapterSyncStep } from './chapter-workflow'
+import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from './chapter-refinement'
+import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from './prose-import'
 import type { WritingRequirementTemplate } from './writing-requirement-templates'
 import type { AppUpdateState } from './app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from './long-story-brainstorm'
@@ -52,6 +55,7 @@ export interface CreateProjectInput {
   genre?: string
 }
 
+/** draft = 正文；reviewed 为旧数据兼容值，显示与返回时并入正文。 */
 export type ChapterStatus = 'outline' | 'draft' | 'reviewed' | 'published'
 
 /** 单个 LLM provider 配置。支持三种 HTTP API 接入方式及本地 CLI。 */
@@ -131,6 +135,8 @@ export type ProviderSummary = Omit<ProviderConfig, 'apiKey'> & {
 /** 功能大类：用于按任务类型路由到不同 provider/模型 */
 export type FeatureCategory =
   | 'chapter'
+  | 'refine'
+  | 'refineReview'
   | 'review'
   | 'humanize'
   | 'opening'
@@ -143,6 +149,15 @@ export interface FeatureRoutingEntry {
   /** 目标 provider id（必须存在于 providers 中，否则回退 activeId） */
   providerId: string
   /** 覆盖 provider.model；空/缺省则用 provider 自带模型 */
+  model?: string
+}
+
+/**
+ * 某一批正文临时使用的 provider。
+ * 只作用于这次生成，不写回 featureRouting，也不改其他窗口。
+ */
+export interface ChapterModelRoute {
+  providerId: string
   model?: string
 }
 
@@ -170,6 +185,8 @@ export interface ProjectData {
   defaultStyleProfileId?: string
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
+  /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
+  ideaDevelopment?: string
   targetChapters?: number
   chapterWordCount?: number
   status?: string
@@ -223,6 +240,8 @@ export interface CreateProjectDataInput {
   genre?: string
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
+  /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
+  ideaDevelopment?: string
   targetChapters?: number
   chapterWordCount?: number
   customPath?: string
@@ -472,7 +491,7 @@ export type StreamHandle = StreamHandleOf<{ ok: boolean; error?: string }>
 
 /** 正文生成与交稿前自动精修共用同一个可取消请求。 */
 export type AgyGenerationStatus = 'queued' | 'waiting' | 'streaming' | 'retrying'
-export type ChapterGenerationStage = 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}` | `continuity:${string}`
+export type ChapterGenerationStage = 'preparing' | `preparing:${string}` | 'waiting' | 'generating' | `agy:${AgyGenerationStatus}` | 'deslop' | `deslop:${string}` | 'foreshadowRepair' | `foreshadow:${string}` | `continuity:${string}`
 export interface PostWriteProgress {
   stage: 'outline' | 'generate' | 'review' | 'verify' | 'dialogue' | 'finalCheck' | 'selfCheck' | 'extract' | 'deepReview' | 'evidence' | 'plantEvidence' | 'writeMemory' | 'writeSettings' | 'summary'
   round?: number
@@ -489,6 +508,8 @@ export interface AutoForeshadowRepairResult {
 export interface DialogueQualityReport {
   /** 未通过的候选稿，仅供继续修订与核对；不得当成通过正文自动采用。 */
   pendingDraft?: string
+  /** 独立场景审核的原始问题，供跨轮复核；不混入事实差异。 */
+  sceneIssues?: string[]
   passed: boolean
   beforeRatio: number
   afterRatio: number
@@ -522,13 +543,19 @@ export interface SavedChapterPolishResult {
  */
 export interface ChapterStreamResult {
   ok: boolean
+  /** 最终正文实际落盘后的回执；表达待修订也可保存，不表示验收通过。 */
+  saved?: ChapterContent
   error?: string
-  /** 重写已完成但后续核对失败的整章稿，仅供复核；不得自动同步记忆。 */
+  /** 续写或重写已生成但后续处理失败的完整整章稿，仅供复核；不得自动同步记忆。 */
   retainedContent?: string
+  /** 通过自动复核的大范围候选，必须由作者对照后决定是否采用。 */
+  repairCandidate?: { original: string; candidate: string; scope: 'scene' | 'structure' }
   /** 自动精修后的最终新生成片段，不含续写前已有正文。 */
   content?: string
   /** 伏笔可能补入已有正文中段；有此字段时直接采用整章，不再拼接旧稿。 */
   fullContent?: string
+  /** 交稿核对查出长篇冲突已由 AI 自动修复并复核通过；fullContent 为修复后整章。 */
+  conflictRepaired?: boolean
   foreshadowRepair?: AutoForeshadowRepairResult
   autoDeslop?: AutoDeslopResult
   continueMode?: 'extend' | 'finish'
@@ -565,9 +592,16 @@ export interface MobileServerStatus {
 }
 
 export interface RendererApi {
+  refineChapter(input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void): StreamHandleOf<RefinementResult>
+  loadRefinement(projectId: string, chapterNumber: number): Promise<RefinementCandidate | null>
+  recordRefinementDetection(projectId: string, chapterNumber: number, id: string, testedContent: string, result: { status: 'green' | 'flagged'; score?: number; note: string }): Promise<RefinementCandidate>
+  discardRefinement(projectId: string, chapterNumber: number, id: string): Promise<void>
+  rejectRefinementHunk(projectId: string, chapterNumber: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate>
+  commitRefinement(projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit>
   getAppUpdateState(): Promise<AppUpdateState>
   checkAppUpdate(): Promise<AppUpdateState>
   downloadAppUpdate(): Promise<AppUpdateState>
+  restartAppUpdate(): Promise<AppUpdateState>
   setAppUpdateAutoCheck(enabled: boolean): Promise<AppUpdateState>
   onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
   listShortStories(): Promise<ShortStorySummary[]>
@@ -583,6 +617,7 @@ export interface RendererApi {
   exportShortStory(id: string): Promise<{ canceled: boolean; path?: string }>
   openShortStoryDirectory(id: string): Promise<{ ok: boolean }>
   listProjects: (query?: ListProjectsQuery) => Promise<ProjectMeta[]>
+  openProjectDirectory: (projectId: string) => Promise<void>
   /** 归档/移回书案。归档不删文件，只从书案列表隐藏。 */
   setProjectArchived: (projectId: string, archived: boolean) => Promise<ProjectMeta>
   getMobileServerStatus: () => Promise<MobileServerStatus>
@@ -605,12 +640,15 @@ export interface RendererApi {
   exportProjectPackage: (projectId: string) => Promise<{ canceled: boolean; path?: string }>
   /** 从小说包恢复一本小说到桌面版书架。用户取消选择文件时 canceled 为 true。 */
   importProjectPackage: () => Promise<{ canceled: boolean; project?: ProjectMeta }>
+  previewProseImport: (request: ProseImportRequest) => Promise<ProseImportPreview | null>
+  commitProseImport: (token: string, name: string) => Promise<ProseImportResult>
+  cancelProseImport: () => Promise<void>
   createProject: (input: CreateProjectDataInput) => Promise<ProjectMeta>
   getProject: (projectId: string) => Promise<ProjectData>
-  /** 更新小说名称和简介；不改项目目录，避免破坏工作区路径。 */
+  /** 更新小说名称或简介；修改名称时同步项目文件夹。 */
   updateProjectInfo: (
     projectId: string,
-    info: { name: string; description?: string }
+    info: { name?: string; description?: string }
   ) => Promise<ProjectData>
   /** 设置项目的对标书列表（拆文库中的书名，写作时召回方法论） */
   setBenchmarkBooks: (projectId: string, books: string[]) => Promise<string[]>
@@ -656,7 +694,7 @@ export interface RendererApi {
     projectId: string,
     chapterNumber: number
   ) => Promise<{ content: string; at: number; different: boolean } | null>
-  discardDraft: (projectId: string, chapterNumber: number) => Promise<boolean>
+  discardDraft: (projectId: string, chapterNumber: number, expectedContent?: string) => Promise<boolean>
   /** P19-E：字数汇总（节奏图谱 + 章节进度笔记） */
   getChapterWordSummary: (projectId: string) => Promise<{
     chapters: Array<{
@@ -818,10 +856,11 @@ export interface RendererApi {
   ) => Promise<DetailedOutlineItem[]>
   getRhythm: (projectId: string) => Promise<RhythmEntry[]>
   getVolumes: (projectId: string) => Promise<Volume[]>
-  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；用户取消保存对话框时 canceled=true */
+  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；onlyUnexported 只导出未导出过的章节（从未导出或导出后正文又改过）；用户取消保存对话框时 canceled=true */
   exportChapters: (
     projectId: string,
-    volumeNumber?: number
+    volumeNumber?: number,
+    onlyUnexported?: boolean
   ) => Promise<{ canceled: boolean; path?: string }>
   getOutlineSections: (projectId: string) => Promise<{ h1Title: string; sections: { title: string; body: string }[] }>
   getVolumeOutlines: (projectId: string) => Promise<VolumeOutline[]>
@@ -841,8 +880,11 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void,
     onGenerationStage?: (stage: ChapterGenerationStage) => void,
     /** 按本章节奏临时调整本次续写的生成强度。 */
-    autoStrength?: boolean
+    autoStrength?: boolean,
+    /** 只修复并核对已保存稿，不生成续写。 */
+    repairOnly?: boolean
   ) => ChapterStreamHandle
+  getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterStreamResult['repairCandidate'] | null>
   /** 按要求重写 · 先出修改建议（不改正文） */
   planAdjustChapterStream: (
     projectId: string,
@@ -902,12 +944,22 @@ export interface RendererApi {
     onToken: (token: string, done: boolean) => void
   ) => StreamHandle
   /** 记忆提取（流式）：从正文提取新增角色/地点/情节/伏笔/状态变化 */
+  syncChapterWorkflow: (projectId: string, chapterNumber: number, content: string,
+    options: Omit<ChapterSyncOptions, 'requestId'>, onStep: (step: ChapterSyncStep) => void) => StreamHandleOf<ChapterSyncResult>
+  getChapterSyncContext: (projectId: string, chapterNumber: number, content: string) => Promise<string | null>
   extractMemoryStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string,
+    reuse?: boolean
   ) => StreamHandle
   /** 记忆应用（自动部分）：状态变化 + 情节追加 + 伏笔回收 */
+  autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, requestId?: string) => Promise<
+    { status: 'unresolved'; reason: string } | { status: 'candidate'; token: string; target: 'prose' | 'outline'; content: string; reason: string }>
+  commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) => Promise<void>
+  autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: OutlineDiffReport, requestId?: string) => Promise<number[]>
+  autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) => Promise<{ memory: MemoryApplyResult; settings: SettingsApplyResult; extraction: MemoryExtraction }>
   applyMemory: (projectId: string, extraction: MemoryExtraction) => Promise<MemoryApplyResult>
   invalidateChapterMemorySync: (projectId: string, chapterNumber: number) => Promise<void>
   /**
@@ -1031,7 +1083,8 @@ export interface RendererApi {
   evaluateRhythmStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string
   ) => StreamHandle
   /** 节奏回填：把评估值写回节奏图谱.html */
   applyRhythmEvaluation: (
@@ -1042,7 +1095,8 @@ export interface RendererApi {
   generateFigureStream: (
     projectId: string,
     chapterNumber: number,
-    onToken: (token: string, done: boolean) => void
+    onToken: (token: string, done: boolean) => void,
+    content?: string
   ) => StreamHandle
   /** 保存图解 HTML 到 图解/ 目录 */
   saveFigure: (
@@ -1074,7 +1128,9 @@ export interface RendererApi {
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
     onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
     onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+    /** 本窗口这一批正文使用的模型；不写全局路由 */
+    chapterRoute?: ChapterModelRoute
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 仅精修已保存正文，不重新生成剧情；最多 100 章，可用 requestId 停止。 */
   polishChaptersBatch: (
@@ -1086,6 +1142,24 @@ export interface RendererApi {
     onProgress?: (chapter: number, step: string) => void,
     requestId?: string
   ) => Promise<{ ok: boolean; results?: SavedChapterPolishResult[]; error?: string }>
+  /** 批次隔离与单章待核对的章节清单（含正文是否还在），供「补跑待核对章节」入口展示。 */
+  listQuarantinedChapters: (projectId: string) => Promise<
+    Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
+  >
+  /** 删稿重写：清空该章正文、概要与章节剧情点并解除全部隔离，回到待生成状态。 */
+  dropQuarantinedChapter: (projectId: string, chapter: number) => Promise<{ ok: boolean }>
+  /** 批次恢复记录丢失后的兜底：复用已保存正文逐章补跑完整检查与自动修复，解除隔离。 */
+  repairQuarantinedChapters: (
+    projectId: string,
+    onProgress?: (chapter: number, message: string) => void,
+    requestId?: string
+  ) => Promise<{
+    ok: boolean
+    repaired: number[]
+    cleared: number[]
+    failures: Array<{ chapter: number; error: string }>
+    error?: string
+  }>
   /** 继续批量续写：从 fromChapter+1 开始继续 */
   resumeBatch: (
     projectId: string,
@@ -1104,7 +1178,9 @@ export interface RendererApi {
     /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
     onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
     onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+    onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+    /** 本窗口这一批正文使用的模型；不写全局路由 */
+    chapterRoute?: ChapterModelRoute
   ) => Promise<{ ok: boolean; progress?: BatchProgress; error?: string }>
   /** 列出还没完全落地的记忆候选（整章待核对 / 个别条目被挡下） */
   listMemoryCandidates: (projectId: string) => Promise<MemoryCandidateSummary[]>
@@ -1163,6 +1239,8 @@ export interface RendererApi {
   setSettingsEvolution: (mode: SettingsEvolutionMode) => Promise<SettingsEvolutionMode>
   /** 续写完成后自动同步记忆与设定（默认 true；派生自 autoPostWritePipeline !== off） */
   getAutoMemorySync: () => Promise<boolean>
+  getChapterCompletionNotification: () => Promise<boolean>
+  setChapterCompletionNotification: (enabled: boolean) => Promise<boolean>
   setAutoMemorySync: (enabled: boolean) => Promise<boolean>
   /**
    * 续写成功后自动后处理：
@@ -1860,6 +1938,8 @@ export type AuditCategory =
   | 'llm_review'
 
 export interface AuditViolation {
+  /** Only version-bound, locatable facts may enter automatic story repair. */
+  evidence?: { sourceRevision: string; reference: string; scope: 'chapter' | 'history' }
   category: AuditCategory
   severity: AuditSeverity
   /** 用户可读的简短描述（如"章末未以对话或事件结尾"） */
@@ -2258,6 +2338,8 @@ export type OutlineDiffPatch = Partial<
 >
 
 export interface OutlineDiffItem {
+  /** 明确违反本章禁区、提前揭示或抢写后章；不得自动回写细纲消除。 */
+  boundaryViolation?: boolean
   /** 1=漏写 2=超纲增量 3=细节调整 4=核心事件改 5=结构性偏离 */
   type: OutlineDiffType
   typeLabel: '漏写' | '超纲增量' | '细节调整' | '核心事件改' | '结构性偏离'
@@ -2349,6 +2431,11 @@ export interface MemoryExtraction {
    * field 推荐：伤势/情绪/位置/当前状态/身份/性格/能力/境界/外貌/关系/持有物
    */
   characterStateChanges: { name: string; field: string; oldValue: string; newValue: string; evidence?: string }[]
+  /**
+   * 既有物品的归属/状态变化（自动写入 追踪/物品.md，生成与长篇核对共用）。
+   * field 推荐：材质外观/持有者/所在位置/状态（在手/封存/耗损/耗尽/易主/销毁）
+   */
+  itemStateChanges?: { name: string; field: string; oldValue: string; newValue: string; evidence?: string }[]
   /** 伏笔回收（自动更新） */
   collectedForeshadowings: { content: string; chapter: number; evidence?: string; foreshadowingId?: string }[]
   /**
@@ -2608,7 +2695,7 @@ export interface MemoryCandidateSummary {
 
 /** 记忆候选里的单个条目（复核界面逐条勾选用） */
 export interface MemoryCandidateItem {
-  kind: 'plotPoint' | 'stateChange' | 'foreshadowCollect' | 'settingsPatch'
+  kind: 'plotPoint' | 'stateChange' | 'itemStateChange' | 'foreshadowCollect' | 'settingsPatch'
   /** 在 extraction 对应数组里的下标，与 kind 一起定位条目（仅本次提取内有效） */
   index: number
   /** 内容派生的稳定标识，跨重跑仍指向同一条 */

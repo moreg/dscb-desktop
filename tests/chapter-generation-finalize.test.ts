@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { chapterReviewFailureMessage, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage } from '../src/renderer/src/chapter-generation-finalize'
+import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from '../src/renderer/src/chapter-generation-finalize'
+
+describe('失败后的重试方向', () => {
+  it.each(['LONGFORM_CONFLICT: 冲突', 'LONGFORM_REVIEW_INCOMPLETE: 核对超时', 'CHAPTER_REPAIR_BUDGET: 剧情纠错耗尽'])('%s 只修复当前稿', error => {
+    expect(shouldRepairChapterOnRetry({ ok: false, error }, '已保存的正文。')).toBe(true)
+    expect(shouldRepairChapterOnRetry({ ok: false, error }, '')).toBe(false)
+  })
+  it('完整稿的后处理超时走补检，真正的生成中断继续续写', () => {
+    expect(shouldRepairChapterOnRetry({ ok: false, error: 'LLM_TIMEOUT', retainedContent: '完整稿。' }, '完整稿。')).toBe(true)
+    expect(shouldRepairChapterOnRetry({ ok: false, error: 'LLM_TIMEOUT' }, '半稿。')).toBe(false)
+    expect(shouldRepairChapterOnRetry({ ok: true }, '完整稿。')).toBe(false)
+  })
+})
 
 describe('重写后检查失败', () => {
   it('保留后端确认完整的稿件，未完成生成仍退回原稿', () => {
@@ -16,8 +28,23 @@ describe('重写后检查失败', () => {
 })
 
 describe('中断续写保留草稿', () => {
+  it.each(['LONGFORM_REVIEW_INCOMPLETE: 缺少可定位的新稿与对照依据', 'LONGFORM_CONFLICT: 冲突', 'CHAPTER_REPAIR_BUDGET'])('%s 保留完整精修稿，不重复拼接前文', error => {
+    expect(failedChapterContinuationDraft('原有前文。', '流式原稿。', {
+      ok: false, error, retainedContent: '原有前文。\n\n完整精修稿。'
+    })).toBe('原有前文。\n\n完整精修稿。')
+    expect(failedChapterContinuationDraft('', '流式原稿。', {
+      ok: false, error, retainedContent: '完整精修稿。'
+    })).toBe('完整精修稿。')
+  })
+  it('旧后端未附完整稿时，核对失败仍保留小说预览而不是清空', () => {
+    const error = 'LONGFORM_REVIEW_INCOMPLETE: 缺少可定位的新稿与对照依据'
+    expect(failedChapterContinuationDraft('', '他把门推开，屋内空无一人。', { ok: false, error }))
+      .toBe('他把门推开，屋内空无一人。')
+    expect(interruptedChapterRetryMessage(error, true)).toContain('正文已保留')
+    expect(failedChapterContinuationDraft('原稿。', '', { ok: false, error })).toBe('原稿。')
+  })
   it.each(['LLM_TIMEOUT', 'LLM_ABORTED', 'LLM_OUTPUT_TRUNCATED'])('%s 保留已有正文和新增正文', error => {
-    expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n“你来了”')
+    expect(interruptedChapterDraft('他推开门。', '“你来了。”', error)).toBe('他推开门。\n\n“你来了。”')
   })
   it.each(['LLM_TIMEOUT', 'LLM_OUTPUT_TRUNCATED'])('%s 没有收到新正文时保留原稿', error => {
     expect(interruptedChapterDraft('原稿。', '', error)).toBe('原稿。')
@@ -47,7 +74,7 @@ describe('正文重写最终稿覆盖流式预览', () => {
   it('正文显示与写后检查收到同一份格式化最终稿', () => {
     let editorDraft = '流式原稿'
     const finalText = finalizeChapterRewrite('林 舟 推 开 门。\n\n他 没 有 回 头。', (text) => { editorDraft = text })
-    expect(editorDraft).toBe('林舟推开门。\n他没有回头。')
+    expect(editorDraft).toBe('林舟推开门。\n\n他没有回头。')
     expect(finalText).toBe(editorDraft)
   })
 })
@@ -58,7 +85,7 @@ describe('续写先采用补写稿再同步记忆', () => {
     const result = finalizeChapterContinuation('已有正文。', '预览', {
       ok: true, content: raw, ...(full ? { fullContent: '已有正文。' + raw } : {})
     })
-    expect(result.content).toBe('已有正文。\n“先签字”\n“别等了！”\n他转身。\n门关了。')
+    expect(result.content).toBe('已有正文。' + (full ? '' : '\n\n') + raw)
   })
 
   it('采用补入已有正文中段的整章，前文只出现一次', () => {
@@ -73,12 +100,22 @@ describe('续写先采用补写稿再同步记忆', () => {
     expect(finalizeChapterContinuation('已有正文。', '预览', {
       ok: true, content: '新增正文。\n【本章伏笔回执】{"planted":[],"collected":[]}',
       foreshadowRepair: { status: 'unchanged', message: '无遗漏' }
-    })).toEqual({ content: '已有正文。\n新增正文。', canSyncMemory: true })
+    })).toEqual({ content: '已有正文。\n\n新增正文。', canSyncMemory: true })
   })
 
   it('补写失败保留生成稿，同时禁止启动自动记忆同步', () => {
     expect(finalizeChapterContinuation('已有正文。', '预览', {
       ok: true, content: '新正文。', foreshadowRepair: { status: 'failed', message: '未通过' }
-    })).toEqual({ content: '已有正文。\n新正文。', canSyncMemory: false })
+    })).toEqual({ content: '已有正文。\n\n新正文。', canSyncMemory: false })
   })
+})
+
+it('只有成功且与最终正文、章号一致的实际保存回执，才能标记已保存', async () => {
+  const { savedChapterContinuation } = await import('../src/renderer/src/chapter-generation-finalize')
+  const saved = { content: '最终正文。', meta: { chapterNumber: 1 } } as import('../src/shared/types').ChapterContent
+  expect(savedChapterContinuation({ ok: true, saved }, '最终正文。', 1)).toBe(saved)
+  expect(savedChapterContinuation({ ok: true, saved }, '作者又改了正文。', 1)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: true, saved }, '最终正文。', 2)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: false, saved }, '最终正文。', 1)).toBeUndefined()
+  expect(savedChapterContinuation({ ok: true }, '最终正文。', 1)).toBeUndefined()
 })

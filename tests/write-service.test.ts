@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -278,7 +279,7 @@ describe('WriteService', () => {
   it('generateChapterStream calls llm with assembled prompt', async () => {
     await new OutlineRepository(await ps.resolveDir(projectId)).upsertDetailed({ chapterNumber: 1, plotSummary: '林远进门核对账册' })
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+    const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     const full = await service.generateChapterStream(projectId, 1)
     expect(full).toBe('生成的正文')
     expect(llm.generateStream).toHaveBeenCalled()
@@ -297,7 +298,7 @@ describe('WriteService', () => {
       '</script>'
     ].join('\n'), 'utf-8')
     const llm = mockLlm('生成的正文')
-    const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+    const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
     await service.generateChapterStream(projectId, 1, { autoStrength: true })
     expect(llm.generateStream).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       strengthOverride: { temperature: 1.0, reasoningEffort: 'high' }
@@ -641,10 +642,15 @@ describe('WriteService', () => {
       expect(progress.completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
       expect(completed).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
       expect(spy).toHaveBeenCalledTimes(10)
+      // 流程完成但没有表达验收报告时保持草稿；未写章节仍是待写。
+      const { ChapterService } = await import('../src/main/data/chapter-service')
+      const chapterService = new ChapterService(ps)
+      expect((await chapterService.getChapter(projectId, 3)).meta.status).toBe('draft')
+      expect((await chapterService.getChapter(projectId, 11)).meta.status).toBe('outline')
       spy.mockRestore()
     })
 
-    it.each(['P0', 'omission', 'core', 'structure'])('autoContinue rewrites the outline from prose on outline issue %s and keeps writing', async (issue) => {
+    it.each(['P0', 'omission', 'core', 'structure'])('autoContinue blocks required omissions and only rebases acceptable differences (%s)', async (issue) => {
       const dir = await ps.resolveDir(projectId)
       const { mkdir, writeFile, readFile } = await import('fs/promises')
       await mkdir(path.join(dir, '细纲'), { recursive: true })
@@ -660,7 +666,7 @@ describe('WriteService', () => {
         prompt.includes('细纲联动校准器')
           ? JSON.stringify([2, 3, 4].map((ch) => ({ chapterNumber: ch, patch: { plotSummary: `承接正文${ch}` } })))
           : JSON.stringify({ patch: { plotSummary: '按正文重写的事件', title: '擅自改名' } }))
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -670,6 +676,14 @@ describe('WriteService', () => {
         return result
       })
       const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+      if (issue === 'P0' || issue === 'omission') {
+        expect(progress.status).toBe('paused')
+        expect(progress.pendingPostProcessChapter).toBe(1)
+        expect(progress.pauseReason).toContain('必需剧情漏写')
+        expect(await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')).toContain('原细纲事件1')
+        expect(await new ProseRepo(dir).read(2)).toBe('')
+        return
+      }
       expect(progress.status).toBe('completed')
       expect(progress.completed).toEqual([1, 2])
       const first = await readFile(path.join(dir, '细纲', '细纲_第001章_测试章1.md'), 'utf-8')
@@ -746,7 +760,7 @@ describe('WriteService', () => {
         )
       }
 
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, withPassingLongformGuard(mockLlm('')))
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章扩写正文`)
         result.outlineDiff = {
@@ -805,7 +819,7 @@ describe('WriteService', () => {
         reason: '承接上一章新结果',
         patch: { plotSummary: `承接改写后的核心事件${ch}` }
       }))))
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         if (ch === 1) {
@@ -852,7 +866,7 @@ describe('WriteService', () => {
         '# 细纲_第001章_测试章1.md\n\n## 第 1 章：测试章1\n\n- **核心事件**：原细纲事件\n',
         'utf-8'
       )
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, withPassingLongformGuard(mockLlm('')))
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
         result.outlineDiff = {
@@ -1017,6 +1031,25 @@ describe('WriteService', () => {
       })
       // 第 3 章：情绪 5、爽点 1，不满足前两条 -> 默认档
       expect(spy.mock.calls[2][3]).toMatchObject({
+        strengthOverride: { temperature: 0.8, reasoningEffort: 'medium' }
+      })
+      spy.mockRestore()
+    })
+
+    it('chapterRoute 只作为这一批正文的 providerOverride，不改强度计算', async () => {
+      const service = new WriteService(ps, mockLlm(''))
+      const spy = vi
+        .spyOn(service, 'runFullFlowForChapter')
+        .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
+      const chapterRoute = { providerId: 'p_gemini', model: 'gemini-2.5-pro' }
+
+      await service.generateChaptersBatch(
+        projectId, 1, 1, () => {}, null, {}, undefined,
+        { autoStrength: true, chapterRoute }
+      )
+
+      expect(spy.mock.calls[0][3]).toMatchObject({
+        providerOverride: chapterRoute,
         strengthOverride: { temperature: 0.8, reasoningEffort: 'medium' }
       })
       spy.mockRestore()
@@ -1390,7 +1423,7 @@ describe('WriteService', () => {
      */
     it('passes generated content to all flow steps (not reloaded from disk)', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '这是步骤1生成的正文内容，尚未落盘。'
 
       // 创建细纲文件（DetailedOutlineMdRepo 读 细纲/第NN卷.md）
@@ -1431,7 +1464,7 @@ describe('WriteService', () => {
         1,
         expect.any(Array),   // knownCharacters
         expect.any(Object),
-      expect.any(Array)
+      expect.any(Array), expect.any(Object)
       )
       // 批量流程不跑节奏评估/图解（结果既不回写也不落盘）
       expect(rhythmSpy).not.toHaveBeenCalled()
@@ -1477,7 +1510,7 @@ describe('WriteService', () => {
 
     it('isolates errors: one flow step failure does not abort others', async () => {
       const llm = mockLlm('')
-      const service = new WriteService(ps, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+      const service = new WriteService(ps, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
       const knownContent = '正文内容'
 
       // 必须真有细纲，否则对照步骤根本不会被调用，"抛错也不影响其他步骤"就成了空跑
@@ -1549,7 +1582,7 @@ describe('WriteService', () => {
       await service.runFullFlowForChapter(projectId, 1, (step) => steps.push(step))
 
       // 对照/提取/深审并行成一步；自动提交在审稿之后，提取时不改全书状态。
-      expect(steps).toEqual([
+      expect(steps.filter(step => !step.startsWith('deslop'))).toEqual([
         'generating',
         'audit',
         'postChecks',

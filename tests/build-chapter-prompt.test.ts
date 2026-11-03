@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, writeFile } from 'fs/promises'
@@ -46,6 +47,19 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(out.system).toContain('章末结尾硬性原则')
     expect(out.system).toContain('禁用高频词')
     expect(out.system).toContain('顺序铁律')
+  })
+
+  it('番茄首章从零生成不再追加寄存语指令，任何平台与章号都直接进入故事', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const configFile = path.join(dir, '设定', '平台配置.md')
+    const service = new WriteService(ps, mockLlm('正文'))
+    await writeFile(configFile, '# 平台配置\n- 平台：番茄\n')
+    for (const existing of [undefined, '已有开场。']) {
+      const out = await service.buildChapterPrompt(projectId, 1, undefined, undefined, existing)
+      expect(out.user).not.toContain('寄存语')
+      expect(out.user).not.toContain('脑子寄存处')
+    }
+    expect((await service.buildChapterPrompt(projectId, 2)).user).not.toContain('寄存语')
   })
 
   it('system prompt voice matches genre', async () => {
@@ -274,14 +288,14 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
   it('模型忽略排版要求且自动润色未启用时，生成返回稿与保存稿仍执行技能排版', async () => {
     await writeFile(path.join(await ps.resolveDir(projectId), '设定', '平台配置.md'), '# 平台配置\n- 平台：番茄\n')
     const raw = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
-    const expected = '林远推开门。\n屋里没人。\n“先签字”\n“还等什么？”\n“快点！”'
+    const expected = '林远推开门。屋里没人。\n“先签字。还等什么？快点！”'
     const llm = mockLlm(raw)
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     expect(await service.generateChapterStream(projectId, 1)).toBe(expected)
     expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain(expected)
     const sent = vi.mocked(llm.generateStream).mock.calls[0][1]?.systemPrompt ?? ''
-    expect(sent).toContain('【正文排版要求')
-    expect(sent).toContain('整章对话占比目标 70%')
+    expect(sent).toContain('【正文保真共享规则')
+    expect(sent).toContain('不设强制比例')
     expect(sent).toContain('说话方式服从人设')
     expect(sent).toContain('已生效的新增利益')
     expect(sent).not.toContain('不设对话占比目标')
@@ -291,7 +305,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     const generateStream = vi.fn().mockResolvedValue('正文')
     const llm = { generateStream } as unknown as LlmService
 
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     const onAutoDeslopResult = vi.fn()
     await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe('正文')
     expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({
@@ -324,7 +338,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
 
     await new ProseRepo(dir).write(1, '师父带林远走到山门外，让他在此等候。')
     vi.spyOn(WriteFlowService.prototype, 'extractEndingState').mockResolvedValue({ chapterNumber: 1, characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
-    const service = new WriteService(ps, llm)
+    const service = new WriteService(ps, withPassingLongformGuard(llm))
     await expect(service.generateChapterStream(projectId, 2)).resolves.toBe('正文')
 
     const opts = vi.mocked(llm.generateStream).mock.calls.find(call => call[1]?.meta?.feature === 'chapter')![1]!
@@ -369,8 +383,8 @@ describe('buildChapterPrompt with structured prev ending state (Phase 12 Task 1)
     expect(user).toContain('深夜')
     expect(user).toContain('门外脚步声')
     expect(user).toContain('师父留下的玉佩')
-    expect(user).toContain('本章必须回应')
-    expect(user).toContain('本章必须处理')
+    expect(user).toContain('按本章细纲回应或延续')
+    expect(user).toContain('仅作为承接线索；按本章细纲安排处理')
   })
 
   it('omits structured state section when prevTail is empty', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyForeshadowingInsertions, missingForeshadowings, repairMissingForeshadowings as runRepairMissingForeshadowings } from '../src/main/data/foreshadowing-repair'
+import { applyForeshadowingInsertions, ForeshadowingRepairRejectedError, missingForeshadowings, repairMissingForeshadowings as runRepairMissingForeshadowings } from '../src/main/data/foreshadowing-repair'
 import type { OutlineDiffReport } from '../src/shared/types'
 
 const prose = '林远把账册交给守门人。\n守门人翻开封皮，核对了印章。\n门内忽然传来父亲的声音。'
@@ -17,6 +17,64 @@ const repairMissingForeshadowings = (input: Parameters<typeof runRepairMissingFo
   runRepairMissingForeshadowings(input, { verify: async () => {}, ...dependencies })
 
 describe('automatic foreshadowing repair', () => {
+  it.each(['joint', 'separate'])('rebuilds rejected additions from the verified draft with evidence feedback (%s)', async mode => {
+    const bad = '他想起刚才父亲已经承认自己就是三皇子。'
+    const rejection = new ForeshadowingRepairRejectedError([{ message: '虚构此前谈话并提前揭底', evidence: bad }])
+    const generate = vi.fn().mockResolvedValueOnce(patch(bad)).mockResolvedValueOnce(patch())
+    const check = vi.fn().mockResolvedValue(report(false))
+    const verify = vi.fn().mockRejectedValueOnce(rejection).mockResolvedValue(undefined)
+    const review = vi.fn().mockRejectedValueOnce(rejection).mockResolvedValue(report(false))
+    const result = await repairMissingForeshadowings(input(), {
+      generate, check, verify, ...(mode === 'joint' ? { review } : {})
+    })
+    expect(generate).toHaveBeenCalledTimes(2)
+    const retryPrompt = generate.mock.calls[1][0] as string
+    expect(retryPrompt).toContain(rejection.issues[0].message)
+    expect(retryPrompt).toContain(bad)
+    expect(retryPrompt.split('当前完整正文（编号只用于定位）')[1]).not.toContain(bad)
+    expect(retryPrompt).toContain('FB-001')
+    expect(result.content).toContain(addition)
+    expect(result.content).not.toContain(bad)
+    expect(mode === 'joint' ? review : verify).toHaveBeenLastCalledWith(prose, result.content, [addition])
+  })
+
+  it('does not re-review an unchanged rejected candidate to obtain a different verdict', async () => {
+    const rejection = new ForeshadowingRepairRejectedError([{ message: '提前揭底', evidence: addition }])
+    const generate = vi.fn().mockResolvedValue(patch())
+    const review = vi.fn().mockRejectedValueOnce(rejection).mockResolvedValue(report(false))
+    await expect(repairMissingForeshadowings(input(), { generate, check: vi.fn(), review })).rejects.toBe(rejection)
+    expect(generate).toHaveBeenCalledTimes(2)
+    expect(review).toHaveBeenCalledOnce()
+  })
+
+  it('stops after two rejected candidates and preserves the final failure', async () => {
+    const first = new ForeshadowingRepairRejectedError([{ message: '虚构对话', evidence: addition }])
+    const last = new ForeshadowingRepairRejectedError([{ message: '错置时序', evidence: '他回到宿舍。' }])
+    const generate = vi.fn().mockResolvedValueOnce(patch()).mockResolvedValueOnce(patch('他回到宿舍。'))
+    const review = vi.fn().mockRejectedValueOnce(first).mockRejectedValueOnce(last)
+    await expect(repairMissingForeshadowings(input(), { generate, check: vi.fn(), review })).rejects.toBe(last)
+    expect(generate).toHaveBeenCalledTimes(2)
+    expect(review).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not regenerate when review is unavailable or cancelled', async () => {
+    const generate = vi.fn().mockResolvedValue(patch())
+    const unavailable = new Error('伏笔补写专项核验缺少新增正文证据')
+    await expect(repairMissingForeshadowings(input(), {
+      generate, check: vi.fn(), review: vi.fn().mockRejectedValue(unavailable)
+    })).rejects.toBe(unavailable)
+    expect(generate).toHaveBeenCalledOnce()
+    generate.mockClear()
+    const controller = new AbortController()
+    await expect(repairMissingForeshadowings({ ...input(), signal: controller.signal }, {
+      generate, check: vi.fn(), review: async () => {
+        controller.abort()
+        throw new ForeshadowingRepairRejectedError([{ message: '提前揭底', evidence: addition }])
+      }
+    })).rejects.toThrow('LLM_ABORTED')
+    expect(generate).toHaveBeenCalledOnce()
+  })
+
   it('联合复核不重复调用原来的两次检查，并报告轮次和实际阶段', async () => {
     const onProgress = vi.fn()
     const check = vi.fn()

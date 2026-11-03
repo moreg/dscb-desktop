@@ -643,7 +643,7 @@ describe('LlmService feature routing', () => {
     fetchSpy.mockRestore()
   })
 
-  it('category aggregates multiple features (chapter-adjust -> chapter routing)', async () => {
+  it.each(['chapter-adjust','chapter-scene-repair'])('routes %s through the configured chapter provider', async (feature) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-agg-'))
     const s = new SecretStore(path.join(dir, 'providers.enc'))
     await s.write({
@@ -660,9 +660,63 @@ describe('LlmService feature routing', () => {
       body: sseBody(['data: [DONE]\n\n'])
     } as never)
     // chapter-adjust 归入 chapter 大类
-    await svc.generateStream('hi', { meta: { feature: 'chapter-adjust' } })
+    await svc.generateStream('hi', { meta: { feature } })
     const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://chapter.example.com/v1/chat/completions')
+    fetchSpy.mockRestore()
+  })
+
+  it.each(['chapter-refine', 'chapter-refine-plan', 'chapter-refine-repair', 'chapter-refine-verify'])(
+    'routes %s through the configured refine provider, not chapter or review',
+    async (feature) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-refine-'))
+      const s = new SecretStore(path.join(dir, 'providers.enc'))
+      await s.write({
+        activeId: 'p_active',
+        providers: [
+          { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+          { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' },
+          { id: 'p_review', label: 'review', baseUrl: 'https://review.example.com/v1', model: 'review-model', apiKey: 'k3' },
+          { id: 'p_refine', label: 'refine', baseUrl: 'https://refine.example.com/v1', model: 'refine-model', apiKey: 'k4' }
+        ],
+        featureRouting: {
+          chapter: { providerId: 'p_chapter' },
+          review: { providerId: 'p_review' },
+          refine: { providerId: 'p_refine', model: 'refine-override' }
+        }
+      })
+      const svc = new LlmService(s)
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        body: sseBody(['data: [DONE]\n\n'])
+      } as never)
+      await svc.generateStream('hi', { meta: { feature } })
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe('https://refine.example.com/v1/chat/completions')
+      expect(JSON.parse(init.body as string).model).toBe('refine-override')
+      fetchSpy.mockRestore()
+    }
+  )
+
+  it('falls back to activeId for refine when the slot is empty, even if chapter is routed', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-refine-empty-'))
+    const s = new SecretStore(path.join(dir, 'providers.enc'))
+    await s.write({
+      activeId: 'p_active',
+      providers: [
+        { id: 'p_active', label: 'active', baseUrl: 'https://active.example.com/v1', model: 'active-model', apiKey: 'k1' },
+        { id: 'p_chapter', label: 'chapter', baseUrl: 'https://chapter.example.com/v1', model: 'chapter-model', apiKey: 'k2' }
+      ],
+      featureRouting: { chapter: { providerId: 'p_chapter' } }
+    })
+    const svc = new LlmService(s)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: sseBody(['data: [DONE]\n\n'])
+    } as never)
+    await svc.generateStream('hi', { meta: { feature: 'chapter-refine' } })
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://active.example.com/v1/chat/completions')
     fetchSpy.mockRestore()
   })
 
@@ -760,6 +814,58 @@ describe('LlmService feature routing', () => {
       'https://codex.example.com/v1/chat/completions'
     )
 
+    fetchSpy.mockRestore()
+  })
+})
+
+describe('LlmService providerOverride：单次调用换正文模型，不改路由', () => {
+  it('指定 provider 和模型时走该通道，功能路由与另一调用保持原样', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-llm-route-'))
+    const store = new SecretStore(path.join(dir, 'providers.enc'))
+    const gpt = {
+      ...sampleProvider,
+      id: 'p_gpt',
+      label: 'GPT',
+      baseUrl: 'https://gpt.example.com/v1',
+      model: 'gpt-6.1',
+      apiKey: 'sk-gpt'
+    }
+    const gemini = {
+      ...sampleProvider,
+      id: 'p_gemini',
+      label: 'Gemini',
+      baseUrl: 'https://gemini.example.com/v1',
+      model: 'gemini-2.5-pro',
+      apiKey: 'sk-gemini'
+    }
+    await store.write({
+      activeId: gpt.id,
+      providers: [gpt, gemini],
+      featureRouting: { chapter: { providerId: gpt.id, model: 'gpt-6.1' } }
+    })
+    const svc = new LlmService(store)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      body: sseBody(['data: {"choices":[{"delta":{"content":"字"}}]}\n\n', 'data: [DONE]\n\n'])
+    }) as never)
+
+    await svc.generateStream('本章', {
+      meta: { feature: 'chapter' },
+      providerOverride: { providerId: 'p_gemini', model: 'gemini-2.5-flash' }
+    })
+    await svc.generateStream('审稿', { meta: { feature: 'review' }, providerOverride: { providerId: 'p_missing' } })
+    await svc.generateStream('下一章', { meta: { feature: 'chapter' } })
+
+    const bodies = fetchSpy.mock.calls.map((call) => {
+      const [url, init] = call as [string, RequestInit]
+      return { url, model: JSON.parse(init.body as string).model as string }
+    })
+    expect(bodies[0]).toEqual({ url: 'https://gemini.example.com/v1/chat/completions', model: 'gemini-2.5-flash' })
+    expect(bodies[1]).toEqual({ url: 'https://gpt.example.com/v1/chat/completions', model: 'gpt-6.1' })
+    expect(bodies[2]).toEqual({ url: 'https://gpt.example.com/v1/chat/completions', model: 'gpt-6.1' })
+    const saved = await store.read()
+    expect(saved.featureRouting?.chapter).toEqual({ providerId: 'p_gpt', model: 'gpt-6.1' })
+    expect(saved.providers.find((item) => item.id === 'p_gemini')?.model).toBe('gemini-2.5-pro')
     fetchSpy.mockRestore()
   })
 })

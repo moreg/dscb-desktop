@@ -1,6 +1,7 @@
+import { chapterRequest } from './chapter-request'
 import { ipcMain, BrowserWindow } from 'electron'
 import { WriteService } from '../data/write-service'
-import { ChapterRewriteReviewError } from '../data/chapter-rewrite-review-error'
+import { ChapterWriteReviewError, ChapterRepairReviewRequiredError } from '../data/chapter-rewrite-review-error'
 import { abortStream, beginStream, endStream } from '../data/stream-abort-registry'
 import { activeBatchProjects } from '../data/write-batch-lock'
 import { safeHandle, safeSend } from './safe-handle'
@@ -19,12 +20,27 @@ import {
   batchWriteInputSchema
 } from './validation'
 import { z } from 'zod'
-import { formatChapterProse, joinContinuation } from '../../shared/format-chapter-prose'
-import { postWriteProgressLabel } from '../../shared/generation-progress'
 
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
-export function registerWriteIpc(service: WriteService): void {
+export type ChapterCompletedNotifier = (chapter: number, window: BrowserWindow | null, signal: AbortSignal) => Promise<void>
+export function registerWriteIpc(service: WriteService, onChapterCompleted?: ChapterCompletedNotifier): void {
+  safeHandle('write:syncChapterWorkflow', async (event, payload: unknown) => {
+    const value = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
+      content: chapterContentSchema, requestId: z.string().uuid(), force: z.boolean().optional(),
+      skipMemory: z.boolean().optional(), extras: z.boolean().optional() }), payload)
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return chapterRequest(event, value.requestId, signal => service.syncChapterWorkflow(value.projectId, value.chapterNumber,
+      value.content, value, signal, step => safeSend(win, 'write:syncStep', { requestId: value.requestId, step })))
+  })
+  safeHandle('write:getChapterRepairProposal', async (_event, raw: unknown) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema, content: chapterContentSchema }), raw)
+    return service.getChapterRepairProposal(input.projectId, input.chapterNumber, input.content)
+  })
+  safeHandle('write:syncContext', async (_event, raw: unknown) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema, content: chapterContentSchema }), raw)
+    return service.getChapterSyncContext(input.projectId, input.chapterNumber, input.content)
+  })
   safeHandle(
     'write:auditChapter',
     async (_e, payload: { projectId: string; content: string }) => {
@@ -110,10 +126,12 @@ export function registerWriteIpc(service: WriteService): void {
         tempContext?: string
         existingText?: string
         autoStrength?: boolean
+        repairOnly?: boolean
         requestId: string
       }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
+      let retainedContent: string | undefined
       try {
         const validated = validateInput(
           z.object({
@@ -123,75 +141,32 @@ export function registerWriteIpc(service: WriteService): void {
             tempContext: z.string().optional(),
             existingText: z.string().optional(),
             autoStrength: z.boolean().optional(),
+            repairOnly: z.boolean().optional(),
             requestId: z.string().min(1)
           }),
           payload
         )
-        const signal = beginStream(validated.requestId)
-        try {
-          // 续写模式由 prompt 组装阶段算出（依赖细纲字数预估），回传给前端用于
-          // 写后自检降级：extend 说明这一章还没写完，完成度类项不该判死。
-          let continueMode: 'extend' | 'finish' | undefined
-          let wordBudget:
-            | { targetWords: number; chapterTargetWords: number; writtenWords: number; fromOutline: boolean; bound?: 'min' | 'about' }
-            | undefined
-          let autoDeslop: AutoDeslopResult | undefined
-          const content = await service.generateChapterStream(
-            validated.projectId,
-            validated.chapterNumber,
-            validated.styleProfileId,
-            {
-              tempContext: validated.tempContext,
-              existingText: validated.existingText,
-              autoStrength: validated.autoStrength === true,
-              signal,
-              onGenerationStage: (stage) =>
-                safeSend(win, 'write:generationStage', {
-                  requestId: validated.requestId,
-                  stage
-                }),
-              onAutoDeslopResult: (result) => { autoDeslop = result },
-              onPromptMeta: (meta) => {
-                continueMode = meta.continueMode
-                wordBudget = {
-                  targetWords: meta.targetWords,
-                  chapterTargetWords: meta.chapterTargetWords,
-                  writtenWords: meta.writtenWords,
-                  fromOutline: meta.fromOutline,
-                  bound: meta.bound
-                }
-              },
-              onToken: (token) =>
-                safeSend(win, 'llm:token', {
-                  requestId: validated.requestId,
-                  token,
-                  done: false
-                })
-            }
-          )
-          const repaired = await service.repairChapterForeshadowings(
-            validated.projectId,
-            validated.chapterNumber,
-            formatChapterProse(joinContinuation(validated.existingText ?? '', content)),
-            {
-              signal, partialChapter: continueMode === 'extend', tempContext: validated.tempContext,
-              onStart: () => safeSend(win, 'write:generationStage', {
-                requestId: validated.requestId, stage: 'foreshadowRepair'
-              }),
-              onProgress: progress => safeSend(win, 'write:generationStage', {
-                requestId: validated.requestId, stage: `foreshadow:${postWriteProgressLabel(progress)}`
-              })
-            }
-          )
+        return await chapterRequest(e, validated.requestId, async signal => {
+          const result = await service.deliverChapter(validated.projectId, validated.chapterNumber, validated.styleProfileId, {
+            tempContext: validated.tempContext, existingText: validated.existingText,
+            autoStrength: validated.autoStrength === true, repairOnly: validated.repairOnly === true, signal,
+            onGenerationStage: stage => safeSend(win, 'write:generationStage', { requestId: validated.requestId, stage }),
+            onToken: token => safeSend(win, 'llm:token', { requestId: validated.requestId, token, done: false })
+          })
+          if (result.ok && !validated.repairOnly && ['applied', 'unchanged'].includes(result.foreshadowRepair?.status ?? '') && !signal.aborted) {
+            try { await onChapterCompleted?.(validated.chapterNumber, win, signal) }
+            catch { console.warn('[chapter-notification] 通知失败，续写结果不受影响') }
+          }
           safeSend(win, 'llm:token', { requestId: validated.requestId, token: '', done: true })
-          return { ok: true, content, autoDeslop, continueMode, wordBudget,
-            foreshadowRepair: repaired.report,
-            ...(repaired.report.status === 'applied' ? { fullContent: repaired.content } : {}) }
-        } finally {
-          endStream(validated.requestId)
-        }
+          return result
+        })
       } catch (err) {
-        return { ok: false, error: (err as Error).message }
+        if (err instanceof ChapterWriteReviewError) retainedContent = err.retainedContent
+        const review = err instanceof ChapterRepairReviewRequiredError ? err :
+          err instanceof Error && err.cause instanceof ChapterRepairReviewRequiredError ? err.cause : undefined
+        return { ok: false, error: (err as Error).message,
+          ...(review ? { repairCandidate: { original: review.original, candidate: review.candidate, scope: review.scope } } : {}),
+          ...(retainedContent?.trim() ? { retainedContent } : {}) }
       }
     }
   )
@@ -312,7 +287,7 @@ export function registerWriteIpc(service: WriteService): void {
           endStream(validated.requestId)
         }
       } catch (err) {
-        if (err instanceof ChapterRewriteReviewError) {
+        if (err instanceof ChapterWriteReviewError) {
           return { ok: false, error: err.message, retainedContent: err.retainedContent }
         }
         return { ok: false, error: (err as Error).message }
@@ -514,21 +489,22 @@ export function registerWriteIpc(service: WriteService): void {
     'write:extractMemory',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string; reuse?: boolean }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.extractMemoryStream(payload.projectId, payload.chapterNumber, {
-            signal,
+            signal, reuseMemory: payload.reuse === undefined ? false : validateInput(z.boolean(), payload.reuse),
             onToken: (token) =>
               safeSend(win, 'llm:token', {
                 requestId: payload.requestId,
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }
@@ -539,6 +515,19 @@ export function registerWriteIpc(service: WriteService): void {
       }
     }
   )
+
+  safeHandle('write:commitOutlineLocalRepair', async (_e, payload: { projectId: string; chapterNumber: number; token: string }) => {
+    return service.commitOutlineLocalRepair(payload.projectId, payload.chapterNumber, payload.token)
+  })
+  safeHandle('write:autoRepairOutlineDifference', async (e, payload: { projectId: string; chapterNumber: number; content: string; report: import('../../shared/types').OutlineDiffReport; requestId?: string }) => {
+    return chapterRequest(e, payload.requestId, signal => service.autoRepairOutlineDifference(payload.projectId, payload.chapterNumber, payload.content, payload.report, signal))
+  })
+  safeHandle('write:autoResolveOutlineDiffs', async (_e, payload: { projectId: string; chapterNumber: number; content: string; report: import('../../shared/types').OutlineDiffReport }) => {
+    return service.autoResolveOutlineDiffs(payload.projectId, payload.chapterNumber, payload.content, payload.report)
+  })
+  safeHandle('write:autoApplyExtractedMemory', async (_e, payload: { projectId: string; chapterNumber: number; content: string; extraction: MemoryExtraction }) => {
+    return service.autoApplyExtractedMemory(payload.projectId, payload.chapterNumber, payload.content, payload.extraction)
+  })
 
   safeHandle(
     'write:applyMemory',
@@ -572,16 +561,16 @@ export function registerWriteIpc(service: WriteService): void {
         payload
       )
       const win = BrowserWindow.fromWebContents(e.sender)
-      return service.syncChapterAfterWrite(
+      return chapterRequest(e, validated.requestId, signal => service.syncChapterAfterWrite(
         validated.projectId,
         validated.chapterNumber,
         validated.content,
         // force：用户手动补跑，忽略 autoMemorySync / pipeline=off
-        { skipIfDisabled: validated.force !== true, tempContext: validated.tempContext,
+        { signal, skipIfDisabled: validated.force !== true, tempContext: validated.tempContext,
           onProgress: validated.requestId ? progress => safeSend(win, 'write:postWriteProgress', {
             requestId: validated.requestId, progress
           }) : undefined }
-      )
+      ))
     }
   )
 
@@ -592,11 +581,11 @@ export function registerWriteIpc(service: WriteService): void {
       content: chapterContentSchema, partialChapter: z.boolean().optional(), tempContext: z.string().max(10000).optional(),
       requestId: z.string().min(1).max(100).optional() }), payload)
     const win = BrowserWindow.fromWebContents(e.sender)
-    return service.repairChapterForeshadowings(input.projectId, input.chapterNumber, input.content,
-      { partialChapter: input.partialChapter, tempContext: input.tempContext,
+    return chapterRequest(e, input.requestId, signal => service.repairChapterForeshadowings(input.projectId, input.chapterNumber, input.content,
+      { signal, partialChapter: input.partialChapter, tempContext: input.tempContext,
         onProgress: input.requestId ? progress => safeSend(win, 'write:postWriteProgress', {
           requestId: input.requestId, progress
-        }) : undefined })
+        }) : undefined }))
   })
 
   safeHandle('write:getChapterSummary', async (_e, payload: { projectId: string; chapterNumber: number; content: string }) => {
@@ -890,10 +879,11 @@ export function registerWriteIpc(service: WriteService): void {
     'write:evaluateRhythm',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.evaluateRhythmStream(payload.projectId, payload.chapterNumber, {
@@ -904,7 +894,7 @@ export function registerWriteIpc(service: WriteService): void {
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }
@@ -927,10 +917,11 @@ export function registerWriteIpc(service: WriteService): void {
     'write:generateFigure',
     async (
       e,
-      payload: { projectId: string; chapterNumber: number; requestId: string }
+      payload: { projectId: string; chapterNumber: number; requestId: string; content?: string }
     ) => {
       const win = BrowserWindow.fromWebContents(e.sender)
       try {
+        const content = payload.content === undefined ? undefined : validateInput(chapterContentSchema, payload.content)
         const signal = beginStream(payload.requestId)
         try {
           await service.generateFigureStream(payload.projectId, payload.chapterNumber, {
@@ -941,7 +932,7 @@ export function registerWriteIpc(service: WriteService): void {
                 token,
                 done: false
               })
-          })
+          }, content)
         } finally {
           endStream(payload.requestId)
         }
@@ -1037,6 +1028,62 @@ export function registerWriteIpc(service: WriteService): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  safeHandle(
+    'write:listQuarantinedChapters',
+    async (_e, payload: { projectId: string }) => {
+      const validated = validateInput(z.object({ projectId: projectIdSchema }), payload)
+      return service.listQuarantinedChapters(validated.projectId)
+    }
+  )
+  safeHandle(
+    'write:dropQuarantinedChapter',
+    async (_e, payload: { projectId: string; chapter: number }) => {
+      const validated = validateInput(z.object({ projectId: projectIdSchema, chapter: chapterNumberSchema }), payload)
+      await service.dropQuarantinedChapter(validated.projectId, validated.chapter)
+      return { ok: true }
+    }
+  )
+  ipcMain.handle('write:repairQuarantinedChapters', async (e, payload: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    try {
+      const validated = validateInput(z.object({
+        projectId: projectIdSchema,
+        requestId: z.string().min(1).max(255)
+      }), payload)
+      if (activeBatchProjects.has(validated.projectId)) {
+        throw new Error('BATCH_ALREADY_RUNNING: 该项目正在批量写作，请等待当前任务结束')
+      }
+      activeBatchProjects.add(validated.projectId)
+      try {
+        const signal = beginStream(validated.requestId)
+        const abortBatch = () => { abortStream(validated.requestId) }
+        e.sender.once('destroyed', abortBatch)
+        try {
+          if (e.sender.isDestroyed()) abortBatch()
+          return await service.repairQuarantinedChapters(
+            validated.projectId,
+            (chapter, result) => safeSend(win, 'write:batchChapterComplete', {
+              requestId: validated.requestId, chapter, result
+            }),
+            {
+              signal,
+              onRepairProgress: (message, chapterNumber) =>
+                safeSend(win, 'write:quarantineRepairProgress', {
+                  requestId: validated.requestId, chapter: chapterNumber, stage: message
+                })
+            }
+          )
+        } finally {
+          e.sender.removeListener('destroyed', abortBatch)
+          endStream(validated.requestId)
+        }
+      } finally {
+        activeBatchProjects.delete(validated.projectId)
+      }
+    } catch (err) {
+      return { ok: false, repaired: [], cleared: [], failures: [], error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   for (const channel of ['write:generateBatch', 'write:resumeBatch'] as const) {
     ipcMain.handle(channel, async (e, payload: unknown) => {
       const win = BrowserWindow.fromWebContents(e.sender)
@@ -1096,7 +1143,17 @@ export function registerWriteIpc(service: WriteService): void {
               validated.batchState,
               {
                 autoContinue: validated.autoContinue === true,
-                autoStrength: validated.autoStrength === true
+                autoStrength: validated.autoStrength === true,
+                ...(validated.chapterRoute
+                  ? {
+                      chapterRoute: {
+                        providerId: validated.chapterRoute.providerId,
+                        ...(validated.chapterRoute.model?.trim()
+                          ? { model: validated.chapterRoute.model.trim() }
+                          : {})
+                      }
+                    }
+                  : {})
               },
               (chapter, attempt, maxAttempts, waitMs) =>
                 safeSend(win, 'write:batchRetryWait', {

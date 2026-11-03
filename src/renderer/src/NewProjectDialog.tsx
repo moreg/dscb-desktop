@@ -11,6 +11,7 @@ export interface NewProjectDraft {
   description: string
   targetChapters?: number
   openingChapters?: FanqieIdeaOpeningChapter[]
+  ideaDevelopment?: string
 }
 interface Props {
   initialDraft?: NewProjectDraft
@@ -75,7 +76,8 @@ export default function NewProjectDialog({ initialDraft, brainstormRecoveryKey, 
         description: description.trim() || undefined,
         targetChapters: chapterCount,
         customPath: customPath.trim() || undefined,
-        openingChapters: initialDraft?.openingChapters
+        openingChapters: initialDraft?.openingChapters,
+        ideaDevelopment: initialDraft?.ideaDevelopment
       })
       const copied = !brainstormRecoveryKey || copyLongStoryBrainstormRecovery(brainstormRecoveryKey, `project:${project.id}`)
       if (mountedRef.current) onCreated(project, copied ? '' : '项目已创建。脑洞记录仍保留在脑洞栏目中。')

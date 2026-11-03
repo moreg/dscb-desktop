@@ -73,3 +73,12 @@
   margin: 10px 0 0;
   color: var(--danger, #a83828);
 }
+
+.dscb-mobile .web-gate {
+  position: fixed;
+  inset: var(--web-viewport-top, 0px) 0 auto;
+  height: var(--web-viewport-height, 100dvh);
+  min-height: 0;
+  overflow-y: auto;
+}
+.dscb-mobile .web-gate-card { max-width: 100%; margin-block: auto; }

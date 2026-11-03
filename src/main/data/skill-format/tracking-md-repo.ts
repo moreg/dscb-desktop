@@ -11,6 +11,10 @@ export interface TrackingContext {
   characterStates: CharacterStateSnapshot[]
   /** 状态变更记录（来自「状态变更记录」表，截到 chapterNumber 及之前） */
   stateChanges: StateChangeRecord[]
+  /** 物品状态快照（来自 追踪/物品.md 的「当前状态」表） */
+  itemStates: ItemStateSnapshot[]
+  /** 物品变更记录（来自 追踪/物品.md，截到 chapterNumber 及之前） */
+  itemStateChanges: ItemStateChangeRecord[]
   /** 时间线文字（来自 追踪/时间线.md 的「历史事件与小说事件对照表」节 body） */
   timeline: string
   /** 日更进度摘要（来自 追踪/上下文.md，取最后 RECENT_PROGRESS_LIMIT 条） */
@@ -45,6 +49,26 @@ export interface StateChangeRecord {
   change: string
 }
 
+export interface ItemStateSnapshot {
+  name: string
+  /** 材质、颜色、形制等外观属性（防材质漂移的关键列） */
+  material: string
+  /** 当前持有者 */
+  holder: string
+  /** 所在位置/封存处 */
+  location: string
+  /** 在手/封存/耗损/耗尽/易主/销毁等 */
+  status: string
+  /** 更新章节号 */
+  updateChapter: number
+}
+
+export interface ItemStateChangeRecord {
+  chapter: number
+  name: string
+  change: string
+}
+
 export interface ProgressEntry {
   date: string
   chapter: string
@@ -71,15 +95,16 @@ export class TrackingMdRepo {
 
   async read(chapterNumber: number): Promise<TrackingContext | null> {
     const dir = join(this.projectDir, '追踪')
-    const [statesText, timelineText, progressText, issuesText] = await Promise.all([
+    const [statesText, itemsText, timelineText, progressText, issuesText] = await Promise.all([
       readText(join(dir, '角色状态.md')),
+      readText(join(dir, '物品.md')),
       readText(join(dir, '时间线.md')),
       readText(join(dir, '上下文.md')),
       readText(join(dir, '问题记录.md'))
     ])
 
-    // 4 个文件全空 -> 视为追踪目录不存在
-    if (!statesText && !timelineText && !progressText && !issuesText) return null
+    // 文件全空 -> 视为追踪目录不存在
+    if (!statesText && !itemsText && !timelineText && !progressText && !issuesText) return null
 
     const rawTimeline = timelineText ? filterTimelineBefore(extractTimelineTable(timelineText), chapterNumber) : ''
     // 开书骨架只有表头、无「第 N 章」数据行时视为空，避免续写 prompt 注入空表噪音
@@ -88,6 +113,8 @@ export class TrackingMdRepo {
     const result: TrackingContext = {
       characterStates: statesText ? parseCharacterStatesAt(statesText, chapterNumber) : [],
       stateChanges: statesText ? parseStateChanges(statesText, chapterNumber) : [],
+      itemStates: itemsText ? parseItemStatesAt(itemsText, chapterNumber) : [],
+      itemStateChanges: itemsText ? parseItemStateChanges(itemsText, chapterNumber) : [],
       timeline,
       recentProgress: progressText ? parseProgress(progressText, chapterNumber) : [],
       openIssues: issuesText ? parseIssues(issuesText) : []
@@ -97,12 +124,26 @@ export class TrackingMdRepo {
     const hasContent =
       result.characterStates.length > 0 ||
       result.stateChanges.length > 0 ||
+      result.itemStates.length > 0 ||
+      result.itemStateChanges.length > 0 ||
       result.timeline.trim() !== '' ||
       result.recentProgress.length > 0 ||
       result.openIssues.length > 0
     if (!hasContent) return null
 
     return result
+  }
+
+  /**
+   * 只读物品追踪表（长篇核对对照材料专用），不加载其余追踪文件。
+   * 返回 null 表示 追踪/物品.md 不存在或全空。
+   */
+  async readItemTracking(chapterNumber: number): Promise<{ states: ItemStateSnapshot[]; changes: ItemStateChangeRecord[] } | null> {
+    const text = await readText(join(this.projectDir, '追踪', '物品.md'))
+    if (!text) return null
+    const states = parseItemStatesAt(text, chapterNumber)
+    const changes = parseItemStateChanges(text, chapterNumber)
+    return states.length || changes.length ? { states, changes } : null
   }
 
   /**
@@ -113,18 +154,21 @@ export class TrackingMdRepo {
    */
   async readForDisplay(): Promise<TrackingDisplayData | null> {
     const dir = join(this.projectDir, '追踪')
-    const [statesText, timelineText, progressText, issuesText] = await Promise.all([
+    const [statesText, itemsText, timelineText, progressText, issuesText] = await Promise.all([
       readText(join(dir, '角色状态.md')),
+      readText(join(dir, '物品.md')),
       readText(join(dir, '时间线.md')),
       readText(join(dir, '上下文.md')),
       readText(join(dir, '问题记录.md'))
     ])
 
-    if (!statesText && !timelineText && !progressText && !issuesText) return null
+    if (!statesText && !itemsText && !timelineText && !progressText && !issuesText) return null
 
     return {
       characterStates: statesText ? parseCharacterStatesAt(statesText, Infinity, true) : [],
       stateChanges: statesText ? parseAllStateChanges(statesText) : [],
+      itemStates: itemsText ? parseItemStatesAt(itemsText, Infinity, true) : [],
+      itemStateChanges: itemsText ? parseAllItemStateChanges(itemsText) : [],
       timeline: timelineText ? extractTimelineTable(timelineText) : '',
       recentProgress: progressText ? parseAllProgress(progressText) : [],
       openIssues: issuesText ? parseIssues(issuesText) : [],
@@ -140,6 +184,8 @@ export class TrackingMdRepo {
 export interface TrackingDisplayData {
   characterStates: CharacterStateSnapshot[]
   stateChanges: StateChangeRecord[]
+  itemStates: ItemStateSnapshot[]
+  itemStateChanges: ItemStateChangeRecord[]
   timeline: string
   recentProgress: ProgressEntry[]
   openIssues: IssueRecord[]
@@ -361,6 +407,83 @@ function parseChapterNum(text: string): number | undefined {
  */
 function cell(row: string[], i: number): string {
   return i >= 0 && i < row.length ? row[i].trim() : ''
+}
+
+/**
+ * 解析物品状态快照（追踪/物品.md）。
+ * 与角色状态同结构：自动历史快照的表按章过滤，人工编辑的失效块不参与生成。
+ * 表头：物品 | 材质外观 | 当前持有者 | 所在位置 | 状态 | 更新章节
+ */
+export function parseItemStatesAt(text: string, chapterNumber: number, includeInvalidated = false): ItemStateSnapshot[] {
+  const doc = parseDoc(includeInvalidated ? text : excludeInvalidatedStateHistory(text))
+  const sections = [{ title: '', body: doc.body.split(/^##\s+/m)[0] }, ...doc.sections.filter((s) =>
+    /当前状态|历史快照|历史状态/.test(s.title))]
+  const byName = new Map<string, ItemStateSnapshot>()
+  for (const sec of sections) {
+    const sectionChapter = latestChapterMention(sec.title) ?? 0
+    for (const row of parseItemStateTable(sec.body)) {
+      const candidate = { ...row, updateChapter: row.updateChapter || sectionChapter }
+      if (candidate.updateChapter > chapterNumber) continue
+      const previous = byName.get(candidate.name)
+      if (!previous || candidate.updateChapter >= previous.updateChapter) byName.set(candidate.name, candidate)
+    }
+  }
+  return [...byName.values()]
+}
+
+function parseItemStateTable(body: string): ItemStateSnapshot[] {
+  const { headers, rows } = parseTable(body)
+  if (headers.length < 2) return []
+  const idx = {
+    name: headers.findIndex((h) => h.includes('物品') || h.includes('道具') || h.includes('名称')),
+    material: headers.findIndex((h) => h.includes('材质') || h.includes('外观')),
+    holder: headers.findIndex((h) => h.includes('持有') || h.includes('归属')),
+    location: headers.findIndex((h) => h.includes('所在') || h.includes('位置') || h.includes('封存')),
+    status: headers.findIndex((h) => h.includes('状态')),
+    updateCh: headers.findIndex((h) => (h.includes('更新') && h.includes('章节')) || h.includes('状态章') || (h.includes('章节') && h.includes('更新')))
+  }
+  if (idx.name < 0) return []
+  const result: ItemStateSnapshot[] = []
+  for (const row of rows) {
+    const name = cell(row, idx.name).replace(/\*\*/g, '').trim()
+    if (!name || name === '-' || name === headers[idx.name] || /^第\s*\d+\s*章/.test(name)) continue
+    const material = cell(row, idx.material)
+    const holder = cell(row, idx.holder)
+    const location = cell(row, idx.location)
+    const status = cell(row, idx.status)
+    if (!material && !holder && !location && !status) continue
+    result.push({
+      name,
+      material, holder, location, status,
+      updateChapter: latestChapterMention(cell(row, idx.updateCh)) ?? parseChapterNum(cell(row, idx.updateCh)) ?? 0
+    })
+  }
+  return result
+}
+
+/** 解析物品「状态变更记录」表（章节 | 物品 | 变更内容），过滤章号 <= chapterNumber。 */
+export function parseItemStateChanges(text: string, chapterNumber: number): ItemStateChangeRecord[] {
+  return parseAllItemStateChanges(excludeInvalidatedStateHistory(text)).filter((s) => s.chapter <= chapterNumber)
+}
+
+function parseAllItemStateChanges(text: string): ItemStateChangeRecord[] {
+  const doc = parseDoc(text)
+  const result: ItemStateChangeRecord[] = []
+  for (const sec of doc.sections.filter((s) => s.title.includes('状态变更') || s.title.includes('变更记录'))) {
+    const { headers, rows } = parseTable(sec.body)
+    if (headers.length < 3) continue
+    const idxCh = headers.findIndex((h) => h.includes('章节'))
+    const idxName = headers.findIndex((h) => h.includes('物品') || h.includes('道具'))
+    const idxChange = headers.findIndex((h) => h.includes('变更'))
+    for (const row of rows) {
+      const ch = parseChapterNum(cell(row, idxCh))
+      if (ch == null) continue
+      const name = cell(row, idxName)
+      const change = cell(row, idxChange)
+      if (name) result.push({ chapter: ch, name, change })
+    }
+  }
+  return result.sort((a, b) => a.chapter - b.chapter)
 }
 
 /**

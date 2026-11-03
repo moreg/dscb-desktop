@@ -1,5 +1,7 @@
+import { featureCategoryOf } from '../../shared/agent-tasks'
+import { trackChapterCall, recordChapterRetry, recordChapterRoute } from './chapter-execution'
 import type { SecretStore } from './secret-store'
-import type { ProviderConfig, FeatureCategory, PingResult, ReasoningEffort } from '../../shared/types'
+import type { ProviderConfig, PingResult, ReasoningEffort, ChapterModelRoute } from '../../shared/types'
 import type { UsageRepository } from './usage-repository'
 import { runAntigravity, probeAntigravity, listAntigravityModelsLive } from './antigravity-runner'
 import { buildAntigravityPrompt } from './antigravity-prompt'
@@ -65,6 +67,14 @@ export interface GenerateOptions {
    * grok 忽略覆盖值。所有覆盖都不修改持久化的 provider 配置。
    */
   strengthOverride?: { temperature?: number; reasoningEffort?: ReasoningEffort }
+
+  /**
+   * 单次调用改用另一个已保存的 provider / 模型。
+   * 合并进当次请求，不写 featureRouting，也不改 provider 自身配置。
+   * 调用方只应加在正文生成上；审稿、去 AI 味和后处理仍走各自路由。
+   * provider 已删除时回退到原来的功能路由。
+   */
+  providerOverride?: ChapterModelRoute
 }
 
 export interface UsageInfo {
@@ -143,74 +153,8 @@ function usageRecordBase(
 const CLI_PROSE_ONLY_PREAMBLE =
   '【硬性约束】只输出成品文本。禁止调用技能、工具或 slash 命令。禁止输出流程说明、自检旁白、技能名（含 story-long-write 等）。\n\n'
 
-/**
- * feature 标识 -> 功能大类 映射。
- * 用于按任务类型路由到不同 provider（见 resolveProvider）。
- * 匹配规则：先精确命中，未命中再按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）。
- * 前缀仍未列出的 feature（如 'other'）无对应大类 -> 回退 activeId。
- *
- * 续写流程面板中的 AI 后处理统一归入 auxiliary：细纲对照、记忆提取、
- * 写后自动同步、节奏评估和图解生成始终使用同一 provider/模型。
- */
-const FEATURE_TO_CATEGORY: Record<string, FeatureCategory> = {
-  // 正文生成
-  chapter: 'chapter',
-  'chapter-adjust': 'chapter',
-  batchForeshadowRepair: 'chapter',
-  continuityRepair: 'chapter',
-  chapterForeshadowRepair: 'chapter',
-  // 按要求重写 · 先出方案（与改写同属正文类）
-  'chapter-adjust-plan': 'chapter',
-  // 审稿质检
-  review: 'review',
-  'deslop:scene-dialogue-review': 'review',
-  deepReview: 'review',
-  batchDeepReview: 'review',
-  foreshadowRepairVerify: 'review',
-  continuityRepairVerify: 'review',
-  foreshadowPlantEvidence: 'review',
-  // 去AI味改写
-  humanize: 'humanize',
-  deslop: 'humanize',
-  // 开局大纲
-  opening: 'opening',
-  'outline-generate': 'opening',
-  batchOutline: 'opening',
-  cast: 'opening',
-  relationship: 'opening',
-  styleExtract: 'opening',
-  // ChapterEditor 正文区 AI 起名：章名风格与大纲一致，复用 opening 路由
-  'chapter-name': 'opening',
-  // 续写后处理（面板内所有 AI 步骤统一使用一个模型）+ 其它辅助提取
-  endingState: 'auxiliary',
-  outlineCheck: 'auxiliary',
-  memoryExtract: 'auxiliary',
-  autoMemorySync: 'auxiliary',
-  chapterSummary: 'auxiliary',
-  longformGuard: 'auxiliary',
-  rhythmEval: 'auxiliary',
-  figureGen: 'auxiliary',
-  batchMemory: 'auxiliary',
-  batchRhythm: 'auxiliary',
-  batchFigure: 'auxiliary',
-  teardown: 'auxiliary',
-  scan: 'auxiliary',
-  // 番茄分类榜的市场分析和榜单脑洞
-  fanqieChart: 'auxiliary',
-  // 封面提示词提炼：读大纲/人物卡/正文，属分析类，与其它辅助提取同一 provider
-  coverPrompt: 'auxiliary',
-  // 番茄书测起书名：读大纲/简介出多套测试书名，不出图
-  'book-test': 'auxiliary',
-  // 学习库：本地扫描封面后，由 LLM 汇总补充规则
-  coverLearn: 'library',
-  ask: 'ask'
-}
-
-/** 解析 feature 所属功能大类；未映射返回 undefined（调用方回退 activeId）。导出供单测。 */
-export function featureCategoryOf(feature?: string): FeatureCategory | undefined {
-  if (!feature) return undefined
-  return FEATURE_TO_CATEGORY[feature] ?? FEATURE_TO_CATEGORY[feature.split(':')[0]]
-}
+/** All model tasks use the same role/route contract in single, batch and recovery flows. */
+export { featureCategoryOf } from '../../shared/agent-tasks'
 
 /**
  * 默认单次生成上限（token）。
@@ -236,10 +180,23 @@ const LLM_STREAM_TIMEOUT_MS = 120_000
  * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
  */
 const LONG_TIMEOUT_FEATURES = new Set([
+  // Structured ending extraction can still be streaming after two minutes.
+  // Do not discard that work and restart the whole prewriting task.
+  'endingState',
   'continuityRepair',
   'continuityRepairVerify',
+  'outlineLocalRepair',
+  'outlineLocalRepairVerify',
+  'outlineSyncDecision',
+  'outlineSyncVerify',
+  'outlineConflictDecision',
+  'outlineConflictVerify',
   'chapter',
   'chapter-adjust',
+  'chapter-refine',
+  'chapter-refine-plan',
+  'chapter-refine-repair',
+  'chapter-refine-verify',
   'chapter-adjust-plan',
   // 重写/续写交稿前核对整章与长期记忆，不能按 3000 输出 token 当成短请求。
   'longformGuard',
@@ -349,11 +306,18 @@ export class LlmService {
    * 回退条件：无 feature / feature 未映射 / 路由未配置 / 路由指向的 provider 已删除 -> activeId
    * 模型覆盖：routing.model 非空时覆盖 provider.model，返回新对象（下游无感知）。
    */
-  private async resolveProvider(feature?: string): Promise<ProviderConfig | null> {
+  private async resolveProvider(feature?: string, override?: ChapterModelRoute): Promise<ProviderConfig | null> {
     const cfg = await this.secret.read()
+    if (override?.providerId) {
+      const picked = cfg.providers.find((x) => x.id === override.providerId)
+      if (picked) {
+        const modelOverride = override.model?.trim()
+        return modelOverride ? { ...picked, model: modelOverride } : picked
+      }
+    }
     // 精确匹配优先；未命中时按 ':' 前缀归一化（如 deslop:cleanup:1 -> deslop -> humanize）
     const category = featureCategoryOf(feature)
-    const routing = category ? cfg.featureRouting?.[category] : undefined
+    const routing = category ? cfg.featureRouting?.[category] ?? (category === 'refineReview' ? cfg.featureRouting?.refine : undefined) : undefined
     const routed = routing ? cfg.providers.find((x) => x.id === routing.providerId) : undefined
     if (routed) {
       const modelOverride = routing!.model?.trim()
@@ -364,6 +328,11 @@ export class LlmService {
 
   /** Opaque in-process cache identity; never exposes provider credentials or endpoint details. */
   /** Routing identity for an in-flight operation only; not a persistent CLI cache identity. */
+  async getRoutingIdentity(feature?: string): Promise<string | null> {
+    const provider = await this.resolveProvider(feature)
+    return provider ? createHash('sha256').update(JSON.stringify(provider)).digest('hex') : null
+  }
+
   async getOperationIdentity(feature?: string): Promise<string | null> {
     const provider = await this.resolveProvider(feature)
     if (!provider?.model.trim() || /^(?:default|auto)$/i.test(provider.model.trim())) return null
@@ -489,9 +458,13 @@ export class LlmService {
   }
 
   async generateStream(prompt: string, opts: GenerateOptions = {}): Promise<string> {
+    return trackChapterCall(opts.meta?.feature, () => this.generateStreamUntracked(prompt, opts))
+  }
+
+  private async generateStreamUntracked(prompt: string, opts: GenerateOptions): Promise<string> {
     // 调用前已取消：立刻退出，避免再开一轮 CLI/HTTP
     if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
-    const resolved = await this.resolveProvider(opts.meta?.feature)
+    const resolved = await this.resolveProvider(opts.meta?.feature, opts.providerOverride)
     if (!resolved) throw new Error('LLM_NOT_CONFIGURED')
     /**
      * strengthOverride 只在这次调用里生效，合并出一份临时对象，不写回 resolveProvider
@@ -509,6 +482,7 @@ export class LlmService {
             : {})
         }
       : resolved
+    recordChapterRoute(createHash('sha256').update(JSON.stringify([p.id, p.model, protocolOf(p), p.temperature, p.reasoningEffort])).digest('hex'))
     const proto = protocolOf(p)
     const images = opts.images ?? []
     validateVisionImages(images)
@@ -565,6 +539,7 @@ export class LlmService {
           if (res.status === 401 || res.status === 403) throw new Error('LLM_AUTH_FAILED')
           if (res.status === 429) throw new Error('LLM_RATE_LIMIT')
           if (res.status >= 500 && attempt < MAX_RETRIES && !hasReceivedTokens) {
+            recordChapterRetry()
             console.warn(`[llm-service] Server error ${res.status}, retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
             await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
             continue
@@ -609,6 +584,7 @@ export class LlmService {
           })
         }
         if (!hasReceivedTokens && isRetryableStreamError(err) && attempt < MAX_RETRIES) {
+          recordChapterRetry()
           console.warn(`[llm-service] Stream error (${(err as Error).message}), retrying in ${RETRY_DELAYS_MS[attempt]}ms...`)
           await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
           continue
@@ -701,6 +677,7 @@ export class LlmService {
 
     const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runCodex(merged, {
+      isolatedTextTask: opts.meta?.feature === 'longformGuard' || opts.meta?.feature === 'endingState',
       model: p.model && p.model !== 'default' ? p.model : undefined,
       reasoningEffort: opts.strengthOverride?.reasoningEffort,
       timeoutSec: Math.ceil(timeoutMs / 1000),

@@ -1,3 +1,6 @@
+import type { ChapterSyncOptions, ChapterSyncResult, ChapterSyncStep } from '../shared/chapter-workflow'
+import type { RefinementInput, RefinementCandidate, RefinementResult, RefinementStage, RefinementCommit } from '../shared/chapter-refinement'
+import type { ProseImportRequest, ProseImportPreview, ProseImportResult } from '../shared/prose-import'
 import type { AppUpdateState } from '../shared/app-update'
 import type { LongStoryBrainstormInput, LongStoryBrainstormResult } from '../shared/long-story-brainstorm'
 import type { ShortStoryBrainstormInput, ShortStoryBrainstormResult, ShortStoryCreateInput, ShortStoryDocument, ShortStoryGenerationInput, ShortStoryStorageSelectionResult, ShortStorySummary } from '../shared/short-story'
@@ -129,6 +132,38 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
   }
 
   const api = {
+    syncChapterWorkflow: (projectId: string, chapterNumber: number, content: string,
+      options: Omit<ChapterSyncOptions, 'requestId'>, onStep: (step: ChapterSyncStep) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_event: unknown, value: { requestId: string; step: ChapterSyncStep }) => {
+        if (value.requestId === requestId) onStep(value.step)
+      }
+      ipcRenderer.on('write:syncStep', handler)
+      const result = (ipcRenderer.invoke('write:syncChapterWorkflow', { projectId, chapterNumber, content, ...options, requestId }) as Promise<ChapterSyncResult>)
+        .finally(() => ipcRenderer.removeListener('write:syncStep', handler))
+      return makeStreamHandle(result, requestId)
+    },
+    refineChapter: (input: RefinementInput, action: 'plan' | 'generate', onStage: (stage: RefinementStage) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_event: unknown, value: { requestId: string; stage: RefinementStage }) => {
+        if (value.requestId === requestId) onStage(value.stage)
+      }
+      ipcRenderer.on('refinement:stage', handler)
+      const result = (ipcRenderer.invoke('refinement:run', { input, action, requestId }) as Promise<RefinementResult>)
+        .finally(() => ipcRenderer.removeListener('refinement:stage', handler))
+      return makeStreamHandle(result, requestId)
+    },
+    recordRefinementDetection: (projectId: string, chapterNumber: number, id: string, testedContent: string,
+      result: { status: 'green' | 'flagged'; score?: number; note: string }): Promise<RefinementCandidate> =>
+      ipcRenderer.invoke('refinement:record-detection', { projectId, chapterNumber, id, testedContent, result }),
+    loadRefinement: (projectId: string, chapterNumber: number): Promise<RefinementCandidate | null> =>
+      ipcRenderer.invoke('refinement:load', { projectId, chapterNumber }),
+    discardRefinement: (projectId: string, chapterNumber: number, id: string): Promise<void> =>
+      ipcRenderer.invoke('refinement:discard', { projectId, chapterNumber, id }),
+    rejectRefinementHunk: (projectId: string, chapterNumber: number, id: string, currentDraft: string, hunkIndex: number): Promise<RefinementCandidate> =>
+      ipcRenderer.invoke('refinement:reject-hunk', { projectId, chapterNumber, id, currentDraft, hunkIndex }),
+    commitRefinement: (projectId: string, chapterNumber: number, id: string, currentDraft: string, undo: boolean, hunkIndex?: number): Promise<RefinementCommit> =>
+      ipcRenderer.invoke('refinement:commit', { projectId, chapterNumber, id, currentDraft, undo, hunkIndex }),
     brainstormLongStory: (input: LongStoryBrainstormInput, onToken: (token: string, done: boolean) => void) => {
       const requestId = crypto.randomUUID()
       const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
@@ -177,6 +212,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     getAppUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<AppUpdateState>,
     checkAppUpdate: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateState>,
     downloadAppUpdate: () => ipcRenderer.invoke('updates:download') as Promise<AppUpdateState>,
+    restartAppUpdate: () => ipcRenderer.invoke('updates:restart') as Promise<AppUpdateState>,
     setAppUpdateAutoCheck: (enabled: boolean) => ipcRenderer.invoke('updates:setAutoCheck', enabled) as Promise<AppUpdateState>,
     onAppUpdateState: (callback: (state: AppUpdateState) => void) => {
       const handler = (_event: unknown, state: AppUpdateState) => callback(state)
@@ -184,6 +220,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       return () => { ipcRenderer.removeListener('updates:state', handler) }
     },
     listProjects: (query?: ListProjectsQuery) => ipcRenderer.invoke('library:list', query ?? {}),
+    openProjectDirectory: (projectId: string) => ipcRenderer.invoke('library:openDirectory', { projectId }) as Promise<void>,
     setProjectArchived: (projectId: string, archived: boolean) =>
       ipcRenderer.invoke('library:setArchived', { projectId, archived }),
     getMobileServerStatus: () =>
@@ -205,6 +242,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         focusedExisting: boolean
       }>,
     scanProjects: () => ipcRenderer.invoke('library:scan'),
+    previewProseImport: (request: ProseImportRequest) => ipcRenderer.invoke('library:previewProse', request) as Promise<ProseImportPreview | null>,
+    commitProseImport: (token: string, name: string) => ipcRenderer.invoke('library:commitProse', { token, name }) as Promise<ProseImportResult>,
+    cancelProseImport: () => ipcRenderer.invoke('library:cancelProse') as Promise<void>,
     exportProjectPackage: (projectId: string) =>
       ipcRenderer.invoke('library:exportPackage', { projectId }) as Promise<{
         canceled: boolean
@@ -217,7 +257,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }>,
     createProject: (input: CreateProjectDataInput) => ipcRenderer.invoke('projects:create', input),
     getProject: (id: string) => ipcRenderer.invoke('projects:get', id),
-    updateProjectInfo: (projectId: string, info: { name: string; description?: string }) =>
+    updateProjectInfo: (projectId: string, info: { name?: string; description?: string }) =>
       ipcRenderer.invoke('projects:updateInfo', { projectId, ...info }),
     setBenchmarkBooks: (projectId: string, books: string[]) =>
       ipcRenderer.invoke('projects:setBenchmarkBooks', { projectId, books }) as Promise<string[]>,
@@ -252,8 +292,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('chapters:saveDraft', projectId, chapterNumber, content),
     readDraft: (projectId: string, chapterNumber: number) =>
       ipcRenderer.invoke('chapters:readDraft', projectId, chapterNumber),
-    discardDraft: (projectId: string, chapterNumber: number) =>
-      ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber),
+    discardDraft: (projectId: string, chapterNumber: number, expectedContent?: string) =>
+      expectedContent === undefined ? ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber)
+        : ipcRenderer.invoke('chapters:discardDraft', projectId, chapterNumber, expectedContent),
     /** P19-E：字数汇总（正文 / 节奏图谱） */
     getChapterWordSummary: (projectId: string) =>
       ipcRenderer.invoke('chapters:wordSummary', projectId),
@@ -397,8 +438,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('outline:generateDetailedRange', id, fromChapter, count) as Promise<DetailedOutlineItem[]>,
     getRhythm: (id: string) => ipcRenderer.invoke('outline:getRhythm', id),
     getVolumes: (id: string) => ipcRenderer.invoke('outline:getVolumes', id),
-    exportChapters: (projectId: string, volumeNumber?: number) =>
-      ipcRenderer.invoke('export:chapters', { projectId, volumeNumber }),
+    exportChapters: (projectId: string, volumeNumber?: number, onlyUnexported?: boolean) =>
+      ipcRenderer.invoke('export:chapters', { projectId, volumeNumber, onlyUnexported }),
     getOutlineSections: (id: string) => ipcRenderer.invoke('outline:getSections', id),
     getVolumeOutlines: (id: string) => ipcRenderer.invoke('outline:getVolumeOutlines', id),
     getDiagnostics: (id: string) => ipcRenderer.invoke('diagnostics:report', id),
@@ -410,6 +451,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     /** 取消进行中的流式生成（传 generate/adjust 返回对象上的 requestId） */
     abortStream: (requestId: string) =>
       ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>,
+    getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) =>
+      ipcRenderer.invoke('write:getChapterRepairProposal', { projectId, chapterNumber, content }),
     generateChapterStream: (
       projectId: string,
       chapterNumber: number,
@@ -418,7 +461,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       existingText: string | undefined,
       onToken: (token: string, done: boolean) => void,
       onGenerationStage?: (stage: ChapterGenerationStage) => void,
-      autoStrength?: boolean
+      autoStrength?: boolean,
+      repairOnly?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -443,6 +487,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           tempContext,
           existingText,
           autoStrength,
+          repairOnly,
           requestId
         })
         .finally(() => {
@@ -648,10 +693,14 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }>
       return makeStreamHandle(result, requestId)
     },
+    getChapterSyncContext: (projectId: string, chapterNumber: number, content: string) =>
+      ipcRenderer.invoke('write:syncContext', { projectId, chapterNumber, content }),
     extractMemoryStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string,
+      reuse?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -662,13 +711,21 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:extractMemory', { projectId, chapterNumber, requestId })
+        .invoke('write:extractMemory', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}), ...(reuse !== undefined ? { reuse } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
       }>
       return makeStreamHandle(result, requestId)
     },
+    commitOutlineLocalRepair: (projectId: string, chapterNumber: number, token: string) =>
+      ipcRenderer.invoke('write:commitOutlineLocalRepair', { projectId, chapterNumber, token }),
+    autoRepairOutlineDifference: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport, requestId?: string) =>
+      ipcRenderer.invoke('write:autoRepairOutlineDifference', { projectId, chapterNumber, content, report, requestId }),
+    autoResolveOutlineDiffs: (projectId: string, chapterNumber: number, content: string, report: import('../shared/types').OutlineDiffReport) =>
+      ipcRenderer.invoke('write:autoResolveOutlineDiffs', { projectId, chapterNumber, content, report }),
+    autoApplyExtractedMemory: (projectId: string, chapterNumber: number, content: string, extraction: MemoryExtraction) =>
+      ipcRenderer.invoke('write:autoApplyExtractedMemory', { projectId, chapterNumber, content, extraction }),
     applyMemory: (projectId: string, extraction: MemoryExtraction) =>
       ipcRenderer.invoke('write:applyMemory', { projectId, extraction }),
     invalidateChapterMemorySync: (projectId: string, chapterNumber: number) =>
@@ -806,7 +863,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     evaluateRhythmStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -817,7 +875,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId })
+        .invoke('write:evaluateRhythm', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
@@ -829,7 +887,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
     generateFigureStream: (
       projectId: string,
       chapterNumber: number,
-      onToken: (token: string, done: boolean) => void
+      onToken: (token: string, done: boolean) => void,
+      content?: string
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -840,7 +899,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       }
       ipcRenderer.on('llm:token', handler as never)
       const result = ipcRenderer
-        .invoke('write:generateFigure', { projectId, chapterNumber, requestId })
+        .invoke('write:generateFigure', { projectId, chapterNumber, requestId, ...(content !== undefined ? { content } : {}) })
         .finally(() => ipcRenderer.removeListener('llm:token', handler as never)) as Promise<{
         ok: boolean
         error?: string
@@ -867,7 +926,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
       onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
       onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+      /** 本窗口这一批正文使用的模型；不写全局路由 */
+      chapterRoute?: { providerId: string; model?: string }
     ) => {
       const requestId = externalRequestId ?? crypto.randomUUID()
       const chapterHandler = (
@@ -920,7 +981,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           requestId,
           batchState,
           autoContinue,
-          autoStrength
+          autoStrength,
+          ...(chapterRoute ? { chapterRoute } : {})
         })
         .finally(() => {
           ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
@@ -955,6 +1017,25 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
         if (onProgress) ipcRenderer.removeListener('write:batchPolishProgress', progressHandler as never)
       })
     },
+    listQuarantinedChapters: (projectId: string) =>
+      ipcRenderer.invoke('write:listQuarantinedChapters', { projectId }),
+    dropQuarantinedChapter: (projectId: string, chapter: number) =>
+      ipcRenderer.invoke('write:dropQuarantinedChapter', { projectId, chapter }),
+    repairQuarantinedChapters: (
+      projectId: string,
+      onProgress?: (chapter: number, message: string) => void,
+      externalRequestId?: string
+    ) => {
+      const requestId = externalRequestId ?? crypto.randomUUID()
+      const progressHandler = (_e: unknown, payload: { requestId: string; chapter: number; stage: string }) => {
+        if (payload.requestId === requestId) onProgress?.(payload.chapter, payload.stage)
+      }
+      if (onProgress) ipcRenderer.on('write:quarantineRepairProgress', progressHandler as never)
+      return ipcRenderer.invoke('write:repairQuarantinedChapters', { projectId, requestId })
+        .finally(() => {
+          if (onProgress) ipcRenderer.removeListener('write:quarantineRepairProgress', progressHandler as never)
+        })
+    },
     resumeBatch: (
       projectId: string,
       fromChapter: number,
@@ -972,7 +1053,9 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       /** 撞上 429 限流、正在退避等待重试时回调，供 UI 显示「第 N 章限流，30 秒后自动重试」 */
       onRetryWait?: (chapter: number, attempt: number, maxAttempts: number, waitMs: number) => void,
       onGenerationStage?: (stage: ChapterGenerationStage, chapterNumber: number) => void,
-      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void
+      onAutoDeslopResult?: (result: AutoDeslopResult, chapterNumber: number) => void,
+      /** 本窗口这一批正文使用的模型；不写全局路由 */
+      chapterRoute?: { providerId: string; model?: string }
     ) => {
       const requestId = externalRequestId ?? crypto.randomUUID()
       const chapterHandler = (
@@ -1025,7 +1108,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           requestId,
           batchState,
           autoContinue,
-          autoStrength
+          autoStrength,
+          ...(chapterRoute ? { chapterRoute } : {})
         })
         .finally(() => {
           ipcRenderer.removeListener('write:batchChapterComplete', chapterHandler as never)
@@ -1114,6 +1198,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('settings:getAutoPostWritePipeline') as Promise<
         'off' | 'memory_only' | 'full'
       >,
+    getChapterCompletionNotification: () => ipcRenderer.invoke('settings:getChapterCompletionNotification') as Promise<boolean>,
+    setChapterCompletionNotification: (enabled: boolean) => ipcRenderer.invoke('settings:setChapterCompletionNotification', enabled) as Promise<boolean>,
     setAutoPostWritePipeline: (mode: 'off' | 'memory_only' | 'full') =>
       ipcRenderer.invoke('settings:setAutoPostWritePipeline', mode) as Promise<
         'off' | 'memory_only' | 'full'

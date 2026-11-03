@@ -25,7 +25,8 @@ vi.mock('child_process', () => ({
   })
 }))
 
-vi.mock('fs/promises', () => ({
+vi.mock('fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('fs/promises')>(),
   readFile: vi.fn()
 }))
 
@@ -474,6 +475,34 @@ describe('runCodex (app-server)', () => {
     await runCodex('测试', { model: undefined })
     expect(threadStartParams).not.toBeNull()
     expect(threadStartParams!.model).toBeUndefined()
+  })
+
+  it('独立文本任务完整传入材料和模型强度，退出后清理临时目录', async () => {
+    let threadParams: Record<string, unknown> = {}
+    let turnParams: Record<string, unknown> = {}
+    fakeChildFactory = () => {
+      const child = createAutoAppServerChild({ deltas: ['{"completed":true}'] })
+      const origWrite = child.stdin.write
+      child.stdin.write = vi.fn((raw: string) => {
+        for (const line of String(raw).split('\n').filter(Boolean)) {
+          const msg = JSON.parse(line)
+          if (msg.method === 'thread/start') threadParams = msg.params
+          if (msg.method === 'turn/start') turnParams = msg.params
+        }
+        return origWrite(raw)
+      })
+      return child
+    }
+    const prompt = '完整主线、历史依据和正文。必须逐项核对。'
+    await runCodex(prompt, { isolatedTextTask: true, model: 'gpt-6.1-sol', reasoningEffort: 'high' })
+    expect(threadParams.cwd).toContain('ai-writer-text-')
+    expect(threadParams.model).toBe('gpt-6.1-sol')
+    expect(threadParams.sandbox).toBe('read-only')
+    expect(threadParams.developerInstructions).toContain('完成全部指定检查')
+    expect(turnParams.effort).toBe('high')
+    expect(turnParams.input).toEqual([{ type: 'text', text: prompt, text_elements: [] }])
+    const { stat } = await import('fs/promises')
+    await expect(stat(threadParams.cwd as string)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('单次思考强度只传给 turn/start，不写入全局配置', async () => {

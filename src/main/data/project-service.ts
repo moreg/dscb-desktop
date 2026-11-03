@@ -22,6 +22,8 @@ import type {
 import { isProjectArchived } from '../../shared/types'
 import { toFolderName } from './folder-name'
 import { extractProjectPackage, writeProjectPackage } from './project-package'
+import { writeProseImport, type ProseImportPlan } from './prose-import'
+import type { ProseImportResult } from '../../shared/prose-import'
 
 export { toFolderName } from './folder-name'
 
@@ -63,6 +65,7 @@ export class ProjectService {
       genre: input.genre,
       description: input.description,
       openingChapters: input.openingChapters,
+      ideaDevelopment: input.ideaDevelopment,
       targetChapters: input.targetChapters,
       chapterWordCount: input.chapterWordCount,
       createdAt: now
@@ -122,8 +125,13 @@ export class ProjectService {
    */
   async updateProjectInfo(
     projectId: string,
-    info: { name: string; description?: string }
+    info: { name?: string; description?: string }
   ): Promise<ProjectData> {
+    if (info.name === undefined) {
+      const next = await this.updateProjectData(projectId, { description: info.description })
+      await this.library.update(projectId, { description: next.description })
+      return next
+    }
     const folderName = toFolderName(info.name)
     if (!folderName) throw new Error('这个名称不能用作文件夹名')
 
@@ -132,7 +140,7 @@ export class ProjectService {
     try {
       const next = await this.updateProjectData(projectId, {
         name: folderName,
-        description: info.description
+        ...(info.description !== undefined ? { description: info.description } : {})
       })
       await writeFolderTitle(nextDir, folderName)
       await this.library.update(projectId, {
@@ -239,6 +247,17 @@ export class ProjectService {
     const found = listed.find((project) => samePath(project.path, dir))
     if (!found) throw new Error('导入完成，但书架没有找到这本小说')
     return found
+  }
+
+  async importProse(name: string, plan: ProseImportPlan): Promise<ProseImportResult> {
+    const root = await this.settings.getProjectsRoot(this.defaultProjectsRoot)
+    const dir = await writeProseImport(root, name, plan)
+    const projects = await this.scanProjects().catch((error: unknown) => {
+      throw new Error(`正文已保存到 ${dir}，书架登记失败，请点击扫描项目。`, { cause: error })
+    })
+    const project = projects.find(item => samePath(item.path, dir))
+    if (!project) throw new Error(`正文已保存到 ${dir}，书架登记失败，请点击扫描项目。`)
+    return { project, importedCount: plan.chapters.length, pendingCount: plan.preview.issues.length }
   }
 
   async scanProjects(): Promise<ProjectMeta[]> {

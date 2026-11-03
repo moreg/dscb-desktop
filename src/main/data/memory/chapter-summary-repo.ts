@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { promises as fs } from 'fs'
 import { writeJsonAtomic } from '../atomic'
 import { hashProse } from './prose-memory-index'
 import type { ChapterSummaryFact, ContinuityFact } from '../../../shared/types'
@@ -54,5 +55,10 @@ export class ChapterSummaryRepo {
 
   async write(summary: ChapterSummary): Promise<void> {
     await writeJsonAtomic(this.path(summary.chapterNumber), summary)
+  }
+
+  /** 删稿重写时清除该章概要：正文清空后旧概要不得再作为历史引句出现。 */
+  async remove(chapterNumber: number): Promise<void> {
+    await fs.rm(this.path(chapterNumber), { force: true })
   }
 }

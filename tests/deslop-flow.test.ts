@@ -658,36 +658,36 @@ describe('splitForDeslop 单行超长', () => {
 })
 
 describe('Phase 3.5 收尾标点兜底（无条件执行）', () => {
-  it('LLM 原样退回时，省略号/破折号仍被确定性清理', async () => {
+  it('LLM 原样退回时，合法省略号/破折号保持原样', async () => {
     // 旧行为：兜底只在"某一遍改写被接受且文本有变"这条路径上跑；
     // 模型把原文原样退回来，标点问题就一直留着。
     const text = '他站在门口。\n「我……我不知道。」\n她没回答——转身走了。'
     const mock = makeMockLlm([`【改写后】\n${text}`])
     const result = await new DeslopService(mock).deslop(text)
-    expect(result.rewritten).not.toContain('……')
-    expect(result.rewritten).not.toContain('——')
+    expect(result.rewritten).toContain('……')
+    expect(result.rewritten).toContain('——')
     // 改动要进 changeSummary，不能只留在会被关掉的日志里
-    expect(result.changeSummary.some((c) => c.includes('标点兜底'))).toBe(true)
+    expect(result.changeSummary.some((c) => c.includes('标点兜底'))).toBe(false)
     // 复扫过，兜底修掉的问题不该还挂在"剩余问题"里
     expect(result.remainingFindings.some((f) => f.type === 'em-dash' || f.type === 'ellipsis')).toBe(
       false
     )
   })
 
-  it('只有省略号的正文也能扫出 finding（否则前端「开始润色」被禁用）', async () => {
+  it('合法省略号不触发无谓润色', async () => {
     const text = '他站在门口。\n「我……我不知道。」\n窗外的雨停了。'
     const report = await new DeslopService(makeMockLlm([''])).scan(text)
-    expect(report.findings.length).toBeGreaterThan(0)
-    expect(report.findings.some((f) => f.type === 'ellipsis' && f.gate === 'D')).toBe(true)
+    expect(report.findings.filter(f => f.type === 'ellipsis')).toHaveLength(0)
+    expect(report.findings.some((f) => f.type === 'ellipsis' && f.gate === 'D')).toBe(false)
   })
 
-  it('全部 Pass 被拒绝时，标点兜底照样兜住', async () => {
+  it('全部 Pass 被拒绝时，不借兜底改坏标点', async () => {
     const text = '他不是冷漠，而是绝望——彻底的绝望。\n她说：「算了……」'
     // 返回一段寒暄，会被 acceptRewrite 拒绝
     const mock = makeMockLlm(['好的，我来帮你改写：'])
     const result = await new DeslopService(mock).deslop(text)
-    expect(result.rewritten).not.toContain('——')
-    expect(result.rewritten).not.toContain('……')
+    expect(result.rewritten).toContain('——')
+    expect(result.rewritten).toContain('……')
     expect(result.changeSummary.some((c) => c.startsWith('- [已拒绝]'))).toBe(true)
   })
 })

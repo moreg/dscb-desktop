@@ -57,7 +57,7 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
   const [results, setResults] = useState<DrawResult[]>([])
   const [copyId, setCopyId] = useState<number | null>(null)
   const [savingResultId, setSavingResultId] = useState<number | null>(null)
-  const [savedResultId, setSavedResultId] = useState<number | null>(null)
+  const [savedResult, setSavedResult] = useState<{ id: number; field: 'name' | 'description' | 'both' } | null>(null)
   const [candidateKeys, setCandidateKeys] = useState<Set<string>>(new Set())
   const [addingCandidateId, setAddingCandidateId] = useState<number | null>(null)
   const generationRef = useRef(0)
@@ -205,19 +205,19 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
     }
   }
 
-  const saveResultToProject = async (result: DrawResult) => {
+  const saveResultToProject = async (result: DrawResult, field: 'name' | 'description' | 'both') => {
     if (!projectId) return
     setSavingResultId(result.id)
-    setSavedResultId(null)
+    setSavedResult(null)
     setError('')
     try {
       const updated = await window.api.updateProjectInfo(projectId, {
-        name: result.name,
-        description: result.description
+        ...(field !== 'description' ? { name: result.name } : {}),
+        ...(field !== 'name' ? { description: result.description } : {})
       })
       setProject(updated)
       onProjectUpdated?.(updated.name)
-      setSavedResultId(result.id)
+      setSavedResult({ id: result.id, field })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -318,14 +318,16 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
                   {copyId === latest.id ? '✓ 已复制' : '复制书名与简介'}
                 </button>
                 {renderCandidateButton(latest)}
+                <button className="btn btn-ghost btn-sm" onClick={() => void saveResultToProject(latest, 'name')} disabled={savingResultId !== null}>{savedResult?.id === latest.id && savedResult.field === 'name' ? '✓ 书名已应用' : '应用书名'}</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => void saveResultToProject(latest, 'description')} disabled={savingResultId !== null}>{savedResult?.id === latest.id && savedResult.field === 'description' ? '✓ 简介已应用' : '应用简介'}</button>
                 <button
                   className="btn btn-primary btn-sm"
-                  onClick={() => void saveResultToProject(latest)}
+                  onClick={() => void saveResultToProject(latest, 'both')}
                   disabled={savingResultId !== null}
                 >
                   {savingResultId === latest.id
                     ? '保存中…'
-                    : savedResultId === latest.id
+                    : savedResult?.id === latest.id && savedResult.field === 'both'
                       ? '✓ 已保存到项目'
                       : '保存为项目书名与简介'}
                 </button>
@@ -355,14 +357,16 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
                     {copyId === item.id ? '✓ 已复制' : '复制'}
                   </button>
                   {renderCandidateButton(item)}
+                  <button className="btn btn-ghost btn-sm" onClick={() => void saveResultToProject(item, 'name')} disabled={savingResultId !== null}>{savedResult?.id === item.id && savedResult.field === 'name' ? '✓ 书名已应用' : '应用书名'}</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => void saveResultToProject(item, 'description')} disabled={savingResultId !== null}>{savedResult?.id === item.id && savedResult.field === 'description' ? '✓ 简介已应用' : '应用简介'}</button>
                   <button
                     className="btn btn-primary btn-sm"
-                    onClick={() => void saveResultToProject(item)}
+                    onClick={() => void saveResultToProject(item, 'both')}
                     disabled={savingResultId !== null}
                   >
                     {savingResultId === item.id
                       ? '保存中…'
-                      : savedResultId === item.id
+                      : savedResult?.id === item.id && savedResult.field === 'both'
                         ? '✓ 已保存'
                         : '保存到项目'}
                   </button>

@@ -1,10 +1,13 @@
+import { CHAPTER_REPAIR_LIMIT, CHAPTER_EXPRESSION_REPAIR_LIMIT } from '../../shared/chapter-repair-limits'
+import { BatchClock, formatBatchDuration, restoreBatchTiming, type BatchTiming } from '../../shared/batch-timing'
+import { batchQuality, BATCH_QUALITY_LABELS, type BatchQuality } from '../../shared/batch-quality'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel } from '../../shared/generation-progress'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoDeslopResult,
   ChapterMeta,
+  ChapterModelRoute,
   Character,
-  ChapterStatus,
   BatchProgress,
   ChapterFlowResult,
   ChapterGenerationStage,
@@ -13,6 +16,7 @@ import type {
   MemoryCandidateItem,
   MemoryCandidateSummary,
   ProjectData,
+  ProviderSummary,
   TeardownEntry
 } from '../../shared/types'
 import { countPendingConfirms } from '../../shared/post-write-sync'
@@ -36,21 +40,42 @@ interface Props {
   onOpenOutline: () => void
 }
 
-const STATUS_FULL: Record<ChapterStatus, string> = {
-  outline: '待写',
-  draft: '草稿',
-  reviewed: '润色',
+
+
+/** 列表上的三档：草稿与润色都是已有正文，合成「正文」；空文件仍是待写。 */
+export type ChapterListBucket = 'pending' | 'prose' | 'published'
+
+export function chapterListBucket(chapter: Pick<ChapterMeta, 'status' | 'wordCount'>): ChapterListBucket {
+  if ((chapter.wordCount ?? 0) <= 0 || chapter.status === 'outline') return 'pending'
+  if (chapter.status === 'published') return 'published'
+  return 'prose'
+}
+
+const BUCKET_LABEL: Record<ChapterListBucket, string> = {
+  pending: '待写',
+  prose: '正文',
   published: '定稿'
 }
 
-const STATUS_CLASS: Record<ChapterStatus, string> = {
-  outline: 'status-outline',
-  draft: 'status-draft',
-  reviewed: 'status-reviewed',
+const BUCKET_CLASS: Record<ChapterListBucket, string> = {
+  pending: 'status-outline',
+  prose: 'status-draft',
   published: 'status-published'
 }
 
+const LIST_BUCKETS: ChapterListBucket[] = ['pending', 'prose', 'published']
+
 const CHAPTER_PAGE_SIZE = 20
+
+/** 生成阶段标签去掉标识符前缀（preparing:/continuity:/continuityRepair:），只展示可读部分。 */
+function quarantineStageLabel(stage: string): string {
+  const m = stage.match(/^([a-zA-Z]+):(.*)$/)
+  return m ? m[2] : stage
+}
+
+function quarantineElapsedLabel(seconds: number): string {
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`
+}
 
 /** 生成分页页码窗口：首尾页恒显，中间取当前页邻域，超距用省略号收拢。 */
 function pageWindow(current: number, total: number): (number | 'ellipsis')[] {
@@ -72,6 +97,8 @@ export interface ChapterPaginatorProps {
   totalPages: number
   totalItems: number
   onPageChange: (page: number) => void
+  /** 条目单位文案，默认「章」；书架等场景传「本」 */
+  unitLabel?: string
   className?: string
 }
 
@@ -80,13 +107,14 @@ export function ChapterPaginator({
   totalPages,
   totalItems,
   onPageChange,
+  unitLabel = '章',
   className
 }: ChapterPaginatorProps) {
   if (totalPages <= 1) return null
   return (
     <div className={`paginator ${className ?? ''}`.trim()}>
       <span className="page-info">
-        第 {currentPage}/{totalPages} 页 · 共 {totalItems} 章
+        第 {currentPage}/{totalPages} 页 · 共 {totalItems} {unitLabel}
       </span>
       <button
         type="button"
@@ -143,12 +171,31 @@ export default function ChapterListPage({
   // 还没入库的记忆候选：连写多章后最容易堆在这里，给个常驻入口
   const [candidateCount, setCandidateCount] = useState(0)
   const [showCandidateReview, setShowCandidateReview] = useState(false)
+  // 批次隔离/待核对章节：批次恢复记录被覆盖后，这里是唯一解除入口
+  const [quarantined, setQuarantined] = useState<
+    Array<{ chapter: number; hasProse: boolean; fromBatch: boolean }>
+  >([])
+  const [quarantineBusy, setQuarantineBusy] = useState(false)
+  const [quarantineProgress, setQuarantineProgress] = useState('')
+  const [quarantineResult, setQuarantineResult] = useState('')
+  const [quarantineConfirming, setQuarantineConfirming] = useState(false)
+  const [dropConfirming, setDropConfirming] = useState<number | null>(null)
+  const [dropping, setDropping] = useState<number | null>(null)
+  // 补跑耗时的每秒计时：核对与记忆同步每章要几分钟，没有秒表用户会以为卡死了
+  const [quarantineElapsed, setQuarantineElapsed] = useState(0)
+  useEffect(() => {
+    if (!quarantineBusy) return
+    setQuarantineElapsed(0)
+    const started = Date.now()
+    const timer = setInterval(() => setQuarantineElapsed(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [quarantineBusy])
   const [showBenchmark, setShowBenchmark] = useState(false)
   const [projectData, setProjectData] = useState<ProjectData | null>(null)
-  const [filter, setFilter] = useState<'all' | ChapterStatus>('all')
+  const [filter, setFilter] = useState<'all' | ChapterListBucket>('all')
   const [page, setPage] = useState(1)
-  // 导出正文：'all' 表示导出全书，number 表示导出该卷；null 表示当前没有导出在进行
-  const [exporting, setExporting] = useState<'all' | number | null>(null)
+  // 导出正文：'all' 表示导出全书，number 表示导出该卷，'new' 表示只导出未导出过的章节；null 表示当前没有导出在进行
+  const [exporting, setExporting] = useState<'all' | number | 'new' | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   const [exportError, setExportError] = useState('')
 
@@ -205,8 +252,8 @@ export default function ChapterListPage({
   const charName = (id: string) => characters.find((c) => c.id === id)?.name ?? '?'
 
   const counts = useMemo(() => {
-    const m: Record<string, number> = { all: chapters.length }
-    for (const c of chapters) m[c.status] = (m[c.status] ?? 0) + 1
+    const m: Record<'all' | ChapterListBucket, number> = { all: chapters.length, pending: 0, prose: 0, published: 0 }
+    for (const c of chapters) m[chapterListBucket(c)] += 1
     return m
   }, [chapters])
 
@@ -236,7 +283,7 @@ export default function ChapterListPage({
   )
 
   const filtered = useMemo(
-    () => chapters.filter((c) => filter === 'all' || c.status === filter),
+    () => chapters.filter((c) => filter === 'all' || chapterListBucket(c) === filter),
     [chapters, filter]
   )
 
@@ -295,6 +342,72 @@ export default function ChapterListPage({
     // showCandidateReview 进出都刷新一次：复核面板里重跑过之后计数要跟着变
   }, [projectId, chapters, showCandidateReview])
 
+  useEffect(() => {
+    let alive = true
+    void window.api.listQuarantinedChapters(projectId)
+      .then((list) => {
+        if (alive) setQuarantined(list)
+      })
+      .catch(() => {
+        if (alive) setQuarantined([])
+      })
+    return () => {
+      alive = false
+    }
+    // 补跑通过后章节状态会变，随章节列表刷新同步重查
+  }, [projectId, chapters])
+
+  const runQuarantineRepair = () => {
+    if (quarantineBusy) return
+    setQuarantineBusy(true)
+    setQuarantineConfirming(false)
+    setQuarantineResult('')
+    setQuarantineProgress('准备补跑…（核对与记忆同步每章约需几分钟）')
+    void window.api
+      .repairQuarantinedChapters(projectId, (chapter, stage) => {
+        setQuarantineProgress(`第 ${chapter} 章 ${quarantineStageLabel(stage)}`)
+      })
+      .then((result) => {
+        const parts: string[] = []
+        if (result.repaired.length) parts.push(`第 ${result.repaired.join('、')} 章检查通过，已解除隔离`)
+        if (result.cleared.length) parts.push(`第 ${result.cleared.join('、')} 章正文已不存在，清除了残留记录`)
+        if (result.failures.length) {
+          parts.push(`失败：${result.failures.map((f) => `第 ${f.chapter} 章 ${f.error}`).join('；')}`)
+        }
+        setQuarantineResult(
+          parts.join('；') || (result.error ? `补跑失败：${result.error}` : '没有需要补跑的章节')
+        )
+        setQuarantineProgress('')
+      })
+      .catch((err) => {
+        setQuarantineResult(`补跑失败：${err instanceof Error ? err.message : String(err)}`)
+        setQuarantineProgress('')
+      })
+      .finally(() => {
+        setQuarantineBusy(false)
+        refresh()
+      })
+  }
+
+  const runDropChapter = (chapter: number) => {
+    if (dropping !== null || quarantineBusy) return
+    setDropping(chapter)
+    setQuarantineResult('')
+    void window.api
+      .dropQuarantinedChapter(projectId, chapter)
+      .then(() => {
+        setQuarantineResult(`第 ${chapter} 章正文与隔离已清除，可直接重新续写本章`)
+        setDropConfirming(null)
+      })
+      .catch((err) => {
+        setQuarantineResult(`删稿失败：${err instanceof Error ? err.message : String(err)}`)
+      })
+      .finally(() => {
+        setDropping(null)
+        refresh()
+      })
+  }
+
   const handlePageChange = (nextPage: number) => {
     setPage(nextPage)
     const mainEl = document.querySelector('.main-content')
@@ -319,12 +432,12 @@ export default function ChapterListPage({
     }
   }
 
-  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷 */
-  const handleExport = async (volumeNumber?: number): Promise<void> => {
+  /** 导出正文为 txt：volumeNumber 缺省导出全书，指定则只导出该卷；onlyNew 只导出未导出过的章节 */
+  const handleExport = async (volumeNumber?: number, onlyNew?: boolean): Promise<void> => {
     setExportError('')
-    setExporting(volumeNumber ?? 'all')
+    setExporting(volumeNumber ?? (onlyNew ? 'new' : 'all'))
     try {
-      const exported = await window.api.exportChapters(projectId, volumeNumber)
+      const exported = await window.api.exportChapters(projectId, volumeNumber, onlyNew)
       if (!exported.canceled) openServerExport(exported.path)
     } catch (err) {
       console.error('[ChapterListPage] Failed to export chapters:', err)
@@ -421,12 +534,96 @@ export default function ChapterListPage({
             >
               {exporting === 'all' ? '导出中…' : '导出全书 TXT'}
             </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => void handleExport(undefined, true)}
+              disabled={exporting !== null || exportingPackage || chapters.length === 0}
+              title={
+                chapters.length === 0
+                  ? '需先创建章节'
+                  : '只导出没导出过的章节（从未导出，或导出后正文又改过）；保存成功后自动标记为已导出'
+              }
+            >
+              {exporting === 'new' ? '导出中…' : '导出未导出章节'}
+            </button>
             <button className="btn btn-primary" onClick={() => setShowNew(true)}>
               + 新章
             </button>
           </div>
         </div>
         {exportError ? <p className="empty" style={{ color: 'var(--danger)' }}>{exportError}</p> : null}
+        {(() => {
+          const pendingChapters = quarantined.filter((q) => q.hasProse)
+          if (!quarantined.length && !quarantineBusy && !quarantineResult) return null
+          return (
+            <div
+              style={{
+                marginTop: 10, padding: '10px 14px', borderRadius: 8,
+                border: '1px solid var(--border, #444)', display: 'flex',
+                flexDirection: 'column', gap: 8
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                {quarantineBusy ? (
+                  <span className="meta">
+                    ⟳ 已运行 {quarantineElapsedLabel(quarantineElapsed)} · {quarantineProgress || '正在补跑…'}
+                  </span>
+                ) : quarantined.length ? (
+                  <span className="meta">
+                    {pendingChapters.length} 章正文待补跑长篇检查（批次隔离；恢复记录已失效时，这里是唯一解除入口）
+                    {quarantineResult ? `——上次结果：${quarantineResult}` : ''}
+                  </span>
+                ) : (
+                  <span className="meta" style={{ color: 'var(--danger)' }}>{quarantineResult}</span>
+                )}
+                {pendingChapters.length ? (
+                  <button
+                    className="btn btn-ghost"
+                    style={quarantineConfirming ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+                    onClick={() => {
+                      if (quarantineConfirming) runQuarantineRepair()
+                      else setQuarantineConfirming(true)
+                    }}
+                    disabled={quarantineBusy || loading}
+                    title="复用这些章已保存的正文自动补跑检查与修复（会调用 AI），通过后解除隔离，无需手改正文；已通过且依赖未变化的步骤可复用，耗时取决于待核对内容"
+                  >
+                    {quarantineConfirming
+                      ? `确认补跑 ${pendingChapters.length} 章？`
+                      : `补跑待核对 ${pendingChapters.length} 章`}
+                  </button>
+                ) : null}
+              </div>
+              {quarantined.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {quarantined.map((q) => (
+                    <div key={q.chapter} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span className="meta" style={{ minWidth: 64 }}>第 {q.chapter} 章</span>
+                      <span className="meta">{q.hasProse ? '正文待检查' : '正文已丢失，补跑时将清除残留记录'}</span>
+                      {q.hasProse ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={dropConfirming === q.chapter ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+                          disabled={quarantineBusy || dropping !== null}
+                          title="清空本章正文、概要与隔离记录，回到待生成状态后重新续写——AI 直出下重生成远快于持续修补。细纲不改动，重生成前请先检查细纲是否被旧稿带偏"
+                          onClick={() => {
+                            if (dropConfirming === q.chapter) runDropChapter(q.chapter)
+                            else setDropConfirming(q.chapter)
+                          }}
+                        >
+                          {dropping === q.chapter
+                            ? '删稿中…'
+                            : dropConfirming === q.chapter
+                              ? '确认删稿重写？'
+                              : '删稿重写'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          )
+        })()}
       </div>
 
       <div className="toolbar">
@@ -439,7 +636,7 @@ export default function ChapterListPage({
                 apply()
               }
             }
-            const applyFilter = (f: 'all' | ChapterStatus) => {
+            const applyFilter = (f: 'all' | ChapterListBucket) => {
               setFilter(f)
               setPage(1)
               const mainEl = document.querySelector('.main-content')
@@ -458,7 +655,7 @@ export default function ChapterListPage({
                 >
                   全部 · {counts.all ?? 0}
                 </span>
-                {(Object.keys(STATUS_FULL) as ChapterStatus[]).map((s) =>
+                {LIST_BUCKETS.map((s) =>
                   // 计数为 0 但正处于该筛选时仍要显示：否则激活中的 chip 凭空消失，
                   // 用户看不出自己在筛什么、也没法点回「全部」以外的入口
                   counts[s] || filter === s ? (
@@ -469,9 +666,9 @@ export default function ChapterListPage({
                       tabIndex={0}
                       onClick={() => applyFilter(s)}
                       onKeyDown={chipKeyDown(() => applyFilter(s))}
-                      title={STATUS_FULL[s]}
+                      title={BUCKET_LABEL[s]}
                     >
-                      {STATUS_FULL[s]} · {counts[s] ?? 0}
+                      {BUCKET_LABEL[s]} · {counts[s] ?? 0}
                     </span>
                   ) : null
                 )}
@@ -540,8 +737,8 @@ export default function ChapterListPage({
                     <div className="ch-top">
                       <span className="ch-num">第 {c.chapterNumber} 章</span>
                       <span className="ch-title">{c.title}</span>
-                      <span className={`chip ${STATUS_CLASS[c.status]}`}>
-                        {STATUS_FULL[c.status]}
+                      <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
+                        {BUCKET_LABEL[chapterListBucket(c)]}
                       </span>
                     </div>
                     {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
@@ -729,6 +926,7 @@ export interface BatchChapterSummary {
   summaryReady: boolean
   words: number
   autoDeslop?: AutoDeslopResult
+  quality?: BatchQuality
   auditError: number
   auditWarn: number
   /** 细纲对照里的 P0 差异条数 */
@@ -814,6 +1012,7 @@ export function summarizeChapterResult(
     summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
     autoDeslop: result.autoDeslop,
+    quality: batchQuality(result),
     auditError: deduped.filter((v) => v.severity === 'error').length,
     auditWarn: deduped.filter((v) => v.severity === 'warn').length,
     p0: result.outlineDiff.diffs.filter((d) => d.priority === 'P0').length,
@@ -1046,15 +1245,29 @@ function ChapterCandidateItems({
             </button>
           </div>
         ) : (
-          <button
-            className="btn btn-ghost"
-            style={{ padding: '2px 10px', fontSize: 12 }}
-            disabled={picked.size === 0 || busy || detail.stale}
-            onClick={() => setConfirming(true)}
-            title="绕过证据校验，把选中的条目直接写进记忆库"
-          >
-            确认属实，强制写入{picked.size > 0 ? `（${picked.size} 条）` : ''}
-          </button>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '2px 10px', fontSize: 12 }}
+              disabled={picked.size === 0 || busy || detail.stale}
+              onClick={() => setConfirming(true)}
+              title="绕过证据校验，把选中的条目直接写进记忆库"
+            >
+              确认属实，强制写入{picked.size > 0 ? `（${picked.size} 条）` : ''}
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '2px 10px', fontSize: 12 }}
+              disabled={busy || detail.stale}
+              onClick={() => {
+                setPicked(new Set(pending.map(keyOf)))
+                setConfirming(true)
+              }}
+              title="选中本章全部未通过条目，二次确认后一次写入"
+            >
+              全部强制写入（{pending.length} 条）
+            </button>
+          </div>
         )
       ) : null}
     </div>
@@ -1342,12 +1555,70 @@ export function recoverBatchProgress(
 }
 
 export interface SavedBatchSession {
+  timing?: BatchTiming
   progress: BatchProgress
   autoContinue: boolean
   autoStrength: boolean
   styleProfileId: string | null
   /** 上次窗口离开时可能仍在生成/检查的章，恢复时核对磁盘。 */
   interruptedChapter?: number
+  /** 这一批正文实际使用的模型。恢复时沿用，不回写全局路由。 */
+  chapterRoute?: ChapterModelRoute
+}
+
+const WINDOW_CHAPTER_MODEL_PREFIX = 'writer:window-chapter-model:'
+
+/** 窗口自己的正文模型。sessionStorage 按窗口分开，不进所有窗口共用的 localStorage。 */
+export function parseChapterModelRoute(value: unknown): ChapterModelRoute | null {
+  if (!value || typeof value !== 'object') return null
+  const route = value as { providerId?: unknown; model?: unknown }
+  if (typeof route.providerId !== 'string') return null
+  const providerId = route.providerId.trim()
+  if (!providerId || providerId.length > 100) return null
+  if (route.model !== undefined && typeof route.model !== 'string') return null
+  const model = typeof route.model === 'string' ? route.model.trim() : ''
+  if (model.length > 255) return null
+  return model ? { providerId, model } : { providerId }
+}
+
+export function readWindowChapterModel(projectId: string): ChapterModelRoute | null {
+  try {
+    const raw = sessionStorage.getItem(WINDOW_CHAPTER_MODEL_PREFIX + projectId)
+    return raw ? parseChapterModelRoute(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
+}
+
+function writeWindowChapterModel(projectId: string, route: ChapterModelRoute): void {
+  try {
+    sessionStorage.setItem(WINDOW_CHAPTER_MODEL_PREFIX + projectId, JSON.stringify(route))
+  } catch {
+    // 窗口存储不可用时，选择仍留在当前对话框，这一批请求照样带上。
+  }
+}
+
+function routeValue(route: ChapterModelRoute | null): string {
+  if (!route) return ''
+  return `${route.providerId}::${route.model ?? ''}`
+}
+
+function routeFromValue(value: string): ChapterModelRoute | null {
+  const splitAt = value.indexOf('::')
+  if (splitAt <= 0) return null
+  return parseChapterModelRoute({
+    providerId: value.slice(0, splitAt),
+    model: value.slice(splitAt + 2)
+  })
+}
+
+function modelsForProvider(
+  provider: ProviderSummary,
+  listed: string[] | undefined,
+  selected: ChapterModelRoute | null
+): string[] {
+  const extra = selected?.providerId === provider.id ? selected.model : undefined
+  return [...new Set([...(listed ?? []), provider.model, extra].map((item) => item?.trim()).filter((item): item is string => !!item))]
 }
 
 /** 中断章未完成时重写该章；已完成章则继续下一章，待检查稿始终优先复用。 */
@@ -1375,6 +1646,12 @@ export function parseSavedBatchSession(raw: string | null): SavedBatchSession | 
       !Number.isSafeInteger(session.interruptedChapter) ||
       session.interruptedChapter < p.fromChapter || session.interruptedChapter > p.toChapter
     )) return null
+    if (session.chapterRoute !== undefined) {
+      const route = parseChapterModelRoute(session.chapterRoute)
+      if (!route) delete session.chapterRoute
+      else session.chapterRoute = route
+    }
+    if (session.timing !== undefined) session.timing = restoreBatchTiming(session.timing, p.fromChapter, p.toChapter)
     return session
   } catch {
     return null
@@ -1424,6 +1701,17 @@ function BatchWriteDialog({
   onPolishBatch?: (range: BatchPolishRange) => void
 }) {
   const [restoredSession] = useState(() => readSavedBatchSession(projectId))
+  const clockRef = useRef(new BatchClock(restoredSession?.timing))
+  const sessionRef = useRef<SavedBatchSession | null>(restoredSession)
+  const [timing, setTiming] = useState(() => clockRef.current.snapshot(performance.now()))
+  const persistSession = useCallback((session: SavedBatchSession): void => {
+    const chapterRoute = session.chapterRoute ?? batchRouteRef.current ?? undefined
+    const next: SavedBatchSession = { ...session, timing: clockRef.current.snapshot(performance.now()) }
+    if (chapterRoute) next.chapterRoute = chapterRoute
+    else delete next.chapterRoute
+    sessionRef.current = next
+    saveBatchSession(projectId, next)
+  }, [projectId])
   const [recovering, setRecovering] = useState(restoredSession?.interruptedChapter !== undefined)
   /**
    * 默认起点：第一个未写章节，而不是「当前最大章号 + 1」。
@@ -1452,6 +1740,18 @@ function BatchWriteDialog({
     [fromChapter, toChapter, draftedChapters]
   )
   const [running, setRunning] = useState(false)
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => {
+      const snapshot = clockRef.current.snapshot(performance.now())
+      setTiming(snapshot)
+      if (sessionRef.current) {
+        sessionRef.current = { ...sessionRef.current, timing: snapshot }
+        saveBatchSession(projectId, sessionRef.current)
+      }
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [running, projectId])
   // 连续模式：每章写完不停，一口气写到结束章号
   const [autoContinue, setAutoContinue] = useState(restoredSession?.autoContinue ?? preset?.autoContinue ?? false)
   const isOneClickTen = preset?.count === 10 && preset.autoContinue
@@ -1462,21 +1762,6 @@ function BatchWriteDialog({
   const [autoStrength, setAutoStrength] = useState(
     restoredSession?.autoStrength ?? (localStorage.getItem(strengthPreferenceKey) !== 'false')
   )
-  const [providerProtocol, setProviderProtocol] = useState<string | null>(null)
-  const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
-  const usesAgyTier = providerProtocol === 'antigravity'
-  useEffect(() => {
-    window.api?.listProviders?.().then((cfg) => {
-      const routing = cfg.featureRouting?.chapter
-      const routedId = routing?.providerId
-      const baseProvider =
-        cfg.providers?.find((p) => p.id === routedId) ??
-        cfg.providers?.find((p) => p.id === cfg.activeId) ??
-        cfg.providers?.[0] ??
-        null
-      setProviderProtocol(baseProvider?.protocol ?? 'openai')
-    }).catch(() => {})
-  }, [])
 
   const rangeChapters = useMemo(() => {
     if (!chapters || !Number.isSafeInteger(fromChapter) || !Number.isSafeInteger(toChapter) || fromChapter > toChapter) return []
@@ -1546,6 +1831,70 @@ function BatchWriteDialog({
   const [liveAutoDeslop, setLiveAutoDeslop] = useState<AutoDeslopResult | null>(null)
   const { projectData, styleProfiles } = useProjectStyleData(projectId)
   const [styleProfileId, setStyleProfileId] = useState<string | null>(restoredSession?.styleProfileId ?? null)
+  const [providers, setProviders] = useState<ProviderSummary[]>([])
+  const [modelsByProvider, setModelsByProvider] = useState<Record<string, string[]>>({})
+  const [routedRoute, setRoutedRoute] = useState<ChapterModelRoute | null>(null)
+  const [windowRoute, setWindowRoute] = useState<ChapterModelRoute | null>(() => readWindowChapterModel(projectId))
+  const [batchRoute, setBatchRoute] = useState<ChapterModelRoute | null>(restoredSession?.chapterRoute ?? null)
+  const [modelsReady, setModelsReady] = useState(false)
+  const batchRouteRef = useRef<ChapterModelRoute | null>(restoredSession?.chapterRoute ?? null)
+  const effectiveRoute = batchRoute ?? windowRoute ?? routedRoute
+  const effectiveRouteRef = useRef<ChapterModelRoute | null>(effectiveRoute)
+  effectiveRouteRef.current = effectiveRoute
+  const selectedProvider = providers.find((item) => item.id === effectiveRoute?.providerId) ?? null
+  const providerProtocol = selectedProvider?.protocol ?? null
+  const usesReasoningStrength = providerProtocol === 'codex' || providerProtocol === 'openai-responses' || providerProtocol === 'claude'
+  const usesAgyTier = providerProtocol === 'antigravity'
+  const chapterModelLabel = selectedProvider
+    ? `${selectedProvider.label} · ${effectiveRoute?.model || selectedProvider.model || '默认模型'}`
+    : modelsReady ? '未配置模型' : '正在读取…'
+  const chooseChapterModel = (route: ChapterModelRoute): void => {
+    setWindowRoute(route)
+    writeWindowChapterModel(projectId, route)
+    if (progress || batchRouteRef.current) {
+      batchRouteRef.current = route
+      setBatchRoute(route)
+      if (sessionRef.current) persistSession({ ...sessionRef.current, chapterRoute: route })
+    }
+  }
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const cfg = await window.api.listProviders()
+        if (!alive) return
+        setProviders(cfg.providers)
+        const routing = cfg.featureRouting?.chapter
+        const base =
+          cfg.providers.find((item) => item.id === routing?.providerId) ??
+          cfg.providers.find((item) => item.id === cfg.activeId) ??
+          cfg.providers[0] ??
+          null
+        const model = base && routing?.providerId === base.id
+          ? (routing.model?.trim() || base.model || '')
+          : (base?.model || '')
+        setRoutedRoute(base ? (model ? { providerId: base.id, model } : { providerId: base.id }) : null)
+        setModelsReady(true)
+        const listed: Record<string, string[]> = {}
+        await Promise.all(cfg.providers.map(async (item) => {
+          try {
+            if (item.protocol === 'codex') listed[item.id] = await window.api.listCodexModels()
+            else if (item.protocol === 'antigravity') listed[item.id] = await window.api.listAntigravityModels()
+            else if (item.protocol === 'claude') listed[item.id] = await window.api.listClaudeModels()
+            else if (item.protocol === 'grok') listed[item.id] = await window.api.listGrokModels()
+            else listed[item.id] = item.model ? [item.model] : []
+          } catch {
+            listed[item.id] = item.model ? [item.model] : []
+          }
+        }))
+        if (alive) setModelsByProvider(listed)
+      } catch {
+        // 读不到目录时仍允许开写，这一批跟随服务端正文路由。
+        if (alive) setModelsReady(true)
+      }
+    })()
+    return () => { alive = false }
+  }, [])
   // 当前批量运行的 requestId：「⏹ 停止」按钮用它 abortStream 中断当前章生成
   const batchRequestIdRef = useRef<string | null>(null)
   const interruptedChapterRef = useRef(restoredSession?.interruptedChapter)
@@ -1554,8 +1903,10 @@ function BatchWriteDialog({
   useEffect(() => () => {
     const requestId = batchRequestIdRef.current
     batchRequestIdRef.current = null
+    const snapshot = clockRef.current.stop(performance.now())
+    if (sessionRef.current) saveBatchSession(projectId, { ...sessionRef.current, timing: snapshot })
     if (requestId) void window.api.abortStream(requestId).catch(() => {})
-  }, [])
+  }, [projectId])
   // 流式预览自动滚底：不滚的话超过容器高度后新 token 一直藏在滚动条下方，
   // 「正在生成…」看起来像卡住了
   const streamingBoxRef = useRef<HTMLDivElement | null>(null)
@@ -1661,12 +2012,13 @@ function BatchWriteDialog({
 
   useEffect(() => {
     if (progress && !running && !recovering) {
-      saveBatchSession(projectId, {
+      persistSession({
         progress, autoContinue, autoStrength, styleProfileId,
-        interruptedChapter: interruptedChapterRef.current
+        interruptedChapter: interruptedChapterRef.current,
+        chapterRoute: batchRouteRef.current ?? undefined
       })
     }
-  }, [projectId, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
+  }, [persistSession, progress, autoContinue, autoStrength, styleProfileId, running, recovering])
 
   useEffect(() => {
     const chapter = restoredSession?.interruptedChapter
@@ -1740,16 +2092,24 @@ function BatchWriteDialog({
     let lastReportedChapter: number | undefined
     const requestId = crypto.randomUUID()
     batchRequestIdRef.current = requestId
+    if (mode === 'start') clockRef.current = new BatchClock()
+    clockRef.current.start(runFrom, performance.now())
+    setTiming(clockRef.current.snapshot(performance.now()))
+    const chapterRoute = effectiveRouteRef.current ?? undefined
+    if (chapterRoute) {
+      batchRouteRef.current = chapterRoute
+      setBatchRoute(chapterRoute)
+    }
     const persistProgress = (next: BatchProgress, interruptedChapter?: number): void => {
       interruptedChapterRef.current = interruptedChapter
-      saveBatchSession(projectId, { progress: next, autoContinue, autoStrength, styleProfileId, interruptedChapter })
+      persistSession({ progress: next, autoContinue, autoStrength, styleProfileId, interruptedChapter })
     }
     persistProgress(previous ?? recoverBatchProgress(rangeFrom, rangeTo, [], '上次生成已中断，可重试当前章。'), runFrom)
     setRunning(true)
     setStopping(false)
     setError(null)
     setStreamingText('')
-    setGenerationStage('generating')
+    setGenerationStage('preparing')
     setLiveAutoDeslop(null)
     setRetryWait(null)
     setLiveCompleted(completed)
@@ -1778,6 +2138,8 @@ function BatchWriteDialog({
         styleProfileId,
         (chapter, result) => {
           if (batchRequestIdRef.current !== requestId) return
+          clockRef.current.finishChapter(chapter, performance.now())
+          setTiming(clockRef.current.snapshot(performance.now()))
           if (!completed.includes(chapter)) completed.push(chapter)
           lastReportedChapter = chapter
           // 此时正文已保存；最终 progress 到达前保守保留该章检查恢复点。
@@ -1811,10 +2173,12 @@ function BatchWriteDialog({
           if (batchRequestIdRef.current !== requestId) return
           setStreamingText('')
           setLiveChapter(chapter)
+          clockRef.current.start(chapter, performance.now())
           handleRetryWait(chapter, attempt, maxAttempts, waitMs)
         },
         (stage, chapterNumber) => {
           if (batchRequestIdRef.current !== requestId) return
+          clockRef.current.start(chapterNumber, performance.now())
           setGenerationStage(stage)
           if (isDeslopStage(stage)) setLiveSavedChapters(prev => prev.includes(chapterNumber) ? prev : [...prev, chapterNumber])
           setLiveChapter(chapterNumber)
@@ -1828,10 +2192,13 @@ function BatchWriteDialog({
           if (batchRequestIdRef.current !== requestId) return
           setGenerationStage(null)
           setLiveChapter(chapterNumber)
+          clockRef.current.start(chapterNumber, performance.now())
           setLiveAutoDeslop(result)
-        }
+        },
+        chapterRoute
       )
       if (batchRequestIdRef.current !== requestId) return
+      setTiming(clockRef.current.stop(performance.now()))
       if (res.progress) {
         persistProgress(res.progress)
         setProgress(res.progress)
@@ -1840,6 +2207,7 @@ function BatchWriteDialog({
       }
     } catch (err) {
       if (batchRequestIdRef.current === requestId) {
+        setTiming(clockRef.current.stop(performance.now()))
         recover(err instanceof Error ? err.message : String(err))
       }
     } finally {
@@ -1862,6 +2230,7 @@ function BatchWriteDialog({
 
   const endBatch = () => {
     if (batchRequestIdRef.current) return
+    sessionRef.current = null
     saveBatchSession(projectId, null)
     onClose()
   }
@@ -1889,7 +2258,7 @@ function BatchWriteDialog({
     generating: '生成中',
     flow: '流程中',
     paused: '已暂停',
-    completed: '已完成',
+    completed: '批量流程已完成',
     failed: '失败'
   }
 
@@ -1907,9 +2276,9 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章先保存生成原稿，再自动去 AI 味并核对事实。表达与语义合计最多修复 2 次，事实差异最多修复 1 次；核验格式异常最多重试 1 次。润色未通过则保留原稿、标记待复核，继续写后检查。
+          逐章先保存生成原稿，再自动去 AI 味并核对事实。每章每轮剧情纠错最多 {CHAPTER_REPAIR_LIMIT} 次、表达润色最多 {CHAPTER_EXPRESSION_REPAIR_LIMIT} 次，分别计数，独立核验仍须完成。表达验收未通过则保留原稿，章节仍显示为正文，验收结果标记为待修订；事实冲突未解决时暂停，不进入下一章。流程完成不代表正文质量验收通过。
           {autoContinue
-            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先按正文回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。仅细纲缺失或同步失败时暂停，已保存的正文保留，可随时点停止。'
+            ? '连续模式：逐章写到结束章号，以正文为准——每章写完先修复必需剧情和伏笔遗漏并复核，再将合理差异回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。细纲缺失、同步失败或阻断性冲突未解决时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
         </p>
 
@@ -1944,6 +2313,52 @@ function BatchWriteDialog({
                 : '跟随项目默认'}
             </span>
           </div>
+        </div>
+
+        <div className="field">
+          <label>正文模型</label>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <select
+              className="select"
+              value={routeValue(effectiveRoute)}
+              onChange={(e) => {
+                const route = routeFromValue(e.target.value)
+                if (route) chooseChapterModel(route)
+              }}
+              disabled={running || !modelsReady || providers.length === 0}
+              aria-label="正文模型"
+              title={`本窗口正文使用：${chapterModelLabel}`}
+              style={{ flex: 1, minWidth: 220 }}
+            >
+              {!effectiveRoute ? (
+                <option value="">{modelsReady ? '未配置模型' : '正在读取正文模型…'}</option>
+              ) : providers.length === 0 ? (
+                <option value={routeValue(effectiveRoute)}>{chapterModelLabel}</option>
+              ) : null}
+              {providers.map((provider) => {
+                const models = modelsForProvider(provider, modelsByProvider[provider.id], effectiveRoute)
+                return (
+                  <optgroup key={provider.id} label={`${provider.label}（${provider.protocol ?? 'openai'}）`}>
+                    {models.length === 0 ? (
+                      <option value={`${provider.id}::`}>{provider.label} · 默认模型</option>
+                    ) : (
+                      models.map((model) => (
+                        <option key={`${provider.id}::${model}`} value={`${provider.id}::${model}`}>
+                          {provider.label} · {model}
+                        </option>
+                      ))
+                    )}
+                  </optgroup>
+                )
+              })}
+            </select>
+            <span className="meta" style={{ fontSize: 12 }}>
+              {chapterModelLabel}
+            </span>
+          </div>
+          <p className="meta" style={{ fontSize: 12, margin: '6px 0 0' }}>
+            只用于本窗口这一批正文。其他窗口、编辑器和其他功能仍用各自的模型，这里改选不会互相覆盖。
+          </p>
         </div>
 
         {!progress && defaultRange.from <= maxChapter ? (
@@ -2036,7 +2451,7 @@ function BatchWriteDialog({
           <span>
             连续写作，以正文为准更新细纲和记忆
             <span className="meta" style={{ display: 'block', fontSize: 12 }}>
-              每章正文保存后，所有细纲差异（含漏写、P0、卷级变化）都按正文回写并校准后续细纲，记忆按正文同步（不受自动记忆开关影响）。剩余的正文自检提示只记在逐章小结里；细纲缺失或同步失败时暂停。可随时点「⏹ 停止」。
+              每章正文保存后，先修复必需剧情和伏笔遗漏并复核，再回写合理的细纲差异、校准后续细纲，记忆按正文同步（不受自动记忆开关影响）。剩余的正文自检提示只记在逐章小结里；细纲缺失或同步失败时暂停。可随时点「⏹ 停止」。
             </span>
           </span>
         </label>
@@ -2079,7 +2494,7 @@ function BatchWriteDialog({
           >
             {providerProtocol === 'grok' ? (
               <span className="meta">
-                ℹ️ 当前正文模型通道（{providerProtocol.toUpperCase()}）不支持单次调整生成强度，本批将使用当前配置。
+                ℹ️ 当前正文模型（{chapterModelLabel}）不支持单次调整生成强度，本批将使用当前配置。
               </span>
             ) : rhythmStats && rhythmStats.withRhythm === 0 ? (
               <span style={{ color: '#d97706' }}>
@@ -2109,6 +2524,21 @@ function BatchWriteDialog({
               <span className="batch-progress-count">
                 {savedChapterCount} / {displayTotal} 章已保存
               </span>
+            </div>
+            <div style={{ marginTop: 10, fontVariantNumeric: 'tabular-nums' }}>
+              <strong>总耗时：{formatBatchDuration(timing.totalMs)}</strong>
+              <p className="meta" style={{ margin: '4px 0 8px', fontSize: 12 }}>
+                含生成、润色、检查及限流等待；暂停不计时，继续或重试累计耗时。
+                {restoredSession && !restoredSession.timing ? '旧批次未记录此前耗时，从本次继续起统计。' : ''}
+              </p>
+              <div className="row" style={{ flexWrap: 'wrap', gap: '6px 16px' }}>
+                {Object.entries(timing.chapters).sort(([a], [b]) => Number(a) - Number(b)).map(([chapter, ms]) => (
+                  <span key={chapter} className="meta">
+                    第 {chapter} 章耗时：{formatBatchDuration(ms)}
+                    {running && Number(chapter) === liveChapter && !liveCompleted.includes(Number(chapter)) ? '（进行中）' : ''}
+                  </span>
+                ))}
+              </div>
             </div>
             {displayChapter ? (
               <div className="batch-progress-current">
@@ -2190,7 +2620,7 @@ function BatchWriteDialog({
             <div className="batch-streaming-head">
               {isDeslopStage(generationStage)
                 ? `生成原稿已保存 · ${deslopProgressLabel(generationStage)}`
-                : generationStage === null ? '正文预览，正在写后检查…' : '正在生成…'}
+                : generationStage === null ? '正文预览，正在写后检查…' : generationProgressLabel(generationStage)}
             </div>
             <pre className="batch-streaming-text">{streamingText}</pre>
           </div>
@@ -2204,6 +2634,7 @@ function BatchWriteDialog({
             <ul className="batch-last-result-list">
               <li>
                 字数：{lastResult.content.length}
+                {timing.chapters[lastResult.chapterNumber] !== undefined ? ` · 耗时 ${formatBatchDuration(timing.chapters[lastResult.chapterNumber])}` : ''}
               </li>
               <li className={lastSummary?.autoDeslop?.status === 'failed' || lastSummary?.autoDeslop?.status === 'review_required' ? 'batch-last-result-warn' : undefined}>
                 {lastSummary ? describeAutoDeslopCell(lastSummary) : ''}
@@ -2352,7 +2783,8 @@ function BatchWriteDialog({
                         </span>
                       ) : null}
                     </span>
-                    <span>{item.words} 字</span>
+                    {timing.chapters[item.chapter] !== undefined ? <span>耗时 {formatBatchDuration(timing.chapters[item.chapter])}</span> : null}
+                    <span>{item.words} 字 · {BATCH_QUALITY_LABELS[item.quality ?? 'unverified']}</span>
                     <span title={[item.autoDeslop?.message, ...(item.autoDeslop?.issues ?? [])].filter(Boolean).join('；')} style={{ color: item.autoDeslop?.status === 'failed' || item.autoDeslop?.status === 'review_required' ? 'var(--warn)' : undefined }}>
                       {describeAutoDeslopCell(item)}
                       {item.autoDeslop?.status !== 'applied' && (item.autoDeslop?.repairAttempts ?? 0) > 0 ? `（已自动修复 ${item.autoDeslop!.repairAttempts} 次）` : ''}
@@ -2433,7 +2865,7 @@ function BatchWriteDialog({
             <button
               className="btn btn-primary"
               onClick={startBatch}
-              disabled={running || recovering || !rangeValid || overwriteWarning.length > 0}
+              disabled={running || recovering || !rangeValid || overwriteWarning.length > 0 || !modelsReady}
             >
               {running
                 ? '生成中…'

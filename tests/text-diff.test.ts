@@ -4,8 +4,39 @@ import {
   diffUnits,
   summarizeTextDiff,
   findFirstDiffWindow,
-  listChangeHunks
+  listChangeHunks,
+  listRefinementHunks,
+  applyChangeHunks,
+  rejectChangeHunk
 } from '../src/shared/text-diff'
+
+describe('large text comparison', () => {
+  it('bounds diff memory for thousands of paragraphs and preserves the changed location', () => {
+    const before = Array.from({ length: 10000 }, (_, i) => `第${i}段。`)
+    const after = [...before]
+    after[5000] = '改后的段落。'
+    expect(diffUnits(before, after)).toEqual([{ before: before[5000], after: after[5000],
+      index: before.slice(0, 5000).reduce((n, line) => n + line.length + 2, 0), line: 5001 }])
+    expect(diffUnits(before, before)).toEqual([])
+    expect(listChangeHunks(before.join('\n\n'), after.join('\n\n'))).toHaveLength(1)
+  })
+})
+
+describe('rejectChangeHunk', () => {
+  it.each([
+    ['甲。\n\n乙。\n\n丙。', '甲改。\n\n乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。'],
+    ['甲。\n\n乙。\n\n丙。', '新增。\n\n甲。\n\n乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。'],
+    ['甲。\n\n乙。\n\n丙。', '乙。\n\n丙改。', '甲。\n\n乙。\n\n丙改。']
+  ])('restores only the selected replacement, insertion or deletion', (before, after, expected) => {
+    expect(rejectChangeHunk(before, after, 0)).toBe(expected)
+    expect(rejectChangeHunk(before, expected, 0)).toBe(before)
+  })
+  it('retains changes beyond the displayed limit', () => {
+    const before = Array.from({ length: 90 }, (_, i) => `原${i}。\n\n锚${i}。`).join('\n\n')
+    const after = before.replace(/原/g, '新')
+    expect(rejectChangeHunk(before, after, 0)).toBe(after.replace('新0。', '原0。'))
+  })
+})
 
 describe('splitUnits', () => {
   it('按空行切段', () => {
@@ -74,5 +105,53 @@ describe('diffUnits LCS', () => {
     expect(hunks).toHaveLength(1)
     expect(hunks[0].before).toBe('')
     expect(hunks[0].after).toBe('新')
+  })
+})
+
+describe('applyChangeHunks', () => {
+  const before = [
+    '鲍记的人只问了我是谁家的，旁的没说，我回来给你们捎个信。',
+    '她点了点头。',
+    '两人到了滩边，岑铁跟在她后头踩进泥里，泥一下没到他膝盖，他往外拔脚，直着拔，拔了三下没拔出来。',
+    '风从河面刮过来。',
+    '那天早上两个人挖了大半筐，岑铁断了两只，后头再没断过。'
+  ].join('\n\n')
+  const after = [
+    '鲍记的人只问了小满是谁家的，旁的没说，我回来给你们捎个信。',
+    '她点了点头。',
+    '两人到了滩边，岑铁跟在她后头踩进泥里，泥一下没到他膝盖，他直着拔了三下，脚都没出来。',
+    '风从河面刮过来。',
+    '那天早上两人挖了大半筐，岑铁后头再没拔断过。'
+  ].join('\n\n')
+
+  it('单条采用只替换对应段落，其余保持原文', () => {
+    const hunks = listRefinementHunks(before, after)
+    expect(hunks).toHaveLength(3)
+    const first = applyChangeHunks(before, after, [0])
+    expect(first).toContain('只问了小满是谁家的')
+    expect(first).toContain('他往外拔脚，直着拔')
+    expect(first).toContain('两个人挖了大半筐')
+    const second = applyChangeHunks(before, after, [1])
+    expect(second).toContain('我是谁家的')
+    expect(second).toContain('他直着拔了三下，脚都没出来。')
+    expect(second).toContain('两个人挖了大半筐')
+  })
+
+  it('按当前剩余改动依次采用后得到完整候选', () => {
+    let text = before
+    const total = listRefinementHunks(before, after).length
+    for (let i = 0; i < total; i++) {
+      expect(listRefinementHunks(text, after).length).toBe(total - i)
+      text = applyChangeHunks(text, after, [0])
+    }
+    expect(text).toBe(after)
+  })
+
+  it('拒绝越界序号，插入与删除也能单条应用', () => {
+    expect(() => applyChangeHunks(before, after, [9])).toThrow('改动序号无效')
+    const inserted = applyChangeHunks('甲\n\n丙', '甲\n\n乙\n\n丙', [0])
+    expect(inserted).toBe('甲\n\n乙\n\n丙')
+    const deleted = applyChangeHunks('甲\n\n乙\n\n丙', '甲\n\n丙', [0])
+    expect(deleted).toBe('甲\n\n丙')
   })
 })

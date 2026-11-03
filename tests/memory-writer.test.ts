@@ -47,6 +47,38 @@ describe('MemoryWriter (v4)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('keeps character level and abilities in separate fields during automatic sync', async () => {
+    seedCharacterFile(dir, '林远')
+    const extraction: MemoryExtraction = { chapterNumber: 4, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [],
+      newPlotPoints: [], collectedForeshadowings: [], characterStateChanges: [
+        { name: '林远', field: '境界', oldValue: '', newValue: '六级' },
+        { name: '林远', field: '能力', oldValue: '', newValue: '学会盾击' }
+      ] }
+    const result = await writer.applyAutomatic(extraction)
+    expect(result.errors).toEqual([])
+    const person = (await new CharacterRepo(dir).list()).find(c => c.name === '林远')
+    expect(person?.abilities).toBe('学会盾击')
+    expect(person?.customFields?.['境界']).toBe('六级')
+    const preview = await writer.previewAutomatic(extraction)
+    expect(preview.diffs.find(item => item.field === '境界')?.oldValue).toBe('六级')
+    expect(preview.diffs.find(item => item.field === '能力')?.oldValue).toBe('学会盾击')
+  })
+
+  it('preserves separate possessions and knowledge extracted from the same chapter', async () => {
+    seedCharacterFile(dir, '林远')
+    const extraction: MemoryExtraction = { chapterNumber: 4, newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [],
+      newPlotPoints: [], collectedForeshadowings: [], characterStateChanges: [
+        { name: '林远', field: '持有物', oldValue: '', newValue: '购买了青铜剑' },
+        { name: '林远', field: '持有物', oldValue: '', newValue: '收到补偿礼包' },
+        { name: '林远', field: '知情', oldValue: '', newValue: '知道补偿已发放' },
+        { name: '林远', field: '知情', oldValue: '', newValue: '知道礼包价格上涨' }
+      ] }
+    await writer.applyAutomatic(extraction)
+    const person = (await new CharacterRepo(dir).list()).find(c => c.name === '林远')
+    expect(person?.customFields?.['持有物']).toBe('购买了青铜剑；收到补偿礼包')
+    expect(person?.customFields?.['知情']).toBe('知道补偿已发放；知道礼包价格上涨')
+  })
+
   describe('applyAutomatic', () => {
     it('auto-applies state changes + plot points + foreshadowing collection', async () => {
       seedCharacterFile(dir, '林远')

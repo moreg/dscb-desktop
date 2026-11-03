@@ -4,7 +4,7 @@ export const MOBILE_BATCH_STYLES = String.raw`
 
 // Shares the mobile page's authenticated request and navigation helpers.
 export const MOBILE_BATCH_CLIENT = String.raw`
-  const mobileBatch = {projectId:'',epoch:0,timer:0,poll:null,paused:true,loading:false,loaded:false,busy:false,job:null,chapters:[],error:'',readError:false,notice:'',form:{from:'1',to:'10',autoStrength:false},formEdited:false,startKey:'',startId:''};
+  const mobileBatch = {projectId:'',epoch:0,timer:0,clock:0,poll:null,paused:true,loading:false,loaded:false,busy:false,job:null,chapters:[],error:'',readError:false,notice:'',form:{from:'1',to:'10',autoStrength:false},formEdited:false,startKey:'',startId:''};
   const mobileBatchPath = (projectId,suffix) => '/api/projects/' + encodeURIComponent(projectId) + '/batch' + (suffix || '');
   const mobileBatchCurrent = (projectId,epoch) => state.view === 'mobile-batch' && !!state.project && state.project.id === projectId && mobileBatch.projectId === projectId && mobileBatch.epoch === epoch && !mobileBatch.paused;
   function mobileBatchRange(chapters) {
@@ -27,6 +27,45 @@ export const MOBILE_BATCH_CLIENT = String.raw`
     const progress = job && job.progress || {};
     return Array.from(new Set((Array.isArray(progress.completed) ? progress.completed : []).filter((chapter) => Number.isSafeInteger(chapter) && chapter >= progress.fromChapter && chapter <= progress.toChapter))).sort((a,b) => a - b);
   }
+  function formatElapsed(ms) {
+    if (!Number.isFinite(ms) || ms < 0) ms = 0;
+    var total = Math.floor(ms / 1000);
+    var hours = Math.floor(total / 3600);
+    var minutes = Math.floor((total % 3600) / 60);
+    var seconds = total % 60;
+    var pad = function (value) { return (value < 10 ? '0' : '') + value; };
+    if (hours > 0) return hours + '小时' + pad(minutes) + '分' + pad(seconds) + '秒';
+    if (minutes > 0) return minutes + '分' + pad(seconds) + '秒';
+    return seconds + '秒';
+  }
+  function mobileBatchElapsed(job) {
+    var timing = job && job.timing;
+    if (!timing || !Number.isFinite(timing.elapsedMs)) return null;
+    var now = Date.now();
+    var total = timing.elapsedMs + (job.running && Number.isFinite(timing.runStartedAt) ? Math.max(0, now - timing.runStartedAt) : 0);
+    var chapter = null;
+    if (Number.isFinite(timing.currentChapter)) {
+      var partials = timing.chapterPartial || {};
+      var partial = Number(partials[timing.currentChapter] || 0);
+      var open = job.running && Number.isFinite(timing.chapterStartedAt) ? Math.max(0, now - timing.chapterStartedAt) : 0;
+      if ((Number.isFinite(partial) && partial > 0) || open > 0 || (job.running && Number.isFinite(timing.chapterStartedAt))) chapter = Math.max(0, partial) + open;
+    }
+    return { total: total, chapter: chapter };
+  }
+  function mobileBatchTimingHtml(job) {
+    var elapsed = mobileBatchElapsed(job);
+    if (!elapsed) return '';
+    return '<div class="mb-current" role="status">总耗时 ' + formatElapsed(elapsed.total) + (elapsed.chapter == null ? '' : ' · 本章 ' + formatElapsed(elapsed.chapter)) + '</div>';
+  }
+  function scheduleMobileBatchClock() {
+    if (mobileBatch.clock) return;
+    var tick = function () {
+      mobileBatch.clock = 0;
+      if (state.view !== 'mobile-batch' || mobileBatch.paused || !mobileBatch.job || !mobileBatch.job.running || document.visibilityState === 'hidden') return;
+      renderMobileBatch();
+    };
+    mobileBatch.clock = window.setTimeout(tick, 1000);
+  }
   function mobileBatchStatus(job) {
     const progress = job.progress || {};
     if (job.running && job.stopping) return '正在停止';
@@ -48,7 +87,7 @@ export const MOBILE_BATCH_CLIENT = String.raw`
     const remaining = retry && Number.isFinite(retry.retryAt) ? Math.max(0,Math.ceil((retry.retryAt - Date.now()) / 1000)) : 0;
     const canResume = !job.running && (progress.status !== 'completed' || pending != null);
     const summaries = Array.isArray(job.summaries) ? job.summaries : [];
-    return '<article class="card mb-progress"><h2>' + esc(mobileBatchStatus(job)) + '</h2><div class="mb-count" role="status"><strong>' + saved.length + ' / ' + total + ' 章已保存</strong><span>第 ' + esc(progress.fromChapter) + '—' + esc(progress.toChapter) + ' 章</span></div><div class="mb-track" role="progressbar" aria-label="已保存正文章节进度" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + saved.length + '"><div class="mb-fill" style="width:' + percent + '%"></div></div><div class="mb-current">当前：第 ' + esc(progress.currentChapter || progress.fromChapter) + ' 章' + (job.autoStrength ? ' · 按节奏调整生成强度' : '') + '</div>' + (saved.length ? '<p class="mb-safety">已保存章节：' + esc(saved.join('、')) + '</p>' : '') + (pending != null ? '<div class="notice">第 ' + esc(pending) + ' 章正文已保存，' + (job.running ? '电脑正在补跑检查，完成后继续下一章。' : '继续时复用正文补跑检查。') + '</div>' : '') + (retry ? '<div class="notice" role="status">第 ' + esc(retry.chapter) + ' 章遇到限流，' + (remaining ? remaining + ' 秒后自动重试' : '正在等待电脑重试') + '（第 ' + esc(retry.attempt) + ' / ' + esc(retry.maxAttempts) + ' 次）。</div>' : '') + (progress.pauseReason ? '<div class="notice">暂停原因：' + esc(progress.pauseReason) + '</div>' : '') + (progress.error ? '<div class="notice error" role="alert">' + esc(progress.error) + '</div>' : '') + '<div class="mb-actions">' + (job.running ? '<button data-action="mobile-batch-stop"' + (job.stopping ? ' disabled' : disabled) + '>' + (job.stopping ? '停止请求已送达' : '停止本批') + '</button>' : (canResume ? '<button class="primary" data-action="mobile-batch-resume"' + disabled + '>' + (pending != null ? '补跑检查并继续' : progress.status === 'failed' ? '重试并继续' : '继续本批') + '</button>' : '') + '<button data-action="mobile-batch-clear"' + disabled + '>结束本批 / 新批</button>') + '<button data-action="mobile-batch-refresh"' + (mobileBatch.busy ? ' disabled' : '') + '>刷新进度</button><button data-action="mobile-batch-chapters">返回章节列表</button></div></article>' + (job.streamText ? '<article class="card mb-progress"><h2>当前正文预览</h2><p class="mb-safety">预览显示最近收到的文字；保存情况以上方章节进度为准。</p><pre id="mbStream" class="mb-stream">' + esc(String(job.streamText).slice(-4000)) + '</pre></article>' : '') + '<div class="section-head"><h2>逐章结果</h2><span class="badge">' + summaries.length + ' 章</span></div><div class="mb-result-list">' + (summaries.length ? summaries.map((summary) => '<article class="card mb-summary"><h3>第 ' + esc(summary.chapter) + ' 章 · ' + esc(summary.wordCount || 0) + ' 字</h3><p>正文：' + (summary.saved === true ? '已保存' : '尚未确认保存') + '</p><p>去 AI 味：' + esc(summary.deslop || '尚未完成') + '</p><p>记忆：' + esc(summary.memory || '尚未完成') + '</p><p' + (summary.checks === 'completed' ? '' : ' class="mb-pending"') + '>检查：' + (summary.checks === 'completed' ? '流程已完成，请查看检查结果' : '待补跑') + '</p><div class="mb-actions"><button data-chapter="' + esc(summary.chapter) + '">查看正文</button></div></article>').join('') : '<div class="empty">每章正文保存及检查完成后，小结会显示在这里。</div>') + '</div>';
+    return '<article class="card mb-progress"><h2>' + esc(mobileBatchStatus(job)) + '</h2><div class="mb-count" role="status"><strong>' + saved.length + ' / ' + total + ' 章已保存</strong><span>第 ' + esc(progress.fromChapter) + '—' + esc(progress.toChapter) + ' 章</span></div>' + mobileBatchTimingHtml(job) + '<div class="mb-track" role="progressbar" aria-label="已保存正文章节进度" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + saved.length + '"><div class="mb-fill" style="width:' + percent + '%"></div></div><div class="mb-current">当前：第 ' + esc(progress.currentChapter || progress.fromChapter) + ' 章' + (job.autoStrength ? ' · 按节奏调整生成强度' : '') + '</div>' + (saved.length ? '<p class="mb-safety">已保存章节：' + esc(saved.join('、')) + '</p>' : '') + (pending != null ? '<div class="notice">第 ' + esc(pending) + ' 章正文已保存，' + (job.running ? '电脑正在补跑检查，完成后继续下一章。' : '继续时复用正文补跑检查。') + '</div>' : '') + (retry ? '<div class="notice" role="status">第 ' + esc(retry.chapter) + ' 章遇到限流，' + (remaining ? remaining + ' 秒后自动重试' : '正在等待电脑重试') + '（第 ' + esc(retry.attempt) + ' / ' + esc(retry.maxAttempts) + ' 次）。</div>' : '') + (progress.pauseReason ? '<div class="notice">暂停原因：' + esc(progress.pauseReason) + '</div>' : '') + (progress.error ? '<div class="notice error" role="alert">' + esc(progress.error) + '</div>' : '') + '<div class="mb-actions">' + (job.running ? '<button data-action="mobile-batch-stop"' + (job.stopping ? ' disabled' : disabled) + '>' + (job.stopping ? '停止请求已送达' : '停止本批') + '</button>' : (canResume ? '<button class="primary" data-action="mobile-batch-resume"' + disabled + '>' + (pending != null ? '补跑检查并继续' : progress.status === 'failed' ? '重试并继续' : '继续本批') + '</button>' : '') + '<button data-action="mobile-batch-clear"' + disabled + '>结束本批 / 新批</button>') + '<button data-action="mobile-batch-refresh"' + (mobileBatch.busy ? ' disabled' : '') + '>刷新进度</button><button data-action="mobile-batch-chapters">返回章节列表</button></div></article>' + (job.streamText ? '<article class="card mb-progress"><h2>当前正文预览</h2><p class="mb-safety">预览显示最近收到的文字；保存情况以上方章节进度为准。</p><pre id="mbStream" class="mb-stream">' + esc(String(job.streamText).slice(-4000)) + '</pre></article>' : '') + '<div class="section-head"><h2>逐章结果</h2><span class="badge">' + summaries.length + ' 章</span></div><div class="mb-result-list">' + (summaries.length ? summaries.map((summary) => '<article class="card mb-summary"><h3>第 ' + esc(summary.chapter) + ' 章 · ' + esc(summary.wordCount || 0) + ' 字' + (Number.isFinite(summary.durationMs) ? ' · 耗时 ' + formatElapsed(summary.durationMs) : '') + '</h3><p>正文：' + (summary.saved === true ? '已保存' : '尚未确认保存') + '</p><p>去 AI 味：' + esc(summary.deslop || '尚未完成') + '</p><p>记忆：' + esc(summary.memory || '尚未完成') + '</p><p' + (summary.checks === 'completed' ? '' : ' class="mb-pending"') + '>检查：' + (summary.checks === 'completed' ? '流程已完成，请查看检查结果' : '待补跑') + '</p><div class="mb-actions"><button data-chapter="' + esc(summary.chapter) + '">查看正文</button></div></article>').join('') : '<div class="empty">每章正文保存及检查完成后，小结会显示在这里。</div>') + '</div>';
   }
   function renderMobileBatch() {
     if (state.view !== 'mobile-batch' || !state.project || state.project.id !== mobileBatch.projectId) return;
@@ -70,6 +109,8 @@ export const MOBILE_BATCH_CLIENT = String.raw`
     const restored = activeId && document.getElementById(activeId); if (restored) restored.focus({preventScroll:true});
     const afterStream = document.getElementById('mbStream'); if (afterStream) afterStream.scrollTop = streamScroll;
     window.scrollTo(0,pageScroll);
+    if (mobileBatch.job && mobileBatch.job.running) scheduleMobileBatchClock();
+    else if (mobileBatch.clock) { window.clearTimeout(mobileBatch.clock); mobileBatch.clock = 0; }
   }
   function scheduleMobileBatchPoll() {
     window.clearTimeout(mobileBatch.timer);
@@ -78,6 +119,8 @@ export const MOBILE_BATCH_CLIENT = String.raw`
   }
   function leaveMobileBatch() {
     window.clearTimeout(mobileBatch.timer);
+    window.clearTimeout(mobileBatch.clock);
+    mobileBatch.clock = 0;
     mobileBatch.paused = true;
     ++mobileBatch.epoch;
     if (mobileBatch.poll) mobileBatch.poll.controller.abort();

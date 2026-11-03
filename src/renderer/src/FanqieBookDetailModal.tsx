@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import {
   formatFanqieReadCount,
   formatFanqieWordCount,
@@ -30,9 +30,15 @@ export default function FanqieBookDetailModal({
   const [searchQuery, setSearchQuery] = useState('')
   const [exportNotice, setExportNotice] = useState('')
   const batchTask = useRef<{ abort: () => void } | null>(null)
+  const requestVersion = useRef(0)
+  const currentBook = useRef(bookId); currentBook.current = bookId
+  const knownBookRef = useRef(knownBook); knownBookRef.current = knownBook
+  const active = useRef(true)
+  const exportTimer = useRef<ReturnType<typeof setTimeout>>()
+  const isCurrent = useCallback((version: number) => active.current && currentBook.current === bookId && requestVersion.current === version, [bookId])
 
-  const autoFetchFirst3 = async (currentDetail: FanqieBookDetail) => {
-    if (batchRunning || !window.api?.fetchFanqieChaptersBatch) return
+  const autoFetchFirst3 = useCallback(async (currentDetail: FanqieBookDetail, version: number) => {
+    if (!isCurrent(version) || batchTask.current || !window.api?.fetchFanqieChaptersBatch) return
     setBatchRunning(true)
     setBatchProgress({
       bookId: currentDetail.bookId,
@@ -48,54 +54,62 @@ export default function FanqieBookDetailModal({
       3,
       undefined,
       (progress) => {
-        setBatchProgress(progress)
+        if (isCurrent(version)) setBatchProgress(progress)
       }
     )
     batchTask.current = handle
 
     try {
       await handle
-      const updated = await window.api.getFanqieBookDetail(currentDetail.bookId, knownBook, false)
-      setDetail(updated)
+      if (!isCurrent(version)) return
+      const updated = await window.api.getFanqieBookDetail(currentDetail.bookId, knownBookRef.current, false)
+      if (isCurrent(version)) setDetail(updated)
     } catch {
       // 预抓取若受阻，不阻断界面，用户可手动再次点击重试
     } finally {
-      batchTask.current = null
-      setBatchRunning(false)
+      if (batchTask.current === handle) {
+        batchTask.current = null
+        if (active.current && currentBook.current === currentDetail.bookId) setBatchRunning(false)
+      }
     }
-  }
+  }, [isCurrent])
 
-  const loadDetail = async (force = false) => {
+  const loadDetail = useCallback(async (force = false) => {
+    const version = ++requestVersion.current
     setLoading(true)
     setError('')
     try {
       if (typeof window.api?.getFanqieBookDetail !== 'function') {
         throw new Error('桌面应用底层服务尚未加载：请重启开发环境（在终端中按 Ctrl+C 关闭后重新运行 npm run dev）')
       }
-      const data = await window.api.getFanqieBookDetail(bookId, knownBook, force)
+      const data = await window.api.getFanqieBookDetail(bookId, knownBookRef.current, force)
+      if (!isCurrent(version)) return
       setDetail(data)
       if (!force && data.chapters.length > 0 && data.cachedChapterIds.length < 3) {
-        void autoFetchFirst3(data)
+        void autoFetchFirst3(data, version)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isCurrent(version)) setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      if (isCurrent(version)) setLoading(false)
     }
-  }
+  }, [bookId, isCurrent, autoFetchFirst3])
 
   useEffect(() => {
+    active.current = true
+    setDetail(null); setActiveChapterId(null); setBatchRunning(false); setBatchProgress(null); setExportNotice('')
     void loadDetail()
-  }, [bookId])
-
-  useEffect(() => {
     return () => {
+      active.current = false
       batchTask.current?.abort()
+      batchTask.current = null
+      clearTimeout(exportTimer.current)
     }
-  }, [])
+  }, [loadDetail])
 
   const handleFetchBatch = async (limit: number) => {
-    if (!detail) return
+    if (!detail || batchTask.current) return
+    const version = requestVersion.current
     setBatchRunning(true)
     setBatchProgress(null)
     setError('')
@@ -111,7 +125,7 @@ export default function FanqieBookDetailModal({
       limit,
       undefined,
       (progress) => {
-        setBatchProgress(progress)
+        if (isCurrent(version)) setBatchProgress(progress)
       }
     )
     batchTask.current = handle
@@ -119,12 +133,14 @@ export default function FanqieBookDetailModal({
     try {
       await handle
       // 刷新详情以更新 cachedChapterIds
-      await loadDetail(false)
+      if (isCurrent(version)) await loadDetail(false)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isCurrent(version)) setError(err instanceof Error ? err.message : String(err))
     } finally {
-      batchTask.current = null
-      setBatchRunning(false)
+      if (batchTask.current === handle) {
+        batchTask.current = null
+        if (active.current && currentBook.current === bookId) setBatchRunning(false)
+      }
     }
   }
 
@@ -133,6 +149,7 @@ export default function FanqieBookDetailModal({
   }
 
   const handleExportTxt = async () => {
+    const version = requestVersion.current
     setExportNotice('')
     if (typeof window.api?.exportFanqieBookTxt !== 'function') {
       setError('桌面应用底层服务尚未加载：请重启开发环境（在终端中按 Ctrl+C 关闭后重新运行 npm run dev）')
@@ -140,6 +157,7 @@ export default function FanqieBookDetailModal({
     }
     try {
       const res = await window.api.exportFanqieBookTxt(bookId)
+      if (!isCurrent(version)) return
       // 生成本地下载 blob
       const blob = new Blob([res.content], { type: 'text/plain;charset=utf-8' })
       const url = URL.createObjectURL(blob)
@@ -151,13 +169,15 @@ export default function FanqieBookDetailModal({
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
       setExportNotice(`✓ 已成功导出 ${res.chapterCount} 章（共 ${res.wordCount} 字）`)
-      setTimeout(() => setExportNotice(''), 4000)
+      clearTimeout(exportTimer.current)
+      exportTimer.current = setTimeout(() => { if (isCurrent(version)) setExportNotice('') }, 4000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isCurrent(version)) setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   const handleDeleteCache = async () => {
+    const version = requestVersion.current
     if (!confirm('确定清除本书的所有已下载章节正文缓存？')) return
     if (typeof window.api?.deleteFanqieBookCache !== 'function') {
       setError('桌面应用底层服务尚未加载：请重启开发环境（在终端中按 Ctrl+C 关闭后重新运行 npm run dev）')
@@ -165,9 +185,9 @@ export default function FanqieBookDetailModal({
     }
     try {
       await window.api.deleteFanqieBookCache(bookId)
-      await loadDetail(true)
+      if (isCurrent(version)) await loadDetail(true)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isCurrent(version)) setError(err instanceof Error ? err.message : String(err))
     }
   }
 

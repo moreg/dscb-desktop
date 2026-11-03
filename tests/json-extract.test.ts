@@ -28,6 +28,23 @@ describe('parsers tolerate chatty model output', () => {
     expect(parseMemoryExtractionJson(raw, 3).parseError).toBeUndefined()
   })
 
+  it('parses optional item state changes and defaults to empty without them', () => {
+    const withItems = { newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [],
+      itemStateChanges: [{ name: '铜牌', field: '材质', oldValue: '', newValue: '铜质', evidence: '一块铜牌' }] }
+    const parsed = parseMemoryExtractionJson(JSON.stringify(withItems), 3)
+    expect(parsed.parseError).toBeUndefined()
+    expect(parsed.itemStateChanges).toEqual(withItems.itemStateChanges)
+    const withoutItems = parseMemoryExtractionJson(JSON.stringify({ newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [] }), 3)
+    expect(withoutItems.parseError).toBeUndefined()
+    expect(withoutItems.itemStateChanges).toEqual([])
+  })
+
+  it('rejects malformed item state entries', () => {
+    const raw = JSON.stringify({ newPlotPoints: [], characterStateChanges: [], collectedForeshadowings: [],
+      itemStateChanges: [{ name: 1, field: '材质', newValue: '铜质' }] })
+    expect(parseMemoryExtractionJson(raw, 3).parseError).toBeDefined()
+  })
+
   it('parses rhythm evaluation after a think block containing braces', () => {
     const raw = '<think>{"actualEmotion": "?"}</think>{"actualEmotion": 6, "reason": "对峙"}'
     expect(parseRhythmEvaluationJson(raw, 2, 6)).toMatchObject({ actualEmotion: 6, autoApply: true })

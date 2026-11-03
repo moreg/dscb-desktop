@@ -43,7 +43,8 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
         }
       : x)
     if (arr.some((x) => !x || typeof x !== 'object' ||
-      ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority))) {
+      ![1, 2, 3, 4, 5].includes(x.type) || !['P0', 'P1', 'P2'].includes(x.priority) ||
+      (x.boundaryViolation !== undefined && typeof x.boundaryViolation !== 'boolean'))) {
       return fail('细纲对照输出的差异项缺少有效的 type/priority')
     }
     const diffs: OutlineDiffItem[] = arr
@@ -53,6 +54,7 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
         const item: OutlineDiffItem = {
           type,
           typeLabel: labels[type] ?? '细节调整',
+          ...(typeof x.boundaryViolation === 'boolean' ? { boundaryViolation: x.boundaryViolation } : {}),
           outline: typeof x.outline === 'string' ? x.outline : undefined,
           actual: typeof x.actual === 'string' ? x.actual : undefined,
           suggestion: typeof x.suggestion === 'string' ? x.suggestion : '',
@@ -63,10 +65,11 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
               : defaultResolutionForType(type)
         }
         const outlinePatch = sanitizeOutlinePatch(x.outlinePatch)
-        if (outlinePatch) item.outlinePatch = outlinePatch
+        if (item.boundaryViolation) item.resolution = 'updateContent'
+        else if (outlinePatch) item.outlinePatch = outlinePatch
         return item
       })
-    const passed = !diffs.some((d) => d.priority === 'P0' || d.priority === 'P1')
+    const passed = !diffs.some((d) => d.boundaryViolation || d.priority === 'P0' || d.priority === 'P1')
     return { chapterNumber, diffs, passed }
   } catch {
     return fail('细纲对照输出的 JSON 格式错误')
@@ -90,7 +93,7 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
   try {
     const obj = findJsonObject(raw)
     if (!obj) return { ...empty, parseError: '记忆提取未返回有效 JSON，本次未提交' }
-    const fields = ['newCharacters', 'newLocations', 'newItems', 'newForeshadowings', 'newPlotPoints', 'characterStateChanges', 'collectedForeshadowings', 'settingsPatches', 'settingsSuggestions']
+    const fields = ['newCharacters', 'newLocations', 'newItems', 'newForeshadowings', 'newPlotPoints', 'characterStateChanges', 'itemStateChanges', 'collectedForeshadowings', 'settingsPatches', 'settingsSuggestions']
     if (!obj || typeof obj !== 'object' ||
       ['newPlotPoints', 'characterStateChanges', 'collectedForeshadowings'].some((key) => !Array.isArray(obj[key])) ||
       fields.some((key) => obj[key] !== undefined && (!Array.isArray(obj[key]) ||
@@ -100,7 +103,7 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
     const required: Record<string, string[]> = {
       newCharacters: ['name'], newLocations: ['name'], newItems: ['name'],
       newForeshadowings: ['content'], newPlotPoints: ['title', 'event'],
-      characterStateChanges: ['name', 'field', 'newValue'], collectedForeshadowings: ['content'],
+      characterStateChanges: ['name', 'field', 'newValue'], itemStateChanges: ['name', 'field', 'newValue'], collectedForeshadowings: ['content'],
       settingsPatches: ['target', 'fileName', 'op', 'content']
     }
     if (Object.entries(required).some(([key, props]) => (obj[key] ?? []).some((item: Record<string, unknown>) =>
@@ -119,6 +122,7 @@ export function parseMemoryExtractionJson(raw: string, chapterNumber: number): M
       characterStateChanges: Array.isArray(obj.characterStateChanges)
         ? obj.characterStateChanges
         : [],
+      itemStateChanges: Array.isArray(obj.itemStateChanges) ? obj.itemStateChanges : [],
       collectedForeshadowings: Array.isArray(obj.collectedForeshadowings)
         ? obj.collectedForeshadowings
         : [],

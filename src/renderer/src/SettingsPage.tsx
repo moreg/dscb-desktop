@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import ChapterNotificationSetting from './ChapterNotificationSetting'
 import type {
   UsageSummary,
   ListProvidersResult,
@@ -214,6 +215,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
     { id: 'appearance', label: '外观' },
     { id: 'storage', label: '保存位置' },
     { id: 'updates', label: '应用更新' },
+    { id: 'notifications', label: '通知' },
     { id: 'model', label: '模型服务' },
     { id: 'usage', label: '用量与费用' },
     { id: 'aiwords', label: 'AI 高频词' },
@@ -662,7 +664,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
         <div className="page-head-row">
           <div>
             <h1>设置</h1>
-            <p className="desc">外观、保存位置、模型服务、用量与写作节奏</p>
+            <p className="desc">外观、保存位置、通知、模型服务、用量与写作节奏</p>
           </div>
         </div>
       </div>
@@ -681,6 +683,12 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
         </nav>
         <div className="settings-content">
           {activeTab === 'updates' && <AppUpdatePanel />}
+          {activeTab === 'notifications' && (
+            <div className="card" style={{ maxWidth: 900 }}>
+              <h3 className="sub">通知</h3>
+              <ChapterNotificationSetting />
+            </div>
+          )}
           {/* 全局消息提示 */}
           {msg ? (
             <p
@@ -787,7 +795,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
                   style={{
                     marginTop: 12,
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 360px), 1fr))',
                     gap: 10,
                     alignItems: 'start'
                   }}
@@ -2272,7 +2280,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
 
               {showAddForm && (
                 <div style={{ marginTop: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface-2)' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label style={{ fontSize: 12.5 }}>名称</label>
                       <input
@@ -2427,7 +2435,7 @@ export default function SettingsPage({ onOpenChapter, initialTab }: Props) {
               <h4 className="sub" style={{ marginTop: 18, fontSize: 13.5 }}>
                 阈值
               </h4>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
+              <div className="mobile-stack-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
                 {(
                   [
                     ['maxParagraphLen', '段落长度上限', 1, 10000],
@@ -3037,11 +3045,42 @@ function ProviderRow({
 }
 
 /* ---------- 新增 provider 表单 ---------- */
+const PROVIDER_DRAFT_BASE_KEY = 'dscb.providerDraft.baseUrl'
+const PROVIDER_DRAFT_API_KEY = 'dscb.providerDraft.apiKey'
+const DEFAULT_PROVIDER_BASE_URL = 'https://api.openai.com/v1'
+
+/** 添加 provider 时记住上次的 Base URL 和 API Key。只写本机 localStorage，不进仓库。 */
+export function readProviderDraft(storage: Pick<Storage, 'getItem'> | null): { baseUrl: string; apiKey: string } {
+  let baseUrl: string
+  let apiKey: string
+  try {
+    baseUrl = storage?.getItem(PROVIDER_DRAFT_BASE_KEY)?.trim() || ''
+    apiKey = storage?.getItem(PROVIDER_DRAFT_API_KEY) || ''
+  } catch {
+    baseUrl = ''
+    apiKey = ''
+  }
+  return { baseUrl: baseUrl || DEFAULT_PROVIDER_BASE_URL, apiKey }
+}
+
+export function writeProviderDraft(
+  storage: Pick<Storage, 'setItem'> | null,
+  draft: { baseUrl: string; apiKey: string }
+): void {
+  try {
+    storage?.setItem(PROVIDER_DRAFT_BASE_KEY, draft.baseUrl)
+    storage?.setItem(PROVIDER_DRAFT_API_KEY, draft.apiKey)
+  } catch {
+    // 隐私模式或存储满时仍允许本次保存 provider，只是下次要再填。
+  }
+}
+
 function NewProviderForm({ onCreated }: { onCreated: () => void }) {
+  const remembered = readProviderDraft(typeof localStorage === 'undefined' ? null : localStorage)
   const [label, setLabel] = useState('')
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
+  const [baseUrl, setBaseUrl] = useState(remembered.baseUrl)
   const [model, setModel] = useState('')
-  const [apiKey, setApiKey] = useState('')
+  const [apiKey, setApiKey] = useState(remembered.apiKey)
   const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
   const [reasoningEffort, setReasoningEffort] = useState<ProviderSummary['reasoningEffort']>('medium')
   const [saving, setSaving] = useState(false)
@@ -3222,17 +3261,19 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
     }
     setSaving(true)
     try {
+      const savedBaseUrl = isCli ? '' : baseUrl.trim().replace(/\/+$/, '')
+      const savedApiKey = isCli ? '' : apiKey.trim()
       await window.api.upsertProvider({
         id: newId(),
         label: resolvedLabel,
-        baseUrl: isCli ? '' : baseUrl.trim().replace(/\/+$/, ''),
+        baseUrl: savedBaseUrl,
         model: isCli ? model.trim() || 'default' : model.trim(),
-        apiKey: isCli ? '' : apiKey.trim(),
+        apiKey: savedApiKey,
         protocol,
         ...(isResponses || isClaude ? { reasoningEffort } : {})
       })
+      if (!isCli) writeProviderDraft(localStorage, { baseUrl: savedBaseUrl, apiKey: savedApiKey })
       setLabel('')
-      setApiKey('')
       setModel('')
       setCodexCustom(false)
       setAgyCustom(false)
@@ -3536,7 +3577,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
                 id="np-baseurl"
                 className="input"
                 value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value
+                  setBaseUrl(next)
+                  writeProviderDraft(localStorage, { baseUrl: next, apiKey })
+                }}
                 placeholder="https://api.openai.com/v1"
                 autoComplete="off"
                 spellCheck={false}
@@ -3607,7 +3652,11 @@ function NewProviderForm({ onCreated }: { onCreated: () => void }) {
             className="input"
             type="password"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value
+              setApiKey(next)
+              writeProviderDraft(localStorage, { baseUrl, apiKey: next })
+            }}
             placeholder="sk-…"
             autoComplete="off"
           />

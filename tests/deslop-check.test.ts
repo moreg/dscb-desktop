@@ -3,6 +3,15 @@ import { scanAiPatterns } from '../src/main/data/deslop/check-ai-patterns'
 import { scanDegeneration } from '../src/main/data/deslop/check-degeneration'
 import { normalizePunctuation, countPunctuationIssues } from '../src/main/data/deslop/normalize-punctuation'
 
+describe('数量词与情态词区分', () => {
+  it('does not flag minute durations while retaining the emotional qualifier at its original position', () => {
+    const text = '结算窗口只剩十几分钟，手续费几分钱，他仍有几分迟疑。'
+    const findings = scanAiPatterns(text, { bannedWords: ['几分'] }).filter(f => f.type === 'banned-word')
+    expect(findings).toHaveLength(1)
+    expect(findings[0].column).toBe(text.indexOf('几分迟疑') + 1)
+  })
+})
+
 describe('check-ai-patterns: not-is-comparison「不是A，而是B」', () => {
   it('检测"不是A，而是B"（★★★★★ 最毒）', () => {
     const text = '他不是冷漠，而是绝望。\n这是普通句子。'
@@ -43,21 +52,14 @@ describe('check-ai-patterns: not-is-comparison「不是A，而是B」', () => {
   })
 })
 
-describe('check-ai-patterns: em-dash 破折号', () => {
-  it('检测双破折号 ——', () => {
-    const text = '他说——然后停了下来。'
-    const findings = scanAiPatterns(text)
-    const dash = findings.filter((f) => f.type === 'em-dash')
-    expect(dash).toHaveLength(1)
-    expect(dash[0].severity).toBe('blocking')
-    expect(dash[0].gate).toBe('D')
+describe('check-ai-patterns: 合法停顿与打断', () => {
+  it.each(['他说——然后停了下来。', '他笑了 -- 然后离开。', '“我……不知道。”'])('不按标点本身判错：%s', text => {
+    expect(scanAiPatterns(text).filter(f => ['em-dash', 'ellipsis', 'punctuation-density'].includes(f.type))).toHaveLength(0)
   })
-
-  it('检测双连字符 --', () => {
-    const text = '他笑了 -- 然后离开。'
-    const findings = scanAiPatterns(text)
-    const dash = findings.filter((f) => f.type === 'em-dash')
-    expect(dash.length).toBeGreaterThanOrEqual(1)
+  it('密集停顿只提示语境复核，不阻断', () => {
+    const findings = scanAiPatterns('“我……你……算了……”').filter(f => f.type === 'punctuation-density')
+    expect(findings).toHaveLength(1)
+    expect(findings[0].severity).toBe('advisory')
   })
 })
 
@@ -371,82 +373,18 @@ describe('check-degeneration: 工程词泄漏', () => {
   })
 })
 
-describe('normalize-punctuation: 标点兜底', () => {
-  it('双破折号 → 逗号', () => {
-    const { text, changes } = normalizePunctuation('他笑了——然后离开。')
-    expect(text).not.toContain('——')
-    expect(changes.emDash).toBe(1)
+describe('normalize-punctuation: 语意保真', () => {
+  it.each(['他笑了——然后离开。', '他沉默了……', '他沉默了…', '他笑了 -- 走了。',
+    '“不急，”她说，“先看收条。”', '“等等——”', '1—3天，--flag，-20元。',
+    '第一段。\n---\n第二段。', '上文。\n***\n下文。', '上文。\n___\n下文。', '他笑了。——'])('不做破坏语意的机械替换：%s', source => {
+    const result = normalizePunctuation(source)
+    expect(result.text).toBe(source)
+    expect(Object.values(result.changes).every(value => value === 0)).toBe(true)
   })
-
-  it('六点省略号 → 句号', () => {
-    const { text, changes } = normalizePunctuation('他沉默了……')
-    expect(text).not.toContain('……')
-    expect(changes.ellipsis).toBe(1)
-  })
-
-  it('三点省略号 → 句号', () => {
-    const { text, changes } = normalizePunctuation('他沉默了…')
-    expect(text).not.toContain('…')
-    expect(changes.singleEllipsis).toBe(1)
-  })
-
-  it('双连字符 → 逗号', () => {
-    const { text, changes } = normalizePunctuation('他笑了 -- 走了。')
-    expect(text).not.toContain('--')
-    expect(changes.doubleHyphen).toBeGreaterThanOrEqual(1)
-  })
-
-  it('正常文本不变', () => {
-    const { text, changes } = normalizePunctuation('他说：「你好。」然后走了。')
-    expect(text).toBe('他说：「你好。」然后走了。')
-    expect(changes.emDash + changes.ellipsis + changes.doubleHyphen).toBe(0)
-  })
-
-  it('countPunctuationIssues 仅计数不改', () => {
-    expect(countPunctuationIssues('他笑了——走了……')).toBeGreaterThanOrEqual(2)
-    expect(countPunctuationIssues('正常句子。')).toBe(0)
-  })
-})
-
-describe('normalizePunctuation 分割线豁免', () => {
-  it('整行分割线 --- 不会被改成逗号', () => {
-    const r = normalizePunctuation('第一段。\n---\n第二段。')
-    expect(r.text).toBe('第一段。\n---\n第二段。')
-    expect(r.changes.doubleHyphen).toBe(0)
-  })
-
-  it('*** / ___ 分割线同样豁免', () => {
-    expect(normalizePunctuation('上文。\n***\n下文。').text).toContain('***')
-    expect(normalizePunctuation('上文。\n___\n下文。').text).toContain('___')
-  })
-
-  it('正文行内的 -- 照常改成逗号', () => {
-    const r = normalizePunctuation('他停下--然后转身。')
-    expect(r.text).toBe('他停下，然后转身。')
-    expect(r.changes.doubleHyphen).toBe(1)
-  })
-
-  it('句尾破折号被删除时要计数（否则日志报"没改"但正文已变）', () => {
-    const r = normalizePunctuation('他笑了。——')
-    expect(r.text).toBe('他笑了。')
-    expect(r.changes.emDash).toBe(1)
-  })
-
-  it('countPunctuationIssues 不把分割线算成标点问题', () => {
+  it('密度计数与合法用法分开，不等价于AI概率', () => {
+    expect(countPunctuationIssues('他笑了——走了……')).toBe(0)
+    expect(countPunctuationIssues('“我……你……算了……”')).toBe(1)
     expect(countPunctuationIssues('第一段。\n---\n第二段。')).toBe(0)
-  })
-})
-
-describe('scanAiPatterns 省略号检测', () => {
-  it('…… 与 … 都产出 Gate D finding', () => {
-    const findings = scanAiPatterns('她低下头。\n「我……算了…」')
-    const ellipsis = findings.filter((f) => f.type === 'ellipsis')
-    expect(ellipsis).toHaveLength(2)
-    expect(ellipsis.every((f) => f.gate === 'D' && f.severity === 'advisory')).toBe(true)
-  })
-
-  it('没有省略号时不误报', () => {
-    expect(scanAiPatterns('他站起来，走了出去。').some((f) => f.type === 'ellipsis')).toBe(false)
   })
 })
 
@@ -470,22 +408,11 @@ describe('scanAiPatterns & normalizePunctuation: 台词自然断句', () => {
     expect(r.changes.dialoguePeriod).toBe(0)
   })
 
-  it('台词被打断以破折号收尾或闭合引号前有逗号时，规范化为句号，绝不留逗号', () => {
-    expect(normalizePunctuation('“你——”').text).toBe('“你。”')
-    expect(normalizePunctuation('“你—”').text).toBe('“你。”')
-    expect(normalizePunctuation('“你--”').text).toBe('“你。”')
-    expect(normalizePunctuation('“你……”').text).toBe('“你。”')
-    expect(normalizePunctuation('“你。”').text).toBe('“你。”')
-    expect(normalizePunctuation('“你，”').text).toBe('“你。”')
-    expect(normalizePunctuation('“面子能算吉凶？”\n“你——”\n“二帅慢走。”').text).toBe(
-      '“面子能算吉凶？”\n“你。”\n“二帅慢走。”'
-    )
-    expect(normalizePunctuation('他说——其实不是这样。').text).toBe('他说，其实不是这样。')
-    expect(normalizePunctuation('“先生既然肯留下——委任今天就能签。”').text).toBe(
-      '“先生既然肯留下，委任今天就能签。”'
-    )
-  })
-})
+  it('保留真实中断及提示语前的逗号，不能一律改成句号', () => {
+    for (const text of ['“你——”', '“你—”', '“你--”', '“你，”她说，“等等。”']) {
+      expect(normalizePunctuation(text).text).toBe(text)
+    }
+  })})
 
 describe('scanAiPatterns: 新增高毒/套路句式检测', () => {
   it('检测"看似……实则……"二元哲学套路（blocking）', () => {

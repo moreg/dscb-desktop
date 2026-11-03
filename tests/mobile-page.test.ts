@@ -167,7 +167,15 @@ interface TestBatchJob {
   }
   stage?: string
   streamText: string
-  summaries: Array<{ chapter: number; wordCount: number; saved: boolean; checks: string; deslop: string; memory: string }>
+  summaries: Array<{ chapter: number; wordCount: number; saved: boolean; checks: string; deslop: string; memory: string; durationMs?: number }>
+  timing?: {
+    elapsedMs: number
+    runStartedAt?: number
+    chapterStartedAt?: number
+    currentChapter?: number
+    chapterDurations?: Record<number, number>
+    chapterPartial?: Record<number, number>
+  }
   retryWait?: { chapter: number; attempt: number; maxAttempts: number; waitMs: number; retryAt: number }
   updatedAt: number
 }
@@ -986,6 +994,23 @@ describe('mobile background batch interactions', () => {
     pending.resolve({ job: backend.batchJobs.get('project-1')! })
     await flushRequests()
     expect(page.document.root.textContent).toContain('按节奏调整生成强度')
+  })
+
+  it('shows the batch total and each chapter duration', async () => {
+    const backend = createBatchBackend()
+    const job = batchJob()
+    job.running = false
+    job.stage = undefined
+    job.progress = { ...job.progress, status: 'paused', current: 1, currentChapter: 4, completed: [3] }
+    job.timing = { elapsedMs: 125_000, currentChapter: 4, chapterPartial: { 4: 60_000 }, chapterDurations: { 3: 65_000 } }
+    job.summaries = [
+      { chapter: 3, wordCount: 3100, saved: true, checks: 'completed', deslop: '已完成', memory: '已同步', durationMs: 65_000 }
+    ]
+    backend.batchJobs.set('project-1', job)
+    const page = await openBatch(backend)
+    expect(page.document.root.textContent).toContain('总耗时 2分05秒')
+    expect(page.document.root.textContent).toContain('本章 1分00秒')
+    expect(page.document.root.textContent).toContain('第 3 章 · 3100 字 · 耗时 1分05秒')
   })
 
   it('restores saved progress and per-chapter results, then resumes checks using only the server job id', async () => {

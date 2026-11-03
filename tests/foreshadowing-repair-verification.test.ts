@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { WriteFlowService } from '../src/main/data/write-flow-service'
+import { ForeshadowingRepairRejectedError } from '../src/main/data/foreshadowing-repair'
 import type { LlmService } from '../src/main/data/llm-service'
 
 const inserted = '父亲竟然是被逐出皇宫的三皇子。'
@@ -23,7 +24,11 @@ describe('只核验伏笔新增段落的语义', () => {
     const generateStream = vi.fn().mockResolvedValue(JSON.stringify({ passed: false,
       issues: [{ message: '提前揭晓父亲身份', evidence: inserted }] }))
     const flow = new WriteFlowService({ generateStream } as unknown as LlmService)
-    await expect(flow.verifyForeshadowingRepair(input)).rejects.toThrow('新的剧情偏离：提前揭晓父亲身份')
+    await expect(flow.verifyForeshadowingRepair(input)).rejects.toMatchObject({
+      name: ForeshadowingRepairRejectedError.name,
+      message: '伏笔补写引入新的剧情偏离：提前揭晓父亲身份',
+      issues: [{ message: '提前揭晓父亲身份', evidence: inserted }]
+    })
   })
 
   it.each(['[]', '{}', '{"passed":true}', '{"passed":false,"issues":[]}',

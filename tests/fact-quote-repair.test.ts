@@ -1,9 +1,25 @@
 import { describe, it, expect, vi } from 'vitest'
-import { restoreOmittedQuoteLines, repairFactQuotes } from '../src/main/data/deslop/fact-quote-repair'
+import { restoreOmittedQuoteLines, restoreQuoteLineBreaks, repairFactQuotes } from '../src/main/data/deslop/fact-quote-repair'
 import type { LlmService } from '../src/main/data/llm-service'
 
 const original='韩素英问得直接。\n“您放掉报价，是为了这个线索？”\n申采恩接过查核副本。\n“我放的是一笔赔本保证”\n记录不能证明已经送达。'
 describe('事实清单局部引句修正',()=>{
+  it('restores more than eight layout-only mismatches without dropping facts or calling a model', async () => {
+    const blocks = Array.from({ length: 20 }, (_, i) => `角色${i}说。\r\n\r\n“记录尚未核实${i}。”`)
+    const text = blocks.join('\r\n')
+    const facts = blocks.map((quote, i) => ({quote: quote.replace(/\r?\n/g, ''), keep: `归属与未决${i}`}))
+    const generateStream = vi.fn()
+    const result = await repairFactQuotes(text, facts, {llm: {generateStream} as unknown as LlmService})
+    expect(result).toEqual(blocks.map((quote, i) => ({quote, keep: facts[i].keep})))
+    expect(generateStream).not.toHaveBeenCalled()
+  })
+  it('layout matching rejects changed negation, punctuation, inline spaces, order and ambiguity', () => {
+    expect(restoreQuoteLineBreaks('尚未核实。\n归属不明。', '已经核实。归属不明。')).toBeUndefined()
+    expect(restoreQuoteLineBreaks('尚未核实。\n归属不明。', '归属不明。尚未核实。')).toBeUndefined()
+    expect(restoreQuoteLineBreaks('尚未核实。\n归属不明。', '尚未核实，归属不明。')).toBeUndefined()
+    expect(restoreQuoteLineBreaks('not now\nthen', 'notnowthen')).toBeUndefined()
+    expect(restoreQuoteLineBreaks('甲尚未核实。\n归属不明。甲尚未核实。\n归属不明。', '甲尚未核实。归属不明。')).toBeUndefined()
+  })
   it('漏掉中间动作时只从原稿补回连续原文',()=>{
     const quote='韩素英问得直接。\n“您放掉报价，是为了这个线索？”\n“我放的是一笔赔本保证”'
     expect(restoreOmittedQuoteLines(original,quote)).toBe(original.split('\n').slice(0,4).join('\n'))

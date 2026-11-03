@@ -54,21 +54,50 @@ describe('agy prompt budget', () => {
     expect(out).toContain('此处省略部分背景')
   })
 
-  it('caps oversized essential task text while retaining the final writing instructions', () => {
+  it('rejects oversized chapter task instead of silently dropping the middle of the outline', () => {
     const prompt = [task, '本章细纲'.repeat(10000), ending].join('\n')
-    const out = buildAntigravityPrompt(prompt, undefined, '')
-    expect(out.length).toBe(AGY_PROMPT_BUDGET)
-    expect(out).toContain(task)
-    expect(out.endsWith(ending)).toBe(true)
+    expect(() => buildAntigravityPrompt(prompt, undefined, '')).toThrow('AGY_WRITING_CONTEXT_TOO_LARGE')
   })
 
   it('caps oversized system prompts and continuation drafts too', () => {
-    for (const prompt of ['正文审核', [task, draft, '正文'.repeat(25000), ending].join('\n')]) {
-      const out = buildAntigravityPrompt(prompt, '规则'.repeat(25000), '前缀')
-      expect(out.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
-      expect(out.startsWith('前缀')).toBe(true)
-      expect(out.endsWith(prompt.slice(-100))).toBe(true)
-    }
+    const out = buildAntigravityPrompt('正文审核', '规则'.repeat(25000), '前缀')
+    expect(out.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+    expect(out.startsWith('前缀')).toBe(true)
+    expect(out.endsWith('正文审核')).toBe(true)
+    expect(() => buildAntigravityPrompt([task, draft, '正文'.repeat(25000), ending].join('\n'), '规则'.repeat(25000), '前缀'))
+      .toThrow('AGY_WRITING_CONTEXT_TOO_LARGE')
+  })
+
+  it('never dispatches a writing request whose essential outline exceeds the model limit', async () => {
+    const service = new LlmService({ read: async () => ({ activeId: 'agy', providers: [
+      { id: 'agy', label: 'agy', protocol: 'antigravity', model: '', baseUrl: '', apiKey: '' }
+    ] }) } as unknown as SecretStore)
+    vi.mocked(runAntigravity).mockClear()
+    await expect(service.generateStream([task, '细纲'.repeat(20000), ending].join('\n'), { meta: { feature: 'chapter' } }))
+      .rejects.toThrow('AGY_WRITING_CONTEXT_TOO_LARGE')
+    expect(runAntigravity).not.toHaveBeenCalled()
+  })
+
+  it('preserves the full current outline, repair feedback and draft when trimming long repair context', () => {
+    const outline = '# 第 4 章 写作任务\n细纲必须先取信再记账。\n写作禁区：不能提前揭底。'
+    const draftText = '第一段正文。\n' + '实际正文。'.repeat(1000) + '\n章末原句。'
+    const prompt = [
+      '修复任务', '--- 最初确认的问题 ---', '本章：事实错误',
+      '--- 本轮需要解决的问题或上轮复检反馈 ---', '不得虚构谈话',
+      '--- 前文、细纲、记忆及作者要求（按来源使用） ---', '背景'.repeat(18000), outline,
+      '# 第 3 章 衔接原料', '旧文'.repeat(12000), '--- 当前原稿（本轮所有替换均基于此稿） ---', draftText
+    ].join('\n')
+    const result = buildAntigravityPrompt(prompt, '仅修复冲突。', '')
+    expect(result.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+    for (const text of [outline, draftText, '本章：事实错误', '不得虚构谈话']) expect(result).toContain(text)
+    expect(result).toContain('此处省略部分背景')
+  })
+
+  it('refuses a repair if the protected draft and outline alone exceed the input limit', () => {
+    const prompt = ['修复任务', '--- 最初确认的问题 ---', '错误',
+      '--- 前文、细纲、记忆及作者要求（按来源使用） ---', '# 第 4 章 写作任务\n重点细纲',
+      '--- 当前原稿（本轮所有替换均基于此稿） ---', '完整原稿'.repeat(10000)].join('\n')
+    expect(() => buildAntigravityPrompt(prompt, undefined, '')).toThrow('AGY_REPAIR_CONTEXT_TOO_LARGE')
   })
 
   it('includes merged overhead in the limit and handles exact boundaries and emoji', () => {

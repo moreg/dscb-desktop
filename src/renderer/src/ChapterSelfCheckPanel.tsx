@@ -68,9 +68,7 @@ interface Props {
    */
   onApplyToContinue?: () => void
   /**
-   * 一键标点兜底（确定性替换破折号/省略号，零 LLM）。
-   * 只挂在 punctuation_rule 这一项上——它是唯一能不动语义就修好的自检项，
-   * 走「按自检改正文」等于为了把 —— 换成 。 烧一次 token。
+   * 兼容旧调用签名。语境标点不再提供机械替换按钮。
    */
   onFixPunctuation?: () => void | Promise<void>
   fixPunctuationLoading?: boolean
@@ -97,7 +95,6 @@ export default function ChapterSelfCheckPanel(props: Props) {
     partialChapter,
     onApplyToRewrite,
     onApplyToContinue,
-    onFixPunctuation,
     fixPunctuationLoading,
     onFixCharPosition,
     fixCharPositionLoading
@@ -282,18 +279,6 @@ export default function ChapterSelfCheckPanel(props: Props) {
                       ) : null}
                     </div>
                     <div className="self-check-item-detail muted">{item.detail}</div>
-                    {item.id === 'punctuation_rule' && item.verdict === 'warn' && onFixPunctuation ? (
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        style={{ marginTop: 6 }}
-                        disabled={actionsDisabled}
-                        onClick={() => void onFixPunctuation()}
-                        title="确定性替换：—— / — / -- 改逗号或句号，…… / … 改句号。不调 LLM，可撤销"
-                      >
-                        {fixPunctuationLoading ? '替换中…' : '⚡ 一键替换标点'}
-                      </button>
-                    ) : null}
                     {item.id === 'char_position' && item.verdict === 'warn' && onFixCharPosition ? (
                       <button
                         type="button"

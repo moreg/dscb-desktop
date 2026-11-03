@@ -21,7 +21,7 @@ export async function initialize(root: string, originalProfile: string) {
   const provider = source.providers.find(p => p.id === source.activeId)
   if (!provider || provider.protocol !== 'openai') throw new Error('实测要求已配置的默认 OpenAI 兼容 HTTP 模型')
   await new SecretStore(join(profile, 'config', 'providers.enc')).write({ activeId: provider.id,
-    providers: [provider], featureRouting: Object.fromEntries(['chapter', 'review', 'humanize', 'opening', 'auxiliary', 'ask']
+    providers: [provider], featureRouting: Object.fromEntries(['chapter', 'refine', 'review', 'humanize', 'opening', 'auxiliary', 'ask']
       .map(k => [k, { providerId: provider.id }])) })
   const settings = new SettingsRepository(join(profile, 'config', 'settings.json'))
   const projects = new ProjectService(join(profile, 'projects'), new LibraryRepository(join(profile, 'library.json')), settings)

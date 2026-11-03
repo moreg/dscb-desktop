@@ -1,0 +1,53 @@
+import { BrowserWindow } from 'electron'
+import { z } from 'zod'
+import { safeHandle, safeSend } from './safe-handle'
+import { projectIdSchema, chapterNumberSchema, chapterContentSchema, validateInput } from './validation'
+import { chapterRequest } from './chapter-request'
+import type { ChapterRefinementService } from '../data/chapter-refinement-service'
+
+const address = z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema })
+const inputSchema = address.extend({ content: chapterContentSchema, goal: z.enum(['expression', 'detection', 'dialogue', 'pacing', 'scene', 'custom']),
+  instruction: z.string().max(10000), plan: z.string().max(20000).optional(),
+  detection: z.object({ excerpts: z.array(z.string().min(8).max(40000)).min(1).max(20), score: z.number().min(0).max(100).optional() }).optional(),
+  styleProfileId: z.string().max(255).nullable().optional(),
+  selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional() })
+export function registerChapterRefinementIpc(service: ChapterRefinementService): void {
+  safeHandle('refinement:record-detection', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({ id: z.string().uuid(), testedContent: chapterContentSchema,
+      result: z.object({ status: z.enum(['green', 'flagged']), score: z.number().min(0).max(100).optional(), note: z.string().max(2000) }) }), payload)
+    return service.recordDetection(value.projectId, value.chapterNumber, value.id, value.testedContent, value.result)
+  })
+  safeHandle('refinement:run', async (event, payload: unknown) => {
+    const value = validateInput(z.object({ input: inputSchema, action: z.enum(['plan', 'generate']), requestId: z.string().uuid() }), payload)
+    try { return await chapterRequest(event, value.requestId, async signal => {
+      const progress = (stage: string): void => safeSend(BrowserWindow.fromWebContents(event.sender), 'refinement:stage', { requestId: value.requestId, stage })
+      if (value.action === 'plan') {
+        progress('planning')
+        return { ok: true, plan: await service.plan(value.input, signal) }
+      }
+      return { ok: true, candidate: await service.generate(value.input, signal, progress) }
+    }) } catch (error) { return { ok: false, error: (error as Error).message } }
+  })
+  safeHandle('refinement:load', async (_event, payload: unknown) => {
+    const value = validateInput(address, payload)
+    return service.load(value.projectId, value.chapterNumber)
+  })
+  safeHandle('refinement:discard', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({ id: z.string().uuid() }), payload)
+    await service.discard(value.projectId, value.chapterNumber, value.id)
+  })
+  safeHandle('refinement:reject-hunk', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({
+      id: z.string().uuid(), currentDraft: chapterContentSchema,
+      hunkIndex: z.number().int().nonnegative().max(79)
+    }), payload)
+    return service.rejectHunk(value.projectId, value.chapterNumber, value.id, value.currentDraft, value.hunkIndex)
+  })
+  safeHandle('refinement:commit', async (_event, payload: unknown) => {
+    const value = validateInput(address.extend({
+      id: z.string().uuid(), currentDraft: chapterContentSchema, undo: z.boolean(),
+      hunkIndex: z.number().int().nonnegative().max(79).optional()
+    }), payload)
+    return service.commit(value.projectId, value.chapterNumber, value.id, value.currentDraft, value.undo, value.hunkIndex)
+  })
+}

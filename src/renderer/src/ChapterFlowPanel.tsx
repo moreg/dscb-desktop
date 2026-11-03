@@ -1,3 +1,5 @@
+import { ChapterSyncRunner, type SyncStep, type SyncStepId } from './chapter-sync-runner'
+import { formatBatchDuration } from '../../shared/batch-timing'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import type {
@@ -49,7 +51,8 @@ import { createChapterCheckTracker, type ChapterSelfCheckSnapshot } from './chap
 
 /** 流程面板 LLM 错误 → 中文提示（与编辑器侧 map 对齐的子集） */
 function friendlyFlowError(err: string): string {
-  const e = err.trim()
+  const e = err.trim().replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^(?:Error:\s*)+/, '')
+  if (e.startsWith('LONGFORM_CONTEXT_CHANGED:')) return e.replace(/^LONGFORM_CONTEXT_CHANGED:\s*/, '')
   if (!e) return '请求失败'
   if (e === 'LLM_TIMEOUT' || /aborted due to timeout/i.test(e)) {
     return '请求超时（正文较长或模型响应慢）。已放宽超时，请重试；若仍失败可换更快模型或缩短本章字数。'
@@ -107,6 +110,10 @@ interface Props {
   onCompleteOutline?: () => void
   /** 以正文回写细纲成功后，把最新细纲同步到编辑器 */
   onOutlineUpdated?: (item: DetailedOutlineItem) => void
+  /** Lock the editor only during the final, version-checked commit. */
+  onSyncSaved?: (saved: import('../../shared/types').ChapterContent) => void
+  onBeginAutoRepairCommit?: (original: string) => boolean
+  onFinishAutoRepairCommit?: (original: string, content: string | null) => boolean
   /** 记忆提取完成后回调 */
   onCompleteMemory?: () => void
   /** 节奏评估完成后回调 */
@@ -131,7 +138,7 @@ interface Props {
   } | null
   /**
    * 当 syncAllTrigger 触发时跳过记忆提取（记忆已由 syncChapterAfterWrite 完成）。
-   * 用户手动点「一键同步」仍会跑记忆提取。
+   * 手动同步可复用上下文完全一致的记忆分析。
    */
   skipMemoryOnAutoSyncAll?: boolean
   /** 写后自动同步状态（编辑器状态条同源，面板顶部再显一次） */
@@ -205,6 +212,8 @@ export default function ChapterFlowPanel(props: Props) {
     onCompleteOutline,
     onOutlineUpdated,
     onCompleteMemory,
+    onBeginAutoRepairCommit,
+    onFinishAutoRepairCommit,
     onCompleteRhythm,
     onCompleteFigure,
     syncAllTrigger,
@@ -233,9 +242,26 @@ export default function ChapterFlowPanel(props: Props) {
     undoAutoSyncLoading
   } = props
 
-  const trackStream = useStreamAborter()
+  const trackStream = useStreamAborter(JSON.stringify([projectId, chapterNumber, draft]))
+  const syncRunnerRef = useRef(new ChapterSyncRunner())
+  const [syncRunning, setSyncRunning] = useState(false)
+  const [syncExtras, setSyncExtras] = useState(false)
+  const [syncSteps, setSyncSteps] = useState<SyncStep[]>([])
+  const [syncError, setSyncError] = useState('')
+  const [syncElapsed, setSyncElapsed] = useState(0)
+  const syncStarted = useRef(0)
+  const latestSource = useRef({ projectId, chapterNumber, draft })
+  latestSource.current = { projectId, chapterNumber, draft }
+  useEffect(() => {
+    if (!syncRunning) return
+    const timer = setInterval(() => setSyncElapsed(performance.now() - syncStarted.current), 1000)
+    return () => clearInterval(timer)
+  }, [syncRunning])
   const [outlineChecking, setOutlineChecking] = useState(false)
   const [outlineDiff, setOutlineDiff] = useState<OutlineDiffReport | null>(null)
+  const lastOutlineRef = useRef<OutlineDiffReport | null>(null)
+  const lastExtractionRef = useRef<MemoryExtraction | null>(null)
+  const lastSettingsPreviewRef = useRef<SettingsApplyPreview | null>(null)
   const [outlineError, setOutlineError] = useState('')
   /**
    * 已忽略 / 已回写的差异：内容稳定键（非列表下标），并持久化到 localStorage。
@@ -258,6 +284,7 @@ export default function ChapterFlowPanel(props: Props) {
   const [summaryContent, setSummaryContent] = useState('')
   const [summaryGenerating, setSummaryGenerating] = useState(false)
   const [summaryError, setSummaryError] = useState('')
+  const summaryConflictRef = useRef('')
   const [memoryExtraction, setMemoryExtraction] = useState<MemoryExtraction | null>(null)
   const [memoryError, setMemoryError] = useState('')
   const [memoryApplying, setMemoryApplying] = useState(false)
@@ -361,10 +388,10 @@ export default function ChapterFlowPanel(props: Props) {
     const epoch = flowEpochRef.current
     try {
       const r = await window.api.generateReviewReport(projectId, draft, chapterNumber)
-      if (epoch !== flowEpochRef.current) return
+      if (epoch !== flowEpochRef.current || latestSource.current.draft !== draft) return
       setReviewReport(r)
     } catch (err) {
-      if (epoch !== flowEpochRef.current) return
+      if (epoch !== flowEpochRef.current || latestSource.current.draft !== draft) return
       setReportError(friendlyFlowError((err as Error).message || '生成审核报告失败'))
     } finally {
       if (epoch === flowEpochRef.current) setReportLoading(false)
@@ -383,6 +410,9 @@ export default function ChapterFlowPanel(props: Props) {
   // 属于旧章正文，任何「确认应用」都会写错章。
   useEffect(() => {
     flowEpochRef.current += 1
+    syncRunnerRef.current.invalidate()
+    setSyncSteps([])
+    setSyncError(syncBusyRef.current ? '正文已变化，本次同步结果将丢弃；请保存后重新同步。' : '')
     setOutlineIgnoredKeys(loadDismissedKeys(outlineIgnoredStorageKey(projectId, chapterNumber)))
     setOutlineAppliedKeys(loadDismissedKeys(outlineAppliedStorageKey(projectId, chapterNumber)))
     setOutlineDiff(null)
@@ -423,7 +453,8 @@ export default function ChapterFlowPanel(props: Props) {
     setReviewReport(null)
     setReportLoading(false)
     setReportError('')
-  }, [projectId, chapterNumber])
+    return () => { flowEpochRef.current += 1 }
+  }, [projectId, chapterNumber, draft])
 
   useEffect(() => {
     let active = true
@@ -440,22 +471,29 @@ export default function ChapterFlowPanel(props: Props) {
     if (!draft.trim()) { setSummaryError('正文为空，无法生成概要'); return }
     if (summaryGenerating) return
     setSummaryGenerating(true)
+    summaryConflictRef.current = ''
     setSummaryError('')
     const epoch = flowEpochRef.current
     const snapshot = draft
     try {
       const value = await window.api.generateChapterSummary(projectId, chapterNumber, snapshot, force)
-      if (epoch !== flowEpochRef.current) return
+      if (epoch !== flowEpochRef.current || latestSource.current.draft !== draft) return
       setChapterSummary(value)
       setSummaryContent(snapshot)
+      return true
     } catch (err) {
-      if (epoch === flowEpochRef.current) setSummaryError(friendlyFlowError((err as Error).message))
+      if (epoch === flowEpochRef.current) {
+        const message = friendlyFlowError((err as Error).message)
+        summaryConflictRef.current = message.startsWith('LONGFORM_CONFLICT:') ? message : ''
+        setSummaryError(message)
+      }
     } finally {
       if (epoch === flowEpochRef.current) setSummaryGenerating(false)
     }
   }
 
   const runOutlineCheck = async () => {
+    syncRunnerRef.current.invalidate('outline')
     if (!draft.trim()) {
       setOutlineError('正文为空，无法对照')
       return
@@ -466,7 +504,7 @@ export default function ChapterFlowPanel(props: Props) {
     // 不清空 ignored/applied：重检后按内容键自动隐藏已处理项
     setOutlineApplyError('')
     const epoch = flowEpochRef.current
-    const stale = () => epoch !== flowEpochRef.current
+    const stale = () => epoch !== flowEpochRef.current || latestSource.current.draft !== draft
     let buffer = ''
     try {
       const r = await trackStream(window.api.checkOutlineStream(
@@ -485,8 +523,12 @@ export default function ChapterFlowPanel(props: Props) {
         setOutlineChecking(false)
         return
       }
-      setOutlineDiff(parseOutlineDiffJson(buffer, chapterNumber))
+      const report = parseOutlineDiffJson(buffer, chapterNumber)
+      if (report.checked === false) throw new Error(report.error || '细纲对照结果无效')
+      lastOutlineRef.current = report
+      setOutlineDiff(report)
       onCompleteOutline?.()
+      return true
     } catch (e) {
       if (stale()) return
       setOutlineError(friendlyFlowError((e as Error).message || '对照失败'))
@@ -615,7 +657,8 @@ export default function ChapterFlowPanel(props: Props) {
     await applyOutlineFromContent(indexes)
   }
 
-  const runMemoryExtract = async () => {
+  const runMemoryExtract = async (snapshot?: string, reuse = false) => {
+    syncRunnerRef.current.invalidate('memory')
     if (!draft.trim()) {
       setMemoryError('正文为空，无法提取')
       return
@@ -635,7 +678,7 @@ export default function ChapterFlowPanel(props: Props) {
     setNewItemResult(null)
     setNewForeshadowingResult(null)
     const epoch = flowEpochRef.current
-    const stale = () => epoch !== flowEpochRef.current
+    const stale = () => epoch !== flowEpochRef.current || latestSource.current.draft !== draft
     let buffer = ''
     try {
       const r = await trackStream(window.api.extractMemoryStream(
@@ -644,7 +687,7 @@ export default function ChapterFlowPanel(props: Props) {
         (token, done) => {
           if (token) buffer += token
           if (done && !stale()) setMemoryExtracting(false)
-        }
+        }, snapshot, reuse
       ))
       if (stale()) return
       if (!r.ok) {
@@ -653,6 +696,8 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       const extraction = parseMemoryExtractionJson(buffer, chapterNumber)
+      if (extraction.parseError) throw new Error(extraction.parseError)
+      lastExtractionRef.current = extraction
       setMemoryExtraction(extraction)
       onCompleteMemory?.()
 
@@ -663,7 +708,9 @@ export default function ChapterFlowPanel(props: Props) {
         setMemoryPreview(preview)
         const sPreview = await window.api.previewSettingsApply(projectId, extraction)
         if (stale()) return
+        lastSettingsPreviewRef.current = sPreview
         setSettingsPreview(sPreview)
+        return true
       } catch (e) {
         if (stale()) return
         setMemoryError(friendlyFlowError((e as Error).message))
@@ -736,7 +783,7 @@ export default function ChapterFlowPanel(props: Props) {
       const preview = await window.api.previewSettingsApply(projectId, memoryExtraction)
       setSettingsPreview(preview)
     } catch (e) {
-      setMemoryError((e as Error).message)
+      setMemoryError(friendlyFlowError((e as Error).message))
     } finally {
       setSettingsApplying(false)
     }
@@ -765,7 +812,8 @@ export default function ChapterFlowPanel(props: Props) {
     }
   }
 
-  const runRhythmEvaluate = async () => {
+  const runRhythmEvaluate = async (snapshot?: string) => {
+    syncRunnerRef.current.invalidate('rhythm')
     if (!draft.trim()) {
       setRhythmError('正文为空，无法评估')
       return
@@ -775,7 +823,7 @@ export default function ChapterFlowPanel(props: Props) {
     setRhythmError('')
     setRhythmResult(null)
     const epoch = flowEpochRef.current
-    const stale = () => epoch !== flowEpochRef.current
+    const stale = () => epoch !== flowEpochRef.current || latestSource.current.draft !== draft
     let buffer = ''
     try {
       const rhythm = await window.api.getRhythm(projectId)
@@ -785,7 +833,7 @@ export default function ChapterFlowPanel(props: Props) {
         window.api.evaluateRhythmStream(projectId, chapterNumber, (token, done) => {
           if (token) buffer += token
           if (done && !stale()) setRhythmEvaluating(false)
-        })
+        }, snapshot)
       )
       if (stale()) return
       if (!r.ok) {
@@ -794,12 +842,14 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       const evaluation = parseRhythmEvaluationJson(buffer, chapterNumber, expectedEmotion)
+      if (!evaluation) throw new Error('节奏评估结果无效')
       setRhythmEvaluation(evaluation)
       onCompleteRhythm?.()
       // 自动应用（diff ≤ 1）
-      if (evaluation?.autoApply) {
+      if (snapshot === undefined && evaluation?.autoApply) {
         await applyRhythm(evaluation)
       }
+      return true
     } catch (e) {
       if (stale()) return
       setRhythmError(friendlyFlowError((e as Error).message))
@@ -819,7 +869,8 @@ export default function ChapterFlowPanel(props: Props) {
     }
   }
 
-  const runFigureGenerate = async () => {
+  const runFigureGenerate = async (snapshot?: string) => {
+    syncRunnerRef.current.invalidate('figure')
     if (!draft.trim()) {
       setFigureError('正文为空，无法生成图解')
       return
@@ -829,14 +880,14 @@ export default function ChapterFlowPanel(props: Props) {
     setFigureError('')
     setFigureSaved('')
     const epoch = flowEpochRef.current
-    const stale = () => epoch !== flowEpochRef.current
+    const stale = () => epoch !== flowEpochRef.current || latestSource.current.draft !== draft
     let buffer = ''
     try {
       const r = await trackStream(
         window.api.generateFigureStream(projectId, chapterNumber, (token, done) => {
           if (token) buffer += token
           if (done && !stale()) setFigureGenerating(false)
-        })
+        }, snapshot)
       )
       if (stale()) return
       if (!r.ok) {
@@ -844,8 +895,11 @@ export default function ChapterFlowPanel(props: Props) {
         setFigureGenerating(false)
         return
       }
-      setFigureDraft(parseFigureDraftJson(buffer, chapterNumber))
+      const figure = parseFigureDraftJson(buffer, chapterNumber)
+      if (!figure) throw new Error('图解结果无效')
+      setFigureDraft(figure)
       onCompleteFigure?.()
+      return true
     } catch (e) {
       if (stale()) return
       setFigureError(friendlyFlowError((e as Error).message))
@@ -914,39 +968,64 @@ export default function ChapterFlowPanel(props: Props) {
       memoryExtraction.collectedForeshadowings.length > 0)
 
   /**
-   * 一键同步：依次触发同步操作，每个操作独立 try/catch。
+   * 一键同步：同一保存版本，增量执行，独立分析最多并发两个。
    * @param opts.skipMemory 为 true 时不跑记忆 extract（外部已 syncChapterAfterWrite）
    */
   const syncBusyRef = useRef(false)
-  const runAllSync = async (opts?: { skipMemory?: boolean }) => {
-    if (!draft.trim()) return
-    // 防并发：syncAllTrigger 效果不走按钮的 disabled，手动同步进行中又触发
-    // 会并发第二条同一类型的流，自动应用被执行两次
-    if (syncBusyRef.current) return
+  const activeSync = useRef<{ abort: () => Promise<unknown> } | null>(null)
+  const runAllSync = async (opts?: { skipMemory?: boolean; force?: boolean }) => {
+    if (!draft.trim() || syncBusyRef.current || outlineChecking || memoryExtracting || memoryApplying || settingsApplying ||
+      rhythmEvaluating || rhythmApplying || figureGenerating || figureSaving || summaryGenerating || outlineApplying) return
+    if (!onBeginAutoRepairCommit?.(draft)) { setSyncError('编辑器正文已变化，请保存后同步。'); return }
     syncBusyRef.current = true
+    setSyncRunning(true); setSyncError(''); setSyncElapsed(0)
+    syncStarted.current = performance.now()
+    const epoch = flowEpochRef.current
+    const current = () => epoch === flowEpochRef.current && latestSource.current.draft === draft
+    let committed: string | null = null
+    let receipt: import('../../shared/types').ChapterContent | undefined
     try {
-      await runAllSyncInner(opts)
+      const handle = window.api.syncChapterWorkflow(projectId, chapterNumber, draft,
+        { force: opts?.force, skipMemory: opts?.skipMemory, extras: syncExtras }, step => {
+          if (!current()) return
+          setSyncSteps(previous => {
+            const item = { ...step, ...(step.status === 'running' ? { startedAt: performance.now() } : {}) }
+            return previous.some(value => value.id === step.id) ? previous.map(value => value.id === step.id ? item : value) : [...previous, item]
+          })
+        })
+      activeSync.current = handle
+      setSyncSteps([])
+      const result = await trackStream(handle)
+      if (!current()) return
+      receipt = result.saved
+      committed = result.saved?.content ?? null
+      setSyncSteps(result.steps)
+      setSyncError(result.error ? friendlyFlowError(result.error) : '')
+      if (result.outline) { setOutlineDiff(result.outline); lastOutlineRef.current = result.outline }
+      if (result.summary) { setChapterSummary(result.summary); setSummaryContent(committed ?? draft) }
+      if (result.memory) {
+        const sync = result.memory
+        setMemoryExtraction(sync.extraction); lastExtractionRef.current = sync.extraction
+        setMemoryResult(sync.memory); setSettingsResult(sync.settings)
+        setMemoryError([...(sync.memory.errors ?? []), ...(sync.memory.reviewRequired ?? []), ...(sync.memory.heldBack ?? [])].join('；'))
+        if (sync.settings.errors.length) setSyncError(sync.settings.errors.join('；'))
+        onCompleteMemory?.()
+      }
+      if (result.rhythm) setRhythmEvaluation(result.rhythm)
+      if (result.figure) setFigureDraft(result.figure)
+      const outline = await loadCurrentOutline()
+      if (current() && outline) onOutlineUpdated?.(outline)
+    } catch (error) {
+      if (current()) setSyncError(friendlyFlowError((error as Error).message))
     } finally {
+      activeSync.current = null
+      if (current()) {
+        const applied = onFinishAutoRepairCommit?.(draft, committed)
+        if (applied && receipt) props.onSyncSaved?.(receipt)
+      } else onFinishAutoRepairCommit?.(draft, null)
       syncBusyRef.current = false
-    }
-  }
-
-  const runAllSyncInner = async (opts?: { skipMemory?: boolean }) => {
-    const tasks: Promise<unknown>[] = [
-      runOutlineCheck(),
-      runRhythmEvaluate(),
-      runFigureGenerate()
-    ]
-    if (!opts?.skipMemory) {
-      tasks.push(runMemoryExtract())
-    }
-    await Promise.allSettled(tasks)
-    await runSummaryGenerate(false)
-    // 操作完成后刷新记忆索引（追踪/时间线 + 追踪/伏笔 -> 记忆/ 派生视图）
-    try {
-      await window.api.syncMemoryIndex(projectId)
-    } catch (err) {
-      console.warn('[runAllSync] syncMemoryIndex failed:', err)
+      setSyncRunning(false)
+      setSyncElapsed(performance.now() - syncStarted.current)
     }
   }
 
@@ -1006,7 +1085,7 @@ export default function ChapterFlowPanel(props: Props) {
   }, [autoSyncSeed, onCompleteMemory])
 
   /**
-   * full 后处理：syncAllTrigger 变化时跑细纲/节奏/图解；
+   * full 后处理：syncAllTrigger 变化时运行所选同步步骤；
    * 若 skipMemoryOnAutoSyncAll 则不再 extract 记忆。
    */
   const prevSyncAllTrigger = useRef(0)
@@ -1037,12 +1116,13 @@ export default function ChapterFlowPanel(props: Props) {
             className="btn btn-sm"
             onClick={() => void runAllSync({ skipMemory: false })}
             disabled={
-              outlineChecking || memoryExtracting || rhythmEvaluating || figureGenerating || summaryGenerating
+              syncRunning || outlineChecking || memoryExtracting || memoryApplying || settingsApplying || rhythmEvaluating || rhythmApplying || figureGenerating || figureSaving || summaryGenerating || outlineApplying
             }
-            title="触发细纲对照、记忆提取、节奏评估、图解生成和章节概要"
+            title="增量同步已保存正文：复用有效分析，只补跑未完成项；概要仍核对有效性"
           >
-            ⟳ 一键同步
+            {syncRunning ? '同步中…' : '⟳ 一键同步'}
           </button>
+          {syncRunning && <button className="btn btn-ghost btn-sm" onClick={() => void activeSync.current?.abort()}>停止同步</button>}
           <button className="btn btn-ghost btn-sm" onClick={onClose}>
             收起
           </button>
@@ -1050,6 +1130,23 @@ export default function ChapterFlowPanel(props: Props) {
       </div>
 
       <div className="ep-body">
+        <div className="meta" style={{ padding: '8px 0', fontSize: 12 }}>
+          <label><input type="checkbox" checked={syncExtras} disabled={syncRunning}
+            onChange={event => setSyncExtras(event.target.checked)} /> 同时评估节奏和生成图解（增加耗时）</label>
+          <p style={{ margin: '6px 0' }}>先保存正文；细纲差异和记忆由 Agent 自动核对，能安全处理的自动处理，其余待确认；概要与索引自动保存。节奏和图解仍需确认。</p>
+          {syncSteps.length > 0 && <>
+            <div>总耗时：{formatBatchDuration(syncElapsed)}</div>
+            {syncSteps.map(step => <div key={step.id}>
+              {({ index: '记忆索引', outline: '细纲对照', memory: '记忆提取', summary: '章节概要', rhythm: '节奏评估', figure: '图解生成' } satisfies Record<SyncStepId, string>)[step.id]}：
+              {{ pending: '待执行', running: '进行中', preview: '有待处理项', handled: '已自动处理', written: '已保存', reused: '复用有效分析', failed: '失败，可补跑' }[step.status]}
+              {' · '}{formatBatchDuration(step.startedAt !== undefined && step.status === 'running' ? performance.now() - step.startedAt : step.elapsedMs)}
+              {step.error && <span> · {step.error}</span>}
+            </div>)}
+            <button className="btn btn-ghost btn-sm" disabled={syncRunning} onClick={() => void runAllSync({ force: true })}>重新分析全部</button>
+          </>}
+          {syncError && <p role="alert">{syncError}</p>}
+        </div>
+        <fieldset disabled={syncRunning} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {postWriteSyncBanner && postWriteSyncBanner.phase !== 'idle' ? (
           <div
             className={`flow-auto-sync-strip flow-auto-sync-${postWriteSyncBanner.phase}`}
@@ -1284,8 +1381,7 @@ export default function ChapterFlowPanel(props: Props) {
             </button>
           </div>
           <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-            差异可「以正文更新细纲」或「忽略」。类型 2/3 推荐回写细纲；类型 1 请补写正文；类型 4/5
-            需确认。
+            自动修复会依据细纲和前文补写或修正正文，并复核剩余差异。确认采纳正文变化时，也可「以正文更新细纲」或「忽略」。
           </p>
           {outlineError ? (
             <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
@@ -1313,6 +1409,16 @@ export default function ChapterFlowPanel(props: Props) {
                         ? ' · 无未处理 P0/P1'
                         : ' · 仍有 P0/P1 待处理'}
                   </p>
+                  {pendingOutlineCount > 0 && onBeginAutoRepairCommit && onFinishAutoRepairCommit ? (
+                    <button
+                      className="btn btn-sm"
+                      disabled={syncRunning || outlineChecking || outlineApplying}
+                      onClick={() => void runAllSync({ force: true })}
+                      title="重新核对已保存正文，逐项修复并复核；漏写内容按原细纲补入正文"
+                    >
+                      {syncRunning ? '自动修复中…' : '自动修复剩余差异'}
+                    </button>
+                  ) : null}
                   {recommendedOutlineCount > 0 ? (
                     <button
                       className="btn btn-sm"
@@ -1404,7 +1510,7 @@ export default function ChapterFlowPanel(props: Props) {
                               </button>
                             ) : (
                               <span className="muted" style={{ fontSize: 11.5 }}>
-                                漏写类请在正文补写，不宜改细纲
+                                漏写项可通过自动修复补入正文。
                               </span>
                             )}
                             <button
@@ -1472,7 +1578,7 @@ export default function ChapterFlowPanel(props: Props) {
               ) : null}
               <button
                 className="btn btn-sm"
-                onClick={runMemoryExtract}
+                onClick={() => void runMemoryExtract()}
                 disabled={memoryExtracting}
               >
                 {memoryExtracting ? '提取中…' : memoryExtraction ? '重新提取' : '✦ 提取记忆'}
@@ -1714,7 +1820,7 @@ export default function ChapterFlowPanel(props: Props) {
               ) : null}
 
               {/* 新增角色（需确认） */}
-              {memoryExtraction.newCharacters.length > 0 ? (
+              {!memoryResult?.entitiesReviewed && memoryExtraction.newCharacters.length > 0 ? (
                 <div
                   style={{
                     border: '1px solid var(--line-soft)',
@@ -1751,7 +1857,7 @@ export default function ChapterFlowPanel(props: Props) {
               ) : null}
 
               {/* 新增地点（需确认） */}
-              {memoryExtraction.newLocations.length > 0 ? (
+              {!memoryResult?.entitiesReviewed && memoryExtraction.newLocations.length > 0 ? (
                 <div
                   style={{
                     border: '1px solid var(--line-soft)',
@@ -1788,7 +1894,7 @@ export default function ChapterFlowPanel(props: Props) {
               ) : null}
 
               {/* 新增道具（需确认） */}
-              {memoryExtraction.newItems.length > 0 ? (
+              {!memoryResult?.entitiesReviewed && memoryExtraction.newItems.length > 0 ? (
                 <div
                   style={{
                     border: '1px solid var(--line-soft)',
@@ -1825,7 +1931,7 @@ export default function ChapterFlowPanel(props: Props) {
               ) : null}
 
               {/* 新增伏笔（需确认） */}
-              {memoryExtraction.newForeshadowings.length > 0 ? (
+              {!memoryResult?.entitiesReviewed && memoryExtraction.newForeshadowings.length > 0 ? (
                 <div
                   style={{
                     border: '1px solid var(--line-soft)',
@@ -1871,7 +1977,7 @@ export default function ChapterFlowPanel(props: Props) {
             <strong style={{ fontSize: 13 }}>节奏图谱回填</strong>
             <button
               className="btn btn-sm"
-              onClick={runRhythmEvaluate}
+              onClick={() => void runRhythmEvaluate()}
               disabled={rhythmEvaluating}
               style={{ marginLeft: 'auto' }}
             >
@@ -1879,7 +1985,7 @@ export default function ChapterFlowPanel(props: Props) {
             </button>
           </div>
           <p className="meta" style={{ fontSize: 11.5, marginTop: 4 }}>
-            LLM 评估实际情绪值；差异 ≤1 自动回写，否则需你确认。
+            单独评估时，情绪差异 ≤1 自动回写；一键同步中的评估仅生成待确认结果。
           </p>
           {rhythmError ? (
             <p className="err" style={{ fontSize: 12.5, marginTop: 6 }}>
@@ -1940,7 +2046,7 @@ export default function ChapterFlowPanel(props: Props) {
             <strong style={{ fontSize: 13 }}>Mermaid 图解生成</strong>
             <button
               className="btn btn-sm"
-              onClick={runFigureGenerate}
+              onClick={() => void runFigureGenerate()}
               disabled={figureGenerating}
               style={{ marginLeft: 'auto' }}
             >
@@ -2015,6 +2121,7 @@ export default function ChapterFlowPanel(props: Props) {
             )
           ) : null}
         </div>
+        </fieldset>
       </div>
     </div>
   )

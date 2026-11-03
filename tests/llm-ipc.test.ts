@@ -594,6 +594,28 @@ describe('registerLlmIpc handlers', () => {
     expect(cfg.providers[0].reasoningEffort).toBeUndefined()
   })
 
+  it('llm:setFeatureRouting persists refine independently of chapter', async () => {
+    await store.write({
+      activeId: 'p1',
+      providers: [
+        { id: 'p1', label: 'A', baseUrl: 'https://a.example.com/v1', model: 'm', apiKey: TEST_API_KEY },
+        { id: 'p2', label: 'B', baseUrl: 'https://b.example.com/v1', model: 'm2', apiKey: TEST_API_KEY }
+      ]
+    })
+    const handler = handlers.get('llm:setFeatureRouting')
+    expect(handler).toBeDefined()
+    const out = (await handler!(null, {
+      chapter: { providerId: 'p1' },
+      refine: { providerId: 'p2', model: 'refine-model' }
+    })) as Record<string, { providerId: string; model?: string }>
+    expect(out.chapter).toEqual({ providerId: 'p1' })
+    expect(out.refine).toEqual({ providerId: 'p2', model: 'refine-model' })
+    expect((await store.read()).featureRouting?.refine).toEqual({
+      providerId: 'p2',
+      model: 'refine-model'
+    })
+  })
+
   it('llm:listProviders surfaces claude reasoningEffort and 登录态', async () => {
     await store.write({
       activeId: 'p_claude',

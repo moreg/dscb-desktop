@@ -1,11 +1,13 @@
 import type { FanqieChartIdea } from '../../../shared/fanqie-chart'
+import { EXPANSION_FIELDS } from './fusion-review'
 
 export const normalizeIdeaText = (value: string): string => value.normalize('NFKC').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
 
 /** 关系去重须携带实际章节事件，只有核心构思看不出感情节奏。 */
 export function ideaComparisonSummary(idea: FanqieChartIdea) {
   return { title: idea.title, goldenFinger: idea.goldenFinger, coreConcept: idea.coreConcept,
-    protagonist: idea.protagonist, openingChapters: idea.openingChapters }
+    protagonist: idea.protagonist, openingHook: idea.openingHook, trendBasis: idea.trendBasis,
+    powerSystem: idea.powerSystem, pacingPlan: idea.pacingPlan, openingChapters: idea.openingChapters }
 }
 
 export const IDEA_REVIEW_DIMENSIONS = ['content', 'originality', 'tags', 'diversity', 'romanceNaturalness', 'romancePacing', 'relationshipOriginality'] as const
@@ -20,13 +22,14 @@ function similarity(a: string, b: string): number {
 /** 快速拦截明显缺项、无来源和文本换皮；语义、因果和标签还需编辑审核。 */
 export function ideaQualityIssues(idea: FanqieChartIdea, others: FanqieChartIdea[]): string[] {
   const issues: string[] = []
+  for (const field of Object.values(EXPANSION_FIELDS)) if (!idea[field]?.trim()) issues.push(`缺少长篇展开 ${field}`)
   const required = ['genre', 'hookLine', 'goldenFinger', 'fusion', 'coreConcept', 'sellingPoint', 'protagonist', 'openingHook', 'marketReasoning', 'readerFit', 'riskNotes'] as const
   for (const field of required) if (!idea[field].trim()) issues.push(`缺少 ${field}`)
   if (!['trend', 'fusion', 'opportunity'].includes(idea.strategy)) issues.push('strategy 必须是 trend、fusion 或 opportunity')
   if (idea.titleCandidates.length !== 3 || !idea.titleCandidates.includes(idea.title) || new Set(idea.titleCandidates.map(normalizeIdeaText)).size !== 3 || idea.titleCandidates.some(title => !normalizeIdeaText(title) || Array.from(title).length > 15)) issues.push('需要三个互不相同且不超过15字的书名，主书名必须属于候选书名')
   const hookLength = Array.from(idea.hookLine).length
   if (hookLength < 20 || hookLength > 40) issues.push('hookLine 必须为20到40字')
-  if (new Set(idea.trendBasis.filter(ref => ref.mechanism.trim()).map(ref => ref.bookId)).size < 2) issues.push('至少需要两本不同样本的有效原文依据和机制说明')
+  if (new Set(idea.trendBasis.filter(ref => ref.field === 'intro' && ref.quote.trim() && ref.mechanism.trim()).map(ref => ref.bookId)).size < 2) issues.push('至少需要两本不同样本的有效原文依据和机制说明，且均为简介具体梗')
   for (const other of others) {
     if (normalizeIdeaText(idea.title) === normalizeIdeaText(other.title) || similarity(idea.coreConcept, other.coreConcept) >= 0.8 || similarity(idea.goldenFinger, other.goldenFinger) >= 0.72) {
       issues.push(`与《${other.title}》标题、构思或金手指高度相似，必须改换机制`)

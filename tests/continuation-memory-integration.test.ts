@@ -1,3 +1,4 @@
+import { withPassingLongformGuard } from './helpers/passing-longform'
 import { createWritingProject } from './helpers/writing-project'
 import { acceptedDeslop } from './helpers/accepted-deslop'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,7 +27,7 @@ describe('续写质量与长篇记忆集成', () => {
     dir = await projects.resolveDir(id)
     generateStream = vi.fn().mockResolvedValue('{}')
     const llm = { generateStream } as unknown as LlmService
-    service = new WriteService(projects, llm, undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
+    service = new WriteService(projects, withPassingLongformGuard(llm), undefined, undefined, undefined, undefined, undefined, acceptedDeslop)
   })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 

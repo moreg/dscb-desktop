@@ -12,6 +12,18 @@ function mockLlm(reply: string): LlmService {
 }
 
 describe('WriteFlowService.extractEndingState', () => {
+  it('keeps all source text and preserves extraction scope when requesting compact output', async () => {
+    const llm = mockLlm('{}')
+    const source = '首段关键事实。' + '正文内容。'.repeat(1000) + '末尾交接尚待核实。'
+    await new WriteFlowService(llm).extractEndingState(source, 65)
+    const [prompt, opts] = vi.mocked(llm.generateStream).mock.calls[0]
+    expect(prompt.endsWith(source)).toBe(true)
+    expect(prompt).toContain('保留全部有原文依据')
+    expect(prompt).toContain('不升级为已发生事实')
+    expect(opts?.strengthOverride).toBeUndefined()
+    expect(opts?.maxTokens).toBeUndefined()
+  })
+
   it('parses structured ending state from LLM JSON', async () => {
     const json = JSON.stringify({
       characterPositions: [{ name: '林远', location: '客栈', action: '正在打坐' }],

@@ -38,7 +38,8 @@ describe('ExportService', () => {
         `  { chapter: 1, title: '破窗', emotion: 5, climax: 1, volume: 1, actualized: true },\n` +
         `  { chapter: 2, title: '夜行', emotion: 5, climax: 1, volume: 1, actualized: true },\n` +
         `  { chapter: 3, title: '登船', emotion: 5, climax: 1, volume: 2, actualized: false },\n` +
-        `  { chapter: 4, title: '未分卷章节', emotion: 5, climax: 1, volume: 0, actualized: true }\n` +
+        `  { chapter: 4, title: '未分卷章节', emotion: 5, climax: 1, volume: 0, actualized: true },\n` +
+        `  { chapter: 5, title: '新程', emotion: 5, climax: 1, volume: 2, actualized: false }\n` +
         `];\n</script>`,
       'utf-8'
     )
@@ -62,11 +63,11 @@ describe('ExportService', () => {
 
     const chapterService = new ChapterService(ps)
     const outlineService = new OutlineService(ps, mockLlm)
-    service = new ExportService(chapterService, outlineService)
+    service = new ExportService(chapterService, outlineService, ps)
   })
 
   it('导出全书：按卷分组，未写正文的章节跳过', async () => {
-    const text = await service.buildText(projectId)
+    const { text } = await service.buildExport(projectId)
 
     expect(text).toContain('第1卷 破晓')
     expect(text).toContain('第1章 破窗')
@@ -82,7 +83,7 @@ describe('ExportService', () => {
   })
 
   it('导出单卷：只包含该卷章节', async () => {
-    const text = await service.buildText(projectId, 1)
+    const { text } = await service.buildExport(projectId, { volumeNumber: 1 })
 
     expect(text).toContain('第1卷 破晓')
     expect(text).toContain('第1章 破窗')
@@ -91,7 +92,48 @@ describe('ExportService', () => {
   })
 
   it('指定的卷全部未写正文时导出结果为空文本', async () => {
-    const text = await service.buildText(projectId, 2)
+    const { text } = await service.buildExport(projectId, { volumeNumber: 2 })
     expect(text.trim()).toBe('')
+  })
+
+  it('未导出过的章节：首次导出包含全部已写章节，标记后再导出报「没有未导出的章节」', async () => {
+    const first = await service.buildExport(projectId, { onlyUnexported: true })
+    expect(first.chapters.map((c) => c.chapterNumber)).toEqual([1, 2, 4])
+    expect(first.text).toContain('第4章 未分卷章节')
+
+    await service.markExported(projectId, first.chapters)
+
+    await expect(service.buildExport(projectId, { onlyUnexported: true }))
+      .rejects.toThrow('没有未导出的章节')
+    // 全量导出不受标记影响
+    const all = await service.buildExport(projectId)
+    expect(all.chapters.map((c) => c.chapterNumber)).toEqual([1, 2, 4])
+  })
+
+  it('导出后新增的章节、导出后改过正文的章节都算未导出', async () => {
+    const first = await service.buildExport(projectId, { onlyUnexported: true })
+    await service.markExported(projectId, first.chapters)
+
+    // 第 5 章新写正文（节奏图谱里已有占位），第 1 章正文改动
+    await writeFile(path.join(dir, '正文', '第005章 新程.md'), '新的旅程开始了。', 'utf-8')
+    await writeFile(path.join(dir, '正文', '第001章 破窗.md'), '苏九再次破窗而出。', 'utf-8')
+
+    const second = await service.buildExport(projectId, { onlyUnexported: true })
+    expect(second.chapters.map((c) => c.chapterNumber)).toEqual([1, 5])
+    expect(second.text).toContain('苏九再次破窗而出。')
+    expect(second.text).toContain('第5章 新程')
+    expect(second.text).not.toContain('第2章 夜行')
+
+    // 再标记后增量导出重新清空
+    await service.markExported(projectId, second.chapters)
+    await expect(service.buildExport(projectId, { onlyUnexported: true }))
+      .rejects.toThrow('没有未导出的章节')
+  })
+
+  it('取消保存不调用 markExported 时，标记不影响下一次增量导出', async () => {
+    const first = await service.buildExport(projectId, { onlyUnexported: true })
+    // 模拟用户取消：不调用 markExported，直接再次导出
+    const second = await service.buildExport(projectId, { onlyUnexported: true })
+    expect(second.chapters.map((c) => c.chapterNumber)).toEqual(first.chapters.map((c) => c.chapterNumber))
   })
 })

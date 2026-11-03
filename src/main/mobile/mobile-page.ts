@@ -142,7 +142,7 @@ export const MOBILE_PAGE = String.raw`<!doctype html>
   }
 
   function chapterCard(chapter) {
-    return '<div class="card chapter-card"><span class="chapter-num">' + String(chapter.chapterNumber).padStart(3, '0') + '</span><button class="chapter-main" data-chapter="' + chapter.chapterNumber + '"><span class="card-title">' + esc(chapter.title || ('第' + chapter.chapterNumber + '章')) + '</span><span class="meta">' + formatNumber(chapter.wordCount) + ' 字 · ' + esc(({outline:'待写',draft:'草稿',reviewed:'已审稿',published:'已发布'})[chapter.status] || chapter.status || '草稿') + '</span></button><button class="rename" data-rename="' + chapter.chapterNumber + '" aria-label="重命名第 ' + chapter.chapterNumber + ' 章">✎</button></div>';
+    return '<div class="card chapter-card"><span class="chapter-num">' + String(chapter.chapterNumber).padStart(3, '0') + '</span><button class="chapter-main" data-chapter="' + chapter.chapterNumber + '"><span class="card-title">' + esc(chapter.title || ('第' + chapter.chapterNumber + '章')) + '</span><span class="meta">' + formatNumber(chapter.wordCount) + ' 字 · ' + esc(({outline:'待写',draft:'正文',reviewed:'正文',published:'已发布'})[chapter.status] || chapter.status || '正文') + '</span></button><button class="rename" data-rename="' + chapter.chapterNumber + '" aria-label="重命名第 ' + chapter.chapterNumber + ' 章">✎</button></div>';
   }
 
   function renderChapters(filter) {

@@ -4,13 +4,21 @@ import { randomBytes } from 'crypto'
 import { invalidateMemoryFile } from './memory/repository-cache'
 
 export async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try {
-    const raw = await fs.readFile(file, 'utf-8')
-    return JSON.parse(raw) as T
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException
-    if (e.code === 'ENOENT') return fallback
-    throw err
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const raw = await fs.readFile(file, 'utf-8')
+      return JSON.parse(raw) as T
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      if (e.code === 'ENOENT') return fallback
+      // Windows can briefly report EPERM while a listed file is being deleted or
+      // atomically replaced. Retry the read, never disguise permanent denial as empty data.
+      if (attempt < 2 && (e.code === 'EPERM' || e.code === 'EBUSY')) {
+        await new Promise(resolve => setTimeout(resolve, 20 * (attempt + 1)))
+        continue
+      }
+      throw err
+    }
   }
 }
 
@@ -19,12 +27,7 @@ export async function readJson<T>(file: string, fallback: T): Promise<T> {
  * 用随机后缀避免并发调用写入同一 .tmp 文件导致 write EOF。
  */
 export async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
-  const dir = path.dirname(file)
-  await fs.mkdir(dir, { recursive: true })
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8')
-  await fs.rename(tmp, file)
-  invalidateMemoryFile(file)
+  await writeTextAtomic(file, JSON.stringify(data, null, 2))
 }
 
 /**
@@ -35,7 +38,13 @@ export async function writeTextAtomic(file: string, text: string): Promise<void>
   const dir = path.dirname(file)
   await fs.mkdir(dir, { recursive: true })
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  await fs.writeFile(tmp, text, 'utf-8')
-  await fs.rename(tmp, file)
+  try {
+    await fs.writeFile(tmp, text, 'utf-8')
+    await fs.rename(tmp, file)
+  } catch (error) {
+    // 写入或替换失败时保留正式文件，清掉本次生成的临时文件。
+    await fs.rm(tmp, { force: true }).catch(() => undefined)
+    throw error
+  }
   invalidateMemoryFile(file)
 }

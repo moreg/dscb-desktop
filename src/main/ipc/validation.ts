@@ -43,7 +43,12 @@ export const batchWriteInputSchema = z.object({
   requestId: z.string().min(1).max(255),
   batchState: batchStateSchema,
   autoContinue: z.boolean().optional(),
-  autoStrength: z.boolean().optional()
+  autoStrength: z.boolean().optional(),
+  /** 本窗口这一批正文的模型；缺省则仍走正文功能路由 */
+  chapterRoute: z.object({
+    providerId: z.string().min(1).max(100),
+    model: z.string().max(255).optional()
+  }).optional()
 }).superRefine((input, ctx) => {
   const error = getBatchRangeError(input.fromChapter, input.toChapter, input.batchState)
   if (error) ctx.addIssue({ code: 'custom', message: error })

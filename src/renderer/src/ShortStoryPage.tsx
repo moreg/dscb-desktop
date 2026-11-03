@@ -1,3 +1,4 @@
+import { isWebClient } from './web-download'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { StreamHandle } from '../../shared/types'
@@ -772,7 +773,8 @@ export default function ShortStoryPage(): React.ReactElement {
         <span className="ss-story-count">{item.writtenWords.toLocaleString()} / {item.targetWords.toLocaleString()} 字 · {item.completedSections} / {item.sectionCount} 节有正文</span>
         <progress aria-label={`${item.title}的字数进度`} max={item.targetWords} value={Math.min(item.writtenWords, item.targetWords)} />
         <span className="ss-story-date">更新于 {new Date(item.updatedAt).toLocaleDateString('zh-CN')}</span>
-        {item.loadError && <><p className="ss-error ss-notice" role="alert">无法读取：{item.loadError}</p><button className="btn btn-sm" disabled={busy} onClick={() => void openDirectory(item.id)}>打开作品文件夹</button></>}
+        {item.loadError && <p className="ss-error ss-notice" role="alert">无法读取：{item.loadError}</p>}
+        {!isWebClient() && <button className="btn btn-sm" disabled={busy} onClick={() => void openDirectory(item.id)}>打开作品文件夹</button>}
       </article>)}
     </div> : <div className="empty-state ss-empty"><h2>从一个能讲完的故事开始</h2><p>短篇默认 8000 字 / 4 节，中篇默认 30000 字 / 12 节。</p><p>新建作品后，先确定冲突与结局，再按全文预算完成正文。</p></div>}
     {!storiesLoading && <div className="ss-list-footer"><button className="btn btn-ghost" disabled={busy} onClick={() => void refresh()}>刷新作品列表</button></div>}

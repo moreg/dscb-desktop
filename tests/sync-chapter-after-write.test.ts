@@ -96,7 +96,7 @@ describe('WriteService.syncChapterAfterWrite', () => {
       5,
       expect.any(Array),
       expect.any(Object),
-      expect.any(Array)
+      expect.any(Array), expect.any(Object)
     )
 
     const dir = await ps.resolveDir(projectId)
@@ -208,7 +208,8 @@ describe('WriteService.syncChapterAfterWrite', () => {
     expect(forced).not.toBeNull()
     expect(forced!.extraction.chapterNumber).toBe(5)
     expect(forced!.extraction.newPlotPoints.length).toBe(1)
-    expect(memSpy).toHaveBeenCalledTimes(1)
+    // 初次提取后 FIXED_EXTRACTION 仍有滞留条目，会再换一次全新提取；结果未严格更好时不采用。
+    expect(memSpy).toHaveBeenCalledTimes(2)
 
     memSpy.mockRestore()
   })

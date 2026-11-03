@@ -89,4 +89,13 @@ describe('批量 preload 的请求隔离与事件生命周期', () => {
       expect(listeners.get(channel)?.size).toBe(0)
     }
   })
+
+  it.each(['generateBatch', 'resumeBatch'] as const)('%s 把本窗口正文模型放进请求，未选择时不带该字段', async (method) => {
+    invoke.mockResolvedValue({ ok: true })
+    const chapterRoute = { providerId: 'p_gemini', model: 'gemini-2.5-pro' }
+    await api[method]('project-1', 1, 10, null, vi.fn(), undefined, 'batch-model', undefined, true, false, undefined, undefined, undefined, chapterRoute)
+    expect(invoke.mock.calls[0][1]).toMatchObject({ chapterRoute, autoContinue: true, autoStrength: false })
+    await api[method]('project-1', 1, 10, null, vi.fn(), undefined, 'batch-default')
+    expect(invoke.mock.calls[1][1]).not.toHaveProperty('chapterRoute')
+  })
 })

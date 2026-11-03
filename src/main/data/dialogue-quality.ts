@@ -1,8 +1,9 @@
 import { findJsonObject } from '../../shared/json-extract'
 import type { LlmService } from './llm-service'
-import { DIALOGUE_VITALITY_RULES } from './skill-prompts/scene-naturalness'
+import { DIALOGUE_VITALITY_RULES, DIALOGUE_FACT_PRESERVATION_RULES } from './skill-prompts/scene-naturalness'
 import { reviewSceneDialogue } from './scene-dialogue-review'
 import { formatChapterProse } from '../../shared/format-chapter-prose'
+import { DIALOGUE_PUNCTUATION_RULE, NATURAL_PARAGRAPHS } from '../../shared/prose-policy'
 import type { DialogueQualityReport, DeslopFinding } from '../../shared/types'
 export type { DialogueQualityReport } from '../../shared/types'
 
@@ -55,6 +56,8 @@ export interface DialogueCompositionOptions {
   mode: 'write' | 'edit'
   revisionInstruction?: string
   previousDraft?: string
+  priorFindings?: string[]
+  repairBaseline?: { text: string; issues: string[] }
   allowSceneRewrite?: boolean
 }
 
@@ -76,18 +79,21 @@ export async function ensureDialogueQuality(
   let issues: string[] = []
   let repairFeedback: string[] = []
   let attempts = 0
+  let sceneIssues: string[] = []
   // 仅在本次调用内复用；未应用有效提案时，不重复审核完全相同的稿件。
   const rejectedReviews = new Map<string, string[]>()
   const sceneReviews = new Map<string, Awaited<ReturnType<typeof reviewSceneDialogue>>>()
   const reviewScene = async () => {
     const snapshot = current
     const cached = sceneReviews.get(snapshot)
-    if (cached) return cached
+    if (cached) { sceneIssues = cached.valid ? cached.issues : []; return cached }
     options.onProgress?.('正在独立复核整场连续对白')
     const result = await reviewSceneDialogue(snapshot, llm, { context: options.context, prefix, signal: options.signal, meta: options.meta,
       instruction: options.revisionInstruction, previousText: options.previousDraft ?? original,
-      priorFindings: [...rejectedReviews.values()].flat() })
+      repairBaseline: options.repairBaseline,
+      priorFindings: [...(options.priorFindings ?? []), ...rejectedReviews.values()].flat() })
     abort()
+    sceneIssues = result.valid ? result.issues : []
     sceneReviews.set(snapshot, result)
     return result
   }
@@ -111,6 +117,8 @@ export async function ensureDialogueQuality(
       const cachedIssues = rejectedReviews.get(current)
       if (cachedIssues) {
         issues = [...cachedIssues, ...repairFeedback]
+        const cachedScene = sceneReviews.get(current)
+        sceneIssues = cachedScene?.valid ? cachedScene.issues : []
         options.onProgress?.('候选稿未变，复用已发现的事实与表达问题')
       } else {
         options.onProgress?.('正在联合核对事实、人物互动与场景表达')
@@ -118,10 +126,10 @@ export async function ensureDialogueQuality(
         const jointReview = llm.generateStream([
           '审核小说整章改写稿，联合核对事实保真、人物互动与场景表达，不能只看引号或比例。只返回JSON：{"passed":true或false,"factsUnchanged":true或false,"issues":["原稿具体事实→候选稿差异"],"expressionFindings":[{"excerpt":"待审核稿逐字存在的原句","reason":"结合相邻段落说明具体表达问题"}]}。事实差异放 issues，文风、重复和人物互动问题放 expressionFindings。passed 为 true 必须事实一致且两个数组都为空；factsUnchanged 只表示事实是否一致，不能代替表达检查。',
           DIALOGUE_VITALITY_RULES,
-          '对白重写保留剧情事实与人物认知、立场、情绪和关键决定，不要求逐句保留原来的提问、回答或澄清；无剧情用途的发言组织可以重写。不要把每一句原台词都升级成不可改变的事件。',
+          DIALOGUE_FACT_PRESERVATION_RULES,
           '区分剧情事实与表达载体：同一状态已被明确建立并仍保留时，可以合并重复提醒、重复确认及没有新增结果的小动作，不要求每次看一眼、点头或再摸一下逐项保留。叮嘱仅重复已保留的规则、没有增加责任或条件时也可合并。',
           '若省略会改变物品去向、首次发现、谁获知信息、人物立场、承诺或后续因果，就属于事实变化；唯一出现的关键警告、约定、未决调查方向及结尾决定不得删去。不要将保留同一事实误判为必须保留每次重复表达。',
-          '作者的对白排版要求：同一对引号内不使用中文句号（包括闭合引号前），陈述台词以闭合引号收尾；多句按语意拆为引号完整的独立段落，问号和感叹号按语气保留；不能擅自以另一套标点习惯否定本稿。',
+          `作者的对白排版要求：${DIALOGUE_PUNCTUATION_RULE}不能擅自以另一套标点习惯否定本稿。`,
           '精简表达时保留仍有效的并行线索、未完成事项和后续决定，不能将多条核查方向改成只有一条；省掉反复说明不等于省掉决定本身。',
           '一次完整对照全章，列出所有明确的事实差异与无用途的重复，而不是每轮只挑一处。复核修复稿时仍检查全文，但不把措辞喜好当成新的硬性问题。',
           '表达修订必须能与事实保真同时成立：不能要求删除独立证据限制、遗漏人物知情或重排实际调查次序。多个不同事项的限定或保留原有先后本身不等于重复；结合相邻回合指出无用途的重复信息或逐轮搬运的交流组织，不能把必须保留的事实本身作为拒绝原因。保留事实也不豁免其生硬表达。',
@@ -171,6 +179,11 @@ export async function ensureDialogueQuality(
           return { text: original, report: { passed: false, beforeRatio: before.ratio,
             afterRatio: before.ratio, attempts, ...pending(), issues: ['联合核验未返回有效结论或具体问题，已保留原稿待复核。'] } }
         }
+        // Both independently found problems must reach the next repair. A joint
+        // rejection must not hide the scene review that already ran in parallel.
+        if (!independentScene.valid) return { text: original, report: { passed: false,
+          beforeRatio: before.ratio, afterRatio: before.ratio, attempts, ...pending(), issues: independentScene.issues } }
+        issues = [...new Set([...issues, ...independentScene.issues])]
         rejectedReviews.set(current, issues)
       }
       if (attempts >= maxRepairs) break
@@ -182,14 +195,14 @@ export async function ensureDialogueQuality(
       options.mode === 'edit' ? '本次是已有正文润色，只整理原文已有的交流与已知信息，不增删剧情。' : '本次是新章或续写的成稿修复，细纲只提供约束，不能把尚未发生的细纲事件提前塞入原稿。',
       `只读前部有${measureDialogue(prefix).total}有效字、${measureDialogue(prefix).dialogue}字对白，不能重写或输出前部。输出只替换【本次正文】，程序会与前部合计验收。`,
       `本次正文有效字数保持在${Math.ceil(originalLength * (1 - budget))}—${Math.floor(originalLength * (1 + budget))}字，不能删掉必要事件或无限扩写。`,
-      '只修复【必须修复的问题】中有原句依据的事实差异、重复、机械组织和表达问题。整章对白目标 70%，本次修复仅在事实与篇幅保真范围内改善表达；片段不验收整章比例，不为占比增删问答或有效交流。所有剧情事实、角色已知范围、说话者、立场、数量、未决线索与结尾决定保持原稿。',
+      '只修复【必须修复的问题】中有原句依据的事实差异、重复、机械组织和表达问题。对白不设强制比例，本次修复仅在事实与篇幅保真范围内改善表达；片段不验收整章比例，不为占比增删问答或有效交流。所有剧情事实、角色已知范围、说话者、立场、数量、未决线索与结尾决定保持原稿。',
       '原稿明确写了未回答、未发生或尚未确认的事，修复时仍须保持这一状态，不能为增加对白改成有人回答、事情发生或确认了归属。删除违规新增台词时可将after设为空字符串，不要用另一段新增交流补回相同问题。',
       '不把旁白套上引号，不让人物解说自己的动作，不增加虚构发言者，不让系统通知、文件名或心声冒充人物直接对白。避免一问一答的说明书、人人同腔、连续金句和捧哏。',
       '按本场用途选择对白或叙述。需要直接交锋的有效互动保留，重复的资料核对与条件说明可归并为凝练叙述，保留已发生的交流、信息来源、实际结果和关键决定；不要让旁白与对白把同一内容各讲一遍，也不要把原有逐项问答改成逐项动作播报。',
       DIALOGUE_VITALITY_RULES,
       '本次明确授权双向改善表达载体：可由在场且已知该消息的人说出必要信息，也可把无用途的重复对白说明合并为叙述，保留有效直接对白，必要时围绕既有信息补全有用途的追问、回应或反驳。通用规则中的“不新增提问”限制凭空编造话题和给包袱搭台，不限制本次有事实依据的自然交锋；这些表达转换不等于新增剧情。保持各人原有关注点与立场，不能让知情者泄露隐瞒的底牌。',
       '对照问题涉及的连续回合修订，保留有效交流、必要动作和原有调查方向。精简重复时保留其承载的事实、否定边界、未完成事项和后续决定；不能将多条仍有效的线索压成只有一条。事实差异优先最小局部修复，不为重组表达另写剧情。',
-      '排版一句一段，直接对白独立成段，引号内不使用中文句号（包括闭合前），问号与感叹号按语气保留；动作不插进同一人的连续发言中。',
+      `${NATURAL_PARAGRAPHS}\n${DIALOGUE_PUNCTUATION_RULE}动作不插进同一人的连续发言中。`,
       '破折号和省略号按功能处理，不能机械变句号。原稿闭合台词末尾被下一句或动作打断的“——”可以保留，用来保留尚未说完的请求；其他修辞停顿应改短句或动作。不能补全尚未说出的消息、删除原有请求，不能留下“需要您。”这样的缺谓语整句。',
       '【本次作者修订要求（必须落实）】', options.revisionInstruction ?? '',
       '【修订前正文（核对旧问题是否仍在，不是新剧情来源）】', options.previousDraft ?? '',
@@ -217,5 +230,6 @@ export async function ensureDialogueQuality(
     repairFeedback = []
   }
   return { text: original, report: { passed: false, beforeRatio: before.ratio,
-    afterRatio: measureDialogue(whole(original)).ratio, attempts, ...pending(), issues } }
+    afterRatio: measureDialogue(whole(original)).ratio, attempts, ...pending(), issues,
+    ...(sceneIssues.length ? { sceneIssues } : {}) } }
 }

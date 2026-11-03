@@ -1,9 +1,13 @@
+import type { ChapterFactSnapshot } from './chapter-fact-snapshot'
+import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
+import { createHash } from 'crypto'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
 import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
-import { parseOutlineDiffJson } from '../../shared/parsers'
+import { ForeshadowingRepairRejectedError } from './foreshadowing-repair'
+import { parseOutlineDiffJson, parseMemoryExtractionJson } from '../../shared/parsers'
 import type { MemoryExtraction } from '../../shared/types'
 
 // 纯解析函数从 shared/parsers re-export，供 main 测试与 renderer 共享
@@ -20,6 +24,7 @@ export {
  * 把 SKILL.md 第 1/5/6/7 步的 LLM 调用集中在此，避免 WriteService 膨胀。
  */
 export class WriteFlowService {
+  private memoryAnalyses = new Map<string, string>()
   constructor(private readonly llm: LlmService) {}
 
   async verifyForeshadowingRepair(input: {
@@ -51,16 +56,16 @@ export class WriteFlowService {
       throw new Error('伏笔补写专项核验未返回有效结论')
     }
     if (obj.passed) return
-    const messages: string[] = []
+    const issues: { message: string; evidence: string }[] = []
     for (const issue of obj.issues) {
       if (!issue || typeof issue.message !== 'string' || !issue.message.trim() ||
         typeof issue.evidence !== 'string' || !issue.evidence.trim() || !input.candidate.includes(issue.evidence) ||
         !input.inserted.some((addition) => addition.includes(issue.evidence) || issue.evidence.includes(addition))) {
         throw new Error('伏笔补写专项核验缺少新增正文证据')
       }
-      messages.push(issue.message)
+      issues.push({ message: issue.message, evidence: issue.evidence })
     }
-    throw new Error(`伏笔补写引入新的剧情偏离：${messages.join('；')}`)
+    throw new ForeshadowingRepairRejectedError(issues)
   }
 
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
@@ -99,6 +104,9 @@ export class WriteFlowService {
       `- unfinished: [未完成的对话/动作/事件，字符串数组]`,
       `- suspense: 章末悬念/钩子（一句话）`,
       `- props: [关键道具，字符串数组]`,
+      `输出紧凑 JSON，不缩进。各字段使用准确短语，保留全部有原文依据的结尾状态、持有关系、未完成事项及信息来源，不为缩短输出遗漏事实。`,
+      `没有依据的情绪、身体、位置或时间用空字符串表示，不逐人反复解释“未明确/未描写”。characterStates.items 必须是字符串，多件物品用顿号连接。`,
+      `只记录结尾仍有效的状态；已经完成的历史动作不能写成仍在进行。转述、请求、计划、待核事项保留其性质，不升级为已发生事实，不从常识补出位置或持有物。`,
       ``,
       `------ 上一章正文末尾 ------`,
       prevTail
@@ -147,8 +155,10 @@ export class WriteFlowService {
       `检查新增伏笔段落是否引入人物认知、时间地点或因果矛盾，是否超出本章揭示范围；提前揭底或矛盾按P1及以上报告。`,
       ``,
       `resolution（推荐处理方向）指引：`,
+      `每条差异必须给 boundaryViolation 布尔值。违反本章明确禁区、提前揭底、越过章末停止位置或抢写后章核心结果时为 true，必须 updateContent，禁止给 outlinePatch；不能以正文为准改变边界。`,
+      `合理的场景细化、配角或道具补充不自动等于越界；无明确边界冲突时 boundaryViolation=false。作者明确调整计划时依其要求判断，“继续写”不授权提前兑现。`,
       `- 类型 1 → "updateContent"（应补写/改正文，不要给 outlinePatch）`,
-      `- 类型 2 → "updateOutline"（以正文为准回写细纲；必须给 outlinePatch）`,
+      `- 类型 2 → 仅 boundaryViolation=false 时 "updateOutline"（以正文为准回写细纲；必须给 outlinePatch）`,
       `- 类型 3 → "either"（默认可回写细纲；尽量给 outlinePatch，用正文表述覆盖对应字段）`,
       `- 类型 4 → "review"（需作者确认；若接受正文则给 outlinePatch，覆盖 plotSummary 等）`,
       `- 类型 5 → "review"（需作者确认；字数问题可写 wordEstimate）`,
@@ -167,6 +177,7 @@ export class WriteFlowService {
       `  actual,`,
       `  suggestion,  // 明确说建议「补写正文」还是「以正文更新细纲」`,
       `  priority: "P0"|"P1"|"P2",`,
+      `  boundaryViolation: true|false,`,
       `  resolution: "updateOutline"|"updateContent"|"either"|"review",`,
       `  outlinePatch?: { ... }  // 可回写细纲时给出`,
       `}。`,
@@ -246,8 +257,9 @@ export class WriteFlowService {
     content: string,
     chapterNumber: number,
     knownCharacters: string[],
-    opts: GenerateOptions = {},
-    knownForeshadowings: Foreshadowing[] = []
+    opts: GenerateOptions & { reuseMemory?: boolean } = {},
+    knownForeshadowings: Foreshadowing[] = [],
+    snapshot?: ChapterFactSnapshot
   ): Promise<string> {
     // 空提取会替换同章自动记忆，不能在漏掉中段的情况下声称提取完整。
     if (content.length > 40_000) throw new Error('记忆提取正文超过 40000 字符，请分章后同步；未清理原有记忆')
@@ -268,6 +280,10 @@ export class WriteFlowService {
       `  若本章揭晓了身份真相、性格侧面、能力边界、外貌特征、关系质变，也必须写入（不要只记伤势）`,
       `  道具转移必须记录交出者与接收者各自的实际持有变化，区分借用、保管与所有权，销毁/耗尽不可记成仍可使用。关系按方向记录，不能推导对方也信任。`,
       `  对明确的知情变化用 field=知情，写清角色知道/不知/怀疑/误信哪件事以及信息来源；不能因旁白揭晓或同伴得知就记成全员知道。`,
+      `- itemStateChanges: [{ name, field, oldValue, newValue, evidence }]（既有物品/道具的归属或状态变化；本章首次登场的新道具写 newItems，不写这里）`,
+      `  field 优先用标准名：材质外观 / 持有者 / 所在位置 / 状态`,
+      `  材质外观只记正文明确写到的材质、颜色、形制，不凭印象补设定；状态写实际结果：在手 / 封存(何处) / 耗损 / 耗尽 / 易主 / 销毁；数量信息并入状态描述。`,
+      `  转交、夺取、交还必须记录新旧持有者双方的实际变化；销毁/耗尽不可记成仍在手。没有实际变化的物品不要输出。`,
       `- collectedForeshadowings: [{ foreshadowingId, content, chapter, evidence }]（本章完整回收的既有伏笔，沿用下表编号和原内容，chapter 必须为 ${chapterNumber}）`,
       `完整回收必须回答原伏笔的核心疑问或兑现原承诺。再次出现道具、回忆、线索强化、部分揭示和细纲的计划回收都不能标成完整回收；不确定则输出空数组。无对应编号时不得编造或借用相似伏笔。`,
       `以下是待核对的伏笔台账，只提供原始问题，不是回收已发生的证据：`,
@@ -281,6 +297,7 @@ export class WriteFlowService {
       `- settingsSuggestions: [{ topic, reason, suggestedPath }]（仅建议手改底稿，如题材定位；可空）`,
       `evidence 必须逐字引用本章连续原文（至少6字符），保留主体、动作、结果及否定词。不能只引用名字或道具名；不能截掉“没有”“打算”等词来制造既成事实。`,
       `evidence 字段值不要额外套中文引号或补标点：直接复制正文片段；只有正文原本存在的引号才能保留。`,
+      READER_NOTE_BOUNDARY,
       `先找到支持该条事实的连续原句，再填写记忆内容；不得先概括事实再凭印象编写引文。每条只记证据能直接支持的一件事，优先引用包含主体和动作结果的最短完整小句，不拼接多处原文，不带入无关的后续猜测。`,
       `否定事实也是事实：正文写“拒绝交出账册”，应记“拒绝交出账册”，不能记为“交出账册”。准备动作与计划结果必须分开，不能把“准备出城”记成“已经出城”。`,
       `只提取已经实际发生的变化；传闻、台词里的猜测、谎言、计划、梦境和假设不能直接更新客观状态。无法确认时留空或写入 settingsSuggestions，不补造。`,
@@ -289,12 +306,40 @@ export class WriteFlowService {
       `------ 第 ${chapterNumber} 章正文 ------`,
       body
     ].join('\n')
-    return this.llm.generateStream(prompt, {
-      ...opts,
+    const { reuseMemory, ...generateOpts } = opts
+    const feature = opts.meta?.feature ?? 'memoryExtract'
+    const identity = await this.llm.getCacheIdentity?.(feature).catch(() => null)
+    const { onToken: _token, onStatus: _status, onDiagnostic: _diagnostic, signal: _signal, meta: _meta, ...parameters } = generateOpts
+    const key = identity ? createHash('sha256').update(JSON.stringify([
+      opts.meta?.projectId, identity, prompt, parameters
+    ])).digest('hex') : null
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    const cached = key && reuseMemory ? this.memoryAnalyses.get(key) : undefined
+    if (cached !== undefined) {
+      opts.onToken?.(cached)
+      return cached
+    }
+    const prior = await snapshot?.read<string>('memory', key, value => typeof value === 'string' && !parseMemoryExtractionJson(value, chapterNumber).parseError)
+    if (prior !== undefined) { opts.onToken?.(prior); return prior }
+    const raw = await this.llm.generateStream(prompt + '\n' + (await snapshot?.context() ?? ''), {
+      ...generateOpts,
       // 默认 8192 对「多数组 JSON」在部分模型上仍会被 max_tokens 截断；提取单独抬高
       maxTokens: opts.maxTokens ?? 12_288,
       meta: { feature: 'memoryExtract', ...opts.meta }
     })
+    if (opts.signal?.aborted) throw new Error('LLM_ABORTED')
+    if (key && !parseMemoryExtractionJson(raw, chapterNumber).parseError &&
+      identity === await this.llm.getCacheIdentity?.(feature).catch(() => null)) {
+      const extraction = parseMemoryExtractionJson(raw, chapterNumber)
+      await snapshot?.remember('memory', key, raw, [
+        ...extraction.newPlotPoints, ...extraction.characterStateChanges, ...(extraction.itemStateChanges ?? []),
+        ...extraction.collectedForeshadowings, ...(extraction.settingsPatches ?? [])
+      ].flatMap(item => item.evidence ? [item.evidence] : []))
+      this.memoryAnalyses.delete(key)
+      this.memoryAnalyses.set(key, raw)
+      if (this.memoryAnalyses.size > 24) this.memoryAnalyses.delete(this.memoryAnalyses.keys().next().value!)
+    }
+    return raw
   }
 
   /**

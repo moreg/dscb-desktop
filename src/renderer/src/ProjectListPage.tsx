@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectMeta, ChapterMeta } from '../../shared/types'
 import { isProjectArchived } from '../../shared/types'
 import NewProjectDialog from './NewProjectDialog'
+import ProseImportDialog from './ProseImportDialog'
+import { ChapterPaginator } from './ChapterListPage'
 import { isWebClient, openServerExport } from './web-download'
 import { uploadProjectPackage } from './web-import'
 import './long-story-project.css'
@@ -14,6 +16,19 @@ interface Props {
 
 type Shelf = 'active' | 'archived'
 
+/**
+ * 书架分页按网格实际列数自适应（列数 × 行数）：auto-fill 列数随窗口宽度变，
+ * 写死页大小会出现「一行 5 张、每页 12 张 → 末行空 3 格」的排不满问题。
+ */
+const SHELF_PAGE_ROWS = 3
+/** 首帧量出列数前的兜底页大小，量到后即替换 */
+const SHELF_PAGE_SIZE_FALLBACK = 12
+
+const openedTime = (project: ProjectMeta) => {
+  const t = new Date(project.lastOpenedAt).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
 export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, onOpenBrainstorm }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({})
@@ -21,9 +36,11 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [showNew, setShowNew] = useState(false)
+  const [showProseImport, setShowProseImport] = useState(false)
   const [creationNotice, setCreationNotice] = useState('')
   const [keyword, setKeyword] = useState('')
   const [shelf, setShelf] = useState<Shelf>('active')
+  const [page, setPage] = useState(1)
   const [pendingArchive, setPendingArchive] = useState<ProjectMeta | null>(null)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [archiveError, setArchiveError] = useState('')
@@ -31,6 +48,22 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   const [exportingId, setExportingId] = useState<string | null>(null)
   const loadSequence = useRef(0)
   const packageInput = useRef<HTMLInputElement>(null)
+  const [gridColumns, setGridColumns] = useState(0)
+  const gridObserver = useRef<ResizeObserver | null>(null)
+  // 回调 ref 随网格挂载/卸载触发：量出 auto-fill 的实际列数，窗口缩放时跟随重算。
+  const gridRef = useCallback((grid: HTMLDivElement | null) => {
+    gridObserver.current?.disconnect()
+    gridObserver.current = null
+    if (!grid) return
+    const measure = () => {
+      const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length
+      if (cols > 0) setGridColumns(cols)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(grid)
+    gridObserver.current = observer
+  }, [])
 
   const loadProjects = async (withSpinner: boolean) => {
     const sequence = ++loadSequence.current
@@ -94,6 +127,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
     }
   }
 
+  const openProjectDirectory = async (project: ProjectMeta) => {
+    setArchiveError('')
+    try {
+      await window.api.openProjectDirectory(project.id)
+    } catch (error) {
+      setArchiveError(packageErrorText(error, '打开作品文件夹失败'))
+    }
+  }
+
   useEffect(() => {
     void loadProjects(true)
     // 这是请求序号而非 DOM ref；卸载时递增可使尚未完成的请求失效。
@@ -139,21 +181,45 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
   )
   const shelfProjects = shelf === 'archived' ? archivedProjects : activeProjects
 
+  // 书案倒序展示：最近翻开（新建）的书排最前，无时间戳的排末尾。
   const filtered = useMemo(() => {
-    if (!keyword) return shelfProjects
     const k = keyword.toLowerCase()
-    return shelfProjects.filter(
-      (p) =>
-        p.name.toLowerCase().includes(k) ||
-        (p.genre ?? '').toLowerCase().includes(k) ||
-        (p.description ?? '').toLowerCase().includes(k)
-    )
+    const base = keyword
+      ? shelfProjects.filter(
+          (p) =>
+            p.name.toLowerCase().includes(k) ||
+            (p.genre ?? '').toLowerCase().includes(k) ||
+            (p.description ?? '').toLowerCase().includes(k)
+        )
+      : shelfProjects
+    return [...base].sort((a, b) => openedTime(b) - openedTime(a))
   }, [shelfProjects, keyword])
 
   const totalWords = useMemo(
     () => shelfProjects.reduce((s, p) => s + (wordCounts[p.id] ?? 0), 0),
     [shelfProjects, wordCounts]
   )
+
+  // 切换书架或改搜索词后回第一页；页码超出总页数（如删除/归档后）也夹回范围内
+  useEffect(() => {
+    setPage(1)
+  }, [shelf, keyword])
+
+  const shelfPageSize = gridColumns > 0 ? gridColumns * SHELF_PAGE_ROWS : SHELF_PAGE_SIZE_FALLBACK
+  const totalPages = Math.max(1, Math.ceil(filtered.length / shelfPageSize))
+  const currentPage = Math.min(Math.max(1, page), totalPages)
+  const pagedProjects = useMemo(
+    () => filtered.slice((currentPage - 1) * shelfPageSize, currentPage * shelfPageSize),
+    [filtered, currentPage, shelfPageSize]
+  )
+
+  const handlePageChange = (nextPage: number) => {
+    setPage(nextPage)
+    const mainEl = document.querySelector('.main-content')
+    if (mainEl) {
+      mainEl.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
 
   const applyArchived = async (project: ProjectMeta, archived: boolean) => {
     const setArchived = (
@@ -231,6 +297,7 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
             >
               {importing ? '导入中…' : '导入小说包'}
             </button>
+            {!isWebClient() && <button className="btn btn-ghost" onClick={() => setShowProseImport(true)}>导入正文</button>}
             <button className="btn" onClick={onOpenBrainstorm}>
               长篇脑洞
             </button>
@@ -300,8 +367,8 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 : '没有匹配的项目。'}
         </p>
       ) : (
-        <div className="project-grid">
-          {filtered.map((p) => {
+        <div className="project-grid" ref={gridRef}>
+          {pagedProjects.map((p) => {
             const ch = chapterCounts[p.id]
             const wc = wordCounts[p.id]
             const initial = p.name.trim().charAt(0) || '卷'
@@ -309,7 +376,15 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
               <article
                 key={p.id}
                 className="project-card"
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpenProject(p.id)}
+                onKeyDown={(event) => {
+                  if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault()
+                    onOpenProject(p.id)
+                  }
+                }}
               >
                 <div className="pc-head">
                   <div className="pc-avatar" aria-hidden>{initial}</div>
@@ -332,6 +407,12 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                 <div className="pc-foot">
                   <span>翻开 {formatRelative(p.lastOpenedAt)}</span>
                   <div className="pc-actions">
+                    {!isWebClient() && (
+                      <button type="button" className="open-window" title="在系统文件管理器中打开作品文件夹"
+                        onClick={(event) => { event.stopPropagation(); void openProjectDirectory(p) }}>
+                        作品文件夹
+                      </button>
+                    )}
                     {isProjectArchived(p) ? (
                       <button
                         type="button"
@@ -360,16 +441,6 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
                         归档
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="open project-entry"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onOpenProject(p.id)
-                      }}
-                    >
-                      进入 →
-                    </button>
                     <button
                       type="button"
                       className="open"
@@ -402,6 +473,13 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
           })}
         </div>
       )}
+      <ChapterPaginator
+        currentPage={currentPage}
+        totalPages={totalPages}
+        totalItems={filtered.length}
+        unitLabel="本"
+        onPageChange={handlePageChange}
+      />
       {pendingArchive ? (
         <ArchiveConfirmDialog
           project={pendingArchive}
@@ -415,6 +493,16 @@ export default function ProjectListPage({ onOpenProject, onOpenProjectWindow, on
           onConfirm={() => void applyArchived(pendingArchive, true)}
         />
       ) : null}
+      {showProseImport && <ProseImportDialog
+        onClose={() => { setShowProseImport(false); void loadProjects(false) }}
+        onImported={(result) => {
+          setShowProseImport(false)
+          setShelf('active')
+          setKeyword('')
+          setCreationNotice(`已导入《${result.project.name}》的 ${result.importedCount} 章正文。${result.pendingCount ? `另有 ${result.pendingCount} 项问题未处理，源文件保留在原处。` : ''}`)
+          void loadProjects(false)
+        }}
+      />}
       {showNew ? (
         <NewProjectDialog
           onClose={() => setShowNew(false)}

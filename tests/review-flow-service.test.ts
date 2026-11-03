@@ -82,6 +82,29 @@ describe('parseFindingsJson', () => {
 })
 
 describe('ReviewFlowService.runDeepReview', () => {
+  it.each([undefined, '不存在的伪造引句'])('does not send unsupported errors to automatic repair (%s)', async reference => {
+    const llm = mockLlm(JSON.stringify({ findings: [{ severity: 'error', message: '声称存在矛盾', snippet: '他打开门', reference }] }))
+    const result = await new ReviewFlowService(llm).runDeepReview('他打开门。', { chapterNumber: 1, enabledChecks: ['logic_hole'] })
+    expect(result[0]).toMatchObject({ ruleId: 'review_incomplete:logic_hole', severity: 'warn' })
+    expect(result[0].evidence).toBeUndefined()
+  })
+  it('limits independent semantic checks to two concurrent requests and keeps deterministic result order', async () => {
+    let active = 0, maximum = 0
+    const pending: Array<() => void> = []
+    const llm = { generateStream: vi.fn(async () => {
+      active++; maximum = Math.max(maximum, active)
+      await new Promise<void>(resolve => pending.push(resolve))
+      active--; return '{"findings":[]}'
+    }) } as unknown as LlmService
+    const task = new ReviewFlowService(llm).runDeepReview('正文。', { chapterNumber: 1,
+      enabledChecks: ['logic_hole', 'style_match', 'emotion_cliff'] })
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    pending.shift()!()
+    await vi.waitFor(() => expect(llm.generateStream).toHaveBeenCalledTimes(3))
+    pending.splice(0).forEach(resolve => resolve())
+    expect(await task).toEqual([])
+    expect(maximum).toBe(2)
+  })
   it('checks mechanical character dialogue during style review', async () => {
     const llm = mockLlm('{"findings":[]}')
     await new ReviewFlowService(llm).runDeepReview('“好的，我明白了。”', {
@@ -95,12 +118,12 @@ describe('ReviewFlowService.runDeepReview', () => {
       mockLlmByCheck({
         logic_hole: JSON.stringify({
           findings: [
-            { checkId: 'logic_hole', severity: 'error', message: '逻辑矛盾', offset: 50 }
+            { checkId: 'logic_hole', severity: 'error', message: '逻辑矛盾', snippet: '他却开门', reference: '明确约定不得开门', offset: 50 }
           ]
         })
       })
     )
-    const out = await svc.runDeepReview('正文…', {
+    const out = await svc.runDeepReview('明确约定不得开门，他却开门。', {
       chapterNumber: 1,
       enabledChecks: ['logic_hole', 'character_breakdown']
     })
@@ -141,7 +164,7 @@ describe('ReviewFlowService.runDeepReview', () => {
     expect(prompt).toContain('第 2 章末才揭晓身份')
     expect(prompt).toContain('前章读者尚不知道他的真实身份')
     expect(prompt).toContain('资料缺失列未评估')
-    expect(prompt).toContain('整章直接对白字数目标 70%')
+    expect(prompt).toContain('不设强制比例')
     expect(prompt).toContain('不因读到关联规则自动写正文')
     expect(out[0]).toMatchObject({ ruleId: 'spoiler', severity: 'error', offset: 0 })
   })
@@ -190,7 +213,7 @@ describe('ReviewFlowService.runDeepReview', () => {
       const body = prompt.split('## 本章正文（本次送检片段）\n')[1]
       bodies.push(body)
       return JSON.stringify({ findings: body.includes(marker)
-        ? [{ message: '人物状态前后冲突', snippet: marker, offset: body.indexOf(marker), severity: 'error' }]
+        ? [{ message: '人物状态前后冲突', snippet: marker, reference: '边界证据。', offset: body.indexOf(marker), severity: 'error' }]
         : [] })
     }) } as unknown as LlmService
     const out = await new ReviewFlowService(llm).runDeepReview(content, {
@@ -241,7 +264,7 @@ describe('ReviewFlowService.runDeepReview', () => {
     const later = '林舟用左手握紧长刀。'
     const content = earlier + '甲'.repeat(length - earlier.length - later.length) + later
     const llm = mockLlm(JSON.stringify({ findings: [{
-      message: '断手后未交代恢复便用左手持刀', snippet: later, severity: 'error'
+      message: '断手后未交代恢复便用左手持刀', snippet: later, reference: earlier, severity: 'error'
     }] }))
     const result = await new ReviewFlowService(llm).runDeepReview(content, {
       chapterNumber: 10, enabledChecks: ['logic_hole']

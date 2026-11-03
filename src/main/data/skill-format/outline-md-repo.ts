@@ -228,7 +228,9 @@ function extractRhythmRows(
     const cm = chapterText.match(/(\d+)/)
     if (!cm) continue
     const chapter = parseInt(cm[1], 10)
-    const title = idxTitle >= 0 ? row[idxTitle] : ''
+    // Imported chapter titles escape Markdown table delimiters without changing the original title.
+    const title = idxTitle >= 0 ? row[idxTitle].replace(/&(amp|lt|gt|#124);/g,
+      (_match, entity: string) => ({ amp: '&', lt: '<', gt: '>', '#124': '|' })[entity]!) : ''
     const emotion = idxEmotion >= 0 ? num(row[idxEmotion]) : 0
     const climax = idxClimax >= 0 ? num(row[idxClimax]) : 0
     const volume = idxVolume >= 0 ? num(row[idxVolume]) || volDefault : volDefault

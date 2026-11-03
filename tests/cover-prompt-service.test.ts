@@ -165,6 +165,7 @@ function makeService(opts: {
   llmResponse?: string
   llmError?: Error
   synopsis?: string | null
+  description?: string
   characters?: Character[]
   learningLibrary?: ConstructorParameters<typeof CoverPromptService>[4]
 }): {
@@ -177,7 +178,7 @@ function makeService(opts: {
   })
 
   const projectService = {
-    getProjectData: async () => ({ name: '断刀行', description: '一个断臂刀客的复仇', genre: '仙侠' }),
+    getProjectData: async () => ({ name: '断刀行', description: opts.description ?? '一个断臂刀客的复仇', genre: '仙侠' }),
     resolveDir: async () => '/nonexistent-project-dir'
   }
   const outlineService = {
@@ -396,6 +397,22 @@ describe('CoverPromptService.extract', () => {
     expect(rules).toEqual(['标题占画面80%，放在上方三分之一。', '标题保持清晰的高对比。'])
   })
 
+  it('自动风格依据作品设计画面，不把题材推荐预设和固定标题位置当作锁定', async () => {
+    const resolveStyle = vi.fn(() => ({ key: 'ink_minimal', definition: COVER_STYLE_PRESETS.ink_minimal }))
+    const learningLibrary = {
+      load: async () => ({ library: { updatedAt: 'v1', source: { sampleCount: 8 }, styles: {} }, summary: { rules: [] } }),
+      resolveStyle,
+      getRulesForGenre: () => []
+    }
+    const { service, generateStream } = makeService({ learningLibrary: learningLibrary as unknown as ConstructorParameters<typeof CoverPromptService>[4], llmResponse: completeResponse() })
+    const draft = await service.extract({ ...input, stylePreset: 'auto' })
+    expect(resolveStyle).not.toHaveBeenCalled()
+    expect(generateStream.mock.calls[0][0]).toContain('为本书自主选择有辨识度的艺术媒介')
+    expect(draft.prompt).not.toContain(COVER_STYLE_PRESETS.ink_minimal.prompt)
+    expect(draft.prompt).toContain('根据画面构图选择清晰的书名位置')
+    expect(draft.prompt).not.toContain('横排于上三分之一区域，水平居中')
+  })
+
   it('仅改变光线时提炼与出图仍保留媒介锁、角色属性和用户构图锁定', async () => {
     const { service, generateStream } = makeService({ llmResponse: completeResponse({ composition: 'closeup' }) })
     const draft = await service.extract({ ...input, stylePreset: 'photorealistic', compositionOverride: 'fullbody', extraHint: '不要二次元，只改光线' })
@@ -484,7 +501,10 @@ describe('CoverPromptService.extract', () => {
     expect(draft.genre).toBe('xianxia')
     expect(draft.composition).toBe('fullbody')
     expect(draft.summary).toBe('断臂刀客立于雪峰')
-    expect(draft.sources).toContain('大纲')
+    expect(draft.sources).toEqual(['书名', '作品题材', '作品简介'])
+    expect(draft.prompt).toContain('作品题材：仙侠')
+    expect(draft.prompt).toContain('一个断臂刀客的复仇')
+    expect(generateStream.mock.calls[0][0]).not.toContain('主角在雪山之巅断刀重铸')
 
     // 返回的是拼好的整段提示词：提炼要素 + 文字层 + 通用约束全在里面
     expect(draft.prompt).toContain('a one-armed blade master')
@@ -509,13 +529,24 @@ describe('CoverPromptService.extract', () => {
     const prompt = generateStream.mock.calls[0][0] as string
     expect(prompt).toContain('断刀行')
     expect(prompt).toContain('一个断臂刀客的复仇')
-    expect(prompt).toContain('主角在雪山之巅断刀重铸')
+    expect(prompt).not.toContain('主角在雪山之巅断刀重铸')
+  })
+
+  it('简介缺失时使用大纲补充，并使用当前输入的书名', async () => {
+    const { service, generateStream } = makeService({ description: '', llmResponse: completeResponse() })
+    const draft = await service.extract({ ...input, bookName: '新书名' })
+    expect(generateStream.mock.calls[0][0]).toContain('书名：新书名')
+    expect(generateStream.mock.calls[0][0]).toContain('主角在雪山之巅断刀重铸')
+    expect(draft.sources).toContain('大纲')
+    expect(draft.prompt).toContain('作品题材：仙侠')
   })
 
   it('genreOverride 锁定题材，模型返回值不生效', async () => {
     const { service } = makeService({ llmResponse: completeResponse({ genre: 'light_novel' }) })
     const draft = await service.extract({ ...input, genreOverride: 'mystery' })
     expect(draft.genre).toBe('mystery')
+    expect(draft.prompt).toContain('作品题材：仙侠')
+    expect(draft.prompt).toContain('封面页手动选定的题材优先')
   })
 
   it('compositionOverride 锁定构图，模型返回值不生效', async () => {
@@ -618,7 +649,7 @@ describe('CoverPromptService.extract', () => {
     ['anime_illustration', '二次元动漫封面', '二次元媒介约束']
   ] as const)('%s 的提炼与最终提示词锁定媒介，保留故事中的年龄和服饰', async (stylePreset, label, medium) => {
     const { service, generateStream } = makeService({
-      synopsis: '主角是一位六十岁的女将军，穿旧铜甲，守卫山中残破的堡垒。',
+      description: '主角是一位六十岁的女将军，穿旧铜甲，守卫山中残破的堡垒。',
       llmResponse: JSON.stringify({
         genre: 'light_novel', composition: 'fullbody',
         characterDesc: 'a sixty-year-old female general in weathered bronze armor',

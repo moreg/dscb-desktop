@@ -4,6 +4,7 @@ import { ProjectWindowRegistry } from './data/project-window-registry'
 import { MobileServer } from './mobile/mobile-server'
 import { registerAppUpdates } from './app-updates'
 import { startBackend } from './backend'
+import { notifyChapterCompleted } from './chapter-notifications'
 import type { ProjectWindowResult } from './ipc/windows'
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
@@ -80,10 +81,11 @@ if (!hasSingleInstanceLock) {
   })
 
   void app.whenReady().then(async () => {
+    if (process.platform === 'win32') app.setAppUserModelId('com.aiwriter.desktop')
     const backend = await startBackend(app.getPath('userData'), {
       open: openProjectWindow,
       bind: bindProjectWindow
-    })
+    }, settings => (chapter, window, signal) => notifyChapterCompleted(chapter, window, signal, settings))
     mobileServer = backend.mobileServer
     disposeProjectWatchers = backend.disposeProjectWatchers
 
@@ -100,7 +102,7 @@ if (!hasSingleInstanceLock) {
     })
   }
 
-  disposeAppUpdates = await registerAppUpdates()
+  disposeAppUpdates = await registerAppUpdates(() => { createWindow() })
   createWindow()
 
   app.on('activate', () => {
@@ -113,7 +115,6 @@ let mobileQuitReady = false
 let mobileQuitPending = false
 app.on('before-quit', (event) => {
   if (mobileQuitReady || !mobileServer) {
-    disposeProjectWatchers?.()
     return
   }
   event.preventDefault()
@@ -128,7 +129,10 @@ app.on('before-quit', (event) => {
   })
 })
 
-app.on('will-quit', () => { disposeAppUpdates?.() })
+app.on('quit', () => {
+  disposeProjectWatchers?.()
+  disposeAppUpdates?.()
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

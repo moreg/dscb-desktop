@@ -71,7 +71,7 @@ describe('short-story candidates', () => {
     const changed = { ...document, review: '另一份检查报告。' }
     expect(shortStoryCandidateSource(changed, 'section')).toBe(proposed.source)
     expect(adoptShortStoryCandidate(changed, proposed).sections[1].content)
-      .toBe('第2节原稿。\n他走到门前。')
+      .toBe('第2节原稿。\n\n他走到门前。')
   })
 
   it('rejects a revision after any original section has been edited', () => {
@@ -129,7 +129,7 @@ describe('short-story candidates', () => {
   })
 
   it.each([
-    ['他关上门。', '屋里终于安静了。', '他关上门。\n屋里终于安静了。'],
+    ['他关上门。', '屋里终于安静了。', '他关上门。\n\n屋里终于安静了。'],
     ['他推开', '门，屋里无人。', '他推开门，屋里无人。']
   ])('preserves the ordinary continuation seam for %s', (base, addition, expected) => {
     const document = story()

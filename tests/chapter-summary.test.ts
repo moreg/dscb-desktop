@@ -30,7 +30,7 @@ describe('章节概要', () => {
     projectId = (await projects.create({ name: '概要测试', genre: '玄幻' })).id
     dir = await projects.resolveDir(projectId)
     llm = { generateStream: vi.fn().mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
-      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item'],findings:[]}) : reply('林远交出账册并进门')) } as unknown as LlmService
+      ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]}) : reply('林远交出账册并进门')) } as unknown as LlmService
     service = new WriteService(projects, llm)
   })
 

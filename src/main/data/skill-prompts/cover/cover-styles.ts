@@ -787,21 +787,22 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     : COMPOSITION_DESC[effectiveComposition]
   const scene = args.scene
   const typography = args.typography
+  const storyLedLayout = Boolean(scene && !preset)
   const titleFont = typography?.titleFont && typography.titleFont !== 'auto'
     ? TITLE_FONT_STYLES[typography.titleFont]
-    : preset?.titleFont ?? style.titleFont
+    : preset?.titleFont ?? (storyLedLayout ? '与作品气质及画面媒介相协调的中文字体' : style.titleFont)
   const titlePosition = typography?.titlePosition && typography.titlePosition !== 'auto'
     ? TITLE_POSITIONS[typography.titlePosition]
-    : preset?.titlePosition ?? '横排于上三分之一区域，水平居中，上方留出呼吸空间'
+    : preset?.titlePosition ?? (storyLedLayout ? '根据画面构图选择清晰的书名位置' : '横排于上三分之一区域，水平居中，上方留出呼吸空间')
   const titleEffect = typography?.titleEffect && typography.titleEffect !== 'auto'
     ? TITLE_EFFECTS[typography.titleEffect]
     : preset?.titleEffect ?? '与主体相适应的强对比，和背景有细微层次分离'
   const authorFont = typography?.authorFont && typography.authorFont !== 'auto'
     ? AUTHOR_FONT_STYLES[typography.authorFont]
-    : preset?.authorFont ?? style.authorFont
+    : preset?.authorFont ?? (storyLedLayout ? '与书名协调、清晰易读的中文字体' : style.authorFont)
   const authorPosition = typography?.authorPosition && typography.authorPosition !== 'auto'
     ? AUTHOR_POSITIONS[typography.authorPosition]
-    : preset?.authorPosition ?? AUTHOR_POSITIONS.bottom_center
+    : preset?.authorPosition ?? (storyLedLayout ? '根据构图选择独立清晰的署名位置' : AUTHOR_POSITIONS.bottom_center)
 
   const lines: string[] = []
   // 提炼出的作品定位直接进入生图，不让单一分类和统计样本替代融合题材。
@@ -822,7 +823,7 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
         ? preset.prompt.replace(/no people|no character illustration|无人物|不绘制人物/gi, '保留方向指定的人物主体')
         : preset.prompt, args.channel)}。`)
   } else {
-    lines.push(`中文网文封面，${platform.prompt}。`)
+    lines.push(scene ? `为${platform.label}设计中文小说封面，画面风格服从本书的故事与视觉概念，手机缩略图清晰可辨。` : `中文网文封面，${platform.prompt}。`)
   }
   if (mediumRequirement) lines.push(sentence(mediumRequirement))
   // 文字层
@@ -833,14 +834,18 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
   const verticalTitle = /\bvertical(?:ly)?\b|竖排/i.test(titlePosition)
   const sideByline = /\bvertical(?:ly)?\b|竖排/i.test(authorPosition)
   const titleLength = Array.from(args.bookName.replace(/\s/g, '')).length
-  const grouping = verticalTitle
+  const grouping = storyLedLayout && (!typography?.titlePosition || typography.titlePosition === 'auto')
+    ? '结合画面选择横排或竖排，按语义分行或分列'
+    : verticalTitle
     ? titleLength > 8
       ? `${titleLength <= 24 ? '分为两至四列竖排' : '采用均衡竖排列数'} ，按语义短语断列，每列自上而下、列间自右向左阅读`
       : '采用单列竖排，自上而下阅读'
     : titleLength > 8
       ? `${titleLength <= 24 ? '分为两至四行横排' : '采用均衡横排行数'} ，按语义短语断行，自左向右、自上而下阅读`
       : '采用清晰单行横排，仅必要时按语义换行'
-  const bylineSpace = sideByline
+  const bylineSpace = storyLedLayout && (!typography?.authorPosition || typography.authorPosition === 'auto')
+    ? '为作者署名预留独立清晰的空间'
+    : sideByline
     ? '在书名旁预留窄侧区供作者署名竖排'
     : /右下|bottom.right/i.test(authorPosition)
       ? '在右下安全区预留独立署名区'
@@ -852,7 +857,9 @@ export function buildCoverPrompt(args: BuildPromptArgs): string {
     ? /左|left/i.test(titlePosition) ? '左侧文字区' : '右侧文字区'
     : /下三分|lower/i.test(titlePosition) ? '下三分之一文字区'
       : /中央|center/i.test(titlePosition) ? '中央文字区' : '上三分之一文字区'
-  lines.push(`排版留白：为书名预留${titleZone}，该区域背景简洁、明暗稳定；人物面部、关键道具与高亮特效避开文字区，主体轮廓与背景清楚分离。`)
+  lines.push(storyLedLayout && (!typography?.titlePosition || typography.titlePosition === 'auto')
+    ? '排版留白：根据画面选择合适的书名区域，保持背景简洁、明暗稳定；文字不遮挡关键主体与道具。'
+    : `排版留白：为书名预留${titleZone}，该区域背景简洁、明暗稳定；人物面部、关键道具与高亮特效避开文字区，主体轮廓与背景清楚分离。`)
   lines.push(COVER_FRAME_SAFETY_PROMPT)
   const learningRules = compileCoverLearningRules(args.learningRules ?? [], typography, scene)
   if (learningRules.length) {

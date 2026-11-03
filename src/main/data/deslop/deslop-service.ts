@@ -1,3 +1,4 @@
+import { migrateLegacyProseDefaults, serializeProseOverrides, PROSE_POLICY_RULES } from '../../../shared/prose-policy'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { LlmService } from '../llm-service'
@@ -306,7 +307,14 @@ export class DeslopService {
       const scanOnce = async (value: string): Promise<DeslopScanReport> => {
         const cached = scans.get(value)
         if (cached) return cached
-        const scan = await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+        // 整章验收也要覆盖旁白和行动组织，不能在对白分支跳过叙事诊断。
+        // 同一候选只诊断一次；修订后的新候选必须重新检查。
+        const scan = opts.polishNarrative
+          ? await this.scanWithNarrative(value, opts)
+          : await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+        if (scan.narrative?.status === 'failed') {
+          throw new Error(`整章叙事检查未完成：${scan.narrative.error}`)
+        }
         scans.set(value, scan)
         return scan
       }
@@ -322,7 +330,7 @@ export class DeslopService {
         },
         context: [opts.dialogueComposition.context ?? '',
           opts.styleContext ? `【项目题材与文风】\n${JSON.stringify(opts.styleContext)}` : '',
-          opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真）】\n${JSON.stringify(opts.textOverrides)}` : ''
+          opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真）】\n${serializeProseOverrides(opts.textOverrides)}` : ''
         ].filter(Boolean).join('\n\n'),
         maxChangeRatio: opts.dialogueComposition.allowSceneRewrite ? 0.35 : level === 'severe' ? 0.35 : level === 'moderate' ? 0.25 : 0.15,
         // 整章对白修复按功能处理停顿/打断，不能先机械变句号再让审核追认。
@@ -489,7 +497,9 @@ export class DeslopService {
       emit(`   风格语境：${bits.join(' ')}\n`)
     }
 
-    const effectiveSystemPrompt = opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT
+    const effectiveSystemPrompt = migrateLegacyProseDefaults(opts.textOverrides?.systemPrompt ?? DESLOP_SYSTEM_PROMPT) + `
+
+${PROSE_POLICY_RULES}`
     const allChangeSummary: string[] = []
     let finalText = text
 
@@ -756,7 +766,7 @@ export class DeslopService {
     const scopeLabel = passNum === 'final' ? '最终清理' : `Pass${passNum}`
     const issueLabel = includeAdvisory ? '问题' : 'blocking'
     const matchesScope = (f: DeslopFinding): boolean =>
-      passGates.includes(f.gate) && (includeAdvisory || f.severity === 'blocking')
+      passGates.includes(f.gate) && f.type !== 'punctuation-density' && (includeAdvisory || f.severity === 'blocking')
     // 普通 Pass 只看本遍 Gate 范围内的 blocking；最终清理看全 Gate 全部 finding
     let scan = await this.scan(result, {
       whitelist: opts.whitelist,

@@ -649,25 +649,21 @@ a:hover { color: var(--vermilion); }
   flex-wrap: wrap;
   font-size: 11.5px;
   color: var(--ink-3);
+  margin-top: auto;
 }
 .project-card .pc-foot .open {
   color: var(--vermilion);
   font-weight: 600;
   font-family: var(--font-sans);
 }
-.project-card .project-entry {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font-size: inherit;
-  padding: 4px 0;
-}
-.project-card .project-entry:focus-visible {
+.project-card:focus-visible {
   outline: 2px solid var(--vermilion);
   outline-offset: 2px;
 }
 .project-card .pc-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 10px;
 }
@@ -3906,6 +3902,22 @@ pre.body {
   color: var(--ink-2);
   font-family: var(--font-kai);
   letter-spacing: 0.04em;
+}
+.batch-progress-time {
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.batch-progress-chapters {
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 2px;
+  max-height: 72px;
+  overflow: auto;
+  font-variant-numeric: tabular-nums;
 }
 .batch-progress-current {
   color: var(--ink);

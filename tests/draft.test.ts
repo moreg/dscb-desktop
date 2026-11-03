@@ -99,3 +99,17 @@ describe('P19-A 集成: 草稿生命周期', () => {
     expect(isDraftDifferent(same, same)).toBe(false)
   })
 })
+
+it('conditional cleanup preserves a newer backup and removes only the adopted source', async () => {
+  const { mkdtemp, readFile } = await import('fs/promises')
+  const { tmpdir } = await import('os')
+  const { join } = await import('path')
+  const { saveDraftText, discardDraftText } = await import('../src/main/data/draft')
+  const dir = await mkdtemp(join(tmpdir(), 'refinement-draft-'))
+  const file = join(dir, '.draft-001.md')
+  await saveDraftText(file, 'another window edit')
+  expect(await discardDraftText(file, 'adopted source')).toBe(false)
+  expect(await readFile(file, 'utf8')).toBe('another window edit')
+  expect(await discardDraftText(file, 'another window edit')).toBe(true)
+  await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+})

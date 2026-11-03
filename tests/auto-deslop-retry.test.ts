@@ -78,9 +78,9 @@ describe('自动去 AI 味事实修复和核验重试', () => {
       expect.objectContaining({ levelOverride: 'mild', polishDialogue: true, polishNarrative: true }))
   })
 
-  it('排版将动作移到台词前时必须核验实际排版稿，事实未通过则原稿原样保留', async () => {
+  it('模型将动作移到台词前时必须核验实际候选稿，事实未通过则原稿原样保留', async () => {
     const original = ORIGINAL + '\n“我先开门。”林远缓缓走到东屋前，“你别跟来。”'
-    const candidate = original.replaceAll('缓缓', '')
+    const candidate = original.replaceAll('缓缓', '').replace('“我先开门。”林远走到东屋前，“你别跟来。”', '林远走到东屋前。\n“我先开门。你别跟来。”')
     const formatted = formatChapterProse(candidate)
     const difference = JSON.stringify({ unchanged: false,
       issues: ['说话与走到屋前的先后顺序改变：原稿先说话再走，排版稿先走再说话'] })
@@ -88,8 +88,8 @@ describe('自动去 AI 味事实修复和核验重试', () => {
 
     const output = await context.run({ formatCandidate: formatChapterProse })
 
-    expect(formatted).not.toBe(candidate)
-    expect(formatted).toContain('林远走到东屋前。\n“我先开门”\n“你别跟来”')
+    expect(formatted).toBe(candidate)
+    expect(formatted).toContain('林远走到东屋前。\n“我先开门。你别跟来。”')
     expect(context.calls('deslop:verify')[0][0]).toContain(formatted)
     expect(context.calls('deslop:verify')[0][0]).toContain(original)
     expect(output.content).toBe(original)
@@ -97,8 +97,8 @@ describe('自动去 AI 味事实修复和核验重试', () => {
   })
 
   it('正文护栏、事实核验和最终采用都使用格式后候选，格式器不传给润色服务', async () => {
-    const unformatted = CANDIDATE.replaceAll('\n', '\n\n').replace('推开院门', '推开 院门')
-    const unformattedRepair = FIXED.replaceAll('\n', '\n\n').replace('推开院门', '推开 院门')
+    const unformatted = CANDIDATE.replaceAll('\n', '\r\n').replace('推开院门', '推开 院门')
+    const unformattedRepair = FIXED.replaceAll('\n', '\r\n').replace('推开院门', '推开 院门')
     const context = setup({ candidate: unformatted, verifyReplies: [DIFFERENCE, PASSED],
       repairReplies: [JSON.stringify({ text: unformattedRepair })] })
     const formatCandidate = vi.fn(formatChapterProse)
@@ -154,7 +154,11 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(output.report.dialogueQuality?.attempts).toBe(4)
     const options = context.deslop.mock.calls[1][1]
     expect(options?.dialogueComposition?.context).toContain('章节事实上下文')
-    expect(options?.dialogueComposition?.context).toContain('钥匙数量从一把变成两把')
+    expect(options?.dialogueComposition?.priorFindings).toContain('钥匙数量从一把变成两把')
+    expect(options?.dialogueComposition?.previousDraft).toBe(CANDIDATE)
+    expect(options?.factBaseline).toBe(ORIGINAL)
+    expect(JSON.parse(options!.dialogueComposition!.context!.split('\n').at(-1)!))
+      .toEqual({facts:[{id:1,quote:ORIGINAL.split('\n')[0]}]})
     expect(options?.initialDialogueDraft).toBeUndefined()
   })
 
@@ -319,11 +323,24 @@ describe('自动去 AI 味事实修复和核验重试', () => {
     expect(context.calls('deslop:repair')).toHaveLength(1)
   })
 
+  it('仅剩建议项时仍独立核对事实，通过后采用且保留建议说明', async () => {
+    const context = setup({ candidate: FIXED, verifyReplies: [PASSED] })
+    context.deslop.mockReset().mockResolvedValue(result(FIXED, {
+      remainingFindings: [{ gate: 'D', type: 'punctuation-density', line: 1, column: 1,
+        severity: 'advisory', excerpt: '……', message: '停顿密度仅供语境复核。' }]
+    }))
+    const output = await context.run()
+    expect(output.content).toBe(FIXED)
+    expect(output.report).toMatchObject({ status: 'applied', remainingIssues: 1 })
+    expect(output.report.issues).toContain('停顿密度仅供语境复核。')
+    expect(context.calls('deslop:verify')).toHaveLength(1)
+  })
+
   it.each([
     { changeSummary: ['[需复核] 道具归属需要确认'] },
     { rewritten: FIXED + '\n[需确认]' },
     { remainingFindings: [{ gate: 'A', type: 'banned-word', line: 1, column: 1,
-      severity: 'advisory', excerpt: '缓缓', message: '程度副词重复' }] }
+      severity: 'blocking', excerpt: '事实丢失', message: '关键信息缺失' }] }
   ] satisfies Partial<DeslopResult>[])('修复后复扫有标记或残余则保留原稿：%j', async (patch) => {
     const context = setup({ verifyReplies: [DIFFERENCE] })
     context.deslop.mockResolvedValueOnce(result(FIXED, patch))

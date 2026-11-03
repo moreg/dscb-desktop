@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { WEB_MOBILE_QUERY } from './web-viewport'
 import { ErrorBoundary } from './ErrorBoundary'
 import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 import MobileConnectPanel from './MobileConnectPanel'
@@ -216,14 +217,17 @@ export default function App() {
   const { open: shortcutOpen, hide: hideShortcut } = useShortcutPanelToggle()
   const webClient = isWebClient()
   const [narrow, setNarrow] = useState(
-    () => webClient && window.matchMedia('(max-width: 760px)').matches
+    () => webClient && window.matchMedia(WEB_MOBILE_QUERY).matches
   )
   const [navOpen, setNavOpen] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const sidebar = useRef<HTMLElement>(null)
+  const mainContent = useRef<HTMLElement>(null)
   const mobileShell = webClient && narrow
 
   useEffect(() => {
     if (!webClient) return
-    const media = window.matchMedia('(max-width: 760px)')
+    const media = window.matchMedia(WEB_MOBILE_QUERY)
     const apply = () => {
       setNarrow(media.matches)
       if (!media.matches) setNavOpen(false)
@@ -239,8 +243,22 @@ export default function App() {
 
   useEffect(() => {
     if (!navOpen) return
+    const panel = sidebar.current
+    const main = mainContent.current
+    const trigger = menuButton.current
+    if (main) main.inert = true
+    panel?.querySelector<HTMLButtonElement>('.web-mobile-close')?.focus()
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setNavOpen(false)
+      if (event.key === 'Tab' && panel) {
+        const items = [...panel.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], select, input, [tabindex="0"]')]
+          .filter(item => item.getClientRects().length > 0)
+        const first = items[0], last = items[items.length - 1]
+        if (first && (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          event.preventDefault()
+          ;(event.shiftKey ? last : first).focus()
+        }
+      }
     }
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -248,6 +266,8 @@ export default function App() {
     return () => {
       document.body.style.overflow = previousOverflow
       window.removeEventListener('keydown', onKey)
+      if (main) main.inert = false
+      trigger?.focus({ preventScroll: true })
     }
   }, [navOpen])
 
@@ -450,6 +470,7 @@ export default function App() {
           <button
             type="button"
             className="web-mobile-menu"
+            ref={menuButton}
             aria-expanded={navOpen}
             aria-controls="app-sidebar"
             onClick={() => setNavOpen((open) => !open)}
@@ -465,7 +486,8 @@ export default function App() {
       {mobileShell && navOpen ? (
         <button type="button" className="web-nav-backdrop" aria-label="关闭菜单" onClick={() => setNavOpen(false)} />
       ) : null}
-      <aside className="sidebar" id="app-sidebar" aria-hidden={mobileShell ? !navOpen : undefined}>
+      <aside ref={sidebar} className="sidebar" id="app-sidebar" aria-label="主导航" role={mobileShell && navOpen ? 'dialog' : undefined}
+        aria-modal={mobileShell && navOpen ? true : undefined} aria-hidden={mobileShell ? !navOpen : undefined}>
         <div className="sidebar-brand">
           {mobileShell ? (
             <button type="button" className="web-mobile-close" onClick={() => setNavOpen(false)}>
@@ -679,7 +701,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main-content">
+      <main ref={mainContent} className="main-content">
         <AppUpdatePanel compact />
         <div className={mainInnerClass}>
           {bootSyncHint ? (
