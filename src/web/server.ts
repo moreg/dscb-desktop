@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join, resolve } from 'node:path'
 import { startBackend } from '../main/backend'
+import { registerWebAppUpdates } from './app-updates-web'
 import { configureShim, invokeTab, releaseTab, retainTab, subscribeTab } from './electron-shim'
 import { createWebHandler } from './http-app'
 
@@ -52,6 +53,9 @@ async function main(): Promise<void> {
     open: () => ({ ok: true, focusedExisting: false }),
     bind: () => ({ ok: true, focusedExisting: false })
   })
+  // Web 版没有 electron-updater，但渲染层启动时会 invoke('updates:getState')。
+  // 不注册的话每次打开页面控制台都会留一个 500。
+  registerWebAppUpdates()
   const staticRoot = resolve(process.env.WEB_RENDERER_DIR?.trim() || join(process.cwd(), 'out', 'web', 'renderer'))
   const handler = createWebHandler({
     accessToken: token,
