@@ -69,7 +69,7 @@ export class WriteFlowService {
   }
 
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
-    return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt, {
+    return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt + '\n' + (opts.retryFeedback ?? ''), {
       ...opts, maxTokens: 4096, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
     }))
   }
@@ -194,6 +194,7 @@ export class WriteFlowService {
         '------ 全部新增段落 ------', JSON.stringify(repairVerification.inserted)
       ] : []),
       ``,
+      opts.retryFeedback ?? '',
       `------ 本章细纲 ------`,
       outline || '（无细纲文本）',
       ``,
@@ -303,6 +304,7 @@ export class WriteFlowService {
       `只提取已经实际发生的变化；传闻、台词里的猜测、谎言、计划、梦境和假设不能直接更新客观状态。无法确认时留空或写入 settingsSuggestions，不补造。`,
       `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。字段值尽量简短，避免冗长复述正文。`,
       ``,
+      opts.retryFeedback ?? '',
       `------ 第 ${chapterNumber} 章正文 ------`,
       body
     ].join('\n')

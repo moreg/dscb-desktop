@@ -9,6 +9,7 @@ import { WriteService } from '../src/main/data/write-service'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 import { SettingsRepository as SettingsRepo } from '../src/main/data/settings-repository'
+import type { WriteFlowService } from '../src/main/data/write-flow-service'
 
 function mockLlm(reply: string): LlmService {
   return { generateStream: vi.fn().mockResolvedValue(reply) } as unknown as LlmService
@@ -111,6 +112,27 @@ describe('WriteService.syncChapterAfterWrite', () => {
     expect(timeline).toContain('第 5 章')
 
     memSpy.mockRestore()
+  })
+
+  it('滞留记忆条目的具体错误和候选在下次同步提取时传回模型，证据通过后才入库', async () => {
+    await settings.update({ autoMemorySync: true })
+    const service = new WriteService(ps, mockLlm(''), undefined, undefined, undefined, settings)
+    const flow = (service as unknown as { flow: WriteFlowService }).flow
+    const source = '林远在青云山击败了赵乾，受了轻伤。'
+    const extraction = { newCharacters: [], newLocations: [], newItems: [], newForeshadowings: [], characterStateChanges: [], collectedForeshadowings: [],
+      newPlotPoints: [{ title: '得到金丹', event: '林远得到了金丹', evidence: '不存在的金丹原文依据。' }] }
+    const extract = vi.spyOn(flow, 'extractMemoryStream').mockResolvedValue(JSON.stringify(extraction))
+    vi.spyOn(flow, 'repairMemoryEvidence').mockImplementation(async (_text, current) => current)
+    const first = await service.syncChapterAfterWrite(projectId, 5, source)
+    expect(first?.memory.heldBack?.length).toBeGreaterThan(0)
+    expect(first?.memory.applied.plotPoints).toBe(0)
+    extract.mockClear().mockResolvedValue(JSON.stringify({ ...extraction,
+      newPlotPoints: [{ title: '击败赵乾', event: '林远击败了赵乾', evidence: '林远在青云山击败了赵乾' }] }))
+    const retried = await service.syncChapterAfterWrite(projectId, 5, source)
+    expect(extract.mock.calls[0][3]?.retryFeedback).toContain('得到金丹')
+    expect(extract.mock.calls[0][3]?.retryFeedback).toContain('缺少')
+    expect(retried?.memory.heldBack ?? []).toEqual([])
+    expect(retried?.memory.applied.plotPoints).toBe(1)
   })
 
   it('skips extraction and writes when autoMemorySync is false (still returns selfCheck shell)', async () => {

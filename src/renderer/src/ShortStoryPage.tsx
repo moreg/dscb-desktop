@@ -118,7 +118,12 @@ function writeRecovery(value: Recovery | null, id: string): boolean {
   } catch { return false }
 }
 
-export default function ShortStoryPage(): React.ReactElement {
+interface Props {
+  /** 可选：从作品页头进入「剧本创作」工作台并带上本作品选材。 */
+  onOpenScript?: (storyId: string) => void
+}
+
+export default function ShortStoryPage({ onOpenScript }: Props = {}): React.ReactElement {
   const [stories, setStories] = useState<ShortStorySummary[]>([])
   const [story, setStory] = useState<ShortStoryDocument | null>(null)
   const [saved, setSaved] = useState('')
@@ -787,6 +792,7 @@ export default function ShortStoryPage(): React.ReactElement {
         <button className="btn" disabled={busy} onClick={() => void copyRecovery({ story, targetWords, sectionCount, candidate })}>复制当前草稿</button>
         <button className="btn" disabled={busy} onClick={() => void openDirectory()}>作品文件夹</button>
         <button className="btn" disabled={busy} onClick={() => void exportStory()}>导出全文</button>
+        {onOpenScript ? <button className="btn" disabled={busy} onClick={() => onOpenScript(story.id)}>改编为剧本</button> : null}
         <button className="btn btn-primary" disabled={busy || !dirty} onClick={() => void saveCurrent()}>{saving ? '保存中…' : '保存作品'}</button>
       </div>
     </div>

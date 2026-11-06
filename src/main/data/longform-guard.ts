@@ -3,6 +3,7 @@ import type { LlmService, GenerateOptions } from './llm-service'
 import { findJsonObject } from '../../shared/json-extract'
 import { hashProse } from './memory/prose-memory-index'
 import { locateMemoryEvidence } from './memory-evidence-validator'
+import type { ReviewRetryFeedback } from './review-retry-feedback'
 
 export interface LongformGuardInput {
   chapterNumber: number
@@ -66,7 +67,7 @@ export class LongformGuard {
     catch { return null } // Cache availability must not replace or prevent the actual review.
   }
 
-  async check(input: LongformGuardInput, opts: GenerateOptions = {}): Promise<void> {
+  async check(input: LongformGuardInput, opts: GenerateOptions = {}, feedback?: ReviewRetryFeedback): Promise<void> {
     const abort = () => { if (opts.signal?.aborted) throw new Error('LLM_ABORTED') }
     abort()
     if (input.content.length > 40_000) throw new Error('LONGFORM_REVIEW_INCOMPLETE: 正文超过40000字符，请分章后核对')
@@ -112,12 +113,14 @@ export class LongformGuard {
     for (let attempt = 0; attempt < 2; attempt++) {
       abort()
       try {
-        const raw = await this.llm.generateStream(prompt + retryFeedback, { ...opts, onToken: undefined, maxTokens: 3000,
+        const previous = feedback?.prompt()
+        const raw = await this.llm.generateStream(prompt + (previous ? '\n' + previous : '') + retryFeedback, { ...opts, onToken: undefined, maxTokens: 3000,
           systemPrompt: '你是长篇小说连续性编辑，严格按原文与作者计划核对，输出完整JSON。',
           meta: { ...opts.meta, feature: 'longformGuard', chapterNumber: input.chapterNumber } })
         abort()
         try { findings = parseLongformGuard(raw, input) }
         catch (error) {
+          await feedback?.record(error, raw)
           retryFeedback = `\n\n【上次结果的程序校验反馈】\n${(error as Error).message}\n请重新完成全部检查，修正证据来源与引用后输出完整 JSON。不能为了通过格式校验而省略真实冲突；无双重原文依据的推测不能作为冲突。`
           throw error
         }
@@ -131,6 +134,7 @@ export class LongformGuard {
     if (!findings) throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 长篇一致性核对未完成，已暂停推进。${(failure as Error)?.message ?? ''}`)
     if (findings.length) throw new Error(`LONGFORM_CONFLICT: 长篇一致性核对发现冲突，已暂停推进：\n${findings.map(f =>
       `${f.kind === 'boundary' ? '章节边界' : f.kind === 'mainline' ? '主线' : f.kind === 'knowledge' ? '人物知情' : f.kind === 'item' ? '跨章道具' : '长期剧情线'}：${f.message}\n本章：${f.snippet}\n依据：${f.reference}`).join('\n')}`)
+    await feedback?.clear()
     if (key && await this.cacheIdentity() === identity) {
       abort()
       this.passed.set(key, Date.now() + 5 * 60_000)

@@ -5,6 +5,7 @@ import ShortcutPanel, { useShortcutPanelToggle } from './ShortcutPanel'
 import MobileConnectPanel from './MobileConnectPanel'
 import AppUpdatePanel from './AppUpdatePanel'
 import { isWebClient } from './web-download'
+import type { SourceSelectionHint } from '../../shared/script-studio'
 import './web-mobile.css'
 export { SHORTCUTS, isMac } from './shortcut-defs'
 import ProjectListPage from './ProjectListPage'
@@ -44,12 +45,14 @@ const ProjectInspirationPage = lazy(() => import('./ProjectInspirationPage'))
 const ProjectInfoPage = lazy(() => import('./ProjectInfoPage'))
 const ShortStoryPage = lazy(() => import('./ShortStoryPage'))
 const BrainstormPage = lazy(() => import('./BrainstormPage'))
+const ScriptStudioPage = lazy(() => import('./ScriptStudioPage'))
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
 type View =
   | { kind: 'projects' }
   | { kind: 'shortStories' }
+  | { kind: 'scriptStudio'; source?: SourceSelectionHint }
   | { kind: 'brainstorm' }
   | { kind: 'teardown' }
   | { kind: 'scan' }
@@ -122,6 +125,8 @@ function mobileTitle(view: View): string {
       return '我的项目'
     case 'shortStories':
       return '中短篇'
+    case 'scriptStudio':
+      return '剧本创作'
     case 'brainstorm':
       return '脑洞'
     case 'teardown':
@@ -171,6 +176,7 @@ function mobileTitle(view: View): string {
 
 function isNavActive(view: View, kind: string, projectId: string | null): boolean {
   if (kind === 'projects') return view.kind === 'projects'
+  if (kind === 'scriptStudio') return view.kind === 'scriptStudio'
   if (kind === 'teardown') return view.kind === 'teardown'
   if (kind === 'styles') return view.kind === 'styles'
   if (kind === 'coverLearningLibrary') return view.kind === 'coverLearningLibrary'
@@ -442,7 +448,7 @@ export default function App() {
   }
 
   const mainInnerClass = `main-inner ${
-    view.kind === 'projects' || view.kind === 'shortStories' || view.kind === 'brainstorm'
+    view.kind === 'projects' || view.kind === 'shortStories' || view.kind === 'brainstorm' || view.kind === 'scriptStudio'
       ? 'projects-wide'
       : view.kind === 'editor'
       ? 'editor-wide'
@@ -516,6 +522,13 @@ export default function App() {
           >
             <span className="icon">📄</span>
             中短篇
+          </button>
+          <button
+            className={`nav-item ${view.kind === 'scriptStudio' ? 'active' : ''}`}
+            onClick={() => setView({ kind: 'scriptStudio' })}
+          >
+            <span className="icon" aria-hidden>🎬</span>
+            剧本创作
           </button>
           <button
             className={`nav-item ${view.kind === 'brainstorm' ? 'active' : ''}`}
@@ -807,7 +820,13 @@ export default function App() {
             </ErrorBoundary>
           ) : view.kind === 'shortStories' ? (
             <ErrorBoundary>
-              <ShortStoryPage />
+              <ShortStoryPage
+                onOpenScript={(storyId) => setView({ kind: 'scriptStudio', source: { kind: 'short', storyId } })}
+              />
+            </ErrorBoundary>
+          ) : view.kind === 'scriptStudio' ? (
+            <ErrorBoundary>
+              <ScriptStudioPage initialSource={view.kind === 'scriptStudio' ? view.source : undefined} />
             </ErrorBoundary>
           ) : view.kind === 'settings' ? (
             <ErrorBoundary>
@@ -859,6 +878,10 @@ export default function App() {
                 onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
                 onOpenMemoryCenter={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
                 onOpenOutline={() => setView({ kind: 'outline', projectId: view.projectId })}
+                onOpenScript={(n) => setView({
+                  kind: 'scriptStudio',
+                  source: { kind: 'long', projectId: view.projectId, chapterNumber: n, chapterNumbers: [n] }
+                })}
               />
             </ErrorBoundary>
           ) : view.kind === 'editor' ? (

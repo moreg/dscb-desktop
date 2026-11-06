@@ -103,12 +103,14 @@ export async function repairContinuity<Check>(input: {
   verify: (original: string, candidate: string) => Promise<void>
   check: (candidate: string) => Promise<Check>
   onProgress?: (round: number, stage: 'generate' | 'verify' | 'check' | 'retry', detail?: string) => void
+  feedback?: import('./review-retry-feedback').ReviewRetryFeedback
 }): Promise<{ content: string; check: Check }> {
   let feedback = input.issue
   const limits = localRepairLimits(input.content.length)
   const scope = input.scope ?? 'local'
   for (let round = 1; ; round++) {
     if (input.signal?.aborted) throw new Error('LLM_ABORTED')
+    let rejected = ''
     try {
       dependencies.onProgress?.(round, 'generate')
       const raw = await dependencies.generate([
@@ -124,10 +126,14 @@ export async function repairContinuity<Check>(input: {
           : `最多 ${MAX_LOCAL_REPLACEMENTS} 处替换；${scope === 'scene' ? '每处原文最多1200字符、新文最多1500字符，仅调整相关场景。' : '如章节边界要求移除越界段落，可用空 after 删除原文；不得删除无关情节。'}未涉及的原文保持不变。`,
         '--- 最初确认的问题 ---', input.issue,
         '--- 本轮需要解决的问题或上轮复检反馈 ---', feedback,
+        dependencies.feedback?.prompt() ?? '',
         '--- 前文、细纲、记忆及作者要求（按来源使用） ---', input.context,
         '--- 当前原稿（本轮所有替换均基于此稿） ---', input.content
       ].join('\n'))
+      rejected = raw
       const candidate = applyContinuityReplacements(input.content, raw, scope)
+      rejected = candidate
+      dependencies.feedback?.assertCandidate(candidate)
       if (input.signal?.aborted) throw new Error('LLM_ABORTED')
       dependencies.onProgress?.(round, 'verify')
       await dependencies.verify(input.content, candidate)
@@ -135,12 +141,14 @@ export async function repairContinuity<Check>(input: {
       dependencies.onProgress?.(round, 'check')
       const check = await dependencies.check(candidate)
       if (input.signal?.aborted) throw new Error('LLM_ABORTED')
+      await dependencies.feedback?.clear()
       return { content: candidate, check }
     } catch (error) {
       if (input.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED') ||
           (error as Error).message?.includes('CHAPTER_REPAIR_BUDGET') ||
           (error as Error).message?.includes('AGY_REPAIR_CONTEXT_TOO_LARGE')) throw error
       feedback = (error as Error).message
+      await dependencies.feedback?.record(error, rejected)
       if (round >= (input.maxRounds ?? 2)) throw new Error(`自动修复复核未通过：${feedback}`, { cause: error })
       if (round % REPAIR_ROUNDS_BEFORE_BACKOFF === 0) {
         dependencies.onProgress?.(round, 'retry', feedback)

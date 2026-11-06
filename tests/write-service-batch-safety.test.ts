@@ -11,6 +11,7 @@ import { ProjectService } from '../src/main/data/project-service'
 import { LibraryRepository } from '../src/main/data/library-repository'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { DetailedOutlineWriter } from '../src/main/data/skill-format/detailed-outline-writer'
+import { ForeshadowingRepairRejectedError } from '../src/main/data/foreshadowing-repair'
 import type { WriteFlowService } from '../src/main/data/write-flow-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 import type { LlmService } from '../src/main/data/llm-service'
@@ -284,6 +285,37 @@ describe('batch safety and recovery', () => {
       .toEqual(['暂不揭晓父亲身份', '本次允许揭晓父亲身份'])
   })
 
+  it('批量暂停后重试携带两轮否决依据，通过独立核验才保存补写稿', async () => {
+    stubPostProcess()
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    vi.mocked(flow.checkOutlineStream).mockResolvedValue(JSON.stringify(foreshadowDiff))
+    const bad = ['父亲承认自己就是三皇子。', '林远已经听清父亲的皇族身份。']
+    let repairs = 0
+    vi.mocked(llm.generateStream).mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'longformGuard') return JSON.stringify({ completed: true,
+        checked: ['mainline', 'knowledge', 'thread', 'item', 'boundary'], findings: [] })
+      if (repairs++ < 2) return JSON.stringify({ insertions: [{ after: -1, text: bad[repairs - 1] }] })
+      return foreshadowPatch
+    })
+    const review = vi.spyOn(flow, 'reviewForeshadowingRepair')
+      .mockRejectedValueOnce(new ForeshadowingRepairRejectedError([{ message: '提前揭晓父亲身份', evidence: bad[0] }]))
+      .mockRejectedValueOnce(new ForeshadowingRepairRejectedError([{ message: '不能让林远知道皇族身份', evidence: bad[1] }]))
+      .mockResolvedValue({ chapterNumber: 1, hasOutline: true, checked: true, passed: true, diffs: [] })
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first).toMatchObject({ status: 'paused', pendingPostProcessChapter: 1 })
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    expect(service.syncChapterAfterWrite).not.toHaveBeenCalled()
+    const retried = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    expect(retried.status, retried.pauseReason).toBe('completed')
+    const prompts = vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'batchForeshadowRepair')
+    expect(prompts).toHaveLength(3)
+    expect(prompts[2][0]).toContain('提前揭晓父亲身份')
+    expect(prompts[2][0]).toContain('不能让林远知道皇族身份')
+    expect(await new ProseRepo(dir).read(1)).toContain(foreshadowAddition)
+    expect(generate).toHaveBeenCalledOnce()
+    expect(review).toHaveBeenCalledTimes(3)
+  })
+
   it('resumes failed repair from saved prose and does not regenerate the chapter', async () => {
     ;(service as unknown as { llm: LlmService }).llm = withPassingLongformGuard(llm)
     stubPostProcess()
@@ -479,7 +511,7 @@ describe('batch safety and recovery', () => {
     if (status) result.autoDeslop = { status, message: '验收结果', remainingIssues: 0 }
     vi.spyOn(service, 'runFullFlowForChapter').mockResolvedValue(result)
     const progress = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
-    expect(progress.status).toBe('completed')
+    expect(progress.status).toBe(status === 'failed' ? 'paused' : 'completed')
     const statuses = await readChapterStatuses(dir)
     expect(statuses['1']?.status).toBe(status === 'applied' ? 'reviewed' : undefined)
     expect(await new ProseRepo(dir).read(1)).toBe(content)
@@ -624,6 +656,69 @@ describe('batch safety and recovery', () => {
       return '[]'
     })
   }
+
+  it.each(['plot', 'foreshadow', 'power', 'structure', 'ban'] as const)('明确的 %s 检查错误进入定向修复，复检通过后才写下一章', async category => {
+    stubPostProcess(); stubContinuityModel()
+    const broken: ChapterSelfCheckReport = { ...passedCheck, ok: false, items: [{
+      id: `confirmed_${category}`, category, label: '明确的原文问题', verdict: 'fail', detail: '门内行动违反本章限制，请改为门外等候。'
+    }] }
+    vi.mocked(service.selfCheckChapter).mockImplementation(async (_pid, ch, text) => ch === 1 && text === content ? broken : passedCheck)
+    const generate = vi.spyOn(service, 'generateChapterStream').mockImplementation(async (_pid, ch) => {
+      if (ch === 2) expect(await new ProseRepo(dir).read(1)).toBe(corrected)
+      return content
+    })
+    const result = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(result.status, result.pauseReason).toBe('completed')
+    expect(generate).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(llm.generateStream).mock.calls.find(([, opts]) => opts?.meta?.feature === 'continuityRepair')?.[0]).toContain('明确的原文问题')
+    expect(vi.mocked(service.selfCheckChapter).mock.calls.some(([, , text]) => text === corrected)).toBe(true)
+  })
+
+  it('章节修复两轮复核失败后，手动重试首轮携带否决原因并保留已存稿', async () => {
+    stubPostProcess(); stubContinuityModel()
+    vi.mocked(service.selfCheckChapter).mockImplementation(async (_pid, _ch, text) => text === content ? brokenContinuity : passedCheck)
+    const generate = vi.spyOn(service, 'generateChapterStream').mockResolvedValue(content)
+    const originalCall = vi.mocked(llm.generateStream).getMockImplementation()!
+    let verified = 0
+    let candidates = 0
+    const endings = ['守门人核对印章后，让他留在门外等待。', '守门人核对印章后，叫他留在门外等候。', '守门人核对印章后，让他留在门外等候。']
+    vi.mocked(llm.generateStream).mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'continuityRepair') return JSON.stringify({ replacements: [{
+        before: '守门人核对印章后放他进门。', after: endings[candidates++] ?? endings[2]
+      }] })
+      return opts?.meta?.feature === 'continuityRepairVerify' && verified++ < 2
+        ? JSON.stringify({ passed: false, issues: ['修复遗漏了门外等候时的动作因果。'] }) : originalCall(prompt, opts)
+    })
+    const first = await service.generateChaptersBatch(projectId, 1, 1, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(first.status).toBe('paused')
+    expect(await new ProseRepo(dir).read(1)).toBe(content)
+    const second = await service.resumeChaptersBatch(projectId, 1, 1, () => {}, null, {}, first, { autoContinue: true })
+    expect(second.status, second.pauseReason).toBe('completed')
+    const repairs = vi.mocked(llm.generateStream).mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')
+    expect(repairs[2][0]).toContain('修复遗漏了门外等候时的动作因果')
+    expect(generate).toHaveBeenCalledOnce()
+  })
+
+  it('关键词疑似遗漏仍属待核实提示，不强迫补写或阻止继续', async () => {
+    const result = resultFor(1)
+    result.selfCheck = { ...passedCheck, items: [{ id: 'core_plot', category: 'plot', verdict: 'fail',
+      label: '核心事件关键词未命中', detail: '需要核对同义表达', repairKind: 'verify_plot' }] }
+    vi.spyOn(service, 'runFullFlowForChapter').mockResolvedValue(result)
+    expect((await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })).status).toBe('completed')
+  })
+
+  it.each(['memory-evidence', 'review-evidence', 'expression'] as const)('明确的 %s 项目仍未复核通过时不能进入下一章', async kind => {
+    const result = resultFor(1)
+    if (kind === 'memory-evidence') result.memoryApply!.heldBack = ['情节「交接」缺少直接证据。']
+    if (kind === 'review-evidence') result.deepReview = [{ category: 'llm_review', severity: 'error', ruleId: 'custom:rule', message: '审稿仍有具体问题。' }]
+    if (kind === 'expression') result.autoDeslop = { status: 'review_required', message: '人物接话重复。', remainingIssues: 1,
+      dialogueQuality: { passed: false, beforeRatio: 0.3, afterRatio: 0.3, attempts: 2, issues: ['人物接话重复。'] } }
+    vi.spyOn(service, 'runFullFlowForChapter').mockResolvedValue(result)
+    const state = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
+    expect(state.status).toBe('paused')
+    expect(state.pendingPostProcessChapter).toBe(1)
+    expect(state.completed).toEqual([1])
+  })
 
   async function stubLongformConflict(options: { stillConflicts?: boolean; verify?: () => Promise<string> } = {}): Promise<void> {
     const goal = '第1章必须留在门外等候，第2章才能进院，禁止提前完成进院节点。'
@@ -840,7 +935,8 @@ describe('batch safety and recovery', () => {
     let verification = 0
     vi.mocked(llm.generateStream).mockImplementation(async (_prompt, options) => {
       if (options?.meta?.feature === 'longformGuard') return JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
-      if (options?.meta?.feature === 'continuityRepair') return continuityPatch
+      if (options?.meta?.feature === 'continuityRepair') return verification === 0
+        ? JSON.stringify({ replacements: [{ before: '守门人核对印章后放他进门。', after: '守门人核对印章后，叫他在门外等待。' }] }) : continuityPatch
       if (options?.meta?.feature === 'continuityRepairVerify') {
         expect(await new ProseRepo(dir).read(1)).toBe(content)
         return JSON.stringify(++verification === 1 ? { passed: false, issues: ['转场依据不足'] } : { passed: true, issues: [] })
@@ -911,14 +1007,16 @@ describe('batch safety and recovery', () => {
     expect(vi.mocked(llm.generateStream).mock.calls.filter(call => call[1]?.meta?.feature === 'continuityRepairVerify')).toHaveLength(0)
   })
 
-  it('keeps writing when only prose self-check hints remain after the prose-first sync', async () => {
+  it('明确的非衔接自检失败也暂停在本章，不能按正文为准绕过', async () => {
     const result = resultFor(1)
     result.selfCheck = { ...passedCheck, ok: false,
       items: [{ id: 'ending_taboo', category: 'structure', label: '章末无说教', detail: '结尾抒怀', verdict: 'fail' }] }
     vi.spyOn(service, 'runFullFlowForChapter').mockResolvedValue(result)
     const progress = await service.generateChaptersBatch(projectId, 1, 2, () => {}, null, {}, undefined, { autoContinue: true })
-    expect(progress.status).toBe('completed')
-    expect(progress.completed).toEqual([1, 2])
+    expect(progress.status).toBe('paused')
+    expect(progress.pendingPostProcessChapter).toBe(1)
+    expect(progress.pauseReason).toContain('结尾抒怀')
+    expect(progress.completed).toEqual([1])
   })
 
   it.each(['memory', 'settings'])('pauses continuous writing as retryable when %s cannot follow the prose, including the final chapter', async (kind) => {

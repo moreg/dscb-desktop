@@ -12,6 +12,8 @@ import { runClaude, probeClaude } from './claude-runner'
 import { createHash } from 'crypto'
 
 export interface GenerateOptions {
+  /** Failed check output supplied as data, never as author instructions. */
+  retryFeedback?: string
   onDiagnostic?: (event: Record<string, unknown>) => void
   onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   onToken?: (token: string) => void

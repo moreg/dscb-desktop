@@ -60,6 +60,8 @@ import { registerShortStoryIpc } from './ipc/short-story'
 import { registerShortStoryStorageIpc } from './ipc/short-story-storage'
 import { registerShortStoryBrainstormIpc } from './ipc/short-story-brainstorm'
 import { registerLongStoryBrainstormIpc } from './ipc/long-story-brainstorm'
+import { ScriptStudioStore } from './data/script-studio-store'
+import { registerScriptStudioIpc } from './ipc/script-studio'
 
 export interface WritingBackend {
   importProjectPackage: ProjectService['importProjectPackage']
@@ -106,6 +108,8 @@ export async function startBackend(userData: string, windows: ProjectWindowActio
   registerShortStoryStorageIpc(shortStoryStorage)
   registerShortStoryBrainstormIpc(llmService)
   registerLongStoryBrainstormIpc(llmService)
+  const scriptStore = new ScriptStudioStore(join(userData, 'script-projects'))
+  registerScriptStudioIpc(scriptStore, llmService)
 
   const chapterNameService = new ChapterNameService(llmService, projectService)
   registerChaptersIpc(projectService, chapterService, chapterNameService)

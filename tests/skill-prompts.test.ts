@@ -47,6 +47,14 @@ describe('resolveGenreVoice', () => {
 })
 
 describe('buildSystemPrompt', () => {
+  it.each([undefined, 'extend', 'finish'] as const)('生成模式 %s 与润色均约束欲言又止和未回应套写', (mode) => {
+    const prompts = [buildSystemPrompt('都市', null, undefined, null, mode), buildDeslopPrompt('原有片段。', 'mild', [], ['B'])]
+    for (const prompt of prompts) {
+      expect(prompt).toContain('张了张嘴')
+      expect(prompt).toContain('没有回复这句')
+      expect(prompt).toContain('不按词语命中机械删除')
+    }
+  })
   it.each([undefined, 'extend', 'finish'] as const)('%s 默认精修不因旧小节停用而丢失，保留作者自定义', (mode) => {
     const overrides = { deai: '', dialogue: '作者自定义：保留人物方言和克制语气。' }
     const before = { ...overrides }

@@ -18,6 +18,29 @@ import type {
   FanqieMultiBookProgress,
   FanqieIdeaOpeningChapter
 } from './fanqie-chart'
+import type {
+  AdoptScriptCandidateInput,
+  AdoptScriptCandidateResult,
+  BuildStudioPromptPackageInput,
+  BuildStudioPromptPackageResult,
+  CreateScriptProjectInput,
+  ExportStudioMarkdownInput,
+  ExportStudioMarkdownResult,
+  GenerateStudioScriptInput,
+  GenerateStudioScriptResult,
+  GenerateStudioStoryboardInput,
+  GenerateStudioStoryboardResult,
+  GenerationRun,
+  ListStudioRunsInput,
+  RecoverStudioRunsInput,
+  RecoverStudioRunsResult,
+  SaveScriptProjectInput,
+  SaveScriptProjectResult,
+  SaveScriptStoryboardInput,
+  SaveScriptStoryboardResult,
+  ScriptProject,
+  ScriptProjectSummary
+} from './script-studio'
 
 export interface ProjectMeta {
   id: string
@@ -1450,6 +1473,26 @@ export interface RendererApi {
     chapterLimit?: number,
     onProgress?: (progress: FanqieMultiBookProgress) => void
   ) => StreamHandleOf<Record<string, number>>
+
+  // ---- 剧本创作工作台（小说 → 剧本 → 分镜 → 视频提示词）----
+  listScriptProjects(): Promise<ScriptProjectSummary[]>
+  createScriptProject(input: CreateScriptProjectInput): Promise<ScriptProject>
+  getScriptProject(id: string): Promise<ScriptProject>
+  saveScriptProject(input: SaveScriptProjectInput): Promise<SaveScriptProjectResult>
+  adoptScriptCandidate(input: AdoptScriptCandidateInput): Promise<AdoptScriptCandidateResult>
+  saveScriptStoryboard(input: SaveScriptStoryboardInput): Promise<SaveScriptStoryboardResult>
+  generateStudioScript(
+    input: GenerateStudioScriptInput,
+    onToken: (token: string, done: boolean) => void
+  ): StreamHandleOf<GenerateStudioScriptResult>
+  generateStudioStoryboard(
+    input: GenerateStudioStoryboardInput,
+    onToken: (token: string, done: boolean) => void
+  ): StreamHandleOf<GenerateStudioStoryboardResult>
+  buildStudioPromptPackage(input: BuildStudioPromptPackageInput): Promise<BuildStudioPromptPackageResult>
+  exportStudioMarkdown(input: ExportStudioMarkdownInput): Promise<ExportStudioMarkdownResult>
+  listStudioRuns(input: ListStudioRunsInput): Promise<GenerationRun[]>
+  recoverStudioRuns(input: RecoverStudioRunsInput): Promise<RecoverStudioRunsResult>
 }
 
 export interface Character {

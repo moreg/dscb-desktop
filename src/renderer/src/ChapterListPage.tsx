@@ -38,6 +38,8 @@ interface Props {
   onOpenCharacters: () => void
   onOpenMemoryCenter: () => void
   onOpenOutline: () => void
+  /** 可选：从章节行直接进入「剧本创作」工作台并带上本章选材。 */
+  onOpenScript?: (chapterNumber: number) => void
 }
 
 
@@ -154,7 +156,8 @@ export function ChapterPaginator({
 
 export default function ChapterListPage({
   projectId,
-  onOpenChapter
+  onOpenChapter,
+  onOpenScript
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
@@ -728,42 +731,54 @@ export default function ChapterListPage({
                 const cast = (c.appearingCharacters ?? []).slice(0, 4)
                 const extra = (c.appearingCharacters?.length ?? 0) - cast.length
                 return (
-                  <button
-                    key={c.chapterNumber}
-                    type="button"
-                    className="chapter-row"
-                    onClick={() => onOpenChapter(c.chapterNumber)}
-                  >
-                    <div className="ch-top">
-                      <span className="ch-num">第 {c.chapterNumber} 章</span>
-                      <span className="ch-title">{c.title}</span>
-                      <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
-                        {BUCKET_LABEL[chapterListBucket(c)]}
-                      </span>
-                    </div>
-                    {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
-                    <div className="ch-foot">
-                      <div className="ch-cast">
-                        {cast.length > 0 ? (
-                          <>
-                            <span className="lbl">登场</span>
-                            {cast.map((id) => (
-                              <span key={id} className="outline-tag emotion">
-                                {charName(id)}
-                              </span>
-                            ))}
-                            {extra > 0 ? (
-                              <span className="outline-tag">+{extra}</span>
-                            ) : null}
-                          </>
-                        ) : null}
+                  <div key={c.chapterNumber} className="ss-chapter-item">
+                    <button
+                      type="button"
+                      className="chapter-row"
+                      onClick={() => onOpenChapter(c.chapterNumber)}
+                    >
+                      <div className="ch-top">
+                        <span className="ch-num">第 {c.chapterNumber} 章</span>
+                        <span className="ch-title">{c.title}</span>
+                        <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
+                          {BUCKET_LABEL[chapterListBucket(c)]}
+                        </span>
                       </div>
-                      <div className="ch-meta">
-                        {c.emotion ? <span className="words">情绪 {c.emotion}</span> : null}
-                        <span className="words">{c.wordCount.toLocaleString()} 字</span>
+                      {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
+                      <div className="ch-foot">
+                        <div className="ch-cast">
+                          {cast.length > 0 ? (
+                            <>
+                              <span className="lbl">登场</span>
+                              {cast.map((id) => (
+                                <span key={id} className="outline-tag emotion">
+                                  {charName(id)}
+                                </span>
+                              ))}
+                              {extra > 0 ? (
+                                <span className="outline-tag">+{extra}</span>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="ch-meta">
+                          {c.emotion ? <span className="words">情绪 {c.emotion}</span> : null}
+                          <span className="words">{c.wordCount.toLocaleString()} 字</span>
+                        </div>
                       </div>
-                    </div>
-                  </button>
+                    </button>
+                    {onOpenScript ? (
+                      <div className="ss-chapter-adapt">
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => onOpenScript(c.chapterNumber)}
+                        >
+                          改编为剧本
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 )
               })}
             </div>

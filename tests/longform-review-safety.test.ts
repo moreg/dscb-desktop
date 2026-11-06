@@ -917,7 +917,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
     expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
   })
 
-  it.each(['rejected', 'failed', 'changed', 'incomplete'] as const)('补跑 %s 表达检查时仅复用同稿已完成的拒绝结论，仍执行事实和写后检查', async mode => {
+  it.each(['rejected', 'failed', 'changed', 'incomplete'] as const)('补跑 %s 表达检查时继续定向修订，不把旧否决当作已完成而跳过', async mode => {
     verdict = cleared
     await new ProseRepo(dir).write(1, good)
     stubSuccessfulPostChecks()
@@ -930,10 +930,10 @@ describe('长篇核对绕过与记忆污染回归', () => {
     if (mode === 'changed') await new ProseRepo(dir).write(1, content)
     const polish = vi.spyOn(service as unknown as { autoDeslopGeneratedProse: () => Promise<string> }, 'autoDeslopGeneratedProse')
     const result = await service.runFullFlowForChapter(id, 1, () => {}, { contentOverride: content })
-    expect(polish).toHaveBeenCalledTimes(mode === 'rejected' ? 0 : 1)
+    expect(polish).toHaveBeenCalledOnce()
     expect(generate.mock.calls.some(([, opts]) => opts?.meta?.feature === 'longformGuard')).toBe(true)
     expect(result.outlineDiff.checked).toBe(true)
-    if (mode === 'rejected') expect(result.autoDeslop).toMatchObject({ status: 'review_required', issues: ['频道重复播报'] })
+    expect(result.autoDeslop).toBeDefined()
   })
 
   it('连续流程把正文优先策略传入生成；修复预算耗尽后不再重复检查与修复', async () => {

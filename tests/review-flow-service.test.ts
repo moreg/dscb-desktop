@@ -150,7 +150,7 @@ describe('ReviewFlowService.runDeepReview', () => {
   it('checks premature reveals against the outline and prior reader knowledge', async () => {
     const llm = mockLlmByCheck({
       spoiler: JSON.stringify({ findings: [{
-        checkId: 'spoiler', severity: 'error', message: '身份在揭晓节点前被说破', snippet: '他其实是魔王'
+        checkId: 'spoiler', severity: 'error', message: '身份在揭晓节点前被说破', snippet: '他其实是魔王', reference: '第 2 章末才揭晓身份。'
       }] })
     })
     const content = '他其实是魔王。门外有人敲门。'

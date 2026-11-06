@@ -26,6 +26,19 @@ describe('independent chapter refinement', () => {
   let context: string
   const call = vi.fn()
   const make = () => new ChapterRefinementService(projects, chapters, { generateStream: call } as unknown as LlmService, async () => context)
+  it('精修被连续否决后重新创建服务，下一次首轮生成带着具体反馈且重新独立核验', async () => {
+    call.mockReset().mockImplementation(async (_prompt, opts) => opts.meta.feature === 'chapter-refine-verify'
+      ? verdict(original, candidate, false) : JSON.stringify({ text: candidate, changes: ['精修表达。'] }))
+    expect((await service.generate(input)).status).toBe('rejected')
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
+    const repaired = candidate.replace('侧身让他进门', '挪开脚步让他进门')
+    call.mockReset().mockResolvedValueOnce(JSON.stringify({ text: repaired, changes: ['修正归属。'] })).mockResolvedValueOnce(verdict(original, repaired))
+    const retried = await make().generate(input)
+    expect(call.mock.calls[0][0]).toContain('道具归属变化，请恢复原文事实')
+    expect(retried.status).toBe('ready')
+    expect(call.mock.calls[1][1].meta.feature).toBe('chapter-refine-verify')
+    expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
+  })
   beforeEach(async () => {
     activeBatchProjects.clear(); call.mockReset(); context = '人物与前章上下文'
     const root = await mkdtemp(join(tmpdir(), 'chapter-refinement-'))
@@ -139,7 +152,7 @@ describe('independent chapter refinement', () => {
       ? verdict(original, candidate, false) : JSON.stringify({ text: candidate, changes: ['修改对白'] }))
     const result = await service.generate(input)
     expect(result).toMatchObject({ attempts: 2, status: 'rejected' })
-    expect(call).toHaveBeenCalledTimes(4)
+    expect(call).toHaveBeenCalledTimes(3)
     await expect(service.commit(input.projectId, 1, result.id, original)).rejects.toThrow('尚未通过验收')
     expect((await chapters.getChapter(input.projectId, 1)).content).toBe(original)
     const picked = await service.commit(input.projectId, 1, result.id, original, false, 0)

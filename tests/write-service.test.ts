@@ -34,6 +34,19 @@ describe('WriteService', () => {
     projectId = (await createWritingProject(ps, { name: '青云志', genre: '玄幻' })).id
   })
 
+  it('正文格式检查失败后，同任务重试携带错误输出和具体原因，格式合格才返回', async () => {
+    const model = mockLlm('我会调用 story-long-write 技能，技能文件较长，正在补读完整规则。')
+    const service = new WriteService(ps, model)
+    const generate = service as unknown as { generateProseStream: (prompt: string, opts: import('../src/main/data/llm-service').GenerateOptions) => Promise<string> }
+    const opts = { meta: { feature: 'chapter', projectId, chapterNumber: 1 } }
+    await expect(generate.generateProseStream('写出本章正文。', opts)).rejects.toThrow('LLM_AGENT_META')
+    const source = '林远把账册交给守门人。守门人核对印章后放他进门。'
+    vi.mocked(model.generateStream).mockClear().mockResolvedValue(source)
+    await expect(generate.generateProseStream('写出本章正文。', opts)).resolves.toBe(source)
+    expect(vi.mocked(model.generateStream).mock.calls[0][0]).toContain('LLM_AGENT_META')
+    expect(vi.mocked(model.generateStream).mock.calls[0][0]).toContain('我会调用 story-long-write 技能')
+  })
+
   it('buildChapterPrompt assembles project, outline, characters, prev chapter', async () => {
     const dir = await ps.resolveDir(projectId)
     await new OutlineRepository(dir).writeMain({
@@ -735,7 +748,7 @@ describe('WriteService', () => {
       expect(await new ProseRepo(await ps.resolveDir(projectId)).read(1)).toContain('第1章正文')
     })
 
-    it('ordinary outline adjustments and held memory items do not interrupt continuous writing', async () => {
+    it('普通细纲调整可处理，但仍缺少证据的记忆条目必须暂停等待定向重试', async () => {
       const service = new WriteService(ps, mockLlm(''))
       vi.spyOn(service, 'runFullFlowForChapter').mockImplementation(async (_pid, ch) => {
         const result = makeFlowResult(ch, `第${ch}章正文`)
@@ -744,8 +757,9 @@ describe('WriteService', () => {
         return result
       })
       const progress = await service.generateChaptersBatch(projectId, 1, 3, () => {}, null, {}, undefined, { autoContinue: true })
-      expect(progress.status).toBe('completed')
-      expect(progress.completed).toEqual([1, 2, 3])
+      expect(progress.status).toBe('paused')
+      expect(progress.completed).toEqual([1])
+      expect(progress.pauseReason).toContain('单条证据待复核')
     })
 
     it('autoContinue writes accepted正文 differences back to the detailed outline before continuing', async () => {

@@ -71,6 +71,10 @@ export const AGENT_TASKS: Readonly<Record<string, AgentTask>> = {
   'chapter-name': task('assistant', 'opening', 'plan_candidate', 'author'),
   ...Object.fromEntries(['rhythmEval', 'figureGen', 'batchRhythm', 'batchFigure', 'teardown', 'scan',
     'fanqieChart', 'coverPrompt', 'book-test'].map(name => [name, task('assistant', 'auxiliary', 'none', 'author')])),
+  // 剧本创作：两次 LLM 生成都归 auxiliary 路由大类，不新增 FeatureCategory、不改设置页。
+  'script:novel-to-script': task('writer', 'auxiliary', 'none', 'structured'),
+  'script:storyboard': task('assistant', 'auxiliary', 'none', 'structured'),
+  'script:storyboard:segment': task('assistant', 'auxiliary', 'none', 'structured'),
   coverLearn: task('extractor', 'library', 'memory_candidate', 'author'),
   ask: task('assistant', 'ask', 'none', 'author')
 }

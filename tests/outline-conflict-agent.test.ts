@@ -28,6 +28,14 @@ describe('细纲冲突自动决策', () => {
     expect(audit.changes[0]).toEqual(decision.changes[0])
     expect(verify).toHaveBeenCalledOnce()
   })
+  it('历史细纲修复被否决后，重试携带具体意见并实际更换候选才复核', async () => {
+    expect(await reconcileOutlineWithHistory(dir, 4, async () => JSON.stringify(decision),
+      async () => '{"passed":false,"issues":["须明确保留观察者与标签持有者的区别。"]}')).toBe('unavailable')
+    const revised = { changes: [{ ...decision.changes[0], after: '秦牧看到韩烁的后台显示神眷者标签' }] }
+    const generate = vi.fn(async (_prompt: string) => JSON.stringify(revised))
+    expect(await reconcileOutlineWithHistory(dir, 4, generate, async () => '{"passed":true,"issues":[]}')).toBe('changed')
+    expect(generate.mock.calls[0][0]).toContain('须明确保留观察者与标签持有者的区别')
+  })
   it('缺少前文原句或独立审核拒绝时不修改', async () => {
     const forged = { changes: [{ ...decision.changes[0], evidence: '不存在的证据' }] }
     const verify = vi.fn().mockResolvedValue('{"passed":true,"issues":[]}')
