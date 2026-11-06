@@ -138,6 +138,11 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('对话结尾')
     expect(prompt).toContain('事件结尾')
     expect(prompt).toContain('AI 味抒怀')
+    expect(prompt).toContain('心理或平静收束都可以')
+    expect(prompt).not.toContain('禁止纯心理活动')
+    expect(prompt).not.toContain('禁止纯动作')
+    expect(prompt).toContain('人物身份未经确认时')
+    expect(prompt).toContain('不反复罗列人物不知道什么')
   })
 
   it('embeds three iron rules of outline obedience', () => {

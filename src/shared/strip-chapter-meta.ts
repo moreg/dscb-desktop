@@ -15,6 +15,13 @@ const IN_WORLD_VERB =
 
 const TAIL_PHRASES = ['请看下回分解', '请看下回', '未完待续', '下章见'] as const
 
+/** 仅识别独占末段的编辑标记，角色对白和故事内容不应被自动改写。 */
+function trailingMarker(text: string): string | null {
+  const last = text.trimEnd().split('\n').at(-1)?.trim() ?? ''
+  const normalized = last.replace(/^[（(【\[]\s*|\s*[）)】\]]$/g, '').replace(/[。.!！]+$/, '').trim()
+  return TAIL_PHRASES.find(phrase => normalized === phrase) ?? null
+}
+
 /** 写进系统提示和记忆块，告诉模型章号标签不能进正文。 */
 export const CHAPTER_INDEX_NOT_PROSE =
   '提示词里的「第 N 章」只是检索坐标，禁止写入正文。回指旧事时用故事里的时间、地点、人物和事件，不要写章号。'
@@ -46,9 +53,8 @@ export function findPublishedChapterLeak(text: string): string | null {
   for (const line of text.split('\n')) {
     if (isChapterHeadingLine(line)) return line.trim()
   }
-  for (const phrase of TAIL_PHRASES) {
-    if (text.includes(phrase)) return phrase
-  }
+  const marker = trailingMarker(text)
+  if (marker) return marker
   for (const re of [chapterRef(), relativeRef()]) {
     let match: RegExpExecArray | null
     while ((match = re.exec(text))) {
@@ -67,7 +73,11 @@ export function stripPublishedChapterRefs(text: string): string {
   if (!text || !findPublishedChapterLeak(text)) return text
   const lines = text.split('\n').filter((line) => !isChapterHeadingLine(line))
   let out = lines.join('\n')
-  for (const phrase of TAIL_PHRASES) out = out.replaceAll(phrase, '')
+  if (trailingMarker(out)) {
+    const parts = out.trimEnd().split('\n')
+    parts.pop()
+    out = parts.join('\n').trimEnd()
+  }
   for (const re of [chapterRef(), relativeRef()]) {
     out = out.replace(re, (match, offset: number, whole: string) => (
       keepInWorld(whole, offset) ? match : '先前'

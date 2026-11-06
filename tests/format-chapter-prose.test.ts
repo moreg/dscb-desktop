@@ -40,7 +40,11 @@ describe('formatChapterProse：最小格式化', () => {
     )
     expect(formatChapterProse('他读到第九章，才合上笔记。')).toBe('他读到第九章，才合上笔记。')
     expect(formatChapterProse('第九章\n他推开门。')).toBe('他推开门。')
-    expect(formatChapterProse('话说完了。下章见。')).toBe('话说完了。')
+    expect(formatChapterProse('话说完了。\n\n下章见。')).toBe('话说完了。')
+    expect(formatChapterProse('“这本书还没完，未完待续是什么意思？”她问。')).toBe('“这本书还没完，未完待续是什么意思？”她问。')
+    expect(formatChapterProse('话说完了。下章见。')).toBe('话说完了。下章见。')
+    expect(formatChapterProse('他说：“下章见。”')).toBe('他说：“下章见。”')
+    expect(formatChapterProse('正文。\n\n（未完待续）')).toBe('正文。')
   })
 
 })
