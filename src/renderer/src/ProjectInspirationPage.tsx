@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DetailedOutlineItem, MainOutline, ProjectData } from '../../shared/types'
 import { buildProjectInspirationPrompt, parseProjectInspiration } from './project-inspiration'
+import { ipcErrorMessage } from './ipc-error'
 
 interface DrawResult {
   id: number
@@ -219,7 +220,7 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
       onProjectUpdated?.(updated.name)
       setSavedResult({ id: result.id, field })
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(ipcErrorMessage(err))
     } finally {
       setSavingResultId(null)
     }

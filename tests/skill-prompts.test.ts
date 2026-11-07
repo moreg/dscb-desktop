@@ -142,10 +142,10 @@ describe('buildSystemPrompt', () => {
 
   it('embeds chapter ending rules', () => {
     const prompt = buildSystemPrompt('玄幻')
-    expect(prompt).toContain('章末结尾硬性原则')
-    expect(prompt).toContain('对话结尾')
-    expect(prompt).toContain('事件结尾')
-    expect(prompt).toContain('AI 味抒怀')
+    expect(prompt).toContain('章末结尾原则')
+    expect(prompt).toContain('对话、事件、动作、心理或平静收束都可以')
+    expect(prompt).toContain('不强制每章出现突发事件、反转或未说完的台词')
+    expect(prompt).toContain('不追加空泛说教、重复解释')
   })
 
   it('embeds three iron rules of outline obedience', () => {
@@ -205,7 +205,7 @@ describe('buildSystemPrompt', () => {
       expect(prompt).toContain('【自定义对话规则】只许说真话。')
       expect(prompt).toContain('【自定义叙述规则】采用作者指定的抒情文风。')
       // 未覆盖的小节仍用内置默认，续写覆盖声明也不能重新插入默认叙述要求。
-      expect(prompt).toContain('章末结尾硬性原则')
+      expect(prompt).toContain('章末结尾原则')
       expect(prompt).not.toContain(narration.text)
       expect(prompt).not.toContain('【自然准确的叙述】')
       expect(prompt).not.toContain('真人对话特征')
@@ -216,7 +216,7 @@ describe('buildSystemPrompt', () => {
     'skips disabled narration and ending sections in %s mode',
     (mode) => {
       const prompt = buildSystemPrompt('玄幻', null, { ending: '', deai: '' }, null, mode)
-      expect(prompt).not.toContain('章末结尾硬性原则')
+      expect(prompt).not.toContain('章末结尾原则')
       expect(prompt).not.toContain('【自然准确的叙述】')
       // 其他小节与续写行为不受影响。
       expect(prompt).toContain('真人对话特征')

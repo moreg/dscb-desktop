@@ -48,6 +48,39 @@ describe('续写 prompt', () => {
     )
   }
 
+  it.each([500, 2400])('续写保留真实上下文，核对身份、逐人认知和叙述重复（已写 %i 字）', async words => {
+    await writeOutline('2500')
+    const dir = await ps.resolveDir(projectId)
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    const previous = '傍晚，林遥留在码头，钥匙已交给顾宁。林遥只怀疑船夫是哥哥，尚未看清他的脸。顾宁独自在船舱读到密信，没有告诉林遥。约好的接头人还没来。'
+    await writeFile(path.join(dir, '正文', '第001章 码头.md'), previous, 'utf-8')
+    const seam = '林遥没有上船，只问船夫能否等接头人。'
+    const existing = '甲'.repeat(words - seam.length) + seam
+    const ending = JSON.stringify({
+      characterPositions: [{ name: '林遥', location: '码头', action: '等接头人' }],
+      characterStates: [], timePoint: '傍晚', unfinished: ['船夫身份待核对', '接头人未到'],
+      suspense: '', props: ['钥匙已交给顾宁']
+    })
+    const prompt = await new WriteService(ps, mockLlm(ending)).buildChapterPrompt(
+      projectId, 2, null, '保留限知视角，以平静等待收束，不新增事件。', existing
+    )
+    expect(prompt.user).toContain(previous)
+    expect(prompt.user).toContain(existing)
+    expect(prompt.user).toContain('船夫身份待核对')
+    expect(prompt.user).toContain('此处为辅助提取')
+    expect(prompt.user).toContain('写前事实核对')
+    expect(prompt.user).toContain('人物位置、时间与耗时、道具、事件顺序及未解决事项')
+    expect(prompt.user).toContain('身份与信息来源')
+    expect(prompt.user).toContain('人物反应')
+    expect(prompt.user).toContain('重复解释')
+    expect(prompt.user).toContain('保留影响选择的必要心理与因果，不机械改成动作')
+    expect(prompt.user).toContain('保留限知视角，以平静等待收束，不新增事件。')
+    expect(prompt.system).toContain('身份尚未确认时')
+    expect(prompt.system).toContain('读者从其他视角已知真相')
+    expect(prompt.system).toContain('不反复罗列主角“不知道什么”')
+    expect(prompt.system + prompt.user).not.toMatch(/章末必须以.*(?:对话|事件).*结尾/)
+  })
+
   it('无 existingText 时按整章参考字数出指令', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
@@ -247,7 +280,7 @@ describe('续写 prompt', () => {
 
       expect(prompt.continueMode).toBe('extend')
       expect(prompt.system).toContain('续写模式覆盖声明')
-      // 与 OUTPUT_RULES「章末必须以对话或事件结尾，违反此条立即视为失败」冲突的改写
+      // 续写不能因一轮输出结束就强行完成整章。
       expect(prompt.system).toContain('不要强行收尾')
       expect(prompt.system).toContain('本次要新增')
       // 与 CONTINUITY_RULES「本章开头必须回应或延续」冲突的改写

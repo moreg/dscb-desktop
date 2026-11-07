@@ -4,6 +4,7 @@ import type { ProjectTitleCandidate } from '../../shared/types'
 import { longStoryIdeaBrief } from '../../shared/long-story-brainstorm'
 import type { LongStoryIdea } from '../../shared/long-story-brainstorm'
 import './long-story-project.css'
+import { ipcErrorMessage } from './ipc-error'
 
 const LongStoryBrainstorm = lazy(() => import('./LongStoryBrainstorm'))
 
@@ -82,7 +83,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
       )
       onProjectUpdated?.(updated.name)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(ipcErrorMessage(err))
     } finally {
       setSaving(false)
     }

@@ -3,6 +3,7 @@ import { auditChapter } from '../src/main/data/chapter-audit'
 import { DEFAULT_REVIEW_RULES, DEFAULT_REVIEW_THRESHOLDS } from '../src/main/data/skill-prompts'
 import type { ReviewRulesConfig } from '../src/shared/types'
 import { formatChapterProse } from '../src/shared/format-chapter-prose'
+import { buildReviewReport } from '../src/main/data/review-report-builder'
 
 /** 拼一段合法的"中段+对话/事件结尾"正文（基线，避免触发 ending/word_count） */
 function makeValidContent(ending = '"我不会让你——"她头也不回地冲了出去'): string {
@@ -358,6 +359,16 @@ describe('chapter-audit (算法层目录完整性)', () => {
 })
 
 describe('续写格式化后的正文质量回归', () => {
+  it('悬念关键词观察仍可查看，但不扣分或进入主要问题和修复清单', () => {
+    const audit = auditChapter('她终于能安心睡个好觉了。', { reviewRules: reviewRulesOn() })
+    expect(audit.violations.find(v => v.ruleId === 'hook_strength')?.severity).toBe('info')
+    const report = buildReviewReport(2, audit, [])
+    expect(report.structure.hookStrength).toHaveLength(1)
+    expect(report.overall.score).toBe(10)
+    expect(report.overall.mainIssues).toEqual([])
+    expect(report.overall.fixPriority).toEqual([])
+  })
+
   it('单换行与空行稿采用相同段落口径，短段不会被焊成全章超长段', () => {
     const text = Array.from({ length: 10 }, (_, i) => String.fromCharCode(0x4e00 + i).repeat(40) + '。').join('\n\n')
     for (const content of [text, formatChapterProse(text)]) {
@@ -370,9 +381,10 @@ describe('续写格式化后的正文质量回归', () => {
     const text = ['他突然推开门。', '桌上有一本旧册。', '窗外的雨停了。', '灯下的纸张发黄。', '夜已经深了。'].join('\n\n')
     for (const content of [text, formatChapterProse(text)]) {
       const findings = auditChapter(content, { reviewRules: reviewRulesOn() }).violations
-      expect(findings.some((v) => v.category === 'ending')).toBe(true)
+      expect(findings.some((v) => v.category === 'ending')).toBe(false)
       expect(findings.some((v) => v.ruleId === 'hook_strength')).toBe(true)
-      expect(findings.find((v) => v.category === 'ending')?.offset).toBe(content.indexOf('窗外'))
+      expect(findings.find((v) => v.ruleId === 'hook_strength')?.severity).toBe('info')
+      expect(findings.find((v) => v.ruleId === 'hook_strength')?.suggestion).toContain('不因关键词缺失添加悬念或事件')
     }
   })
 

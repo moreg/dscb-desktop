@@ -9,6 +9,19 @@ const finding = JSON.stringify([{
 }])
 
 describe('场景级流水账诊断', () => {
+  it('动作后重复解释须有相邻场景证据，保留影响选择的未知与必要心理', () => {
+    const text = '“我不信他。”她退回门内。\n她这样做，是因为她并不相信门外的人。\n她不知道船夫是谁，因此没有交出信。'
+    const prompt = buildNarrativeFlowPrompt(text)
+    expect(prompt).toContain('旁白、心理或后续台词同义解释')
+    expect(prompt).toContain('未知影响当前判断、风险或选择时应保留')
+    expect(prompt).toContain('不得把必要心理与因果机械改成动作')
+    const result = { kind: 'result-repeat', line: 2, excerpt: '她这样做，是因为她并不相信门外的人。', reason: '前句台词已说明不信，退回门内后再解释同一动机，没有新增作用。' }
+    expect(parseNarrativeFlowFindings(JSON.stringify([result]), text)).toMatchObject([
+      { type: 'narrative-result-repeat', line: 2, excerpt: result.excerpt }
+    ])
+    expect(parseNarrativeFlowFindings(JSON.stringify([{ ...result, line: 3 }]), text)).toBeNull()
+  })
+
   it('首次扫描即使本地零命中仍调用场景诊断，合并证据和计数', async () => {
     let calls = 0
     const llm = { generateStream: async () => { calls++; return finding } } as unknown as LlmService

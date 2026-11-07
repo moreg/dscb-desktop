@@ -55,7 +55,7 @@ export function buildReviewReport(
   const mainIssues: string[] = []
   if (toxicPoints.length > 0) mainIssues.push(`毒点 ${toxicPoints.length} 处`)
   if (deAiSuggestions.length > 0) mainIssues.push(`AI 味 ${deAiSuggestions.length} 处`)
-  if (hookStrength.length > 0) mainIssues.push('章末钩子偏弱')
+  if (hookStrength.some(v => v.severity !== 'info')) mainIssues.push('章末钩子需核对')
   if (quoteConsistency.length > 0) mainIssues.push(`引文一致性 ${quoteConsistency.length} 处`)
 
   // 修复优先级

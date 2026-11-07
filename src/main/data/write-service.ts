@@ -6165,7 +6165,7 @@ export class WriteService {
     const source = await new ProseRepo(dir).read(chapterNumber - 1)
     const snapshot = new ChapterFactSnapshot(dir, chapterNumber - 1, source)
     const identity = await this.llm.getCacheIdentity?.('endingState').catch(() => null)
-    const projectionKey = identity ? hashProse(JSON.stringify(['ending-v2', identity, prevTail])) : null
+    const projectionKey = identity ? hashProse(JSON.stringify(['ending-v3', identity, prevTail])) : null
     const stored = await snapshot.read<PrevEndingState>('ending', projectionKey, value => !!value && value.rawTail === undefined &&
       value.chapterNumber === chapterNumber - 1 && Array.isArray(value.characterPositions) && Array.isArray(value.characterStates) &&
       Array.isArray(value.unfinished) && Array.isArray(value.props) && typeof value.timePoint === 'string' && typeof value.suspense === 'string')
@@ -6182,7 +6182,7 @@ export class WriteService {
       const state = await request
       if (state) this.endingStateVersions.set(key, version)
       if (state && state.rawTail === undefined && projectionKey === (await this.llm.getCacheIdentity?.('endingState').catch(() => null)
-        ? hashProse(JSON.stringify(['ending-v2', await this.llm.getCacheIdentity?.('endingState'), prevTail])) : null)) {
+        ? hashProse(JSON.stringify(['ending-v3', await this.llm.getCacheIdentity?.('endingState'), prevTail])) : null)) {
         await snapshot.remember('ending', projectionKey, state)
       }
       return state
@@ -6591,6 +6591,7 @@ function renderUserPrompt(input: RenderInput): string {
   ) {
     parts.push('---')
     parts.push(`# 上一章结尾状态（结构化提取）${prevStateUse}`)
+    parts.push('此处为辅助提取，须回到上方原文核对；猜测、传闻、待核对的身份和信息来源不升级为确定事实，与原文冲突时以原文为准。')
     const s = input.prevEndingState
     if (s.characterPositions.length > 0) {
       parts.push('**人物位置**：')
@@ -6727,7 +6728,7 @@ function renderUserPrompt(input: RenderInput): string {
       )
     }
     parts.push(
-      '**若本次已把本章细纲的剧情点全部写完，就在本次输出里把本章收束掉**：章末必须以"对话"或"事件"结尾，禁止总结式旁白收尾；剧情点还没写完则不要强行收尾。'
+      '**若本次已把本章细纲的剧情点全部写完，就在本次输出里把本章收束掉**：按剧情、题材与作者要求选择对话、事件、动作、心理或平静收束；不为悬念硬加情节，剧情点还没写完则不要强行收尾。'
     )
   } else {
     // 细纲写的是上限口径（「不超过 3000 字」）时不能反过来当硬性下限下发
@@ -6736,7 +6737,7 @@ function renderUserPrompt(input: RenderInput): string {
         ? `**正文约 ${input.targetWords} 字**（细纲给的是上限口径，可以少写，但不要明显超出）`
         : `**正文目标约 ${input.targetWords} 字**（以剧情充分展开为准；已完整时允许少写，禁止为达字数机械扩写）`
     parts.push(
-      `${lengthClause}。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末必须以"对话"或"事件"结尾。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
+      `${lengthClause}。按本章细纲剧情点顺序展开，每个剧情点都要充分展开，禁止为了凑数而流水账带过。章末按剧情、题材与作者要求自然收束，不强制悬念或突发事件。直接输出正文，不要标题、不要解释、不要流程说明、不要提及任何技能名。`
     )
   }
   if (input.chapterDetail) {
@@ -7637,6 +7638,12 @@ function renderTrackingSection(tracking: TrackingContext, chapterNumber: number)
 function renderChapterSelfCheck(input: RenderInput): string[] {
   const checks: string[] = []
   const ch = input.chapterNumber
+  checks.push(
+    '□ **写前事实核对**：先读近期正文和同章已写前部，对照已有设定逐项核对人物位置、时间与耗时、道具、事件顺序及未解决事项。辅助摘要不替代原文；冲突或依据不足在内部标为待核对，不编成确定设定，不将核对表写进正文。',
+    '□ **身份与信息来源**：写后核对旁白是否把未确认身份写成事实，分别追溯每个人新获信息的时间与途径；作者设定、读者及同伴所知不能自动变成角色所知。',
+    '□ **人物反应**：重要言行与情绪转变符合当下认知、处境、关系和目的，不为推进情节无故配合或失去防备。',
+    '□ **重复解释**：通读连续场景，删除动作或对白之后同义总结的旁白，不反复罗列主角不知道什么；保留影响选择的必要心理与因果，不机械改成动作。'
+  )
   if (input.continuityContext?.length) checks.push(
     '□ **跨章道具**：核对长期连续性记录与实际原文的持有者、所有权、转交链和消耗状态；若本章改变，写清原因与过程，不让已交出或销毁的道具无故复现。',
     '□ **关系与知情**：分别核对每个人的关系方向和已知/不知/怀疑/误信；不得把读者知道当成人物知道，获取新信息必须有来源。历史记录不足时保留未知，不用猜测补齐事实。'
@@ -7667,8 +7674,8 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
       if (!u?.trim()) continue
       checks.push(
         isContinuation
-          ? `□ **上章未完成**：整章（含已写前部）必须处理，前部没处理就在本次处理——${clipCheck(u, 120)}`
-          : `□ **上章未完成**：${clipCheck(u, 120)}`
+          ? `□ **上章未完成**：核对整章（含已写前部）及后续状态，只处理本章细纲安排承接的事项；已解决不重复，后续计划继续保留——${clipCheck(u, 120)}`
+          : `□ **上章未完成**：按本章细纲承接，已解决不重复，后续计划继续保留——${clipCheck(u, 120)}`
       )
     }
   }
@@ -7741,8 +7748,8 @@ function renderChapterSelfCheck(input: RenderInput): string[] {
   checks.push('□ **人设与状态连续**：实力/立场/道具与「当前状态快照」不矛盾')
   checks.push(
     isContinuation
-      ? '□ **章末形态**：若本次已写完本章剧情点，则以对话或事件收束，禁止总结式旁白收尾；未写完则自然停在推进中'
-      : '□ **章末形态**：以对话或事件收束，禁止总结式旁白收尾'
+      ? '□ **章末选择**：若本次已写完本章剧情点，按剧情、题材与作者要求选择对话、事件、动作、心理或平静收束；未写完则自然停在推进中，不为悬念硬加情节'
+      : '□ **章末选择**：按剧情、题材与作者要求选择对话、事件、动作、心理或平静收束，不为悬念硬加情节'
   )
 
   const parts: string[] = []

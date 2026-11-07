@@ -208,7 +208,7 @@ function actionHint(item: SelfCheckItemResult): string {
     return '结合语境核对提示中的动作是否重复或空泛，必要时替换为具体行为；不要仅因命中模式删除有效情节。'
   }
   if (id === 'meta_narration') {
-    return '去掉「第N章」「下章见」「未完待续」等元叙述，改用故事内对话/事件收尾。'
+    return '核对并去掉误入正文的出版章号或文末独立作者告别语；保留对白、书信、题字等故事内使用的“下章见”“未完待续”，按剧情和作者要求自然收束，不为替换附语新增事件。'
   }
 
   switch (item.category) {

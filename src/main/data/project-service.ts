@@ -24,6 +24,8 @@ import { toFolderName } from './folder-name'
 import { extractProjectPackage, writeProjectPackage } from './project-package'
 import { writeProseImport, type ProseImportPlan } from './prose-import'
 import type { ProseImportResult } from '../../shared/prose-import'
+import { withFileLock } from './file-lock'
+import { ProjectFolderInUseError, renameProjectDirectory } from './project-directory-rename'
 
 export { toFolderName } from './folder-name'
 
@@ -127,6 +129,13 @@ export class ProjectService {
     projectId: string,
     info: { name?: string; description?: string }
   ): Promise<ProjectData> {
+    return withFileLock(`project-info:${projectId}`, () => this.saveProjectInfo(projectId, info))
+  }
+
+  private async saveProjectInfo(
+    projectId: string,
+    info: { name?: string; description?: string }
+  ): Promise<ProjectData> {
     if (info.name === undefined) {
       const next = await this.updateProjectData(projectId, { description: info.description })
       await this.library.update(projectId, { description: next.description })
@@ -173,6 +182,7 @@ export class ProjectService {
     try {
       await renameDir(currentDir, target)
     } catch (err) {
+      if (err instanceof ProjectFolderInUseError) throw err
       const code = (err as NodeJS.ErrnoException).code
       if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
         throw new Error('文件夹正在被占用，请关掉正在使用这本书的程序后再保存', { cause: err })
@@ -326,19 +336,7 @@ async function renameDir(from: string, to: string): Promise<void> {
 }
 
 async function renameDirOnce(from: string, to: string): Promise<void> {
-  let last: unknown
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      await fs.rename(from, to)
-      return
-    } catch (err) {
-      last = err
-      const code = (err as NodeJS.ErrnoException).code
-      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err
-      await new Promise((resolve) => setTimeout(resolve, 80 * (attempt + 1)))
-    }
-  }
-  throw last
+  await renameProjectDirectory(from, to)
 }
 
 /** 纯数字、uuid 这类目录名不是书名，扫描时不拿来覆盖大纲标题。 */

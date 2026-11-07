@@ -44,7 +44,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const out = await service.buildChapterPrompt(projectId, 1)
     expect(out).toHaveProperty('system')
     expect(out).toHaveProperty('user')
-    expect(out.system).toContain('章末结尾硬性原则')
+    expect(out.system).toContain('章末结尾原则')
     expect(out.system).toContain('禁用高频词')
     expect(out.system).toContain('顺序铁律')
   })
@@ -319,7 +319,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     ]
     expect(userPrompt).toContain('青云志')
     expect(opts.systemPrompt).toBeDefined()
-    expect(opts.systemPrompt).toContain('章末结尾硬性原则')
+    expect(opts.systemPrompt).toContain('章末结尾原则')
     expect(opts.meta?.feature).toBe('chapter')
     // 默认目标 2500 → 反算 maxTokens 应高于旧的硬编码 4096
     expect(opts.maxTokens).toBeDefined()

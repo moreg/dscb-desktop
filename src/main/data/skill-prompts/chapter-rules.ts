@@ -7,7 +7,7 @@ import { SCENE_NATURALNESS_RULES } from './scene-naturalness'
 /**
  * 章节写作硬性规则文本。
  * 出自「正文写作」技能 SKILL.md：
- * - 章末结尾硬性原则
+ * - 依剧情和作者安排选择章末落点
  * - 三铁律（顺序/完整/边界）
  * - 自然准确的叙述（按作者认可的文风调整）
  * - 服从当前交谈的口语表达
@@ -17,8 +17,8 @@ import { SCENE_NATURALNESS_RULES } from './scene-naturalness'
  * 这些是 system prompt 的核心约束文本，对 LLM 而言是"写作守则"。
  */
 
-/** 章末结尾硬性原则：每章结尾必须用"对话"或"事件"，禁说教/AI 味抒怀。 */
-export const CHAPTER_ENDING_RULES = `
+/** 历史内置全文仅用于精确迁移；不模糊匹配或改写作者自定义条款。 */
+const LEGACY_CHAPTER_ENDING_RULES = `
 【章末结尾硬性原则（必读，违反必须重写）】
 
 每一章的结尾**必须**用"对话"或"事件"来写：
@@ -51,6 +51,30 @@ export const CHAPTER_ENDING_RULES = `
 话没说完，门被踹开。
 门口站着的人，让所有声音都停了。
 `.trim()
+
+/** 结尾服从本章剧情、题材与作者安排，不用固定形态替代收束判断。 */
+export const CHAPTER_ENDING_RULES = `
+【章末结尾原则】
+
+按本章剧情进度、题材、人称视角及作者要求选择落点。对话、事件、动作、心理或平静收束都可以，必要的情绪消化与简短总结可以保留；判断其是否承接本章并产生叙事用途，不按形式判失败。
+
+作者或细纲明确安排的悬念、伏笔、停止位置和后章边界仍须遵守。悬念来自已有矛盾或未解决事项，不强制每章出现突发事件、反转或未说完的台词，不为制造钩子新增人物、危机或情节。
+
+剧情点尚未写完时保留自然停点，不为收尾跳过过程；剧情已完整时自然结束，不追加空泛说教、重复解释或“故事才刚刚开始”等套话。
+`.trim()
+
+const LEGACY_ENDING_OUTPUT_LINE = '- 章末必须以"对话"或"事件"结尾，违反此条立即视为失败'
+const ENDING_OUTPUT_LINE = '- 章末按剧情、题材和作者要求自然收束，对话、事件、动作、心理或平静收束均可，不为悬念硬加情节'
+const LEGACY_META_OUTPUT_LINE = `- **正文禁止出现出版章号**：「第N章」「第N卷」「上一章」「本章」「下章见」都不许写，阿拉伯数字和中文数字一样。${CHAPTER_INDEX_NOT_PROSE}`
+const META_OUTPUT_LINE = `- **正文禁止出现出版章号及作者告别语**：不要将「第N章」「第N卷」「上一章」「本章」等出版坐标或「下章见」「未完待续」等作者告别语写入叙述。${CHAPTER_INDEX_NOT_PROSE}故事内对白、书信、题字等正常使用这些词语时保留，不能按词面删除。`
+
+/** 只在提示词中迁移逐字相同的旧默认，配置原文及附加的作者规则保持不变。 */
+export function normalizeLegacyEndingOverride(text: string): string {
+  return text.replace(LEGACY_CHAPTER_ENDING_RULES.replace(/\n/g, '\r\n'), CHAPTER_ENDING_RULES.replace(/\n/g, '\r\n'))
+    .replace(LEGACY_CHAPTER_ENDING_RULES, CHAPTER_ENDING_RULES)
+    .replace(LEGACY_ENDING_OUTPUT_LINE, ENDING_OUTPUT_LINE)
+    .replace(LEGACY_META_OUTPUT_LINE, META_OUTPUT_LINE)
+}
 
 /** 大纲/细纲遵守的三铁律 */
 export const OUTLINE_THREE_RULES = `
@@ -295,7 +319,7 @@ export const OUTPUT_RULES = `
 【输出要求】
 
 - 直接输出本章正文，**不要**任何标题、章号、解释、前言、后记
-- **正文禁止出现出版章号**：「第N章」「第N卷」「上一章」「本章」「下章见」都不许写，阿拉伯数字和中文数字一样。${CHAPTER_INDEX_NOT_PROSE}
+${META_OUTPUT_LINE}
 - **禁止**输出写作流程说明、技能调用说明、自检旁白、计划步骤（如「我会先…」「正在调用…技能」「随后输出正文」）
 - **禁止**提及 story-long-write / story-short-write 等技能名或工具名；本提示已包含全部写作规则，无需再读外部技能
 - 不要使用 Markdown 格式（不要 # 标题、不要 **加粗**、不要 \`代码块\`）
@@ -303,7 +327,7 @@ export const OUTPUT_RULES = `
 - **字数以下文"写作任务"里给出的目标为参考，剧情完整与可读性优先**。偏短时先检查是否遗漏必要行动、因果、代价或情绪变化，仅补有用途的内容；剩余剧情点已经完整落实时允许提前结束，禁止为凑字数重复堆砌、机械扩写或添加无效铺陈
 - **【语言风格与文笔红线】**：写网文尽量直白！不要过多的拽词、长篇的华丽词藻反复描写，这繁杂的内容读者很难有耐心去看的。吸引读者的永远都是好的剧情，文笔必须为剧情服务。能用利落白话写清的动作冲突与对白，绝不堆砌形容词；凡是删去后不影响情节推进、信息传达或人物塑造的冗余修饰，坚决不写，不得只为了补字数而增加；严禁使用"声音发紧"、"从牙缝/喉咙挤出来"等发声解说腔
 - **【对话排版绝对硬性红线】**：同一人的台词必须一次性说完，严禁在台词中间插入动作打断（绝对禁止写成："话1。"某某做动作，"话2。"）。只有需要写动作时，才将动作写在台词前单独成行，或在台词全部结束后另起一行；不要求每句台词配动作，连续对白可以直接接续，违反位置要求立即视为失败
-- 章末必须以"对话"或"事件"结尾，违反此条立即视为失败
+${ENDING_OUTPUT_LINE}
 - 按细纲剧情点编号顺序写，不得跳过、不得越界写下一章内容
 `.trim()
 
@@ -311,7 +335,7 @@ export const OUTPUT_RULES = `
  * 续写模式覆盖声明。
  *
  * 上面那些守则是按「从零写整章」写的：衔接检查通篇讲「本章开头」、旧版自定义输出要求
- * 可能仍把目标字数定成硬性下限、章末硬性原则要求每次输出都以对话/事件收束。续写时这三条都不成立
+ * 可能仍把目标字数定成硬性下限。续写需要按真实剧情进度决定停点，不能将一轮输出当作整章收尾
  * （开头已写好、字数只是本次增量、章可能还没到收尾的时候），而它们又允许被用户在设置里
  * 覆盖，逐条改内置文本既盖不全也会破坏用户自定义。
  *
@@ -353,14 +377,14 @@ export function buildContinueModeRules(mode: 'extend' | 'finish'): string {
       '- **"目标字数是硬性下限 / 宁可写超也不要写不够"**：本次**不适用**。本章篇幅已接近参考目标，下文给出的字数仅供收尾参考，不能据字数认定剧情完成；为凑字数拉长反而是错。'
     )
     lines.push(
-      '- **"章末必须以对话或事件结尾"**：只在本章剧情真正完成时适用。剩余剧情尚需展开时保留自然停点，不得跳点压缩；剧情完整后再以对话或事件收束本章，禁止总结式旁白收尾。'
+      '- **章末选择**：剩余剧情尚需展开时保留自然停点，不得跳点压缩；剧情完整后按题材与作者要求收束本章，对话、事件、动作、心理或平静收束均可，不强制悬念或突发事件。'
     )
   } else {
     lines.push(
       '- **目标字数**：下文给出的是**本次要新增**的篇幅参考，不是整章字数；已写前部不计入。优先完整落实剩余剧情点，已完整时允许少于参考字数，不得把字数缺口当作添加填充内容的理由。'
     )
     lines.push(
-      '- **"章末必须以对话或事件结尾"**：**仅当**本次把本章细纲剧情点全部写完、真正收束本章时才适用。若剧情点还没写完，本次应自然停在剧情推进中，**不要强行收尾**，也不要为了收尾而跳过没写的剧情点。'
+      '- **章末选择**：本次把本章细纲剧情点全部写完后，按剧情、题材和作者要求自然收束，对话、事件、动作、心理或平静收束均可。若剧情点还没写完，本次应自然停在剧情推进中，**不要强行收尾**，也不要为了收尾而跳过没写的剧情点或硬加悬念。'
     )
   }
   return lines.join('\n').trim()
@@ -396,7 +420,7 @@ export const CHAPTER_RULE_SECTIONS: ChapterRuleSection[] = [
   { key: 'outline', title: '细纲遵守', text: OUTLINE_THREE_RULES },
   { key: 'spoiler', title: '防剧透', text: SPOILER_RULES },
   { key: 'continuity', title: '衔接检查', text: CONTINUITY_RULES },
-  { key: 'ending', title: '章末硬性原则', text: CHAPTER_ENDING_RULES },
+  { key: 'ending', title: '章末收束', text: CHAPTER_ENDING_RULES },
   { key: 'deai', title: '自然准确的叙述', text: DEAI_TECHNIQUES },
   { key: 'style_targets', title: '句段节奏', text: STYLE_TARGETS },
   { key: 'dialogue', title: '对话规则', text: DIALOGUE_RULES },

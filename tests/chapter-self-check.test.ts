@@ -40,6 +40,18 @@ describe('splitEventClauses', () => {
 })
 
 describe('evaluateChapterSelfCheck', () => {
+  it.each(['“下章见。”', '“未完待续。”', '信上写道：\n\n未完待续'])(
+    '写后自检不把故事内告别词判为元叙述：%s', content => {
+      expect(evaluateChapterSelfCheck({ chapterNumber: 2, content }).items
+        .find(item => item.id === 'meta_narration')?.verdict).toBe('pass')
+    }
+  )
+
+  it('文末独立附语仍会被写后自检指出', () => {
+    expect(evaluateChapterSelfCheck({ chapterNumber: 2, content: '她收好信。\n\n未完待续' }).items
+      .find(item => item.id === 'meta_narration')?.verdict).toBe('warn')
+  })
+
   it('章中的中文章号也算泄露，书中章节不算', () => {
     const leaked = evaluateChapterSelfCheck({
       chapterNumber: 12,

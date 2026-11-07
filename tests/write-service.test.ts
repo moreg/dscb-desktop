@@ -70,7 +70,7 @@ describe('WriteService', () => {
     expect(user).toContain('林远')
     expect(user).toContain('前一章的正文内容')
     // 新的 system prompt 含技能守则
-    expect(system).toContain('章末结尾硬性原则')
+    expect(system).toContain('章末结尾原则')
     expect(system).toContain('禁用高频词')
   })
 

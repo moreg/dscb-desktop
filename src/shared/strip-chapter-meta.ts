@@ -14,6 +14,41 @@ const IN_WORLD_VERB =
   /(?:翻到|翻开|读到|看到|看见|念到|诵到|写着|印着|载于|出自|引自|见于|讲到)\s*$/
 
 const TAIL_PHRASES = ['请看下回分解', '请看下回', '未完待续', '下章见'] as const
+const TAIL_MARKER = new RegExp(`^(?:${TAIL_PHRASES.join('|')})[。.!！…]*$`)
+const IN_WORLD_TAIL_INTRO = /(?:写着|写下|写道|刻着|留下|印着|题着|说道|说|喊|念|读|四个字|三个字|一句话|一行字)[^。！？\n]{0,12}[：:]$/
+
+/** 仅清理文末独立的出版附语。行内出现、引语及未闭合对白一律保留。 */
+function trailingMeta(text: string): { start: number; phrase: string } | null {
+  const lines = [...text.matchAll(/[^\n]*(?:\n|$)/g)].filter(m => m[0].length > 0)
+  const quoted = new Set<number>()
+  const stack: string[] = []
+  const pairs: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
+  for (const line of lines) {
+    if (stack.length) quoted.add(line.index!)
+    for (const char of line[0]) {
+      if (char === stack.at(-1)) stack.pop()
+      else if (pairs[char]) stack.push(pairs[char])
+      else if (char === '"') stack.push('"')
+    }
+  }
+  let result: { start: number; phrase: string } | null = null
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    const raw = line[0].trim()
+    if (!raw) continue
+    if (quoted.has(line.index!)) break
+    // 常见独立附语包装；不接受引号，避免误删人物台词。
+    const wrapped = raw.match(/^(?:（([^（）]+)）|\(([^()]+)\)|【([^【】]+)】)$/)
+    const marker = wrapped ? wrapped[1] ?? wrapped[2] ?? wrapped[3] : raw
+    if (!TAIL_MARKER.test(marker)) break
+    let previous = i - 1
+    while (previous >= 0 && !lines[previous][0].trim()) previous--
+    const before = previous >= 0 ? lines[previous][0].trim() : ''
+    if (IN_WORLD_TAIL_INTRO.test(before)) break
+    result = { start: line.index!, phrase: TAIL_PHRASES.find(p => marker.startsWith(p))! }
+  }
+  return result
+}
 
 /** 写进系统提示和记忆块，告诉模型章号标签不能进正文。 */
 export const CHAPTER_INDEX_NOT_PROSE =
@@ -46,9 +81,8 @@ export function findPublishedChapterLeak(text: string): string | null {
   for (const line of text.split('\n')) {
     if (isChapterHeadingLine(line)) return line.trim()
   }
-  for (const phrase of TAIL_PHRASES) {
-    if (text.includes(phrase)) return phrase
-  }
+  const tail = trailingMeta(text)
+  if (tail) return tail.phrase
   for (const re of [chapterRef(), relativeRef()]) {
     let match: RegExpExecArray | null
     while ((match = re.exec(text))) {
@@ -65,13 +99,14 @@ export function findPublishedChapterLeak(text: string): string | null {
  */
 export function stripPublishedChapterRefs(text: string): string {
   if (!text || !findPublishedChapterLeak(text)) return text
-  const lines = text.split('\n').filter((line) => !isChapterHeadingLine(line))
+  const tail = trailingMeta(text)
+  const body = tail ? text.slice(0, tail.start).trimEnd() : text
+  const lines = body.split('\n').filter((line) => !isChapterHeadingLine(line))
   let out = lines.join('\n')
-  for (const phrase of TAIL_PHRASES) out = out.replaceAll(phrase, '')
   for (const re of [chapterRef(), relativeRef()]) {
     out = out.replace(re, (match, offset: number, whole: string) => (
       keepInWorld(whole, offset) ? match : '先前'
     ))
   }
-  return out.replace(/。{2,}/g, '。').replace(/，{2,}/g, '，')
+  return out
 }

@@ -15,6 +15,32 @@ const mock = (response = JSON.stringify(cleared)) => ({ generateStream: vi.fn().
   getCacheIdentity: vi.fn().mockResolvedValue('model-v1') })
 
 describe('长篇写作交稿闸门', () => {
+  it('旁白把未确认身份坐实也核对，不仅检查角色台词；有证据的冲突保留出处', async () => {
+    const source = {
+      ...input, content: '那位失散多年的兄长撑着船靠岸，林遥还没看清他的脸。',
+      history: '林遥只怀疑船夫是失散的兄长，尚未看清脸，也未获得其他确认。'
+    }
+    const llm = mock(JSON.stringify({ ...cleared, findings: [{
+      kind: 'knowledge', message: '旁白提前确认了仍待核实的身份。',
+      snippet: '那位失散多年的兄长撑着船靠岸', reference: source.history
+    }] }))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow('LONGFORM_CONFLICT')
+    const prompt = llm.generateStream.mock.calls[0][0]
+    expect(prompt).toContain('同时核对叙述层的身份确认')
+    expect(prompt).toContain('不得因“不再写不知道”而判为知情')
+    expect(prompt).toContain('结尾可为对话、事件、动作、心理或平静收束')
+  })
+
+  it('逐人认知冲突不能拿旁人的经历或编造传信当作已核实依据', () => {
+    const source = { ...input, content: '林遥直接说出了密信里的接头地点。',
+      history: '顾宁独自读信，未告知林遥。林遥尚不知信中内容。' }
+    const result = { ...cleared, findings: [{ kind: 'knowledge', message: '林遥无来源获得密信内容。',
+      snippet: source.content, reference: source.history }] }
+    expect(parseLongformGuard(JSON.stringify(result), source)).toHaveLength(1)
+    result.findings[0].reference = '顾宁早已传信，把内容告诉了林遥。'
+    expect(() => parseLongformGuard(JSON.stringify(result), source)).toThrow('对照依据')
+  })
+
   it('允许边界核对引用远期卷纲节点，但不能用历史替代计划依据', () => {
     const result = { ...cleared, checked: [...cleared.checked, 'boundary'], findings: [{
       kind: 'boundary', message: '提前揭晓内应身份', snippet: '陆宁直接揭穿赵伯就是内应', reference: '第850章才能查明内应身份。'
