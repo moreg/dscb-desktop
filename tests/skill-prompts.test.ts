@@ -47,23 +47,24 @@ describe('resolveGenreVoice', () => {
 })
 
 describe('buildSystemPrompt', () => {
-  it.each([undefined, 'extend', 'finish'] as const)('生成模式 %s 与润色均约束欲言又止和未回应套写', (mode) => {
-    const prompts = [buildSystemPrompt('都市', null, undefined, null, mode), buildDeslopPrompt('原有片段。', 'mild', [], ['B'])]
-    for (const prompt of prompts) {
-      expect(prompt).toContain('张了张嘴')
-      expect(prompt).toContain('没有回复这句')
-      expect(prompt).toContain('不按词语命中机械删除')
-    }
+  it.each([undefined, 'extend', 'finish'] as const)('生成模式 %s 不下发润色套句样例，润色保留针对性诊断', (mode) => {
+    const generation = buildSystemPrompt('都市', null, undefined, null, mode)
+    const deslop = buildDeslopPrompt('原有片段。', 'mild', [], ['B'])
+    expect(generation).toContain('没有新变化时无需给每个动作补心理')
+    expect(generation).not.toContain('张了张嘴')
+    expect(deslop).toContain('张了张嘴')
+    expect(deslop).toContain('没有回复这句')
+    expect(deslop).toContain('不按词语命中机械删除')
   })
-  it.each([undefined, 'extend', 'finish'] as const)('%s 默认精修不因旧小节停用而丢失，保留作者自定义', (mode) => {
+  it.each([undefined, 'extend', 'finish'] as const)('%s 的场景与信息规则独立于编辑小节，保留作者自定义', (mode) => {
     const overrides = { deai: '', dialogue: '作者自定义：保留人物方言和克制语气。' }
     const before = { ...overrides }
     const prompt = buildSystemPrompt('历史', null, overrides, null, mode)
-    expect(prompt).toContain('【默认成稿精修：保留剧情、人设和文风】')
-    expect(prompt).toContain('避免机械问答')
-    expect(prompt).toContain('避免重复解释')
-    expect(prompt).toContain('避免动作清单感')
-    expect(prompt).toContain('保留谁向谁传达什么及亲见、听说、推测的区别')
+    expect(prompt).toContain('【从人物处境写场景】')
+    expect(prompt).toContain('对白可以直答、合作、争执或转述')
+    expect(prompt).toContain('连续动作按目的、阻力与结果组织')
+    expect(prompt).toContain('区分客观事实、亲见、转述、猜测、误信和作者预设')
+    expect(prompt).not.toContain('【默认成稿精修：保留剧情、人设和文风】')
     expect(prompt).toContain(overrides.dialogue)
     expect(overrides).toEqual(before)
     if (mode) expect(prompt).toContain('禁止重写、复述或另起一个开头')
@@ -149,11 +150,12 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('不追加空泛说教、重复解释')
   })
 
-  it('embeds three iron rules of outline obedience', () => {
-    const prompt = buildSystemPrompt()
+  it('only includes the default outline rules when there is a chapter plan', () => {
+    const prompt = buildSystemPrompt(undefined, undefined, undefined, undefined, undefined, undefined, 'write', true)
     expect(prompt).toContain('顺序铁律')
     expect(prompt).toContain('完整铁律')
     expect(prompt).toContain('边界铁律')
+    expect(buildSystemPrompt()).not.toContain('顺序铁律')
   })
 
   it.each([undefined, 'extend', 'finish'] as const)('keeps the reader knowledge boundary in %s mode', (mode) => {
@@ -184,8 +186,8 @@ describe('buildSystemPrompt', () => {
   it('embeds negative constraints', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('写作负向限制（结合连续场景判断）')
-    expect(prompt).toContain('工具人/背景板路人')
-    expect(prompt).toContain('不以无用途动作拖延交流')
+    expect(prompt).toContain('避免用人物轮流复述信息')
+    expect(prompt).toContain('可以保留服务于体验、关系或后果的细节')
     expect(prompt).not.toContain('事件-反应-结果')
   })
 
@@ -228,7 +230,7 @@ describe('buildSystemPrompt', () => {
   it('embeds continuity rules', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('衔接检查')
-    expect(prompt).toContain('禁止凭空起头')
+    expect(prompt).toContain('从上章的实际状态或本章已写断点接起')
   })
 
   it('embeds output rules', () => {
@@ -249,8 +251,9 @@ describe('buildSystemPrompt', () => {
   it.each([undefined, 'extend', 'finish'] as const)('%s 模式按场景安排句段和人物反应', (mode) => {
     const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
     expect(prompt).toContain('一句一段也可以是一句有层次的长句')
-    expect(prompt).toContain('跟着视角人物当下的处境、观察和判断')
-    expect(prompt).toContain('先判断这一反应是否来自当下处境')
+    expect(prompt).toContain('视角人物眼下要做什么、知道什么、受什么阻碍')
+    expect(prompt).toContain('围绕他为何选择、身体与判断怎样受影响')
+    expect(prompt).toContain('短句可自然出现')
     expect(prompt).toContain('不能据相似细节补造人物以往的经历')
     expect(prompt).not.toContain('同一人的台词必须一次性说完')
   })
@@ -259,18 +262,16 @@ describe('buildSystemPrompt', () => {
     const prompt = buildSystemPrompt()
     expect(prompt).toContain('无论是否提供对标书，都必须使用原创表达')
     expect(prompt).toContain('不得只替换人名、地名、道具做同义改写')
-    expect(prompt).toContain('人物动机、性格、能力和当时可知信息')
-    expect(prompt).toContain('结果须有因果与相应代价')
-    expect(prompt).toContain('以场景为单位检查')
-    expect(prompt).toContain('读者能否理解人物的经历与选择')
-    expect(prompt).toContain('允许必要的情绪消化、关系建立、氛围和留白')
-    expect(prompt).toContain('不要求每段都推进主线')
+    expect(prompt).toContain('人物此刻知道的信息、处境、能力、关系与目的')
+    expect(prompt).toContain('保留行动条件与真正付出的代价')
+    expect(prompt).toContain('环境、心理与停顿用来呈现人物经历、关系、氛围及取舍')
+    expect(prompt).toContain('保留人物做得到的主动行动')
     expect(prompt).toContain('重复堆砌、机械扩写或添加无效铺陈')
   })
 
   it.each(['extend', 'finish'] as const)('续写 %s 覆盖旧版硬字数规则，先续完句子和进行中剧情点', (mode) => {
     const legacyOutput = '【用户旧版输出规则】目标字数是硬性下限，宁可写超也不要写不够。'
-    const prompt = buildSystemPrompt(undefined, null, { output: legacyOutput }, null, mode)
+    const prompt = buildSystemPrompt(undefined, null, { output: legacyOutput }, null, mode, undefined, 'write', true)
     // 保留用户可编辑内容，但续写专用解释在其后覆盖旧版冲突条款。
     expect(prompt).toContain(legacyOutput)
     const continuation = prompt.slice(prompt.indexOf('续写模式覆盖声明（接缝、范围、篇幅与收束）'))
@@ -279,18 +280,19 @@ describe('buildSystemPrompt', () => {
     expect(continuation).toContain('先从断点续完')
     expect(continuation).toContain('不得插入动作或另起一句打断')
     expect(continuation).toContain('不强制动作起手')
-    expect(continuation).toContain('先续完进行中的剧情点')
+    expect(continuation).toContain('先续完进行中的关键情节')
     expect(continuation).toContain('文风、对白和排版遵守作者明确要求')
     expect(continuation).not.toContain('第一句必须**立刻切入具体物理动作')
     expect(continuation).not.toContain('本次要新增**的字数下限')
   })
 
-  it('对称流水账改写示例保留原有事实，不通过新增具体细节拉长', () => {
+  it('生成避免按操作断句，并保护使结果成立的事实', () => {
     const prompt = buildSystemPrompt()
-    expect(prompt).toContain('楚弈点进去才发现时标没了，退回列表一看，标题也改了。')
+    expect(prompt).not.toContain('楚弈点进去')
     expect(prompt).not.toContain('今日下午')
     expect(prompt).not.toContain('夏季健康提醒')
-    expect(prompt).toContain('只调整表达，不凭空增加原文没有的事实')
+    expect(prompt).toContain('保留使后果成立的动作、先后、位置和交接')
+    expect(prompt).toContain('不靠逗号把所有操作串成一句')
   })
 
   it('选用古风时保留题材语气，不下发替换示例', () => {
@@ -310,27 +312,15 @@ describe('buildSystemPrompt', () => {
     const prompt = buildSystemPrompt('悬疑', null, undefined, null, mode)
     expect(prompt).toContain('## 1. 题材定位（默认语感参考）')
     expect(prompt).toContain('克制、留白、信息量密')
-    expect(prompt).toContain('先找场景生硬的原因')
-    expect(prompt).toContain('核对整场的目标、压力和因果')
-    expect(prompt).toContain('避免靠突然出现的巧合或无铺垫的新线索强推剧情')
-    expect(prompt).toContain('误会或风险是否有可信原因')
-    expect(prompt).toContain('先在获准范围内重构相关场景的因果和信息安排')
-    expect(prompt).toContain('等待与悬念须有当前处境或人物动机的依据')
-    expect(prompt).toContain('不要为了章末钩子先预设惊险结果')
-    expect(prompt).toContain('只能依据自己掌握的信息判断和行动')
-    expect(prompt).toContain('推动他作出选择、采取行动或改变对局势的认识')
-    expect(prompt).toContain('不反复把它当成疑点渲染')
-    expect(prompt).toContain('不让场景只靠电话、短信或一问一答来回传递消息')
-    expect(prompt).toContain('落在人物的决定、关系变化或事件后果上')
-    expect(prompt).toContain('不反复用“电话接通了”“有人来了”等动作突然中断来留钩子')
-    expect(prompt).toContain('仍不确定的信息保持不确定，不替读者重复推理')
-    expect(prompt).toContain('让等待、追问和转场起作用')
-    expect(prompt).toContain('避免让人物轮流汇报、接令、逐项完成任务')
-    expect(prompt).toContain('危险要实际改变人物能做什么、先做什么或必须放弃什么')
-    expect(prompt).toContain('脱险后的转场跟着人物仍需解决的事走')
-    expect(prompt).toContain('新增的事实陈述须对照前文；无法核实的在内部标为待确认')
-    expect(prompt).toContain('不要求每个动作都带来反转')
-    expect(prompt).toContain('也不用“这不代表……但……”替读者总结一遍')
+    expect(prompt).toContain('连续动作按目的、阻力与结果组织')
+    expect(prompt).toContain('疼痛、恐惧、迟疑、盘算或必要的空间因果可以直写')
+    expect(prompt).toContain('不为钩子硬加突发事件或无动机的等待')
+    expect(prompt).toContain('不能只剩轮流报状态、接令和执行')
+    expect(prompt).toContain('规则、关键数字、影响成败的顺序、必要步骤和时限照实保留')
+    expect(prompt).toContain('结论只及证据支持的对象、时点与条件')
+    expect(prompt).toContain('人物可以据此暂不采信或误判')
+    expect(prompt).toContain('已经清楚的结果无需再汇报一遍')
+    expect(prompt).not.toContain('按细纲承接')
     expect(prompt).not.toContain('语感用词参考')
     expect(prompt).not.toContain('高频套写排查参考')
   })

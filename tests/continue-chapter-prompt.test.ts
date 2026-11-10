@@ -65,8 +65,8 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain(bookRule)
     expect(prompt.user).toContain(existing)
     expect(prompt.user).toContain(instruction)
-    expect(prompt.user).toContain('未明确指定的表达沿用前部的叙述语气、人物口吻和句段节奏')
-    expect(prompt.user.indexOf('【默认表达与推进方式】')).toBeLessThan(prompt.user.lastIndexOf(instruction))
+    expect(prompt.system).toContain('沿用本作既有视角、叙述语气和人物口吻，句段依当前场景组织')
+    expect(prompt.user.indexOf('**只输出新写的后续正文**')).toBeLessThan(prompt.user.lastIndexOf(instruction))
     expect(prompt.system).toContain(override)
     expect(prompt.system).toContain('本次临时要求优先')
     expect(prompt.system).toContain('默认排版，作者明确指定其他排版时依其要求执行')
@@ -93,16 +93,13 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain(existing)
     expect(prompt.user).toContain('船夫身份待核对')
     expect(prompt.user).toContain('此处为辅助提取')
-    expect(prompt.user).toContain('写前事实核对')
-    expect(prompt.user).toContain('人物位置、时间与耗时、道具、事件顺序及未解决事项')
-    expect(prompt.user).toContain('身份与信息来源')
-    expect(prompt.user).toContain('人物反应')
-    expect(prompt.user).toContain('重复解释')
-    expect(prompt.user).toContain('保留影响选择的必要心理与因果，不机械改成动作')
+    expect(prompt.user).toContain('以已确认正文的最新状态承接人物位置、时间、道具和知情边界')
+    expect(prompt.user).not.toContain('写前/写后自检清单')
+    expect(prompt.system).toContain('疼痛、恐惧、迟疑、盘算或必要的空间因果可以直写')
     expect(prompt.user).toContain('保留限知视角，以平静等待收束，不新增事件。')
     expect(prompt.system).toContain('身份尚未确认时')
     expect(prompt.system).toContain('读者从其他视角已知真相')
-    expect(prompt.system).toContain('不反复罗列主角“不知道什么”')
+    expect(prompt.system).toContain('结论只及证据支持的对象、时点与条件')
     expect(prompt.system + prompt.user).not.toMatch(/章末必须以.*(?:对话|事件).*结尾/)
   })
 
@@ -274,7 +271,7 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('还没决定走不走')
     // 悬念也保留，但改成「前部没回应就本次补上」的措辞
     expect(prompt.user).toContain('上章悬念')
-    expect(prompt.user).toContain('若【本章已写正文前部】尚未回应')
+    expect(prompt.user).toContain('先看本章前部是否已回应')
   })
 
   /**
@@ -312,7 +309,7 @@ describe('续写 prompt', () => {
       expect(prompt.system).toContain('禁止重写、复述或另起一个开头')
       expect(prompt.system).toContain('接缝起手（第一句写法）')
       expect(prompt.system).toContain('不要复述前文末尾台词')
-      expect(prompt.system).toContain('机械双联报表句')
+      expect(prompt.system).toContain('连续动作按目的、阻力与结果组织')
       expect(prompt.user).toContain('未完句或未闭合台词优先自然接完')
     })
 
@@ -365,12 +362,12 @@ describe('续写 prompt', () => {
     const cont = await service.buildChapterPrompt(projectId, 2, null, undefined, '甲'.repeat(500))
     expect(cont.user).not.toContain('本章开头必须对接')
     expect(cont.user).toContain('不要回头改开头')
-    expect(cont.user).toContain('前部若已回应就不要再回应一遍')
-    expect(cont.user).toContain('只处理本章细纲安排承接的事项')
+    expect(cont.user).toContain('前部已回应的照实际状态继续')
+    expect(cont.user).toContain('仅在与当前场景有关时承接')
 
     // 非续写路径保持原措辞
     const fresh = await service.buildChapterPrompt(projectId, 2)
-    expect(fresh.user).toContain('本章开头必须对接')
+    expect(fresh.user).toContain('承接前章实际状态')
   })
 
   it('续写时给出剧情点进度对齐指令（细纲每轮整份重发，不点明就会重复或跳点）', async () => {
@@ -384,8 +381,9 @@ describe('续写 prompt', () => {
       '甲'.repeat(500)
     )
 
-    expect(prompt.user).toContain('进度对齐')
-    expect(prompt.user).toContain('已完成 / 进行中 / 未开始')
+    expect(prompt.system).toContain('关键事件是已发生、进行中还是未开始')
+    expect(prompt.user).toContain('已发生的内容无需重述，提到或打算做的事仍是计划')
+    expect(prompt.user).not.toContain('执行清单')
   })
 
   it('中段省略标记不采用括号省略句式（deslop 占位符硬规则会拦这个形状）', async () => {
@@ -554,14 +552,14 @@ describe('续写 prompt', () => {
     }
   })
 
-  it('续写时自检清单改为对接已写前部，不再要求「开头」对齐上一章', async () => {
+  it('续写从已写前部的实际断点接起，不重新要求写章首', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
     const existing = '甲'.repeat(500)
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
-    expect(prompt.user).toContain('接续点连续')
-    expect(prompt.user).toContain('不重复前部')
+    expect(prompt.user).toContain('从【本章已写正文前部】的实际断点接下去')
+    expect(prompt.user).toContain('已发生的内容无需重述')
     expect(prompt.user).not.toContain('上章结尾对接')
   })
   /**

@@ -105,7 +105,7 @@ describe('saved legacy dialogue rules at prompt time', () => {
     expect(prompt).toContain('自定义：沿用本书既定的方言分寸')
     expect(prompt).toContain('保留角色已有粗口，不新增口头禅')
     expect(prompt).toContain('【自定义章末】以当前事件结束')
-    expect(prompt).toContain('自检要求不进入故事')
+    expect(prompt).toContain('待核对标记和核对过程不进入小说正文')
     expect(prompt).toContain('不设强制比例')
     expect(await readFile(file, 'utf8')).toBe(before)
     expect((await repo.getChapterRuleOverrides()).dialogue).toBe(legacy)

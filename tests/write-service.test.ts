@@ -71,7 +71,7 @@ describe('WriteService', () => {
     expect(user).toContain('前一章的正文内容')
     // 新的 system prompt 含技能守则
     expect(system).toContain('章末结尾原则')
-    expect(system).toContain('避免动作清单感')
+    expect(system).toContain('连续动作按目的、阻力与结果组织')
     expect(system).not.toContain('高频套写排查参考')
   })
 
@@ -177,15 +177,15 @@ describe('WriteService', () => {
     }
 
     const { user } = await service.buildChapterPrompt(projectId, 2)
-    expect(user).toContain('写前/写后自检清单')
+    expect(user).not.toContain('写前/写后自检清单')
     expect(user).toContain('上章悬念')
     expect(user).toContain('山门阴影')
     expect(user).toContain('未完成')
-    expect(user).toContain('本章核心事件')
+    expect(user).toContain('核心事件')
     expect(user).toContain('击败赵乾')
-    expect(user).toContain('金手指边界')
+    expect(user).toContain('设定中的能力边界')
     expect(user).toMatch(/只能|无法|不能|消耗/)
-    expect(user).toContain('输出前必须对照')
+    expect(user).toContain('按上方本章细纲落实关键事件、必要因果、信息边界与停止位置')
   })
 
   /**

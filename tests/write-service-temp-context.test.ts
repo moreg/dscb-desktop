@@ -41,8 +41,7 @@ describe('WriteService tempContext', () => {
     const instructionIdx = prompt.user.indexOf(instruction)
     const outputIdx = prompt.user.indexOf('现在请写第')
     expect(instructionIdx).toBeGreaterThan(outputIdx)
-    expect(prompt.user).toContain('续写前部保留原样')
-    // 自检指令覆盖 tempContext（逐条落实）
-    expect(prompt.user).toContain('逐条落实')
+    expect(prompt.user).toContain('只输出新写的后续正文')
+    expect(prompt.user).not.toContain('逐条落实')
   })
 })

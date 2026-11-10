@@ -120,8 +120,8 @@ describe('续写质量与长篇记忆集成', () => {
       await writer.generateChapterStream(id, 1, style.id, { previewOnly: true, existingText: start, tempContext: instruction })
       const [user, options] = generateStream.mock.calls.at(-1)!
       const system = options.systemPrompt as string
-      for (const value of [style.stylePrompt, negative, positive, '本次临时要求优先', '顺畅协作',
-        '一句一段也可以是一句有层次的长句', '避免机械问答']) expect(system).toContain(value)
+      for (const value of [style.stylePrompt, negative, positive, '本次临时要求优先', '配合者也有自己的判断与反应',
+        '一句一段也可以是一句有层次的长句', '已经清楚的结果无需再汇报一遍']) expect(system).toContain(value)
       for (const value of [bookRule, scene, '宋禾', '次日宋禾收到认领通知', '停在窗边，不写第二天。', instruction]) {
         expect(user).toContain(value)
       }
@@ -248,7 +248,7 @@ describe('续写质量与长篇记忆集成', () => {
     const p = await service.buildChapterPrompt(id, 1, null, undefined, '甲'.repeat(2000))
     expect(p.wordTarget.bound).toBe('about')
     expect(p.user).toContain('这是剩余上限，允许少写')
-    expect(p.user).toContain('若剧情已全部完成，可自然结束')
+    expect(p.user).toContain('保留自然停点，不跳过剧情')
     expect(p.user).not.toMatch(/不少于\s*1000|新增\s*1000\s*字.{0,8}硬性下限/)
   })
 
@@ -257,7 +257,7 @@ describe('续写质量与长篇记忆集成', () => {
     const existing = '甲'.repeat(3000) + fact + '乙'.repeat(4500) + '他问：“证据究竟在'
     const p = await service.buildChapterPrompt(id, 1, null, undefined, existing)
     expect(p.user).toContain(existing)
-    expect(p.user).toContain('未完句或未闭合台词优先自然接完，再续完进行中的动作或剧情点')
+    expect(p.user).toContain('未完句或未闭合台词优先自然接完，承接仍在进行的事')
     expect(p.user).not.toContain('省略本章中段')
   })
 
