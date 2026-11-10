@@ -122,7 +122,7 @@ export class ProjectService {
   }
 
   /**
-   * 保存书名和简介。书名会同步成同级文件夹名，并写回大纲标题与核心设定。
+   * 保存书名和简介。尝试同步同级文件夹名，占用时先原地保存并标记待同步。
    * 文件夹名不能用的符号换成全角，返回的 name 就是最终文件夹名。
    */
   async updateProjectInfo(
@@ -145,10 +145,20 @@ export class ProjectService {
     if (!folderName) throw new Error('这个名称不能用作文件夹名')
 
     const currentDir = await this.resolveDir(projectId)
-    const nextDir = await this.renameProjectFolder(projectId, currentDir, folderName)
+    let nextDir = currentDir
+    let folderRenamePending = false
+    try {
+      nextDir = await this.renameProjectFolder(projectId, currentDir, folderName)
+    } catch (error) {
+      // Explorer 等程序的目录句柄会阻止改名，但通常不影响目录内的文件写入。
+      // 只降级处理目录占用；冲突、路径错误和实际写入失败仍必须报错。
+      if (!(error instanceof ProjectFolderInUseError) || !(await pathExists(currentDir))) throw error
+      folderRenamePending = true
+    }
     try {
       const next = await this.updateProjectData(projectId, {
         name: folderName,
+        folderRenamePending,
         ...(info.description !== undefined ? { description: info.description } : {})
       })
       await writeFolderTitle(nextDir, folderName)

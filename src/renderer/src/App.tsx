@@ -878,10 +878,6 @@ export default function App() {
                 onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
                 onOpenMemoryCenter={() => setView({ kind: 'memoryCenter', projectId: view.projectId })}
                 onOpenOutline={() => setView({ kind: 'outline', projectId: view.projectId })}
-                onOpenScript={(n) => setView({
-                  kind: 'scriptStudio',
-                  source: { kind: 'long', projectId: view.projectId, chapterNumber: n, chapterNumbers: [n] }
-                })}
               />
             </ErrorBoundary>
           ) : view.kind === 'editor' ? (
@@ -891,7 +887,6 @@ export default function App() {
                 chapterNumber={view.chapterNumber}
                 onBack={() => setView({ kind: 'chapters', projectId: view.projectId })}
                 onOpenOutline={() => setView({ kind: 'outline', projectId: view.projectId })}
-                onOpenCharacters={() => setView({ kind: 'characters', projectId: view.projectId })}
                 onNavigateChapter={(n) => setView({ kind: 'editor', projectId: view.projectId, chapterNumber: n })}
               />
             </ErrorBoundary>

@@ -303,6 +303,7 @@ export default function ProjectInspirationPage({ projectId, onProjectUpdated }: 
           </button>
           <p className="meta">连续抽取会更换包装角度，并避开已经抽到的书名。</p>
           {error ? <div className="inspiration-error" role="alert">{error}</div> : null}
+          {project?.folderRenamePending ? <p role="status">作品信息已保存，文件夹名尚未同步。请关闭打开这本小说目录的资源管理器窗口及其他占用程序，再到“作品信息”页保存一次。</p> : null}
         </section>
 
         <section className={`inspiration-stage ${drawing ? 'is-drawing' : ''}`}>

@@ -64,21 +64,34 @@ describe('保存作品时恢复目录改名', () => {
     expect(conflict).not.toBeInstanceOf(ProjectFolderInUseError)
   })
 
-  it.skipIf(process.platform !== 'win32')('无法释放时不改小说文件或书架路径，原信息可以继续读取', async () => {
+  it('目录持续占用时保存书名简介，重启扫描不丢失，解除后可再次同步目录', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aw-locked-save-'))
     const library = new LibraryRepository(join(root, 'library.json'))
     const settings = { getProjectsRoot: async (fallback: string) => fallback } as SettingsRepository
     const service = new ProjectService(join(root, 'projects'), library, settings)
     const meta = await service.create({ name: '原书名', description: '原简介' })
-    const saved = await readFile(join(meta.path, 'project.json'), 'utf8')
-    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(busy())
+    await fs.mkdir(join(meta.path, '正文'))
+    await fs.writeFile(join(meta.path, '正文', '第1章.md'), '正文不能丢失。')
+    const nativeRename = fs.rename.bind(fs)
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === meta.path) throw busy()
+      return nativeRename(from, to)
+    })
     vi.mocked(recoverProjectFolderLocks).mockResolvedValue({ released: [], remaining: [] })
     try {
-      await expect(service.updateProjectInfo(meta.id, { name: '新书名', description: '新简介' })).rejects.toBeInstanceOf(ProjectFolderInUseError)
-      expect(await readFile(join(meta.path, 'project.json'), 'utf8')).toBe(saved)
+      await expect(service.updateProjectInfo(meta.id, { name: '新书名', description: '新简介' }))
+        .resolves.toMatchObject({ name: '新书名', description: '新简介', folderRenamePending: true })
       expect(await service.resolveDir(meta.id)).toBe(meta.path)
-      expect(await service.getProjectData(meta.id)).toMatchObject({ name: '原书名', description: '原简介' })
-      expect(await library.list()).toEqual([meta])
+      const restarted = new ProjectService(join(root, 'projects'), library, settings)
+      expect(await restarted.getProjectData(meta.id)).toMatchObject({ name: '新书名', description: '新简介', folderRenamePending: true })
+      expect(await restarted.scanProjects()).toEqual([expect.objectContaining({ id: meta.id, name: '新书名', description: '新简介', path: meta.path })])
+      rename.mockRestore()
+      await expect(restarted.updateProjectInfo(meta.id, { name: '新书名' }))
+        .resolves.toMatchObject({ name: '新书名', description: '新简介', folderRenamePending: false })
+      const nextDir = join(root, 'projects', '新书名')
+      expect(await restarted.resolveDir(meta.id)).toBe(nextDir)
+      expect(await readFile(join(nextDir, '正文', '第1章.md'), 'utf8')).toBe('正文不能丢失。')
+      expect(await library.list()).toEqual([expect.objectContaining({ id: meta.id, name: '新书名', description: '新简介', path: nextDir })])
     } finally {
       rename.mockRestore()
       // root is the exact directory just created by mkdtemp in the temporary workspace.

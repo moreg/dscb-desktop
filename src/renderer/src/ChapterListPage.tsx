@@ -38,8 +38,6 @@ interface Props {
   onOpenCharacters: () => void
   onOpenMemoryCenter: () => void
   onOpenOutline: () => void
-  /** 可选：从章节行直接进入「剧本创作」工作台并带上本章选材。 */
-  onOpenScript?: (chapterNumber: number) => void
 }
 
 
@@ -156,8 +154,7 @@ export function ChapterPaginator({
 
 export default function ChapterListPage({
   projectId,
-  onOpenChapter,
-  onOpenScript
+  onOpenChapter
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
@@ -767,17 +764,6 @@ export default function ChapterListPage({
                         </div>
                       </div>
                     </button>
-                    {onOpenScript ? (
-                      <div className="ss-chapter-adapt">
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => onOpenScript(c.chapterNumber)}
-                        >
-                          改编为剧本
-                        </button>
-                      </div>
-                    ) : null}
                   </div>
                 )
               })}

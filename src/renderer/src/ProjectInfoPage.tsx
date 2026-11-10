@@ -45,6 +45,7 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
         setGenre(project.genre ?? '')
         setTargetChapters(project.targetChapters)
         setCandidates(project.titleCandidates ?? [])
+        if (project.folderRenamePending) setMessage('作品信息已保存，文件夹名尚未同步。请关闭打开这本小说目录的资源管理器窗口及其他占用程序，再点击“保存作品信息”。')
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -77,9 +78,11 @@ export default function ProjectInfoPage({ projectId, onProjectUpdated }: Props) 
       setName(updated.name)
       setDescription(updated.description ?? '')
       setMessage(
-        updated.name === nextName
-          ? '已保存。书架和本地文件夹都会使用这个名称'
-          : `已保存。不能放进文件夹名的符号已换成全角，文件夹名为「${updated.name}」`
+        updated.folderRenamePending
+          ? '书名和简介已保存，文件夹被占用，暂时保留原目录名。请关闭打开这本小说目录的资源管理器窗口及其他占用程序，再次保存即可同步文件夹名。'
+          : updated.name === nextName
+            ? '已保存。书架和本地文件夹都会使用这个名称。'
+            : `已保存。不能放进文件夹名的符号已换成全角，文件夹名为「${updated.name}」。`
       )
       onProjectUpdated?.(updated.name)
     } catch (err) {

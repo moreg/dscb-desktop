@@ -206,6 +206,8 @@ export interface ProjectData {
   name: string
   genre?: string
   defaultStyleProfileId?: string
+  /** 目录被占用时先保存作品信息，下次保存书名时重试同步文件夹名。 */
+  folderRenamePending?: boolean
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
   /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
