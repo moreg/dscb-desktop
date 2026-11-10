@@ -48,6 +48,31 @@ describe('续写 prompt', () => {
     )
   }
 
+  it('续写以作者明确的视角和排版为先，前部叙述语气仍保留作参照', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const bookRule = '本书用长段写码头夜景，只有换说话人才另起一段。'
+    await mkdir(path.join(dir, '设定'), { recursive: true })
+    await writeFile(path.join(dir, '设定', '叙述约定.md'), `# 叙述约定\n\n${bookRule}`, 'utf-8')
+    await writeOutline('2500')
+    const override = '人名之前不用称谓，保留人物自己的土话。'
+    const get = vi.fn().mockResolvedValue({ chapterRuleOverrides: { dialogue: override } })
+    const service = new WriteService(ps, mockLlm(''), undefined, undefined, undefined,
+      { get } as unknown as SettingsRepository)
+    const existing = '渡船撞着木桩，一下，又一下。阿姐的伞还立在脚边，伞柄上的红布叫水浸成了黑的。我把伞往灯底下挪了挪。\n\n“你去问一声，她认得这把伞。”'
+    const instruction = '这一段仍用第一人称，两个连贯的陈述句保留在同一段，先写等消息的心思。'
+    const prompt = await service.buildChapterPrompt(projectId, 1, null, instruction, existing)
+
+    expect(prompt.user).toContain(bookRule)
+    expect(prompt.user).toContain(existing)
+    expect(prompt.user).toContain(instruction)
+    expect(prompt.user).toContain('未明确指定的表达沿用前部的叙述语气、人物口吻和句段节奏')
+    expect(prompt.user.indexOf('【默认表达与推进方式】')).toBeLessThan(prompt.user.lastIndexOf(instruction))
+    expect(prompt.system).toContain(override)
+    expect(prompt.system).toContain('本次临时要求优先')
+    expect(prompt.system).toContain('默认排版，作者明确指定其他排版时依其要求执行')
+    expect(prompt.system).not.toContain('与上文守则冲突时一律以本节为准')
+  })
+
   it.each([500, 2400])('续写保留真实上下文，核对身份、逐人认知和叙述重复（已写 %i 字）', async words => {
     await writeOutline('2500')
     const dir = await ps.resolveDir(projectId)
@@ -285,9 +310,8 @@ describe('续写 prompt', () => {
       expect(prompt.system).toContain('本次要新增')
       // 与 CONTINUITY_RULES「本章开头必须回应或延续」冲突的改写
       expect(prompt.system).toContain('禁止重写、复述或另起一个开头')
-      // 接缝起手硬性铁律与去 AI 报表句断言
-      expect(prompt.system).toContain('接缝起手硬性铁律')
-      expect(prompt.system).toContain('严禁首句复述前文末尾台词')
+      expect(prompt.system).toContain('接缝起手（第一句写法）')
+      expect(prompt.system).toContain('不要复述前文末尾台词')
       expect(prompt.system).toContain('机械双联报表句')
       expect(prompt.user).toContain('未完句或未闭合台词优先自然接完')
     })

@@ -45,7 +45,8 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(out).toHaveProperty('system')
     expect(out).toHaveProperty('user')
     expect(out.system).toContain('章末结尾原则')
-    expect(out.system).toContain('禁用高频词')
+    expect(out.system).not.toContain('高频套写排查参考')
+    expect(out.system).toContain('避免机械问答')
     expect(out.system).toContain('顺序铁律')
   })
 
@@ -72,7 +73,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const id2 = (await createWritingProject(ps, { name: '剑无名', genre: '古风仙侠' })).id
     const out2 = await new WriteService(ps, mockLlm('正文')).buildChapterPrompt(id2, 1)
     expect(out2.system).toContain('古风/仙侠')
-    expect(out2.system).toContain('勾了勾唇')
+    expect(out2.system).toContain('按情境选用的题材语气词')
     expect(out2.system).not.toContain('他心里直骂娘')
   })
 
@@ -109,7 +110,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('我不入轮回，谁入轮回')
     expect(user).toContain('击败长老后不留活口')
     expect(user).toContain('【本章硬性写作要求】')
-    expect(user).toContain('以下要求必须全部落实到正文里')
+    expect(user).toContain('按本次作者要求及作品规则落实以下章内计划')
     expect(user).toContain('下笔前先自检一次')
     expect(user).toContain('林远')
     // 未填细纲字数预估 → 兜底 2500，且为强约束"不少于"
@@ -307,7 +308,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
 
     const service = new WriteService(ps, withPassingLongformGuard(llm))
     const onAutoDeslopResult = vi.fn()
-    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe('正文')
+    await expect(service.generateChapterStream(projectId, 1, { autoDeslopAfterContinue: true, onAutoDeslopResult })).resolves.toBe('正文')
     expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed', message: expect.stringContaining('已保留生成稿')
     }))

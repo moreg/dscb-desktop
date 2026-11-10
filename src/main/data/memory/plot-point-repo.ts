@@ -56,6 +56,25 @@ export interface ListSummariesBeforeOptions {
 export class PlotPointRepo {
   constructor(private readonly projectDir: string) {}
 
+  /** Source versions of intact automatic plot points, written alongside tracking history. */
+  async readAutomaticSourceHashes(chapters: ReadonlySet<number>): Promise<Map<number, Set<string>>> {
+    const hashes = new Map<number, Set<string>>()
+    if (!chapters.size) return hashes
+    const dir = join(this.projectDir, '记忆', '剧情点')
+    const names = (await listPlotFileNames(dir)).filter(name => chapters.has(extractChapterNumFromName(name) ?? 0))
+    for (const { path, text, doc } of await readMemoryDocuments(dir, names)) {
+      const chapter = extractChapterNumFromName(path)!
+      if (!isManagedPlotPoint(text, chapter)) continue
+      const { fields } = parseBoldFields(doc.sections.map(section => section.body).join('\n') + '\n' + doc.body)
+      const hash = fieldToStr(fields.get('正文哈希'))
+      if (!hash || !/^[a-f0-9]{64}$/.test(hash)) continue
+      const versions = hashes.get(chapter) ?? new Set<string>()
+      versions.add(hash)
+      hashes.set(chapter, versions)
+    }
+    return hashes
+  }
+
   /**
    * 取「写第 chapterNumber 章之前」最近 limit 章的剧情摘要（不含本章）。
    * 优先采用绑定当前正文哈希的记忆摘要；其余回退真实正文摘录。
@@ -272,6 +291,11 @@ async function listPlotFileNames(plotDir: string): Promise<string[]> {
   } catch {
     return []
   }
+}
+
+export function isManagedPlotPoint(text: string, chapter: number): boolean {
+  const match = text.match(/\n<!-- writer-plot:(\d+):([a-f0-9]{64}) -->\r?\n?$/)
+  return Boolean(match && Number(match[1]) === chapter && hashProse(text.slice(0, match.index)) === match[2])
 }
 
 function extractChapterNumFromName(name: string): number | null {

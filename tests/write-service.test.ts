@@ -71,7 +71,8 @@ describe('WriteService', () => {
     expect(user).toContain('前一章的正文内容')
     // 新的 system prompt 含技能守则
     expect(system).toContain('章末结尾原则')
-    expect(system).toContain('禁用高频词')
+    expect(system).toContain('避免动作清单感')
+    expect(system).not.toContain('高频套写排查参考')
   })
 
   it('loads project platform for chapter writing and rewriting, with Tomato fallback', async () => {
@@ -402,11 +403,12 @@ describe('WriteService', () => {
       '把这段改成女主主动反击，删掉所有旁白解释。'
     )
 
-    const [prompt] = vi.mocked(llm.generateStream).mock.calls[0]
-    // 用户追问要求被标为最高优先级，覆盖细纲/人物/伏笔
-    expect(prompt).toContain('最高优先级')
-    expect(prompt).toContain('覆盖一切既有约束')
-    expect(prompt).toContain('以用户要求为准')
+    const [prompt, options] = vi.mocked(llm.generateStream).mock.calls[0]
+    expect(prompt).toContain('用户追问要求是最高优先级的创作要求')
+    expect(prompt).toContain('由这些调整直接产生的细纲与设定冲突')
+    expect(prompt).not.toContain('覆盖一切既有约束')
+    expect(options?.systemPrompt).toContain('其他情节、因果和信息边界以原稿为准')
+    expect(options?.systemPrompt).not.toContain('顺序铁律')
     // 要求逐条落实 + 输出前自检，避免遗漏
     expect(prompt).toContain('逐条')
     expect(prompt).toContain('自检')
@@ -568,6 +570,11 @@ describe('WriteService', () => {
     })
 
     afterEach(() => vi.restoreAllMocks())
+    function batchModel(): LlmService {
+      return { generateStream: vi.fn(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
+        ? JSON.stringify({ completed: true, checked: ['mainline', 'knowledge', 'thread', 'item'], findings: [] })
+        : '') } as unknown as LlmService
+    }
     function makeFlowResult(ch: number, content: string): ChapterFlowResult {
       return {
         chapterNumber: ch,
@@ -632,7 +639,7 @@ describe('WriteService', () => {
     })
 
     it('autoContinue writes the whole range without pausing', async () => {
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, batchModel())
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))
@@ -943,7 +950,7 @@ describe('WriteService', () => {
     })
 
     it('autoContinue still stops at the failing chapter', async () => {
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, batchModel())
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => {
@@ -970,7 +977,7 @@ describe('WriteService', () => {
     })
 
     it('resumeChaptersBatch carries autoContinue to the rest of the range', async () => {
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, batchModel())
       await new ProseRepo(await ps.resolveDir(projectId)).write(1, '第1章正文')
       await new ProseRepo(await ps.resolveDir(projectId)).write(2, '第2章正文')
       const spy = vi
@@ -1018,7 +1025,7 @@ describe('WriteService', () => {
         'utf-8'
       )
 
-      const service = new WriteService(ps, mockLlm(''))
+      const service = new WriteService(ps, batchModel())
       const spy = vi
         .spyOn(service, 'runFullFlowForChapter')
         .mockImplementation(async (_pid, ch) => makeFlowResult(ch, `第${ch}章正文`))

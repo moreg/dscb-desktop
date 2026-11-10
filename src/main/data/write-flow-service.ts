@@ -3,7 +3,8 @@ import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import { createHash } from 'crypto'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
-import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
+import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
+import { characterNamesInText } from './memory/character-memory-context'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
 import { ForeshadowingRepairRejectedError } from './foreshadowing-repair'
@@ -269,7 +270,7 @@ export class WriteFlowService {
     const prompt = [
       `请从下面的小说正文中提取本章新增的记忆信息。`,
       ``,
-      `已知人物（不要重复提取）：${knownCharacters.join('、') || '（空）'}`,
+      `已知人物（本章原文中已提到的名字，不要重复提取）：${characterNamesInText(knownCharacters, content).join('、') || '（空）'}`,
       ``,
       `输出要求：严格 JSON，字段：`,
       `- newCharacters: [{ name, role, identity, personality, appearance?, abilities? }]（本章首次登场；外貌/能力有则填）`,
@@ -290,7 +291,7 @@ export class WriteFlowService {
       `完整回收必须回答原伏笔的核心疑问或兑现原承诺。再次出现道具、回忆、线索强化、部分揭示和细纲的计划回收都不能标成完整回收；不确定则输出空数组。无对应编号时不得编造或借用相似伏笔。`,
       `以下是待核对的伏笔台账，只提供原始问题，不是回收已发生的证据：`,
       JSON.stringify(foreshadowingsBeforeChapter(knownForeshadowings, chapterNumber).filter((f) =>
-        f.status !== 'collected' && f.status !== 'missed'
+        f.plantChapter != null && (isOpenForeshadowing(f) || f.status === 'deferred')
       ).map((f) => ({ id: f.id, content: f.content, status: f.status, plantChapter: f.plantChapter }))),
       `- settingsPatches: [{ target, fileName, op, sectionTitle?, title?, content, reason?, confidence?, evidence }]`,
       `  正文揭晓的可复用设定增量（只增不改旧文）。target: worldview|faction|relation|customRule|geography`,

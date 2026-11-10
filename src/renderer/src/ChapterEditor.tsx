@@ -193,6 +193,7 @@ function friendlyLlmError(err: string | undefined): string {
     LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
     AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
     CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+    CODEX_MODEL_CAPACITY: 'Codex 模型当前繁忙，请稍后重试或更换模型',
     GROK_AUTH_EXPIRED: 'Grok 登录态失效，请在终端运行 grok login',
     LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
     LLM_TIMEOUT: '生成超时（内容过长或网络较慢），请重试',
@@ -774,6 +775,23 @@ export default function ChapterEditor({
   const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
   const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [defaultContinueAutoDeslop, setDefaultContinueAutoDeslop] = useState<boolean | null>()
+  const [continueAutoDeslopOverride, setContinueAutoDeslopOverride] = useState<boolean>()
+
+  useEffect(() => {
+    let active = true
+    void window.api.getAutoDeslopAfterContinue().then(enabled => {
+      if (active) setDefaultContinueAutoDeslop(enabled)
+    }).catch(() => {
+      if (active) setDefaultContinueAutoDeslop(null)
+    })
+    return () => { active = false }
+  }, [])
+
+  function openContinueDialog(context = ''): void {
+    setTempContextInput(context)
+    setShowContinueDialog(true)
+  }
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
   /** 按要求重写：AI 给出的修改建议（可编辑，确认后作为落笔方案） */
@@ -1250,6 +1268,8 @@ export default function ChapterEditor({
     setGenerating(false)
     setGenerationStage(null)
     setGenerationRetry(null)
+    setContinueAutoDeslopOverride(undefined)
+    setShowContinueDialog(false)
     setRepairReviewCandidate(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
@@ -2043,6 +2063,8 @@ export default function ChapterEditor({
     streamCompletedRef.current = false
     setGenerating(true)
     setGenerationRetry(null)
+    const autoDeslopAfterContinue = repairOnly ? undefined : continueAutoDeslopOverride
+    if (!repairOnly) setContinueAutoDeslopOverride(undefined)
     setRepairReviewCandidate(null)
     generationContextRef.current = tempContextVal
     generationPreviewRef.current = ''
@@ -2120,7 +2142,8 @@ export default function ChapterEditor({
           }
         },
         autoContinueStrength,
-        repairOnly
+        repairOnly,
+        autoDeslopAfterContinue
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -2160,14 +2183,10 @@ export default function ChapterEditor({
       refreshUsage()
       // extend：本章仍是分轮续写的半成品，写后自检的完成度项据此降级（见 lastContinueMode）
       setLastContinueMode(result.continueMode ?? null)
-      // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
-        // token 只作预览；最终回包含自动精修结果，必须以它交稿和同步记忆。
+        // 交稿和同步使用后端保存的原文；再次格式化整章会改动续写前部。
         const finalized = finalizeChapterContinuation(initialDraft, finalDraft, result)
-        const formatted = formatDraftProse(finalized.content, {
-          silent: true,
-          recordHistory: true
-        })
+        const formatted = finalized.content
         foreshadowCheckContextRef.current = { projectId: targetProjectId, chapterNumber: targetChapter, content: formatted,
           foreshadowContext: { partialChapter: result.continueMode === 'extend', tempContext: tempContextVal } }
         setAutoDeslopResult(result.autoDeslop ?? null)
@@ -3172,8 +3191,7 @@ export default function ChapterEditor({
       setUndoToast({ message: '当前自检无失败/留意项', type: 'info' })
       return
     }
-    setTempContextInput(text)
-    setShowContinueDialog(true)
+    openContinueDialog(text)
     setUndoToast({
       message: '已填入续写临时要求，确认后点「带临时要求续写」',
       type: 'success'
@@ -4962,26 +4980,41 @@ export default function ChapterEditor({
             {generationStage === 'foreshadowRepair' || generationStage?.startsWith('foreshadow:') ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
-          <button
-            className="btn btn-primary btn-sm mobile-primary-action"
-            onClick={() => {
-              const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
-              if (skip) {
-                void aiGenerate()
-              } else {
-                setTempContextInput('')
-                setShowContinueDialog(true)
-              }
-            }}
-          >
-            ✦ 续写
-          </button>
+          <div className="editor-continue-controls mobile-primary-action">
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
+                if (skip) {
+                  void aiGenerate()
+                } else {
+                  openContinueDialog()
+                }
+              }}
+            >
+              ✦ 续写
+            </button>
+            <label
+              className="editor-continue-deslop"
+              title={defaultContinueAutoDeslop === null
+                ? '无法读取全局设置。未手动选择时，续写仍按全局设置执行。'
+                : '默认跟随全局设置，修改只对本次续写生效。'}
+            >
+              <input
+                type="checkbox"
+                checked={continueAutoDeslopOverride ?? defaultContinueAutoDeslop ?? false}
+                disabled={defaultContinueAutoDeslop === undefined}
+                onChange={e => setContinueAutoDeslopOverride(e.target.checked)}
+              />
+              本次自动去 AI 味
+            </label>
+          </div>
         )}
         {!generating && !adjusting && !adjustPlanning ? (
           <button
             className="btn btn-ghost btn-sm"
-            onClick={() => { setTempContextInput(''); setShowContinueDialog(true) }}
-            title="打开续写设置，可单独开启或关闭自动调整强度"
+            onClick={() => openContinueDialog()}
+            title="打开续写设置，可填写本次临时要求或调整生成强度"
           >
             ⚙ 续写设置
           </button>

@@ -526,7 +526,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       onToken: (token: string, done: boolean) => void,
       onGenerationStage?: (stage: ChapterGenerationStage) => void,
       autoStrength?: boolean,
-      repairOnly?: boolean
+      repairOnly?: boolean,
+      autoDeslopAfterContinue?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -552,6 +553,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           existingText,
           autoStrength,
           repairOnly,
+          autoDeslopAfterContinue,
           requestId
         })
         .finally(() => {
@@ -1264,6 +1266,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       >,
     getChapterCompletionNotification: () => ipcRenderer.invoke('settings:getChapterCompletionNotification') as Promise<boolean>,
     setChapterCompletionNotification: (enabled: boolean) => ipcRenderer.invoke('settings:setChapterCompletionNotification', enabled) as Promise<boolean>,
+    getAutoDeslopAfterContinue: () => ipcRenderer.invoke('settings:getAutoDeslopAfterContinue') as Promise<boolean>,
+    setAutoDeslopAfterContinue: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoDeslopAfterContinue', enabled) as Promise<boolean>,
     setAutoPostWritePipeline: (mode: 'off' | 'memory_only' | 'full') =>
       ipcRenderer.invoke('settings:setAutoPostWritePipeline', mode) as Promise<
         'off' | 'memory_only' | 'full'

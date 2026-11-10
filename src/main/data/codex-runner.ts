@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { readFile, mkdtemp, rm } from 'fs/promises'
 import { join } from 'path'
 import { homedir, tmpdir } from 'os'
+import { StringDecoder } from 'string_decoder'
 import type { UsageInfo } from './llm-service'
 import type { ReasoningEffort } from '../../shared/types'
 import { LLM_ABORTED_ERROR } from './agent-meta-detect'
@@ -30,6 +31,8 @@ export interface CodexOptions {
   reasoningEffort?: ReasoningEffort
   /** 超时（秒），默认 300 */
   timeoutSec?: number
+  /** 正文首段输出的单独等待上限（秒），从启动子进程起计。 */
+  firstOutputTimeoutSec?: number
   /** 流式 token 回调（按 item/agentMessage/delta 真流式喂回） */
   onToken?: (token: string) => void
   /** 中止信号（仅用户取消；超时由 timeoutSec 处理） */
@@ -120,6 +123,17 @@ interface PendingRequest {
   reject: (err: Error) => void
 }
 
+interface CodexTurnError {
+  message?: string
+  codexErrorInfo?: unknown
+}
+
+function modelCapacityError(message: string, info?: unknown): Error | undefined {
+  if (info === 'serverOverloaded' || /\bmodel\b[^.!?\n]*\b(?:at capacity|overloaded)\b/i.test(message)) {
+    return new Error('CODEX_MODEL_CAPACITY: 当前 Codex 模型繁忙，请稍后重试。')
+  }
+}
+
 /**
  * 调用 codex app-server 执行单轮生成（真流式）。
  *
@@ -171,6 +185,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
     let stderrBuf = ''
     let stdinError = ''
     let lineBuf = ''
+    const stdoutDecoder = new StringDecoder('utf8')
     let settled = false
     let timedOut = false
     let full = ''
@@ -184,6 +199,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
 
     const cleanup = (): void => {
       clearTimeout(timer)
+      clearTimeout(firstOutputTimer)
       opts.signal?.removeEventListener('abort', onAbort)
     }
 
@@ -230,6 +246,8 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
     }
 
     const mapErrorMessage = (msg: string): Error => {
+      const capacity = modelCapacityError(msg)
+      if (capacity) return capacity
       if (/auth|login|credential|401|403|not logged|sign in/i.test(msg)) {
         return new Error('CODEX_AUTH_EXPIRED')
       }
@@ -259,12 +277,14 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
 
     const appendToken = (token: string): void => {
       if (!token) return
+      if (token.trim()) clearTimeout(firstOutputTimer)
       full += token
       streamedAny = true
       opts.onToken?.(token)
     }
 
     const processMessage = (msg: Record<string, unknown>): void => {
+      if (settled) return
       const id = msg.id as JsonRpcId | undefined
       const method = typeof msg.method === 'string' ? msg.method : undefined
 
@@ -339,9 +359,15 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
       }
 
       if (method === 'error') {
-        const error = params.error as { message?: string } | undefined
+        const error = params.error as CodexTurnError | undefined
         const willRetry = Boolean(params.willRetry)
         const message = String(error?.message ?? '')
+        // Codex 的容量退避可能超过五分钟，已明确收到容量错误就交回给用户。
+        const capacity = modelCapacityError(message, error?.codexErrorInfo)
+        if (capacity) {
+          fail(capacity)
+          return
+        }
         if (!willRetry && message) {
           // 可恢复错误交给 turn/completed；不可恢复且明显是鉴权/限流则尽早失败
           if (/auth|login|credential|401|403|rate|quota|limit|429/i.test(message)) {
@@ -355,7 +381,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
         const turn = params.turn as {
           id?: string
           status?: string
-          error?: { message?: string } | null
+          error?: CodexTurnError | null
         } | undefined
         const status = String(turn?.status ?? '')
         if (status === 'completed') {
@@ -378,7 +404,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
         }
         // failed 或其它
         const msgText = String(turn?.error?.message ?? 'turn failed')
-        fail(mapErrorMessage(msgText))
+        fail(modelCapacityError(msgText, turn?.error?.codexErrorInfo) ?? mapErrorMessage(msgText))
       }
     }
 
@@ -415,6 +441,12 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
         if (!settled) fail(new Error('LLM_TIMEOUT'))
       }, 1500)
     }, timeoutSec * 1000)
+    // 部分 CLI 版本的容量退避不发错误通知。短于总超时的首段上限也覆盖握手无响应，
+    // 但实际输出后仍使用原总超时，不干扰长章的流式生成。
+    const firstOutputTimer = opts.firstOutputTimeoutSec && opts.firstOutputTimeoutSec < timeoutSec
+      ? setTimeout(() => fail(new Error('CODEX_FIRST_TOKEN_TIMEOUT: Codex 等待首段正文超时，请稍后重试。')),
+        opts.firstOutputTimeoutSec * 1000)
+      : undefined
 
     const onAbort = (): void => {
       if (settled) return
@@ -437,7 +469,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
     }
 
     child.stdout.on('data', (chunk: Buffer) => {
-      lineBuf += chunk.toString('utf8')
+      lineBuf += stdoutDecoder.write(chunk)
       const lines = lineBuf.split('\n')
       lineBuf = lines.pop() ?? ''
       for (const line of lines) processLine(line)
@@ -463,6 +495,7 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
     })
 
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      lineBuf += stdoutDecoder.end()
       if (lineBuf.trim()) processLine(lineBuf)
       if (settled) return
       if (timedOut) {
@@ -539,12 +572,14 @@ async function runCodexOnce(prompt: string, opts: CodexOptions, taskDirectory?: 
         }
 
         const turnRes = (await request('turn/start', turnParams)) as {
-          turn?: { id?: string; status?: string }
+          turn?: { id?: string; status?: string; error?: CodexTurnError | null }
         }
         turnId = turnRes?.turn?.id ?? null
         // 后续靠 turn/completed 通知收尾；若 turn 已立刻失败则检查 status
         if (turnRes?.turn?.status === 'failed') {
-          throw new Error('CODEX_ERROR: turn failed immediately')
+          const error = turnRes.turn.error
+          throw modelCapacityError(error?.message ?? '', error?.codexErrorInfo) ??
+            mapErrorMessage(error?.message ?? 'turn failed immediately')
         }
       } catch (err) {
         if (!settled) {

@@ -19,7 +19,7 @@ export interface ReviewRetryFeedback {
 /** Execution failures must never become instructions to alter story facts. */
 export function isReviewExecutionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /LLM_ABORTED|AbortError|CONTEXT_CHANGED|(?:正文|细纲|前文|计划|上下文|稿件)(?:已变化|已改变)|CHAPTER_REPAIR_BUDGET|AGY_REPAIR_CONTEXT_TOO_LARGE|LLM_RATE_LIMIT|LLM_TIMEOUT|AUTH_EXPIRED|ECONN|ENOTFOUND|ETIMEDOUT|fetch failed|network error|network request|断网|断流|断连|(?:请求|调用|响应|连接)超时|接口限流|连接失败|(?:认证|鉴权|登录)失败|登录(?:已)?过期|请先登录|重新登录|磁盘(?:已满|空间不足|写入失败)|EACCES|ENOSPC|EPERM|EBUSY/iu.test(message)
+  return /LLM_ABORTED|AbortError|CONTEXT_CHANGED|(?:正文|细纲|前文|计划|上下文|稿件)(?:已变化|已改变)|CHAPTER_REPAIR_BUDGET|AGY_REPAIR_CONTEXT_TOO_LARGE|LLM_RATE_LIMIT|LLM_TIMEOUT|CODEX_MODEL_CAPACITY|CODEX_FIRST_TOKEN_TIMEOUT|AUTH_EXPIRED|ECONN|ENOTFOUND|ETIMEDOUT|fetch failed|network error|network request|断网|断流|断连|(?:请求|调用|响应|连接)超时|接口限流|连接失败|(?:认证|鉴权|登录)失败|登录(?:已)?过期|请先登录|重新登录|磁盘(?:已满|空间不足|写入失败)|EACCES|ENOSPC|EPERM|EBUSY/iu.test(message)
 }
 
 /** Failed evidence is advisory only. Every new candidate still needs the original independent gates. */

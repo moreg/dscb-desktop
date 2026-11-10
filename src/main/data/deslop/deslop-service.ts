@@ -155,16 +155,22 @@ export class DeslopService {
    */
   async scan(
     text: string,
-    opts: { whitelist?: Set<string>; bannedWords?: string[]; isTail?: boolean } = {}
+    opts: Pick<DeslopOptions, 'whitelist' | 'bannedWords' | 'isTail' | 'dialogueComposition'> = {}
   ): Promise<DeslopScanReport> {
     const isTail = opts.isTail ?? true
+    const continuation = opts.dialogueComposition?.mode === 'write' && Boolean(opts.dialogueComposition.existingText?.trim())
     const aiFindings = scanAiPatterns(text, {
       whitelist: opts.whitelist,
       bannedWords: opts.bannedWords,
       isTail
     })
     const degenFindings = scanDegeneration(text, { isTail })
-    const findings = [...aiFindings, ...degenFindings]
+    // 续写的句式、心理和段长交给场景复核，词面命中不能触发自动改稿。
+    // 仍检查作者明确配置的用词约束以及复读、截断、占位符等文本故障。
+    const enforcedAiFindings = continuation
+      ? aiFindings.filter(finding => finding.type === 'banned-word' && opts.bannedWords !== undefined)
+      : aiFindings
+    const findings = [...enforcedAiFindings, ...degenFindings]
     const counts = {
       blocking: findings.filter((f) => f.severity === 'blocking').length,
       advisory: findings.filter((f) => f.severity === 'advisory').length
@@ -312,7 +318,7 @@ export class DeslopService {
         // 同一候选只诊断一次；修订后的新候选必须重新检查。
         const scan = opts.polishNarrative
           ? await this.scanWithNarrative(value, opts)
-          : await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+          : await this.scan(value, opts)
         if (scan.narrative?.status === 'failed') {
           throw new Error(`整章叙事检查未完成：${scan.narrative.error}`)
         }

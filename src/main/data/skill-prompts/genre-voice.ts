@@ -222,7 +222,7 @@ export function resolveGenreVoice(genre?: string): GenreVoice {
 }
 
 /** 把单个题材的语感渲染为 markdown 段落（注入 system prompt） */
-export function renderGenreVoiceMarkdown(voice: GenreVoice): string {
+export function renderGenreVoiceMarkdown(voice: GenreVoice, includeWordExamples = true): string {
   const lines: string[] = []
   lines.push(`**题材**：${voice.label}`)
   lines.push(`- 风格：${voice.tone}`)
@@ -235,6 +235,7 @@ export function renderGenreVoiceMarkdown(voice: GenreVoice): string {
   if (voice.suggestedParticles?.length) {
     lines.push(`- 按情境选用的题材语气词（符合时代与人物身份时使用）：${voice.suggestedParticles.join('、')}`)
   }
+  if (!includeWordExamples) return lines.join('\n')
   lines.push('')
   lines.push('**语感用词参考**（不是逐词替换表；先核对原意与场景，普通词不因出现在左侧就判错，无用途动作应省略，不能把原意换成另一个动作）：')
   for (const [bad, good] of voice.replacements) {

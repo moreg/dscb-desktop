@@ -25,6 +25,11 @@ const longPrompt = [
   '---', draft, ending
 ].join('\n')
 
+it('长稿重写不允许 AGY 截断原稿中段后提交', () => {
+  const rewrite = '## 任务：按用户追问调整第 2 章已生成正文\n' + '原稿。'.repeat(10_000)
+  expect(() => buildAntigravityPrompt(rewrite, '保留未授权事实。', '')).toThrow('AGY_WRITING_CONTEXT_TOO_LARGE')
+})
+
 describe('agy prompt budget', () => {
   it('将长篇检查的 10 分钟预算传给实际 AGY runner', async () => {
     const service = new LlmService({ read: async () => ({ activeId: 'agy', providers: [

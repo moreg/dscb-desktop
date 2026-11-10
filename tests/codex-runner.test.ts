@@ -621,6 +621,30 @@ describe('runCodex (app-server)', () => {
     await expect(runCodex('测试', {})).rejects.toThrow('LLM_RATE_LIMIT')
   })
 
+  it.each([
+    { message: 'Selected model is at capacity. Please try a different model.' },
+    { message: 'Service unavailable.', codexErrorInfo: 'serverOverloaded' }
+  ])('明确的容量错误即使声明重试也立即返回', async (error) => {
+    const onToken = vi.fn()
+    fakeChildFactory = () => createAutoAppServerChild({
+      injectBeforeDeltas: [{ method: 'error', params: { error, willRetry: true } }]
+    })
+
+    await expect(runCodex('续写', { onToken })).rejects.toThrow('CODEX_MODEL_CAPACITY')
+    expect(onToken).not.toHaveBeenCalled()
+  })
+
+  it('一般流式错误仍允许 Codex 重试并完成本轮', async () => {
+    fakeChildFactory = () => createAutoAppServerChild({
+      injectBeforeDeltas: [{
+        method: 'error',
+        params: { error: { message: 'Stream disconnected.' }, willRetry: true }
+      }]
+    })
+
+    expect((await runCodex('续写')).full).toBe('你好')
+  })
+
   it('spawn ENOENT -> CODEX_NOT_FOUND', async () => {
     fakeChildFactory = () =>
       createAutoAppServerChild({
@@ -646,6 +670,46 @@ describe('runCodex (app-server)', () => {
     fakeChildFactory = () => createAutoAppServerChild({ hangAfterTurnStart: true, deltas: [] })
 
     await expect(runCodex('测试', { timeoutSec: 0 })).rejects.toThrow('LLM_TIMEOUT')
+  })
+
+  it('静默等待首段正文有独立上限，空白增量不解除', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = createAutoAppServerChild({ hangAfterTurnStart: true })
+      fakeChildFactory = () => child
+      const pending = runCodex('续写', { firstOutputTimeoutSec: 180, timeoutSec: 600 })
+      const rejection = expect(pending).rejects.toThrow('CODEX_FIRST_TOKEN_TIMEOUT')
+      await vi.advanceTimersByTimeAsync(1_000)
+      child.stdout.emit('data', Buffer.from('{"method":"item/agentMessage/delta","params":{"delta":" "}}\n'))
+      await vi.advanceTimersByTimeAsync(179_000)
+      await rejection
+      expect(child.killed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('非空首段解除等待上限并保留跨缓冲区的中文流式内容', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = createAutoAppServerChild({ hangAfterTurnStart: true })
+      fakeChildFactory = () => child
+      const onToken = vi.fn()
+      const pending = runCodex('续写', { firstOutputTimeoutSec: 180, timeoutSec: 600, onToken })
+      await vi.advanceTimersByTimeAsync(1_000)
+      const line = Buffer.from('{"method":"item/agentMessage/delta","params":{"delta":"船停了。"}}\n')
+      const split = line.indexOf(Buffer.from('船')) + 1
+      child.stdout.emit('data', line.subarray(0, split))
+      child.stdout.emit('data', line.subarray(split))
+      expect(onToken).toHaveBeenCalledTimes(1)
+      expect(onToken).toHaveBeenCalledWith('船停了。')
+      await vi.advanceTimersByTimeAsync(200_000)
+      expect(child.killed).toBe(false)
+      child.stdout.emit('data', Buffer.from('{"method":"turn/completed","params":{"turn":{"status":"completed"}}}\n'))
+      expect((await pending).full).toBe('船停了。')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('审批类 server request 自动 decline', async () => {

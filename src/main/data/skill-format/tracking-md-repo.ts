@@ -1,5 +1,11 @@
 import { join } from 'path'
 import { readText, parseDoc, parseTable } from './md-parser'
+import { renderItemStateHistory, renderStateHistory } from './tracking-state-fields'
+import { ChapterSummaryRepo } from '../memory/chapter-summary-repo'
+import { PlotPointRepo } from '../memory/plot-point-repo'
+import { ProseMemoryIndex, hashProse, type IndexedChapter } from '../memory/prose-memory-index'
+import { mapMemoryFiles } from '../memory/repository-cache'
+import type { MemoryExtraction } from '../../../shared/types'
 
 /**
  * 写作前的追踪上下文（来自 `追踪/` 目录）。
@@ -21,6 +27,8 @@ export interface TrackingContext {
   recentProgress: ProgressEntry[]
   /** 待处理问题（来自 追踪/问题记录.md，过滤状态含「待处理/处理中」） */
   openIssues: IssueRecord[]
+  /** 角色状态自动记录引用的旧稿章节，仅在续写视图内用于剔除同步的人物卡字段。 */
+  staleCharacterChapters?: number[]
 }
 
 export interface CharacterStateSnapshot {
@@ -106,18 +114,27 @@ export class TrackingMdRepo {
     // 文件全空 -> 视为追踪目录不存在
     if (!statesText && !itemsText && !timelineText && !progressText && !issuesText) return null
 
-    const rawTimeline = timelineText ? filterTimelineBefore(extractTimelineTable(timelineText), chapterNumber) : ''
+    const stale = await trackingSourceValidator(this.projectDir, chapterNumber,
+      [statesText, itemsText], [timelineText, progressText])
+    const staleCharacterChapters = [...new Set([...statesText.matchAll(stateHistoryBlock)]
+      .filter(match => stale(Number(match[1]), stateSource(match[2]))).map(match => Number(match[1])))]
+    const characterHistory = rebaseTrackingHistory(statesText, chapterNumber, stale, parseCharacterStatesAt, renderStateHistory)
+    const itemHistory = rebaseTrackingHistory(itemsText, chapterNumber, stale, parseItemStatesAt, renderItemStateHistory)
+    const timelineHistory = excludeStaleTrackingRows(timelineText, stale)
+    const progressHistory = excludeStaleTrackingRows(progressText, stale)
+    const rawTimeline = timelineHistory ? filterTimelineBefore(extractTimelineTable(timelineHistory), chapterNumber) : ''
     // 开书骨架只有表头、无「第 N 章」数据行时视为空，避免续写 prompt 注入空表噪音
     const timeline = hasTimelineDataRows(rawTimeline) ? rawTimeline : ''
 
     const result: TrackingContext = {
-      characterStates: statesText ? parseCharacterStatesAt(statesText, chapterNumber) : [],
-      stateChanges: statesText ? parseStateChanges(statesText, chapterNumber) : [],
-      itemStates: itemsText ? parseItemStatesAt(itemsText, chapterNumber) : [],
-      itemStateChanges: itemsText ? parseItemStateChanges(itemsText, chapterNumber) : [],
+      characterStates: characterHistory ? parseCharacterStatesAt(characterHistory, chapterNumber) : [],
+      stateChanges: characterHistory ? parseStateChanges(characterHistory, chapterNumber) : [],
+      itemStates: itemHistory ? parseItemStatesAt(itemHistory, chapterNumber) : [],
+      itemStateChanges: itemHistory ? parseItemStateChanges(itemHistory, chapterNumber) : [],
       timeline,
-      recentProgress: progressText ? parseProgress(progressText, chapterNumber) : [],
-      openIssues: issuesText ? parseIssues(issuesText) : []
+      recentProgress: progressHistory ? parseProgress(progressHistory, chapterNumber) : [],
+      openIssues: issuesText ? parseIssues(issuesText) : [],
+      ...(staleCharacterChapters.length ? { staleCharacterChapters } : {})
     }
 
     // 内容全空（项目创建时的空模板）-> 返回 null，避免注入空段
@@ -128,7 +145,8 @@ export class TrackingMdRepo {
       result.itemStateChanges.length > 0 ||
       result.timeline.trim() !== '' ||
       result.recentProgress.length > 0 ||
-      result.openIssues.length > 0
+      result.openIssues.length > 0 ||
+      staleCharacterChapters.length > 0
     if (!hasContent) return null
 
     return result
@@ -138,11 +156,13 @@ export class TrackingMdRepo {
    * 只读物品追踪表（长篇核对对照材料专用），不加载其余追踪文件。
    * 返回 null 表示 追踪/物品.md 不存在或全空。
    */
-  async readItemTracking(chapterNumber: number): Promise<{ states: ItemStateSnapshot[]; changes: ItemStateChangeRecord[] } | null> {
+  async readItemTracking(chapterNumber: number, sources?: readonly IndexedChapter[]): Promise<{ states: ItemStateSnapshot[]; changes: ItemStateChangeRecord[] } | null> {
     const text = await readText(join(this.projectDir, '追踪', '物品.md'))
     if (!text) return null
-    const states = parseItemStatesAt(text, chapterNumber)
-    const changes = parseItemStateChanges(text, chapterNumber)
+    const stale = await trackingSourceValidator(this.projectDir, chapterNumber, [text], [], sources)
+    const history = rebaseTrackingHistory(text, chapterNumber, stale, parseItemStatesAt, renderItemStateHistory)
+    const states = parseItemStatesAt(history, chapterNumber)
+    const changes = parseItemStateChanges(history, chapterNumber)
     return states.length || changes.length ? { states, changes } : null
   }
 
@@ -288,6 +308,88 @@ function parseStateChanges(text: string, chapterNumber: number): StateChangeReco
   return parseAllStateChanges(excludeInvalidatedStateHistory(text)).filter((s) => s.chapter <= chapterNumber)
 }
 
+const stateHistoryBlock = /<!-- writer-state-history:(\d+):start -->\r?\n([\s\S]*?)\r?\n<!-- writer-state-history:\1:end -->/g
+const trackingRowBlock = /<!-- writer-tracking:(timeline|context):(\d+):([a-f0-9]{64})(?::([a-f0-9]{64}))? -->\r?\n([^\r\n]*)\r?\n<!-- writer-tracking:\1:\2:end -->/g
+const stateSource = (body: string) => body.match(/^<!-- writer-state-source:([a-f0-9]{64}) -->$/m)?.[1]
+type StaleSource = (chapter: number, hash?: string) => boolean
+
+async function trackingSourceValidator(
+  projectDir: string,
+  through: number,
+  stateFiles: string[],
+  rowFiles: string[],
+  sources?: readonly IndexedChapter[]
+): Promise<StaleSource> {
+  const records = [
+    ...stateFiles.flatMap(text => [...text.matchAll(stateHistoryBlock)].map(match => ({ chapter: Number(match[1]), hash: stateSource(match[2]) }))),
+    ...rowFiles.flatMap(text => [...text.matchAll(trackingRowBlock)].map(match => ({ chapter: Number(match[2]), hash: match[4] })))
+  ].filter(record => record.chapter <= through)
+  if (!records.length) return () => false
+
+  // Legacy markers lacked a source hash. Intact automatic plot points were saved by
+  // the same writer as tracking, so a refreshed summary cannot unquarantine old rows.
+  const legacyChapters = new Set(records.filter(record => !record.hash).map(record => record.chapter))
+  const summaryRepo = new ChapterSummaryRepo(projectDir)
+  const [summaryHashes, plotHashes] = await Promise.all([
+    mapMemoryFiles([...legacyChapters], async chapter => [chapter, (await summaryRepo.read(chapter))?.sourceHash] as const),
+    new PlotPointRepo(projectDir).readAutomaticSourceHashes(legacyChapters)
+  ])
+  const legacyHashes = new Map(summaryHashes)
+  if (!records.some(record => record.hash || legacyHashes.get(record.chapter) || plotHashes.has(record.chapter))) return () => false
+  const current = new Map((sources ?? await new ProseMemoryIndex(projectDir).readBefore(through + 1, true))
+    .map(source => [source.chapterNumber, source.sourceHash]))
+  return (chapter, hash) => {
+    if (chapter > through) return false
+    const currentHash = current.get(chapter)
+    if (hash) return hash !== currentHash
+    const summaryHash = legacyHashes.get(chapter)
+    return Boolean((summaryHash && summaryHash !== currentHash) ||
+      [...(plotHashes.get(chapter) ?? [])].some(version => version !== currentHash))
+  }
+}
+
+function excludeStaleTrackingRows(text: string, stale: StaleSource): string {
+  return text.replace(trackingRowBlock, (block, _kind: string, chapter: string, checksum: string, hash: string | undefined, row: string) =>
+    hashProse(row) === checksum && stale(Number(chapter), hash) ? '' : block)
+}
+
+function rebaseTrackingHistory<State extends { name: string }>(
+  text: string,
+  through: number,
+  stale: StaleSource,
+  parse: (text: string, chapter: number) => State[],
+  render: (chapter: number, changes: MemoryExtraction['characterStateChanges'], prior: Map<string, State>) => string
+): string {
+  const blocks = [...text.matchAll(stateHistoryBlock)]
+    .map(match => ({ full: match[0], chapter: Number(match[1]), body: match[2] }))
+    .filter(block => block.chapter <= through)
+    .sort((a, b) => a.chapter - b.chapter)
+  const first = blocks.findIndex(block => stale(block.chapter, stateSource(block.body)))
+  if (first < 0) return text
+
+  // Later snapshots copy earlier fields. Replay each still-valid delta against the
+  // remaining history, using the same renderer as the writer, without modifying disk.
+  const replay = blocks.slice(first)
+  let result = replay.reduce((history, block) => history.replace(block.full, ''), text)
+  for (const { chapter, body } of replay) {
+    if (stale(chapter, stateSource(body)) || /<!-- writer-state-invalidated:\d+ -->/.test(body)) continue
+    const checked = body.match(/^<!-- writer-state-checksum:([a-f0-9]{64}) -->\r?\n([\s\S]*)$/)
+    const data = checked?.[2].match(/^<!-- writer-state-data:([A-Za-z0-9+/=]+) -->/)
+    if (checked && data && hashProse(checked[2]) === checked[1]) {
+      try {
+        const changes = JSON.parse(Buffer.from(data[1], 'base64').toString('utf8'))
+        if (Array.isArray(changes)) {
+          result += '\n\n' + render(chapter, changes, new Map(parse(result, chapter - 1).map(state => [state.name, state])))
+          continue
+        }
+      } catch { /* Leave the readable independent changes below when a block cannot be replayed. */ }
+    }
+    const log = body.match(/^## 自动状态变更[^\n]*\n[\s\S]*/m)?.[0]
+    if (log) result += '\n\n' + log + '\n'
+  }
+  return result
+}
+
 /** Preserve disputed author edits on disk/display, but never feed a stale derived snapshot back into generation. */
 function excludeInvalidatedStateHistory(text: string): string {
   return text.replace(/<!-- writer-state-history:(\d+):start -->[\s\S]*?<!-- writer-state-history:\1:end -->/g,
@@ -302,7 +404,7 @@ function excludeInvalidatedStateHistory(text: string): string {
  * 找不到 H2 节时回退到 doc.body（H1 下的全部正文，含裸表）。
  */
 function extractTimelineTable(text: string): string {
-  const doc = parseDoc(text.replace(/<!-- writer-tracking:(?:timeline|context):\d+:(?:[a-f0-9]{64}|end) -->\r?\n?/g, ''))
+  const doc = parseDoc(text.replace(/<!-- writer-tracking:(?:timeline|context):\d+:(?:[a-f0-9]{64}(?::[a-f0-9]{64})?|end) -->\r?\n?/g, ''))
   const sec = doc.sections.find((s) => s.title.includes('对照') || s.title.includes('历史事件'))
   if (sec) return sec.body.trim()
   // 回退：H1 下的裸表（开书格式）或第一个 H2 节

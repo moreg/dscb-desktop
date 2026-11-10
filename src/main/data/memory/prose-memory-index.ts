@@ -1,10 +1,11 @@
-import { searchProsePassages } from './prose-search'
+import { recallNearbyProse, searchProsePassages } from './prose-search'
 import { readLongformReviewState, blockedLongformChapters } from '../longform-review-state'
-import { memoryFileFingerprint } from './repository-cache'
+import { isRecentMemoryFileFingerprint, mapMemoryFiles, memoryFileFingerprint } from './repository-cache'
 import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { writeJsonAtomic } from '../atomic'
+import { readText } from '../skill-format/md-parser'
 import { expandCharacterAliasTerms, type CharacterAliasGroup } from './character-memory-context'
 
 /** A recalled passage is evidence from a saved chapter, never an outline or an LLM summary. */
@@ -20,6 +21,8 @@ export interface ProseMemoryHit {
   endOffset: number
   sourceHash: string
   score: number
+  /** A supplementary nearby hit, linked to the primary hit by shared query terms. */
+  nearby?: { primaryIndex: number; anchors: string[] }
 }
 
 export interface ProseMemoryQuery {
@@ -28,6 +31,7 @@ export interface ProseMemoryQuery {
   /** Explicit, unambiguous aliases filtered to the requested chapter. Retrieval only. */
   characterAliases?: CharacterAliasGroup[]
   props?: string[]
+  locations?: string[]
   foreshadowings?: string[]
 }
 
@@ -35,6 +39,10 @@ export interface ProseMemorySearchOptions {
   maxChars?: number
   maxResults?: number
   excludeChapters?: number[]
+  /** Preserve adjacent narration for attribution and evidence within maxChars. */
+  includeAdjacentParagraphs?: boolean
+  /** Optional small, separate budget for passages in the three immediately preceding chapters. */
+  nearbyFocus?: string
 }
 
 export interface ProseSource {
@@ -45,15 +53,17 @@ export interface ProseSource {
 
 type Passage = Pick<ProseMemoryHit, 'text' | 'startLine' | 'endLine' | 'startOffset' | 'endOffset'>
 export interface IndexedChapter extends ProseSource {
-  fingerprint: string
+  /** Null until the file has been verified after its metadata has aged. */
+  fingerprint: string | null
   sourceHash: string
   passages: Passage[]
 }
 interface StoredIndex {
-  version: 1
+  version: typeof INDEX_VERSION
   chapters: IndexedChapter[]
 }
 
+const INDEX_VERSION = 2
 const MAX_PASSAGE_CHARS = 600
 const READ_CONCURRENCY = 4
 const STOP_WORDS = new Set(['他们', '她们', '我们', '自己', '一个', '这个', '那个', '什么', '没有', '已经', '开始', '继续', '本章', '剧情', '角色', '场景', 'the', 'and', 'with', 'from', 'that'])
@@ -69,19 +79,21 @@ export async function listProseSources(projectDir: string): Promise<ProseSource[
     throw err
   }
   const chosen = new Map<number, ProseSource & { rank: number }>()
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, 'zh'))) {
+  for (const entry of entries) {
     if (!entry.isFile()) continue
-    const skill = entry.name.match(/^第0*(\d+)章(?:[ _](.*))?\.md$/)
+    const skill = entry.name.match(/^第0*(\d+)章(.*)\.md$/)
     const legacy = entry.name.match(/^(\d+)\.md$/)
     if (!skill && !legacy) continue
     const chapterNumber = Number((skill ?? legacy)![1])
     if (!Number.isSafeInteger(chapterNumber) || chapterNumber < 1) continue
-    const prefix = `第${String(chapterNumber).padStart(3, '0')}章`
-    const rank = skill
-      ? (entry.name.startsWith(prefix + ' ') ? 0 : entry.name.startsWith(prefix + '_') ? 1 : 2)
-      : 3
+    const paddedNumber = String(chapterNumber).padStart(3, '0')
+    const prefix = `第${paddedNumber}章`
+    // Match the editor's skill-file priority and its padded legacy fallback.
+    // Imported nonstandard filenames can still supply evidence when there is no editor-readable copy.
+    const rank = entry.name.startsWith(`${prefix} `) ? 0 : entry.name.startsWith(`${prefix}_`) ? 1
+      : entry.name.startsWith(prefix) ? 2 : entry.name === `${paddedNumber}.md` ? 3 : skill ? 4 : 5
     if ((chosen.get(chapterNumber)?.rank ?? Infinity) <= rank) continue
-    chosen.set(chapterNumber, { chapterNumber, sourcePath: `正文/${entry.name}`, title: skill?.[2] ?? '', rank })
+    chosen.set(chapterNumber, { chapterNumber, sourcePath: `正文/${entry.name}`, title: skill?.[2].replace(/^[ _]/, '') ?? '', rank })
   }
   return [...chosen.values()].sort((a, b) => a.chapterNumber - b.chapterNumber)
     .map(({ rank: _rank, ...source }) => source)
@@ -142,10 +154,54 @@ export class ProseMemoryIndex {
   ): Promise<ProseMemoryHit[]> {
     const maxChars = Math.max(0, Math.min(12_000, Math.floor(opts.maxChars ?? 2400)))
     const maxResults = Math.max(0, Math.min(20, Math.floor(opts.maxResults ?? 6)))
-    const terms = queryTerms(typeof query === 'string' ? { text: query } : query)
+    const request = typeof query === 'string' ? { text: query } : query
+    const terms = queryTerms(request)
     if (chapterNumber <= 1 || !maxChars || !maxResults || terms.size === 0) return []
     const index = await this.readBefore(chapterNumber)
-    return searchProsePassages(index, chapterNumber, terms, opts, maxChars, maxResults)
+    const primaryHits = searchProsePassages(index, chapterNumber, terms, opts, maxChars, maxResults)
+    const remaining = maxChars - primaryHits.reduce((total, hit) => total + hit.text.length, 0)
+    const hits = opts.includeAdjacentParagraphs
+      ? await this.addAdjacentParagraphs(index, primaryHits, Math.min(600, remaining)) : primaryHits
+    if (opts.nearbyFocus === undefined || !hits.length) return hits
+    const names = new Set([...(request.characters ?? []), ...expandCharacterAliasTerms(
+      request.characters ?? [], request.text ?? '', request.characterAliases ?? []
+    )].map(name => name.trim().toLocaleLowerCase()))
+    const primaryTerms = hits.map(hit => new Set([...queryTerms({ text: hit.text }).keys()].filter(term => !names.has(term))))
+    const focus = queryTerms({ text: opts.nearbyFocus })
+    return [...hits, ...recallNearbyProse(index, chapterNumber, opts.excludeChapters ?? [], hits, primaryTerms, focus)]
+  }
+
+  private async addAdjacentParagraphs(index: IndexedChapter[], hits: ProseMemoryHit[], budget: number): Promise<ProseMemoryHit[]> {
+    const sources = new Map(await mapMemoryFiles([...new Set(hits.map(hit => hit.sourcePath))], async path => {
+      const source = await readText(join(this.projectDir, path))
+      return [path, { source, hash: hashProse(source) }] as const
+    }))
+    const valid = hits.filter(hit => {
+      const current = sources.get(hit.sourcePath)
+      return current?.hash === hit.sourceHash && current.source.slice(hit.startOffset, hit.endOffset) === hit.text
+    })
+    const excerpts = [...valid]
+    for (const [indexInHits, hit] of valid.entries()) {
+      const { source } = sources.get(hit.sourcePath)!
+      const passages = index.find(chapter => chapter.sourcePath === hit.sourcePath)!.passages
+      const position = passages.findIndex(passage => passage.startOffset === hit.startOffset)
+      if (position < 0) continue
+      let { startOffset, endOffset, startLine, endLine } = hit
+      for (const neighbor of [passages[position - 1], passages[position + 1]]) {
+        if (!neighbor || /^(?:[*_—·-]\s*){3,}$/.test(neighbor.text)) continue
+        const before = neighbor.endOffset <= startOffset
+        const gap = before ? source.slice(neighbor.endOffset, startOffset) : source.slice(endOffset, neighbor.startOffset)
+        const added = neighbor.text.length + gap.length
+        if (added > budget || /\S/.test(gap) || (gap.match(/\n/g)?.length ?? 0) > 2) continue
+        if (excerpts.some((other, positionInHits) => positionInHits !== indexInHits && other.sourcePath === hit.sourcePath &&
+          other.startOffset < neighbor.endOffset && other.endOffset > neighbor.startOffset)) continue
+        if (before) ({ startOffset, startLine } = neighbor)
+        else ({ endOffset, endLine } = neighbor)
+        budget -= added
+      }
+      excerpts[indexInHits] = { ...hit, startOffset, endOffset, startLine, endLine, text: source.slice(startOffset, endOffset) }
+    }
+    return excerpts
   }
 
   /** Validated saved prose, also used by long-term continuity recall without another full read. */
@@ -184,16 +240,19 @@ export class ProseMemoryIndex {
       const batch = await Promise.all(sources.slice(i, i + READ_CONCURRENCY).map(async (source) => {
         const file = join(this.projectDir, source.sourcePath)
         try {
-          const before = await fs.stat(file)
-          const fingerprint = `${before.size}:${before.mtimeMs}:${before.ctimeMs}:${before.ino}`
+          const fingerprint = await memoryFileFingerprint(file)
+          if (fingerprint === 'missing') { changed = true; return null }
           const cached = old.get(source.sourcePath)
-          if (cached?.fingerprint === fingerprint) return cached
-          changed = true
+          const reusable = isRecentMemoryFileFingerprint(fingerprint) ? null : fingerprint
+          if (reusable && cached?.fingerprint === reusable) return cached
           const text = await fs.readFile(file, 'utf8')
-          const after = await fs.stat(file)
           // Source changed while reading: leave uncached and retry on the next query.
-          if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null
-          return { ...source, fingerprint, sourceHash: hashProse(text), passages: splitProsePassages(text) }
+          if (fingerprint !== await memoryFileFingerprint(file)) { changed = true; return null }
+          const sourceHash = hashProse(text)
+          if (cached?.sourceHash === sourceHash && cached.fingerprint === reusable) return cached
+          changed = true
+          return { ...source, fingerprint: reusable, sourceHash,
+            passages: cached?.sourceHash === sourceHash ? cached.passages : splitProsePassages(text) }
         } catch (err) {
           changed = true
           if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
@@ -202,7 +261,7 @@ export class ProseMemoryIndex {
       }))
       chapters.push(...batch.filter((c): c is IndexedChapter => c !== null))
     }
-    const result: StoredIndex = { version: 1, chapters: chapters.sort((a, b) => a.chapterNumber - b.chapterNumber) }
+    const result: StoredIndex = { version: INDEX_VERSION, chapters: chapters.sort((a, b) => a.chapterNumber - b.chapterNumber) }
     if (changed) {
       try { await writeJsonAtomic(cachePath, result) } catch { /* Read-only projects can still recall from this in-memory refresh. */ }
     }
@@ -225,7 +284,8 @@ async function readStoredIndex(file: string): Promise<StoredIndex> {
     }
     const text = await fs.readFile(file, 'utf8')
     const stored = JSON.parse(text) as StoredIndex
-    const index: StoredIndex = { version: 1, chapters: stored.version === 1 && Array.isArray(stored.chapters) ? stored.chapters.filter(validIndexedChapter) : [] }
+    const index: StoredIndex = { version: INDEX_VERSION, chapters: stored.version === INDEX_VERSION && Array.isArray(stored.chapters)
+      ? stored.chapters.filter(validIndexedChapter) : [] }
     const bytes = Buffer.byteLength(text, 'utf8')
     if (await memoryFileFingerprint(file) === before && bytes <= 16 * 1024 * 1024) {
       storedIndexes.set(file, { fingerprint: before, index, bytes })
@@ -236,13 +296,13 @@ async function readStoredIndex(file: string): Promise<StoredIndex> {
     return index
   } catch {
     storedIndexes.delete(file)
-    return { version: 1, chapters: [] }
+    return { version: INDEX_VERSION, chapters: [] }
   }
 }
 
 function validIndexedChapter(c: IndexedChapter): boolean {
   return Boolean(c && Number.isSafeInteger(c.chapterNumber) && typeof c.sourcePath === 'string' &&
-    typeof c.sourceHash === 'string' && typeof c.fingerprint === 'string' && Array.isArray(c.passages) &&
+    typeof c.sourceHash === 'string' && (c.fingerprint === null || typeof c.fingerprint === 'string') && Array.isArray(c.passages) &&
     c.passages.every((p) => p && typeof p.text === 'string' && Number.isSafeInteger(p.startOffset) && Number.isSafeInteger(p.endOffset) && Number.isSafeInteger(p.startLine) && Number.isSafeInteger(p.endLine)))
 }
 
@@ -262,7 +322,7 @@ function queryTerms(query: ProseMemoryQuery): Map<string, number> {
     }
   }
   // Entity/prop phrases get priority before the longer outline text consumes the token budget.
-  for (const [values, weight] of [[query.props, 4], [query.characters, 3], [query.foreshadowings, 2]] as const) {
+  for (const [values, weight] of [[query.props, 4], [query.locations, 4], [query.characters, 3], [query.foreshadowings, 2]] as const) {
     for (const value of (values ?? []).slice(0, 30)) { add(value, weight); tokenize(value, weight) }
   }
   // Use a label as a whole; splitting an alias into a surname/title would merge unrelated people.

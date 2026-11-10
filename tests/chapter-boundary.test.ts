@@ -203,7 +203,7 @@ it('最终润色引入越界仍被拦截，不能只检查生成原稿', async (
   generate.mockImplementation(async (prompt, opts) => opts?.meta?.feature === 'longformGuard'
     ? (prompt.endsWith(safe) ? clear : scopeConflict) : safe)
   vi.spyOn(service as unknown as { autoDeslopGeneratedProse: () => Promise<string> }, 'autoDeslopGeneratedProse').mockResolvedValue(leaked)
-  await expect(service.generateChapterStream(id, 1)).rejects.toThrow('LONGFORM_CONFLICT')
+  await expect(service.generateChapterStream(id, 1, { autoDeslopAfterContinue: true })).rejects.toThrow('LONGFORM_CONFLICT')
   const calls = generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')
   expect(calls.length).toBeGreaterThan(1)
   expect(calls[0][0].endsWith(safe)).toBe(true)

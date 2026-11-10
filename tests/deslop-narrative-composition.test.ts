@@ -40,6 +40,30 @@ describe('整章对白分支的叙事覆盖', () => {
     expect(generateStream.mock.calls.filter(([, o]) => o?.meta?.feature === 'deslop:narrative-flow')).toHaveLength(1)
   })
 
+  it('续写直接写人物判断可进入语义审核，作者显式禁词及截断仍须处理', async () => {
+    const { service, generateStream } = makeService('[]')
+    vi.mocked(service.scan).mockRestore()
+    const passage = '他知道阿姐不会赶夜船，河面还有一层冰，船夫一桨下去，先得等那块冰裂开。'
+    const options = { polishNarrative: true, dialogueRepairLimit: 0, dialogueComposition: {
+      mode: 'write' as const, existingText: '老钱把船篙横在膝上，问要等到几时。'
+    } }
+    // 控制组确认旧机械扫描确实会报这句，避免测试因词面未命中而空过。
+    expect((await service.scan(passage)).findings.some(item => item.type === 'he_knows')).toBe(true)
+
+    const accepted = await service.deslop(passage, options)
+    expect(accepted.rewritten).toBe(passage)
+    expect(accepted.dialogueQuality?.passed).toBe(true)
+    expect(generateStream.mock.calls.some(([, opts]) => opts?.meta?.feature === 'deslop:dialogue-review')).toBe(true)
+
+    const banned = await service.deslop(passage, { ...options, bannedWords: ['船夫'] })
+    expect(banned.dialogueQuality?.passed).toBe(false)
+    expect(banned.remainingFindings.some(item => item.type === 'banned-word' && item.word === '船夫')).toBe(true)
+
+    const truncated = await service.deslop('船夫伸手去接', options)
+    expect(truncated.dialogueQuality?.passed).toBe(false)
+    expect(truncated.remainingFindings.some(item => item.type === 'truncation')).toBe(true)
+  })
+
   it('叙事诊断连续返回无效证据时，不降级为空问题通过', async () => {
     const { service, generateStream } = makeService(JSON.stringify([{ ...finding, excerpt: '不存在的证据' }]))
     await expect(service.deslop(source, { polishNarrative: true,

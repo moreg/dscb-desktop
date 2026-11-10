@@ -15,6 +15,25 @@ const mock = (response = JSON.stringify(cleared)) => ({ generateStream: vi.fn().
   getCacheIdentity: vi.fn().mockResolvedValue('model-v1') })
 
 describe('长篇写作交稿闸门', () => {
+  it('将配对证据放在新稿旁，并接受只在核对组出现的原文引句', async () => {
+    const earlier = '陆宁把抄件叠起来，说末行没有盖章。'
+    const later = '桌上的抄件露出最后一行，鲜红的圆章压住了日期。'
+    const draft = '陆安没打开抄件，就说末行从来没有盖章。'
+    const source = { ...input, plan: '', history: '', content: draft, crossChapterClues: [
+      '核对组 1（共享检索词：抄件）', `主召回：第 3 章 · 正文/003.md:9–9\n${earlier}`,
+      `近章补召回：第 798 章 · 正文/798.md:11–11\n${later}`
+    ].join('\n') }
+    const llm = mock(JSON.stringify({ ...cleared, findings: [{ kind: 'item', snippet: draft, reference: later,
+      message: '两章对同一抄件末行是否有章说法不一，只能保留抄件及其日期待核。' }] }))
+    await expect(new LongformGuard(llm as unknown as LlmService).check(source)).rejects.toThrow(later)
+    const prompt = llm.generateStream.mock.calls[0][0]
+    const clueSection = prompt.split('【与新稿细节有关的跨章原文对照（核对线索）】')[1]
+    expect(clueSection).toContain('同一物件、同一版资料或同一次历史动作')
+    expect(clueSection).toContain('共享词只帮助定位，不能据此判错')
+    expect(clueSection).toContain(`${later}\n\n【本章实际正文】\n\n${draft}`)
+    expect(llm.generateStream).toHaveBeenCalledTimes(1)
+  })
+
   it('旁白把未确认身份坐实也核对，不仅检查角色台词；有证据的冲突保留出处', async () => {
     const source = {
       ...input, content: '那位失散多年的兄长撑着船靠岸，林遥还没看清他的脸。',
@@ -118,6 +137,17 @@ describe('长篇写作交稿闸门', () => {
     expect(() => parse({ ...finding, reference: '陆宁已经亲眼看清全部事实。' })).toThrow('依据')
     expect(() => parse(finding, { ...input, continuationStart: input.content.length })).toThrow('依据')
     expect(() => parse(finding, { ...input, continuationStart: 0 })).not.toThrow()
+  })
+
+  it('同轮新增段落不能充当续写前的已知事实', () => {
+    const prefix = '林遥站在门外，隔着两层木板听不清屋里的人说什么。'
+    const added = '顾宁把蓝布包被调换的消息写在便笺上。\n\n林遥直接说出了便笺上的内容。'
+    const source = { ...input, plan: '', history: '', content: prefix + '\n\n' + added, continuationStart: prefix.length }
+    const result = { ...cleared, findings: [{ kind: 'knowledge', message: '林遥无来源获得便笺内容。',
+      snippet: '林遥直接说出了便笺上的内容。', reference: '顾宁把蓝布包被调换的消息写在便笺上。' }] }
+    expect(() => parseLongformGuard(JSON.stringify(result), source)).toThrow('对照依据')
+    result.findings[0].reference = prefix
+    expect(parseLongformGuard(JSON.stringify(result), source)).toHaveLength(1)
   })
 
   it('缓存仅复用相同全文、主线、历史和模型的成功结果', async () => {

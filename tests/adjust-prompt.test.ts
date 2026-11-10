@@ -45,6 +45,13 @@ describe('renderAdjustUserPrompt 优先级语义', () => {
     expect(prompt).toContain('仅执行以下条目；未勾选条目一律不要改')
     expect(prompt).toContain('完整建议里出现但未勾选的内容，禁止改动对应正文')
   })
+
+  it('整章重写保留三万字符以后的情节，超过预算明确失败', () => {
+    const content = '旧信还在抽屉里。'.repeat(3800) + '宋禾把唯一的钥匙交给船工。'
+    expect(content.length).toBeGreaterThan(30_000)
+    expect(renderAdjustUserPrompt(baseInput({ content }))).toContain(content)
+    expect(() => renderAdjustUserPrompt(baseInput({ content: '甲'.repeat(40_001) }))).toThrow('CHAPTER_CONTEXT_TOO_LARGE')
+  })
 })
 
 describe('parseAdjustPlanCompliance 落笔要点达成度解析', () => {

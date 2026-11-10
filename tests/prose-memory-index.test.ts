@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, writeFile, unlink, stat, utimes } from 'fs/promises'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { hashProse, ProseMemoryIndex } from '../src/main/data/memory/prose-memory-index'
 import { buildCharacterAliasGroups } from '../src/main/data/memory/character-memory-context'
+import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 
 describe('ProseMemoryIndex source evidence', () => {
   let dir: string
@@ -12,9 +13,11 @@ describe('ProseMemoryIndex source evidence', () => {
     dir = await mkdtemp(join(tmpdir(), 'aw-prose-recall-'))
     await mkdir(join(dir, '正文'), { recursive: true })
   })
+  afterEach(() => vi.restoreAllMocks())
 
   it('reuses the parsed disk index on fully warmed queries and revalidates external index edits', async () => {
     await writeFile(join(dir, '正文', '001.md'), '令牌藏在桥下。')
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000)
     const index = new ProseMemoryIndex(dir)
     for (let attempt = 0; attempt < 3; attempt++) await index.searchBefore(3, '令牌')
     const reads = vi.spyOn(fs, 'readFile')
@@ -59,6 +62,72 @@ describe('ProseMemoryIndex source evidence', () => {
     expect(copies[0].text).toBe(repeated)
   })
 
+  it('adds matching short passages from adjacent chapters without spending the primary recall budget', async () => {
+    const archive = '潜水队交接了铜阀试验录像。顾宁把样片和签过名的记录封进档案袋，记下小阀门根本没拍进去。'
+    const contradiction = '小阀门的编号，就在你交的样片里。'
+    const nearby = `沈唯把那张借据翻到背面。\r\n\r\n${contradiction}\r\n\r\n雨水从窗缝里淌了进来。`
+    await writeFile(join(dir, '正文', '005.md'), archive)
+    await writeFile(join(dir, '正文', '063.md'), '船夫在灶上热了两碗米酒。')
+    await writeFile(join(dir, '正文', '064.md'), nearby)
+    await writeFile(join(dir, '正文', '065.md'), '小阀门和铜阀试验录像是两回事，样片原件还在。')
+    await writeFile(join(dir, '正文', '066.md'), '顾宁查明了小阀门的编号和样片来源。')
+    const index = new ProseMemoryIndex(dir)
+    const query = { characters: ['顾宁'], props: ['铜阀试验录像'] }
+    const opts = { maxChars: archive.length, maxResults: 1, excludeChapters: [65] }
+    const main = await index.searchBefore(66, query, opts)
+    const withNearby = await index.searchBefore(66, query, { ...opts, nearbyFocus: '那段样片没有拍到小阀门。' })
+    expect(main).toHaveLength(1)
+    expect(main[0].text).toBe(archive)
+    expect(withNearby.slice(0, 1)).toEqual(main)
+    expect(withNearby.slice(1)).toEqual([expect.objectContaining({
+      chapterNumber: 64, sourcePath: '正文/064.md', sourceHash: hashProse(nearby), startLine: 3, endLine: 3, text: contradiction,
+      nearby: { primaryIndex: 0, anchors: expect.arrayContaining(['阀门']) }
+    })])
+  })
+
+  it('preserves who said a recalled line and whether they believed it, within the original recall budget', async () => {
+    const attribution = '阿九听见脚步声，把酒壶一推，模仿掌柜哄客人的腔调。'
+    const claim = '“玄霜铜钥早让官差收走了。”'
+    const correction = '藏在桌底的钥匙硌着他的膝盖，他没敢伸手。'
+    const excerpt = [attribution, claim, correction].join('\r\n\r\n')
+    const old = `# 第三章\r\n\r\n${excerpt}\r\n\r\n---\r\n\r\n城外已经起雾了。`
+    const file = join(dir, '正文', '003.md')
+    await writeFile(file, old)
+    await writeFile(join(dir, '正文', '020.md'), '林远从县衙地窖里找回玄霜铜钥。')
+    await writeFile(join(dir, '正文', '021.md'), '林远拿着玄霜铜钥出城。')
+    const index = new ProseMemoryIndex(dir)
+    const query = { props: ['玄霜铜钥'] }
+    await index.searchBefore(22, query) // Warm the index with the later chapters.
+    const options = { includeAdjacentParagraphs: true, maxChars: excerpt.length, maxResults: 1 }
+    const [hit] = await index.searchBefore(20, query, options)
+    expect(hit).toMatchObject({ chapterNumber: 3, sourcePath: '正文/003.md', text: excerpt, sourceHash: hashProse(old), startLine: 3, endLine: 7 })
+    expect(old.slice(hit.startOffset, hit.endOffset)).toBe(excerpt)
+    const [tight] = await index.searchBefore(20, query, { ...options, maxChars: claim.length })
+    expect(tight.text).toBe(claim)
+
+    const revisedAttribution = '阿九对着门外拱手，把衙门的查封令摆到了桌上。'
+    const revisedCorrection = '他看着门缝下漏进来的那道光，把空匣子也递了过去。'
+    const revised = old.replace(attribution, revisedAttribution).replace(correction, revisedCorrection)
+    await writeFile(file, revised)
+    const [after] = await index.searchBefore(20, query, { ...options, maxChars: revised.length })
+    expect(after.text).toContain(revisedAttribution)
+    expect(after.text).toContain(revisedCorrection)
+    expect(after.text).not.toContain(correction)
+    expect(after.sourceHash).toBe(hashProse(revised))
+    expect(revised.slice(after.startOffset, after.endOffset)).toBe(after.text)
+  })
+
+  it('does not attach unrelated narration across scene breaks to an original quotation', async () => {
+    const attribution = '雪梨把那张誊错了字的便笺揉成一团。'
+    const clue = '“是铜哨，不是铜锁。”'
+    const otherScene = '雨停时，沈唯已经坐上了往北的渡船。'
+    const source = [attribution, clue, '---', otherScene].join('\n\n')
+    await writeFile(join(dir, '正文', '001.md'), source)
+    const [hit] = await new ProseMemoryIndex(dir).searchBefore(8, { props: ['铜哨'] }, { includeAdjacentParagraphs: true })
+    expect(hit.text).toBe([attribution, clue].join('\n\n'))
+    expect(source.slice(hit.startOffset, hit.endOffset)).toBe(hit.text)
+  })
+
   it('refreshes after equal-length rewrites with restored mtime, then removes deleted evidence', async () => {
     const file = join(dir, '正文', '001.md')
     await writeFile(file, '琉璃令牌已交给沈清秋。')
@@ -76,9 +145,37 @@ describe('ProseMemoryIndex source evidence', () => {
     expect(cache.chapters).toEqual([])
   })
 
+  it('checks equal-size rewrites with identical recent timestamps even after that metadata ages', async () => {
+    const file = join(dir, '正文', '001.md')
+    const first = '林遥把铜哨塞回自己的口袋。'
+    const edited = '林遥把铜哨塞进顾宁的口袋。'
+    const final = '林遥把铜哨塞进沈唯的口袋。'
+    expect(Buffer.byteLength(edited)).toBe(Buffer.byteLength(first))
+    expect(Buffer.byteLength(final)).toBe(Buffer.byteLength(first))
+    await writeFile(file, first)
+    const frozen = await fs.stat(file, { bigint: true })
+    const statSource = fs.stat.bind(fs)
+    vi.spyOn(fs, 'stat').mockImplementation((path, options) => String(path) === file
+      ? Promise.resolve(frozen) : statSource(path, options))
+    const now = Number(frozen.ctimeNs / 1_000_000n)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    const index = new ProseMemoryIndex(dir)
+    const query = { props: ['铜哨'] }
+    expect((await index.searchBefore(8, query))[0].text).toBe(first)
+    await writeFile(file, edited)
+    expect((await index.searchBefore(8, query))[0].text).toBe(edited)
+    await writeFile(file, final)
+    clock.mockReturnValue(now + 1000)
+    expect((await index.searchBefore(8, query))[0]).toMatchObject({ text: final, sourceHash: hashProse(final) })
+    const reads = vi.spyOn(fs, 'readFile')
+    expect((await index.searchBefore(8, query))[0].text).toBe(final)
+    expect(reads.mock.calls.some(([path]) => String(path) === file)).toBe(false)
+  })
+
   it('reuses unchanged indexed passages and rebuilds a damaged cache from real prose', async () => {
     const file = join(dir, '正文', '001.md')
     await writeFile(file, '琉璃令牌藏在左袖。')
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000)
     await new ProseMemoryIndex(dir).searchBefore(5, '琉璃令牌')
     const spy = vi.spyOn(fs, 'readFile')
     try {
@@ -98,6 +195,20 @@ describe('ProseMemoryIndex source evidence', () => {
     expect(hits).toHaveLength(1)
     expect(hits[0].sourcePath).toBe('正文/第001章 新稿.md')
     expect(hits[0].text).toBe('琉璃令牌的修订正文。')
+  })
+
+  it('keeps recall on the editor’s saved copy when an imported copy has a different ending', async () => {
+    const active = '她用铜哨吹了两声，桥底的灯便熄了。那个约好替她守桥的人，还在那里。'
+    const imported = '守桥人从未赴约，她把铜哨扔进了河。'
+    const file = join(dir, '正文', '001.md')
+    await writeFile(file, active)
+    await writeFile(join(dir, '正文', '第1章_过桥.md'), imported)
+    const index = new ProseMemoryIndex(dir)
+    const recalled = await index.searchBefore(20, { props: ['铜哨'] })
+    expect(recalled).toHaveLength(1)
+    expect(recalled[0]).toMatchObject({ sourcePath: '正文/001.md', text: await new ProseRepo(dir).read(1), sourceHash: hashProse(active) })
+    await unlink(file)
+    expect((await index.searchBefore(20, { props: ['铜哨'] }))[0]).toMatchObject({ sourcePath: '正文/第1章_过桥.md', text: imported })
   })
 
   it('recalls an early explicitly recorded alias without replacing the source wording', async () => {

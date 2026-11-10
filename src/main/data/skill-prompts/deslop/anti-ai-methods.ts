@@ -23,13 +23,13 @@ import type { DeslopFinding, DeslopLevel, DeslopStyleContext } from '../../../..
 import { resolveGenreVoice } from '../genre-voice'
 import { CHARACTER_VOICE_RULES } from '../skill-contracts'
 import { PRESS_ACTION_RULES } from '../action-precision'
-import { DIALOGUE_VITALITY_RULES, SCENE_NATURALNESS_RULES, NATURAL_NARRATIVE_REVISION_RULES } from '../scene-naturalness'
+import { NATURAL_NARRATIVE_REVISION_RULES } from '../scene-naturalness'
 
 /** 从续写守则提取的编辑约束；只整理已有正文，不授权续写或扩充剧情。 */
 export const DESLOP_CONTINUATION_RULES = `
 【引用续写规则：只改善表达，保留剧情】
 - **优先级**：剧情事实、语意和原有时序优先；排版与标点遵守共享正文保真规则。
-- **人物与对白一致**：依据原文已有的身份、性格、关系和当下目的调整措辞，保留每次发言的说话人、对象、立场、意图与信息量。人物当时不知道的事不能写成已知，不把试探写成确认，不替人物新增动机、口癖或态度转变。
+- **人物与对白一致**：依据原文已有的身份、性格、关系和当下目的调整措辞。可合并无独立用途的重复发言，保留有效交流的说话人、对象、立场、意图和信息。人物当时不知道的事不能写成已知，不把试探写成确认，不替人物新增动机、口癖或态度转变。
 - **动作与空间连贯**：写清原文已经确定的谁在做什么、动作对象及先后，延续已有的位置、伤势、道具归属与行动条件；调整动词不能改变实际行为。只利用原文证据澄清表达，不补造移动、接触、伤势、道具或行动步骤，无法确定时保留事实并在改动说明中标记 [需复核]。
 - **描写与心理克制**：保留理解情节、人物判断、关系或情绪变化所需的心理、环境与细节，允许直白表达；删除同义复述和无用途的铺陈，不机械把心理外化成攥拳、停手等动作，不为真实感新增手续、感官细节或量化刻度。
 - **顺序、因果与边界不变**：原稿是唯一剧情基线，保留事件顺序、行动条件、阻力、代价、数量、否定与推测、关键转折、伏笔和结尾落点；不因去解释腔删掉必要因果，不把未解决的问题写成已解决，不续写后续情节，不为改善节奏移动事件或补新事件。
@@ -51,10 +51,6 @@ ${PROSE_POLICY_RULES}
 ${CHARACTER_VOICE_RULES}
 
 ${PRESS_ACTION_RULES}
-
-${SCENE_NATURALNESS_RULES}
-
-${DIALOGUE_VITALITY_RULES}
 
 ${NATURAL_NARRATIVE_REVISION_RULES}
 

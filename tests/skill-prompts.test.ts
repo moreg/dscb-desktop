@@ -131,12 +131,13 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('作者明确指定的项目比例')
   })
 
-  it('embeds 12 forbidden word categories with hints', () => {
+  it('生成保留整场诊断，不下发内置逐词替换表', () => {
     const prompt = buildSystemPrompt('现代都市')
+    expect(prompt).toContain('不按词语命中机械删除')
+    expect(prompt).not.toContain('语感用词参考')
     for (const cat of FORBIDDEN_WORD_CATEGORIES) {
-      expect(prompt).toContain(cat.name)
-      // 抽样校验至少含 1 个该类禁词
-      expect(prompt).toContain(cat.words[0])
+      expect(prompt).not.toContain(cat.name)
+      expect(flattenForbiddenWords()).toContain(cat.words[0])
     }
   })
 
@@ -182,10 +183,10 @@ describe('buildSystemPrompt', () => {
 
   it('embeds negative constraints', () => {
     const prompt = buildSystemPrompt()
-    expect(prompt).toContain('严格禁止与写作负向限制')
+    expect(prompt).toContain('写作负向限制（结合连续场景判断）')
     expect(prompt).toContain('工具人/背景板路人')
     expect(prompt).toContain('不以无用途动作拖延交流')
-    expect(prompt).toContain('事件-反应-结果')
+    expect(prompt).not.toContain('事件-反应-结果')
   })
 
   it.each([undefined, 'extend', 'finish'] as const)(
@@ -241,16 +242,17 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Markdown')
     expect(prompt).toContain('正文禁止出现出版章号')
     expect(prompt).toContain('只是检索坐标，禁止写入正文')
-    expect(prompt).toContain('写网文尽量直白')
-    expect(prompt).toContain('不要过多的拽词、长篇的华丽词藻反复描写')
+    expect(prompt).toContain('用符合本作语气的语言写清场景')
     expect(prompt).toContain('文笔必须为剧情服务')
   })
 
-  it.each([undefined, 'extend', 'finish'] as const)('无论在标准模式还是续写模式(%s)，都落实"写网文尽量直白/文笔为剧情服务"', (mode) => {
+  it.each([undefined, 'extend', 'finish'] as const)('%s 模式按场景安排句段和人物反应', (mode) => {
     const prompt = buildSystemPrompt(undefined, null, undefined, null, mode)
-    expect(prompt).toContain('写网文尽量直白')
-    expect(prompt).toContain('不要过多的拽词、长篇的华丽词藻反复描写')
-    expect(prompt).toContain('文笔必须为剧情服务')
+    expect(prompt).toContain('一句一段也可以是一句有层次的长句')
+    expect(prompt).toContain('跟着视角人物当下的处境、观察和判断')
+    expect(prompt).toContain('先判断这一反应是否来自当下处境')
+    expect(prompt).toContain('不能据相似细节补造人物以往的经历')
+    expect(prompt).not.toContain('同一人的台词必须一次性说完')
   })
 
   it('未提供对标书时也约束原创表达、人物动机与场景变化，并允许有用途的情绪氛围', () => {
@@ -260,7 +262,7 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('人物动机、性格、能力和当时可知信息')
     expect(prompt).toContain('结果须有因果与相应代价')
     expect(prompt).toContain('以场景为单位检查')
-    expect(prompt).toContain('至少一项出现读者可感知的变化')
+    expect(prompt).toContain('读者能否理解人物的经历与选择')
     expect(prompt).toContain('允许必要的情绪消化、关系建立、氛围和留白')
     expect(prompt).toContain('不要求每段都推进主线')
     expect(prompt).toContain('重复堆砌、机械扩写或添加无效铺陈')
@@ -271,15 +273,14 @@ describe('buildSystemPrompt', () => {
     const prompt = buildSystemPrompt(undefined, null, { output: legacyOutput }, null, mode)
     // 保留用户可编辑内容，但续写专用解释在其后覆盖旧版冲突条款。
     expect(prompt).toContain(legacyOutput)
-    const continuation = prompt.slice(prompt.indexOf('续写模式覆盖声明（最高优先级）'))
+    const continuation = prompt.slice(prompt.indexOf('续写模式覆盖声明（接缝、范围、篇幅与收束）'))
     expect(continuation).toContain('本次一律改为篇幅参考')
     expect(continuation).toContain('剩余剧情点已完整落实时可以提前结束')
     expect(continuation).toContain('先从断点续完')
     expect(continuation).toContain('不得插入动作或另起一句打断')
     expect(continuation).toContain('不强制动作起手')
     expect(continuation).toContain('先续完进行中的剧情点')
-    expect(continuation).toContain('剧情第一与禁止华丽辞藻堆砌')
-    expect(continuation).toContain('文笔是为剧情服务的')
+    expect(continuation).toContain('文风、对白和排版遵守作者明确要求')
     expect(continuation).not.toContain('第一句必须**立刻切入具体物理动作')
     expect(continuation).not.toContain('本次要新增**的字数下限')
   })
@@ -292,18 +293,46 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('只调整表达，不凭空增加原文没有的事实')
   })
 
-  it('选用古风时包含古风替换示例，不包含都市口语', () => {
+  it('选用古风时保留题材语气，不下发替换示例', () => {
     const prompt = buildSystemPrompt('古风修真')
-    expect(prompt).toContain('勾了勾唇')
-    expect(prompt).toContain('天色将明')
-    // urban 专属的"他心里直骂娘"不应出现在古风 prompt
+    expect(prompt).toContain(resolveGenreVoice('古风修真').tone)
+    expect(prompt).not.toContain('语感用词参考')
     expect(prompt).not.toContain('他心里直骂娘')
   })
 
-  it('选用都市时包含都市替换示例', () => {
+  it('选用都市时保留题材语气，不下发替换示例', () => {
     const prompt = buildSystemPrompt('现代都市')
-    expect(prompt).toContain('他心里直骂娘')
-    expect(prompt).toContain('天刚亮')
+    expect(prompt).toContain(resolveGenreVoice('现代都市').tone)
+    expect(prompt).not.toContain('语感用词参考')
+  })
+
+  it.each(['extend', 'finish'] as const)('续写 %s 保留题材语感与场景诊断，不下发词语替换表', (mode) => {
+    const prompt = buildSystemPrompt('悬疑', null, undefined, null, mode)
+    expect(prompt).toContain('## 1. 题材定位（默认语感参考）')
+    expect(prompt).toContain('克制、留白、信息量密')
+    expect(prompt).toContain('先找场景生硬的原因')
+    expect(prompt).toContain('核对整场的目标、压力和因果')
+    expect(prompt).toContain('避免靠突然出现的巧合或无铺垫的新线索强推剧情')
+    expect(prompt).toContain('误会或风险是否有可信原因')
+    expect(prompt).toContain('先在获准范围内重构相关场景的因果和信息安排')
+    expect(prompt).toContain('等待与悬念须有当前处境或人物动机的依据')
+    expect(prompt).toContain('不要为了章末钩子先预设惊险结果')
+    expect(prompt).toContain('只能依据自己掌握的信息判断和行动')
+    expect(prompt).toContain('推动他作出选择、采取行动或改变对局势的认识')
+    expect(prompt).toContain('不反复把它当成疑点渲染')
+    expect(prompt).toContain('不让场景只靠电话、短信或一问一答来回传递消息')
+    expect(prompt).toContain('落在人物的决定、关系变化或事件后果上')
+    expect(prompt).toContain('不反复用“电话接通了”“有人来了”等动作突然中断来留钩子')
+    expect(prompt).toContain('仍不确定的信息保持不确定，不替读者重复推理')
+    expect(prompt).toContain('让等待、追问和转场起作用')
+    expect(prompt).toContain('避免让人物轮流汇报、接令、逐项完成任务')
+    expect(prompt).toContain('危险要实际改变人物能做什么、先做什么或必须放弃什么')
+    expect(prompt).toContain('脱险后的转场跟着人物仍需解决的事走')
+    expect(prompt).toContain('新增的事实陈述须对照前文；无法核实的在内部标为待确认')
+    expect(prompt).toContain('不要求每个动作都带来反转')
+    expect(prompt).toContain('也不用“这不代表……但……”替读者总结一遍')
+    expect(prompt).not.toContain('语感用词参考')
+    expect(prompt).not.toContain('高频套写排查参考')
   })
 
   it('不同 genre 生成的 prompt 头部不同', () => {
@@ -368,7 +397,7 @@ describe('题材语感不强制机关式对白', () => {
     expect(prompt).toContain('普通的“好”“嗯”和直接回答按语境保留')
     expect(prompt).toContain('不设强制比例')
   })
-  it('语感示例须核对原意，不能把普通词和动作机械替换', () => {
-    expect(buildSystemPrompt('都市')).toContain('不是逐词替换表；先核对原意与场景')
+  it('都市生成不按词面机械删改', () => {
+    expect(buildSystemPrompt('都市')).toContain('不按词语命中机械删除')
   })
 })

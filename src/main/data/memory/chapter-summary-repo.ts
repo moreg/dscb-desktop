@@ -6,6 +6,7 @@ import type { ChapterSummaryFact, ContinuityFact } from '../../../shared/types'
 import { readMemoryText } from './repository-cache'
 import { readLongformReviewState, blockedLongformChapters } from '../longform-review-state'
 import { locateMemoryEvidence } from '../memory-evidence-validator'
+import { readText } from '../skill-format/md-parser'
 
 export interface ChapterSummary {
   schemaVersion: 1
@@ -33,9 +34,12 @@ export class ChapterSummaryRepo {
     return join(this.projectDir, '记忆', '章节概要', `第${String(chapterNumber).padStart(3, '0')}章.json`)
   }
 
-  async read(chapterNumber: number): Promise<ChapterSummary | null> {
+  async read(chapterNumber: number, fresh = false): Promise<ChapterSummary | null> {
     let value: ChapterSummary | null
-    try { const text = await readMemoryText(this.path(chapterNumber)); value = text ? JSON.parse(text) : null }
+    try {
+      const text = await (fresh ? readText : readMemoryText)(this.path(chapterNumber))
+      value = text ? JSON.parse(text) : null
+    }
     catch (err) { if (err instanceof SyntaxError) return null; throw err }
     if (!value || value.schemaVersion !== 1 || value.chapterNumber !== chapterNumber ||
       typeof value.sourceHash !== 'string' || !Array.isArray(value.events) ||
@@ -47,7 +51,7 @@ export class ChapterSummaryRepo {
 
   async readCurrent(chapterNumber: number, prose: string): Promise<ChapterSummary | null> {
     if (blockedLongformChapters(await readLongformReviewState(this.projectDir))[String(chapterNumber)]) return null
-    const value = await this.read(chapterNumber)
+    const value = await this.read(chapterNumber, true)
     return value && prose.trim() && value.sourceHash === hashProse(prose) &&
       [...value.events, ...value.stateChanges, ...value.openThreads].every(f => f.evidence.trim() &&
         (prose.includes(f.evidence) || locateMemoryEvidence(prose, f.evidence))) ? value : null

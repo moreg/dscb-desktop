@@ -147,3 +147,65 @@ export function searchProsePassages(
   }
   return result
 }
+
+/** The primary recall can favor longer passages. Compare short recent passages
+ * by their strongest shared details so a counterexample can survive that bias. */
+export function recallNearbyProse(
+  chapters: SearchChapter[],
+  chapterNumber: number,
+  excluded: number[],
+  hits: ProseMemoryHit[],
+  primaryTerms: ReadonlySet<string>[],
+  focus: ReadonlyMap<string, number>
+): ProseMemoryHit[] {
+  if (!focus.size) return []
+  const recent = chapters.filter(chapter => chapter.chapterNumber >= chapterNumber - 3 &&
+    chapter.chapterNumber < chapterNumber && !excluded.includes(chapter.chapterNumber))
+  if (!recent.length) return []
+  const recentText = recent.flatMap(chapter => chapter.passages.map(passage => passage.text.toLocaleLowerCase())).join('\n')
+  const corpus = corpusFor(chapters)
+  const bridge = new Set(primaryTerms.flatMap(terms => [...terms]))
+  const signals = [...bridge].filter(term => recentText.includes(term)).map(term => {
+    const count = postingsFor(corpus, term.slice(0, 2)).filter(id => corpus.passages[id].normalized.includes(term)).length
+    return { term, weight: Math.log(1 + corpus.passages.length / (count || 1)) * (focus.has(term) ? 2 : 1) }
+  }).sort((a, b) => b.weight - a.weight)
+  const result: ProseMemoryHit[] = []
+  const shown = new Set(hits.map(hit => hit.text.replace(/\s+/g, '')))
+  const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
+  let remaining = 1800
+  for (const chapter of [...recent].reverse()) {
+    const crossChapterSignals = signals.filter(({ term }) => primaryTerms.some((terms, index) =>
+      hits[index].chapterNumber !== chapter.chapterNumber && terms.has(term)))
+    let best: ProseMemoryHit | undefined
+    let bestAnchors: typeof signals = []
+    for (const passage of chapter.passages) {
+      if (passage.text.length > remaining || shown.has(passage.text.replace(/\s+/g, ''))) continue
+      const text = passage.text.toLocaleLowerCase()
+      if (!crossChapterSignals.some(({ term }) => focus.has(term) && text.includes(term))) continue
+      const words = new Set([...segmenter.segment(text)].filter(part => part.isWordLike).map(part => part.segment))
+      const matches = crossChapterSignals.filter(({ term }) => words.has(term))
+      const anchors = matches.filter(({ term }) => focus.has(term)).slice(0, 2)
+      if (!anchors.length) continue
+      const score = (matches[0]?.weight ?? 0) + 0.2 * (matches[1]?.weight ?? 0)
+      if (score > (best?.score ?? 0)) {
+        best = { ...passage, chapterNumber: chapter.chapterNumber,
+          sourcePath: chapter.sourcePath, sourceHash: chapter.sourceHash, score }
+        bestAnchors = anchors
+      }
+    }
+    if (best) {
+      let primaryIndex = 0
+      let maxWeight = 0
+      for (const [index, terms] of primaryTerms.entries()) {
+        if (hits[index].chapterNumber === chapter.chapterNumber) continue
+        const weight = bestAnchors.reduce((sum, signal) => sum + (terms.has(signal.term) ? signal.weight : 0), 0)
+        if (weight > maxWeight) { maxWeight = weight; primaryIndex = index }
+      }
+      result.push({ ...best, nearby: { primaryIndex,
+        anchors: bestAnchors.filter(({ term }) => primaryTerms[primaryIndex].has(term)).map(({ term }) => term) } })
+      shown.add(best.text.replace(/\s+/g, ''))
+      remaining -= best.text.length
+    }
+  }
+  return result
+}

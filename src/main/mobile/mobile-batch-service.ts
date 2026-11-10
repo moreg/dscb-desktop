@@ -347,7 +347,7 @@ export class MobileBatchService implements MobileBatchRunner {
           job.progress.pendingPostProcessChapter = chapter
           const previousSummary = job.summaries.find((summary) => summary.chapter === chapter)
           const deslopFallback = previousSummary?.deslop ?? (resume && previous.pendingPostProcessChapter === chapter
-            ? '复用已保存正文，无需再次去 AI 味' : '未返回去 AI 味报告')
+            ? '复用已保存正文' : '本次未运行自动去 AI 味')
           const finished = finishBatchChapter(job.timing ?? emptyBatchTiming(), chapter, Date.now())
           job.timing = finished.state
           job.summaries = [...job.summaries.filter((summary) => summary.chapter !== chapter), summarize(chapter, result, deslopFallback, finished.durationMs)]

@@ -30,7 +30,7 @@ describe('writing platform config', () => {
       expect(prompt).toContain('你是七猫小说')
       expect(prompt).not.toContain('你是番茄小说风格')
       expect(prompt).toContain('章名策略：清楚具体')
-      expect(prompt.indexOf('续写模式覆盖声明（最高优先级）')).toBeGreaterThan(prompt.indexOf('项目平台配置（来源'))
+      expect(prompt.indexOf('续写模式覆盖声明（接缝、范围、篇幅与收束）')).toBeGreaterThan(prompt.indexOf('项目平台配置（来源'))
     }
   })
   let dir: string | undefined

@@ -3,7 +3,7 @@ import { createHash } from 'crypto'
 import { createReadStream, promises as fs } from 'fs'
 import { join, resolve } from 'path'
 import { writeJsonAtomic } from './atomic'
-import { mapMemoryFiles, memoryFileFingerprint } from './memory/repository-cache'
+import { isRecentMemoryFileFingerprint, mapMemoryFiles, memoryFileFingerprint } from './memory/repository-cache'
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 // Bump when stage prompts, parsers or acceptance rules change.
@@ -17,8 +17,9 @@ async function fileDigest(file: string): Promise<string> {
   const key = resolve(file)
   const fingerprint = await memoryFileFingerprint(key)
   if (fingerprint === 'missing') { fileDigests.delete(key); throw new Error('Dependency disappeared') }
+  const recent = isRecentMemoryFileFingerprint(fingerprint)
   const cached = fileDigests.get(key)
-  if (cached?.fingerprint === fingerprint) {
+  if (!recent && cached?.fingerprint === fingerprint) {
     fileDigests.delete(key); fileDigests.set(key, cached)
     return cached.digest
   }
@@ -36,7 +37,7 @@ async function fileDigest(file: string): Promise<string> {
     }
     if (await memoryFileFingerprint(key) !== fingerprint) throw new Error('Dependency changed during hashing')
     fileDigests.delete(key)
-    fileDigests.set(key, { fingerprint, digest: value })
+    if (!recent) fileDigests.set(key, { fingerprint, digest: value })
     while (fileDigests.size > MAX_DIGEST_ENTRIES) fileDigests.delete(fileDigests.keys().next().value!)
     return value
   })()

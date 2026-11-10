@@ -881,6 +881,7 @@ describe('batch safety and recovery', () => {
   })
 
   it('automatically repairs confirmed continuity conflicts and uses rechecked prose and fresh memory for the next chapter', async () => {
+    vi.spyOn(settings, 'get').mockResolvedValue({ autoMemorySync: true, autoDeslopAfterContinue: true })
     stubPostProcess()
     stubContinuityModel()
     // Even when polishing is available, local conflict repair must not invoke it.

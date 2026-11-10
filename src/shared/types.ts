@@ -905,7 +905,9 @@ export interface RendererApi {
     /** 按本章节奏临时调整本次续写的生成强度。 */
     autoStrength?: boolean,
     /** 只修复并核对已保存稿，不生成续写。 */
-    repairOnly?: boolean
+    repairOnly?: boolean,
+    /** 本次续写的自动去 AI 味选项，省略时使用全局设置。 */
+    autoDeslopAfterContinue?: boolean
   ) => ChapterStreamHandle
   getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterStreamResult['repairCandidate'] | null>
   /** 按要求重写 · 先出修改建议（不改正文） */
@@ -1264,6 +1266,8 @@ export interface RendererApi {
   getAutoMemorySync: () => Promise<boolean>
   getChapterCompletionNotification: () => Promise<boolean>
   setChapterCompletionNotification: (enabled: boolean) => Promise<boolean>
+  getAutoDeslopAfterContinue: () => Promise<boolean>
+  setAutoDeslopAfterContinue: (enabled: boolean) => Promise<boolean>
   setAutoMemorySync: (enabled: boolean) => Promise<boolean>
   /**
    * 续写成功后自动后处理：

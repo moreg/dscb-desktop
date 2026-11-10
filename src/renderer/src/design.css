@@ -1543,6 +1543,19 @@ a:hover { color: var(--vermilion); }
   margin-bottom: 12px;
 }
 .editor-toolbar .spacer { flex: 1; }
+.editor-continue-controls,
+.editor-continue-deslop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.editor-continue-deslop {
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.editor-continue-deslop input { margin: 0; }
 /* 质检面板头部同样用 spacer 把右侧按钮组推到行尾 */
 .audit-panel-header .spacer { flex: 1; }
 

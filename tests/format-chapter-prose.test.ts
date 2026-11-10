@@ -92,6 +92,16 @@ describe('joinContinuation', () => {
     )
   })
 
+  it('句末标点在未闭合对白内时直接接完发言', () => {
+    expect(joinContinuation('“你去吗？', '”她问。')).toBe('“你去吗？”她问。')
+    expect(joinContinuation('她问：「你听见他说『上船！』', '了吗？」')).toBe('她问：「你听见他说『上船！』了吗？」')
+    expect(joinContinuation('"Are you going?', '" she asked.')).toBe('"Are you going?" she asked.')
+    expect(joinContinuation('她问：「你听见他说『上船！』了吗？」', '他点头。'))
+      .toBe('她问：「你听见他说『上船！』了吗？」\n\n他点头。')
+    expect(joinContinuation('　　她问：“等水退了，\r\n你会过来吗？', '”岸边没动静。'))
+      .toBe('　　她问：“等水退了，\r\n你会过来吗？”岸边没动静。')
+  })
+
   it('英文词间已有的接缝空格保留，词内断点仍直接接续', () => {
     expect(joinContinuation('He said ', 'hello.')).toBe('He said hello.')
     expect(joinContinuation('He said', ' hello.')).toBe('He said hello.')

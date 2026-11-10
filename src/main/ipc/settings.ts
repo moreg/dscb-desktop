@@ -21,6 +21,11 @@ export function registerSettingsIpc(
   defaultProjectsRoot: string
 ): void {
   const defaultChartCoversRoot = join(app.getPath('userData'), 'covers')
+  safeHandle('settings:getAutoDeslopAfterContinue', async () => (await repo.get()).autoDeslopAfterContinue === true)
+  safeHandle('settings:setAutoDeslopAfterContinue', async (_event, input: unknown) => {
+    const enabled = validateInput(z.boolean(), input)
+    return (await repo.update({ autoDeslopAfterContinue: enabled })).autoDeslopAfterContinue === true
+  })
   safeHandle('settings:getChapterCompletionNotification', async () => (await repo.get()).chapterCompletionNotification === true)
   safeHandle('settings:setChapterCompletionNotification', async (_event, input: unknown) => {
     const enabled = validateInput(z.boolean(), input)

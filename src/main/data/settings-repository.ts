@@ -106,6 +106,8 @@ export interface AppSettings {
   autoPostWritePipeline?: 'off' | 'memory_only' | 'full'
   /** Windows 桌面版本轮续写完成后的系统通知，默认开启。 */
   chapterCompletionNotification?: boolean
+  /** 续写后自动去 AI 味，默认关闭。 */
+  autoDeslopAfterContinue?: boolean
 }
 
 export type AutoPostWritePipeline = 'off' | 'memory_only' | 'full'
@@ -446,6 +448,7 @@ function normalizeAppSettings(stored: AppSettings): AppSettings {
     deslopRules: sanitizeDeslopRules(stored.deslopRules),
     settingsEvolution,
     autoPostWritePipeline,
+    autoDeslopAfterContinue: stored.autoDeslopAfterContinue === true,
     chapterCompletionNotification: typeof stored.chapterCompletionNotification === 'boolean' ? stored.chapterCompletionNotification : true,
     autoMemorySync
   }

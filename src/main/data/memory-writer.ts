@@ -3,9 +3,10 @@ import { promises as fs } from 'fs'
 import { CharacterRepo } from './memory/character-repo'
 import { LocationRepo } from './memory/location-repo'
 import { ItemRepo } from './memory/item-repo'
-import { PlotPointRepo } from './memory/plot-point-repo'
-import { hashProse } from './memory/prose-memory-index'
-import { parseCharacterStatesAt, parseItemStatesAt, type CharacterStateSnapshot, type ItemStateSnapshot } from './skill-format/tracking-md-repo'
+import { PlotPointRepo, isManagedPlotPoint } from './memory/plot-point-repo'
+import { hashProse, listProseSources, type IndexedChapter } from './memory/prose-memory-index'
+import { parseCharacterStatesAt, parseItemStatesAt } from './skill-format/tracking-md-repo'
+import { escapeTableCell, mapFieldToStateColumn, normalizeStateField, renderItemStateHistory, renderStateHistory } from './skill-format/tracking-state-fields'
 import { ForeshadowingMdRepo } from './skill-format/foreshadowing-md-repo'
 import { writeTextAtomic } from './atomic'
 import { withFileLock } from './file-lock'
@@ -15,7 +16,7 @@ import { FIELD_CHAPTERS, observationChapters, datedEntityNotes } from './memory/
 import { ProseRepo } from './skill-format/prose-repo'
 import { readMemoryCandidate, storedChapterIssues } from './memory/candidate-repository'
 import { blockedLongformChapters, readLongformReviewState } from './longform-review-state'
-import { invalidateMemoryProject } from './memory/repository-cache'
+import { invalidateMemoryProject, mapMemoryFiles } from './memory/repository-cache'
 import type {
   Character,
   Foreshadowing,
@@ -26,6 +27,19 @@ import type {
   UpdateCharacterInput
 } from '../../shared/types'
 
+interface AutomaticEntityReceipt {
+  kind: '人物' | '地点' | '道具'
+  name: string
+  path: string
+  hash: string
+  sourceHash?: string
+}
+
+interface AutomaticEntityLedger {
+  version: 1
+  chapters: Record<string, AutomaticEntityReceipt[]>
+}
+
 /**
  * 记忆回写器（v4：单一真相源策略）。
  * - 新增内容（角色/地点/伏笔）：需用户确认，由 UI 调 applyNew* 方法
@@ -35,16 +49,73 @@ import type {
 export class MemoryWriter {
   constructor(private readonly projectDir: string) {}
 
-  private async recordEntityIntent(chapter: number, kind: '人物' | '地点' | '道具', name: string, body: string): Promise<void> {
+  private get automaticEntityLedgerPath(): string {
+    return join(this.projectDir, '追踪', '.automatic-entity-ledger.json')
+  }
+
+  /** Source chapters and obsolete, still-automatic cards for the read-only writing context. */
+  async readAutomaticEntityProvenance(kinds: AutomaticEntityReceipt['kind'][], beforeChapter: number, indexed?: readonly IndexedChapter[]) {
+    const origins = new Map<string, number>()
+    const stale = new Set<string>()
+    const raw = await readText(this.automaticEntityLedgerPath)
+    if (!raw) return { origins, stale }
+    let ledger: AutomaticEntityLedger
+    try { ledger = JSON.parse(raw) } catch { return { origins, stale } }
+    if (ledger?.version !== 1 || !ledger.chapters) return { origins, stale }
+    const originReceipts = new Map<string, AutomaticEntityReceipt>()
+    for (const [key, receipts] of Object.entries(ledger.chapters)) {
+      const chapter = Number(key)
+      if (!Number.isSafeInteger(chapter) || chapter < 1 || !Array.isArray(receipts)) continue
+      for (const receipt of receipts) {
+        if (!receipt || typeof receipt.name !== 'string' || !kinds.includes(receipt.kind) ||
+          receipt.path !== `记忆/${receipt.kind}/${sanitizeForFileName(receipt.name)}.md`) continue
+        if (chapter >= (origins.get(receipt.path) ?? Infinity)) continue
+        origins.set(receipt.path, chapter)
+        originReceipts.set(receipt.path, receipt)
+      }
+    }
+    const chapters = new Set([...origins.values()].filter(chapter => chapter < beforeChapter))
+    if (!chapters.size) return { origins, stale }
+    const blocked = blockedLongformChapters(await readLongformReviewState(this.projectDir))
+    const hashes = new Map<number, string>()
+    if (indexed) {
+      for (const source of indexed) if (chapters.has(source.chapterNumber) && !blocked[source.chapterNumber] && source.passages.length) {
+        hashes.set(source.chapterNumber, source.sourceHash)
+      }
+    } else {
+      const sources = (await listProseSources(this.projectDir)).filter(source =>
+        chapters.has(source.chapterNumber) && !blocked[source.chapterNumber])
+      for (const [chapter, hash] of await mapMemoryFiles(sources, async source => {
+        const text = await readText(join(this.projectDir, source.sourcePath))
+        return [source.chapterNumber, text.trim() ? hashProse(text) : ''] as const
+      })) if (hash) hashes.set(chapter, hash)
+    }
+    const candidates = [...originReceipts.values()].filter(receipt => {
+      const chapter = origins.get(receipt.path)!
+      const currentHash = hashes.get(chapter)
+      return chapter < beforeChapter && (!currentHash || Boolean(receipt.sourceHash && receipt.sourceHash !== currentHash))
+    })
+    await mapMemoryFiles(candidates, async receipt => {
+      const current = await readText(join(this.projectDir, receipt.path))
+      // The original receipt owns only the exact card it created. Preserve author edits.
+      if (current && hashProse(current) === receipt.hash) stale.add(receipt.path)
+    })
+    return { origins, stale }
+  }
+
+  private async recordEntityIntent(chapter: number, kind: AutomaticEntityReceipt['kind'], name: string, body: string): Promise<void> {
     if (!Number.isSafeInteger(chapter) || chapter <= 0) return
-    const file = join(this.projectDir, '追踪', '.automatic-entity-ledger.json')
+    const source = await new ProseRepo(this.projectDir).read(chapter)
+    const file = this.automaticEntityLedgerPath
     await withFileLock(file, async () => {
       const raw = await readText(file)
       const ledger = raw ? JSON.parse(raw) : { version: 1, chapters: {} }
       if (ledger.version !== 1 || !ledger.chapters) throw new Error('自动实体账本无效')
       const receipts = ledger.chapters[String(chapter)] ?? []
       const path = `记忆/${kind}/${sanitizeForFileName(name)}.md`
-      ledger.chapters[String(chapter)] = [...receipts.filter((r: { path: string }) => r.path !== path), { path, hash: hashProse(body), kind, name }]
+      const receipt: AutomaticEntityReceipt = { path, hash: hashProse(body), kind, name,
+        ...(source.trim() ? { sourceHash: hashProse(source) } : {}) }
+      ledger.chapters[String(chapter)] = [...receipts.filter((r: { path: string }) => r.path !== path), receipt]
       // Write intent before the card: a hard kill after creation cannot orphan the entity.
       await writeTextAtomic(file, JSON.stringify(ledger, null, 2) + '\n')
     })
@@ -55,7 +126,7 @@ export class MemoryWriter {
     // Rechecking an old chapter must not remove cards later chapters may use.
     const laterProse = (await new ProseRepo(this.projectDir).listChapterNumbers()).some(n => n > extraction.chapterNumber)
     const currentProse = await new ProseRepo(this.projectDir).read(extraction.chapterNumber)
-    const file = join(this.projectDir, '追踪', '.automatic-entity-ledger.json')
+    const file = this.automaticEntityLedgerPath
     await withFileLock(file, async () => {
       const raw = await readText(file)
       if (!raw) return
@@ -184,6 +255,7 @@ export class MemoryWriter {
     let plotPoints = 0
     let collected = 0
     const appliedDiffs: MemoryApplyDiffItem[] = []
+    const sourceHash = opts?.sourceContent == null ? undefined : hashProse(opts.sourceContent)
 
     // 自动字段按章重放；只改仍与上次自动写入值一致的卡片字段。
     const preview = await this.previewAutomatic(extraction)
@@ -208,7 +280,7 @@ export class MemoryWriter {
           pp.title,
           pp.event,
           pp.coolPoint,
-          opts?.sourceContent != null ? hashProse(opts.sourceContent) : undefined
+          sourceHash
         )
         if (applied) {
           plotPoints++
@@ -227,7 +299,7 @@ export class MemoryWriter {
 
     // 空提取也要清除同章旧自动事件；作者手写记录不属于自动替换范围。
     try {
-      await this.appendTimeline(extraction.chapterNumber, extraction.newPlotPoints)
+      await this.appendTimeline(extraction.chapterNumber, extraction.newPlotPoints, sourceHash)
     } catch (e) {
       errors.push(`时间线追加失败: ${(e as Error).message}`)
     }
@@ -237,7 +309,8 @@ export class MemoryWriter {
       await this.appendProgress(
         extraction.chapterNumber,
         extraction.newPlotPoints,
-        extraction.characterStateChanges
+        extraction.characterStateChanges,
+        sourceHash
       )
     } catch (e) {
       errors.push(`进度摘要追加失败: ${(e as Error).message}`)
@@ -246,14 +319,14 @@ export class MemoryWriter {
     // 2.7 追踪角色状态表：写入 追踪/角色状态.md（续写读「当前状态/变更记录」）
     try {
       // An empty extraction also replaces this chapter's previous automatic history after a rewrite.
-      await this.syncTrackingCharacterStates(extraction.chapterNumber, extraction.characterStateChanges)
+      await this.syncTrackingCharacterStates(extraction.chapterNumber, extraction.characterStateChanges, sourceHash)
     } catch (e) {
       errors.push(`追踪角色状态写入失败: ${(e as Error).message}`)
     }
 
     // 2.8 追踪物品状态表：写入 追踪/物品.md（生成提示词与长篇核对读「当前状态/变更记录」）
     try {
-      await this.syncTrackingItemStates(extraction.chapterNumber, extraction.itemStateChanges ?? [])
+      await this.syncTrackingItemStates(extraction.chapterNumber, extraction.itemStateChanges ?? [], sourceHash)
     } catch (e) {
       errors.push(`追踪物品状态写入失败: ${(e as Error).message}`)
     }
@@ -669,6 +742,58 @@ export class MemoryWriter {
     })
   }
 
+  /** Remove stale synchronized observations from the prompt view without editing character cards. */
+  async projectCharactersWithoutStaleObservations(characters: Character[], chapters: number[]): Promise<Character[]> {
+    if (!characters.length || !chapters.length) return characters
+    const text = await readText(join(this.projectDir, '追踪', '.automatic-state-ledger.json'))
+    if (!text) return characters
+    const ledger: AutomaticStateLedger = JSON.parse(text)
+    if (ledger.version !== 1 || !ledger.fields || !ledger.tracks) return characters
+    const stale = new Set(chapters)
+    return characters.map(character => {
+      const dates = observationChapters(character.customFields?.[FIELD_CHAPTERS])
+      const customFields = { ...character.customFields }
+      const rawFields = character.rawFields ? { ...character.rawFields } : undefined
+      const fields: UpdateCharacterInput = {}
+      let changed = false
+      for (const [field, chapter] of Object.entries(dates)) {
+        if (!stale.has(chapter)) continue
+        const owner = ledger.fields[`${character.id}:${field}`]
+        if (!owner) continue
+        changed = true
+        delete dates[field]
+        // A manual change can keep the historical date marker. Only revert a
+        // value still owned by the automatic writer, in this read-only view.
+        if (readCharacterField(character, field) !== owner.lastApplied) continue
+        const { customFields: extra, ...builtIn } = buildCharacterFieldPatch(field, owner.baseline)
+        Object.assign(fields, builtIn)
+        for (const record of [rawFields, customFields]) {
+          for (const key of Object.keys(record ?? {})) {
+            if (observationFieldKey(key) === field) delete record![key]
+          }
+        }
+        Object.assign(customFields, extra)
+        if (rawFields) Object.assign(rawFields, extra)
+      }
+      const track = ledger.tracks[character.id]
+      if (track && fieldToPlain(customFields['状态轨迹']) === track.lastApplied) {
+        const tail = track.lastApplied.slice(track.baseline.length).replace(/^；/, '')
+        const kept = tail.split(/；(?=第\d+章 [^：；]+：)/)
+          .filter(line => !stale.has(Number(line.match(/^第(\d+)章 /)?.[1])))
+        const next = [track.baseline, ...kept].filter(Boolean).join('；')
+        if (next !== track.lastApplied) {
+          changed = true
+          customFields['状态轨迹'] = next
+          if (rawFields?.['状态轨迹'] === track.lastApplied) rawFields['状态轨迹'] = next
+        }
+      }
+      if (!changed) return character
+      if (Object.keys(dates).length) customFields[FIELD_CHAPTERS] = JSON.stringify(dates)
+      else delete customFields[FIELD_CHAPTERS]
+      return { ...character, ...fields, customFields, rawFields }
+    })
+  }
+
   /** Migrate only unchanged automatic observations corroborated by a current prose-bound candidate. */
   async dateLegacyObservations(): Promise<void> {
     const locationRepo = new LocationRepo(this.projectDir)
@@ -801,7 +926,8 @@ export class MemoryWriter {
    */
   private async appendTimeline(
     chapter: number,
-    plotPoints: MemoryExtraction['newPlotPoints']
+    plotPoints: MemoryExtraction['newPlotPoints'],
+    sourceHash?: string
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '时间线.md')
     await this.ensureTrackingSkeleton('timeline')
@@ -814,7 +940,7 @@ export class MemoryWriter {
       const title = escapeTableCell(plotPoints[0]?.title ?? `第${chapter}章`)
       const row = events.length ? `| ${chapterMarker} | ${title} | - | - | ${desc} |` : ''
 
-      text = replaceManagedTrackingRow(text, 'timeline', chapter, row)
+      text = replaceManagedTrackingRow(text, 'timeline', chapter, row, sourceHash)
       await writeTextAtomic(file, text)
     })
   }
@@ -826,7 +952,8 @@ export class MemoryWriter {
   private async appendProgress(
     chapter: number,
     plotPoints: MemoryExtraction['newPlotPoints'],
-    stateChanges: MemoryExtraction['characterStateChanges'] = []
+    stateChanges: MemoryExtraction['characterStateChanges'] = [],
+    sourceHash?: string
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '上下文.md')
     await this.ensureTrackingSkeleton('context')
@@ -852,7 +979,7 @@ export class MemoryWriter {
       const today = new Date().toISOString().slice(0, 10)
       const row = `| ${today} | ${chapterMarker} | ${summary} | - | - |`
 
-      text = replaceManagedTrackingRow(text, 'context', chapter, row)
+      text = replaceManagedTrackingRow(text, 'context', chapter, row, sourceHash)
       await writeTextAtomic(file, text)
     })
   }
@@ -864,7 +991,8 @@ export class MemoryWriter {
    */
   private async syncTrackingCharacterStates(
     chapter: number,
-    changes: MemoryExtraction['characterStateChanges']
+    changes: MemoryExtraction['characterStateChanges'],
+    sourceHash?: string
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '角色状态.md')
     if (changes.length === 0 && !(await readText(file))) return
@@ -883,16 +1011,13 @@ export class MemoryWriter {
         text = text.replace(block.full, block.full.replace(start, `${start}\n<!-- writer-state-invalidated:${block.chapter} -->\n> 前章状态已改写：本节含人工编辑，原文保留，自动续写暂停采用，待核对后重新确认。`))
       }
       for (const block of toRebuild) text = text.replace(block.full, '')
-      const deltas = new Map(toRebuild.map((b) => [b.chapter, b.changes]))
-      deltas.set(chapter, changes)
-      for (const [number, stateChanges] of [...deltas].sort(([a], [b]) => a - b)) {
+      const deltas = new Map(toRebuild.map((b) => [b.chapter, { changes: b.changes, sourceHash: b.sourceHash }]))
+      deltas.set(chapter, { changes, sourceHash })
+      for (const [number, delta] of [...deltas].sort(([a], [b]) => a - b)) {
         const prior = new Map(parseCharacterStatesAt(text, number - 1).map((s) => [s.name, s]))
-        const body = renderStateHistory(number, stateChanges, prior)
+        const body = renderStateHistory(number, delta.changes, prior)
         if (!body) continue
-        const data = Buffer.from(JSON.stringify(stateChanges), 'utf8').toString('base64')
-        const content = `<!-- writer-state-data:${data} -->\n${body}`
-        const block = `<!-- writer-state-history:${number}:start -->\n<!-- writer-state-checksum:${hashProse(content)} -->\n${content}\n<!-- writer-state-history:${number}:end -->`
-        text = text.trimEnd() + `\n\n${block}\n`
+        text = appendManagedStateBlock(text, number, body, delta.changes, delta.sourceHash)
       }
       await writeTextAtomic(file, text)
       if (invalidated.length) throw new Error(`${invalidated.length} 个后章历史含人工编辑，已标记待核对并暂停用于自动续写，原文保留`)
@@ -905,7 +1030,8 @@ export class MemoryWriter {
    */
   private async syncTrackingItemStates(
     chapter: number,
-    changes: NonNullable<MemoryExtraction['itemStateChanges']>
+    changes: NonNullable<MemoryExtraction['itemStateChanges']>,
+    sourceHash?: string
   ): Promise<void> {
     const file = join(this.projectDir, '追踪', '物品.md')
     if (changes.length === 0 && !(await readText(file))) return
@@ -924,16 +1050,13 @@ export class MemoryWriter {
         text = text.replace(block.full, block.full.replace(start, `${start}\n<!-- writer-state-invalidated:${block.chapter} -->\n> 前章物品状态已改写：本节含人工编辑，原文保留，自动续写暂停采用，待核对后重新确认。`))
       }
       for (const block of toRebuild) text = text.replace(block.full, '')
-      const deltas = new Map(toRebuild.map((b) => [b.chapter, b.changes]))
-      deltas.set(chapter, changes)
-      for (const [number, itemChanges] of [...deltas].sort(([a], [b]) => a - b)) {
+      const deltas = new Map(toRebuild.map((b) => [b.chapter, { changes: b.changes, sourceHash: b.sourceHash }]))
+      deltas.set(chapter, { changes, sourceHash })
+      for (const [number, delta] of [...deltas].sort(([a], [b]) => a - b)) {
         const prior = new Map(parseItemStatesAt(text, number - 1).map((s) => [s.name, s]))
-        const body = renderItemStateHistory(number, itemChanges, prior)
+        const body = renderItemStateHistory(number, delta.changes, prior)
         if (!body) continue
-        const data = Buffer.from(JSON.stringify(itemChanges), 'utf8').toString('base64')
-        const content = `<!-- writer-state-data:${data} -->\n${body}`
-        const block = `<!-- writer-state-history:${number}:start -->\n<!-- writer-state-checksum:${hashProse(content)} -->\n${content}\n<!-- writer-state-history:${number}:end -->`
-        text = text.trimEnd() + `\n\n${block}\n`
+        text = appendManagedStateBlock(text, number, body, delta.changes, delta.sourceHash)
       }
       await writeTextAtomic(file, text)
       if (invalidated.length) throw new Error(`${invalidated.length} 个后章物品历史含人工编辑，已标记待核对并暂停用于自动续写，原文保留`)
@@ -1023,40 +1146,7 @@ export class MemoryWriter {
 
 }
 
-/** 字段名归一：同义映射到标准名（预览与写入共用） */
-export function normalizeStateField(field: string): string {
-  const f = field.trim()
-  const map: Record<string, string> = {
-    伤: '伤势',
-    受伤: '伤势',
-    伤势情况: '伤势',
-    情绪状态: '情绪',
-    心情: '情绪',
-    所在: '位置',
-    所在地: '位置',
-    地点: '位置',
-    状态: '当前状态',
-    现状: '当前状态',
-    人设: '性格',
-    性格特点: '性格',
-    能力境界: '境界',
-    修为: '境界',
-    功法: '能力',
-    长相: '外貌',
-    相貌: '外貌',
-    关系网: '关系',
-    人物关系: '关系',
-    物品: '持有物',
-    随身: '持有物',
-    定位: '角色定位',
-    role: '角色定位',
-    identity: '身份',
-    personality: '性格',
-    abilities: '能力',
-    appearance: '外貌'
-  }
-  return map[f] ?? f
-}
+export { normalizeStateField, normalizeItemStateField } from './skill-format/tracking-state-fields'
 
 function fieldToPlain(v: string | string[] | undefined): string {
   if (v == null) return ''
@@ -1095,18 +1185,16 @@ function findCharacterByName(
   return undefined
 }
 
-function escapeTableCell(s: string): string {
-  return s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim()
-}
 
 /**
  * 在 markdown 表中 upsert 含「第 N 章」的行：已有则替换，否则插到最后一行数据后。
  */
-function replaceManagedTrackingRow(text: string, kind: 'timeline' | 'context', chapter: number, newRow: string): string {
-  const re = new RegExp(`<!-- writer-tracking:${kind}:${chapter}:([a-f0-9]+) -->\\r?\\n([^\\n]*)(?:\\r?\\n)?<!-- writer-tracking:${kind}:${chapter}:end -->`, 'g')
+function replaceManagedTrackingRow(text: string, kind: 'timeline' | 'context', chapter: number, newRow: string, sourceHash?: string): string {
+  const re = new RegExp(`<!-- writer-tracking:${kind}:${chapter}:([a-f0-9]+)(?::[a-f0-9]{64})? -->\\r?\\n([^\\n]*)(?:\\r?\\n)?<!-- writer-tracking:${kind}:${chapter}:end -->`, 'g')
   let protectedBlock = false
   let replaced = false
-  const block = newRow ? `<!-- writer-tracking:${kind}:${chapter}:${hashProse(newRow)} -->\n${newRow}\n<!-- writer-tracking:${kind}:${chapter}:end -->` : ''
+  const source = sourceHash ? `:${sourceHash}` : ''
+  const block = newRow ? `<!-- writer-tracking:${kind}:${chapter}:${hashProse(newRow)}${source} -->\n${newRow}\n<!-- writer-tracking:${kind}:${chapter}:end -->` : ''
   const next = text.replace(re, (whole: string, checksum: string, row: string) => {
     if (hashProse(row.replace(/\r$/, '')) !== checksum) {
       protectedBlock = true
@@ -1129,23 +1217,6 @@ function replaceManagedTrackingRow(text: string, kind: 'timeline' | 'context', c
   return lines.join('\n')
 }
 
-/** 字段 → 角色状态表列 */
-function mapFieldToStateColumn(
-  field: string
-): StateColumn | null {
-  const f = normalizeStateField(field)
-  if (['伤势', '当前状态', '能力', '境界', '金手指', '实力'].includes(f)) return 'power'
-  if (['情绪', '立场'].includes(f)) return 'stance'
-  if (f === '目标') return 'goal'
-  if (['持有物', '物品'].includes(f)) return 'items'
-  if (['关系', '关系网'].includes(f)) return 'relations'
-  if (f === '性格') return 'personality'
-  if (f === '角色定位') return 'role'
-  if (f === '身份') return 'identity'
-  return null
-}
-
-type StateColumn = 'power' | 'stance' | 'goal' | 'items' | 'relations' | 'personality' | 'role' | 'identity'
 
 function stateChangesKey(changes: MemoryExtraction['characterStateChanges']): string {
   return JSON.stringify(changes.map((c) => [c.name.trim(), normalizeStateField(c.field || '状态'), String(c.newValue ?? '').trim()]))
@@ -1183,6 +1254,10 @@ interface AutomaticStateLedger {
 
 function cardFieldKey(field: string): string {
   return ['能力', '金手指'].includes(field) ? '能力' : field
+}
+
+function observationFieldKey(field: string): string {
+  return field === '显性性格' ? '性格' : cardFieldKey(normalizeStateField(field))
 }
 
 /** Upgrade only fields corroborated by the previous automatic history and trajectory. */
@@ -1250,112 +1325,16 @@ function buildCharacterFieldPatch(field: string, value: string, custom: UpdateCh
   return { customFields: { ...custom, [key]: value } }
 }
 
-function isManagedPlotPoint(text: string, chapter: number): boolean {
-  const match = text.match(/\n<!-- writer-plot:(\d+):([a-f0-9]{64}) -->\r?\n?$/)
-  return Boolean(match && Number(match[1]) === chapter && hashProse(text.slice(0, match.index)) === match[2])
+function appendManagedStateBlock(text: string, chapter: number, body: string, changes: MemoryExtraction['characterStateChanges'], sourceHash?: string): string {
+  const data = Buffer.from(JSON.stringify(changes), 'utf8').toString('base64')
+  const source = sourceHash ? `<!-- writer-state-source:${sourceHash} -->\n` : ''
+  const content = `<!-- writer-state-data:${data} -->\n${source}${body}`
+  const block = `<!-- writer-state-history:${chapter}:start -->\n<!-- writer-state-checksum:${hashProse(content)} -->\n${content}\n<!-- writer-state-history:${chapter}:end -->`
+  return text.trimEnd() + `\n\n${block}\n`
 }
 
-function renderStateHistory(
-  chapter: number,
-  changes: MemoryExtraction['characterStateChanges'],
-  prior: Map<string, CharacterStateSnapshot>,
-  legacy = false
-): string {
-  const byName = new Map<string, { field: string; value: string }[]>()
-  for (const c of changes) {
-    const name = c.name?.trim()
-    const value = String(c.newValue ?? '').trim()
-    if (!name || !value) continue
-    const list = byName.get(name) ?? []
-    list.push({ field: normalizeStateField(c.field || '状态'), value })
-    byName.set(name, list)
-  }
-  const snapshots: CharacterStateSnapshot[] = []
-  const logs: string[] = []
-  for (const [name, fields] of byName) {
-    const state: CharacterStateSnapshot = { name, power: '-', stance: '-', goal: '-', items: '-', relations: '-', ...prior.get(name), updateChapter: chapter }
-    const columns = new Map<StateColumn, string[]>()
-    for (const f of fields) {
-      const column = (legacy && ['性格', '角色定位', '身份'].includes(f.field) ? null : mapFieldToStateColumn(f.field)) ?? 'power'
-      columns.set(column, [...(columns.get(column) ?? []), f.value])
-      logs.push(`| 第 ${chapter} 章 | ${escapeTableCell(name)} | ${escapeTableCell(`${f.field}：${f.value}`)} |`)
-    }
-    for (const [column, values] of columns) state[column] = [...new Set(values)].join('；')
-    snapshots.push(state)
-  }
-  if (!snapshots.length) return ''
-  return [
-    `## 自动历史快照（第 ${chapter} 章）`, '',
-    legacy ? '| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 更新章节 |' : '| 角色 | 当前实力 | 当前立场 | 当前目标 | 关键道具 | 关系快照 | 性格 | 角色定位 | 身份 | 更新章节 |',
-    legacy ? '|---|---|---|---|---|---|---|' : '|---|---|---|---|---|---|---|---|---|---|',
-    ...snapshots.map((s) => `| ${[s.name, s.power, s.stance, s.goal, s.items, s.relations,
-      ...(!legacy ? [s.personality || '-', s.role || '-', s.identity || '-'] : []), `第 ${chapter} 章`].map(escapeTableCell).join(' | ')} |`),
-    '', `## 自动状态变更（第 ${chapter} 章）`, '',
-    '| 章节 | 角色 | 变更内容 |', '|---|---|---|', ...logs, ''
-  ].join('\n')
-}
-
-/** 字段名归一：物品状态表同义映射（提取提示词与写入共用口径） */
-export function normalizeItemStateField(field: string): string {
-  const f = field.trim()
-  const map: Record<string, string> = {
-    外观: '材质外观', 材质: '材质外观', 外形: '材质外观', 形制: '材质外观', 质地: '材质外观',
-    持有: '持有者', 持有人: '持有者', 持有物: '持有者', 归属: '持有者',
-    位置: '所在位置', 所在: '所在位置', 封存: '所在位置', 存放: '所在位置',
-    现状: '状态', 情况: '状态'
-  }
-  return map[f] ?? f
-}
-
-type ItemStateColumn = 'material' | 'holder' | 'location' | 'status'
-
-function mapItemFieldToColumn(field: string): ItemStateColumn {
-  const f = normalizeItemStateField(field)
-  if (f === '材质外观') return 'material'
-  if (f === '持有者') return 'holder'
-  if (f === '所在位置') return 'location'
-  return 'status'
-}
-
-function renderItemStateHistory(
-  chapter: number,
-  changes: NonNullable<MemoryExtraction['itemStateChanges']>,
-  prior: Map<string, ItemStateSnapshot>
-): string {
-  const byName = new Map<string, { field: string; value: string }[]>()
-  for (const c of changes) {
-    const name = c.name?.trim()
-    const value = String(c.newValue ?? '').trim()
-    if (!name || !value) continue
-    const list = byName.get(name) ?? []
-    list.push({ field: normalizeItemStateField(c.field || '状态'), value })
-    byName.set(name, list)
-  }
-  const snapshots: ItemStateSnapshot[] = []
-  const logs: string[] = []
-  for (const [name, fields] of byName) {
-    const state: ItemStateSnapshot = { name, material: '-', holder: '-', location: '-', status: '-', ...prior.get(name), updateChapter: chapter }
-    const columns = new Map<ItemStateColumn, string[]>()
-    for (const f of fields) {
-      const column = mapItemFieldToColumn(f.field)
-      columns.set(column, [...(columns.get(column) ?? []), f.value])
-      logs.push(`| 第 ${chapter} 章 | ${escapeTableCell(name)} | ${escapeTableCell(`${f.field}：${f.value}`)} |`)
-    }
-    for (const [column, values] of columns) state[column] = [...new Set(values)].join('；')
-    snapshots.push(state)
-  }
-  if (!snapshots.length) return ''
-  return [
-    `## 自动历史快照（第 ${chapter} 章）`, '',
-    '| 物品 | 材质外观 | 当前持有者 | 所在位置 | 状态 | 更新章节 |',
-    '|---|---|---|---|---|---|',
-    ...snapshots.map((s) => `| ${[s.name, s.material, s.holder, s.location, s.status, `第 ${chapter} 章`].map(escapeTableCell).join(' | ')} |`),
-    '', `## 自动状态变更（第 ${chapter} 章）`, '',
-    '| 章节 | 物品 | 变更内容 |', '|---|---|---|', ...logs, ''
-  ].join('\n')
-}
-
-function readManagedStateBlocks(text: string): { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] {  const blocks: { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges'] }[] = []
+function readManagedStateBlocks(text: string): { chapter: number; full: string; intact: boolean; changes: MemoryExtraction['characterStateChanges']; sourceHash?: string }[] {
+  const blocks: ReturnType<typeof readManagedStateBlocks> = []
   for (const match of text.matchAll(/<!-- writer-state-history:(\d+):start -->\r?\n([\s\S]*?)\r?\n<!-- writer-state-history:\1:end -->/g)) {
     const chapter = Number(match[1])
     const body = match[2]
@@ -1379,7 +1358,8 @@ function readManagedStateBlocks(text: string): { chapter: number; full: string; 
       const prior = new Map(parseCharacterStatesAt(text, chapter - 1).map((s) => [s.name, s]))
       intact = renderStateHistory(chapter, changes, prior, true).trim() === body.trim()
     }
-    blocks.push({ chapter, full: match[0], intact, changes })
+    const sourceHash = body.match(/^<!-- writer-state-source:([a-f0-9]{64}) -->$/m)?.[1]
+    blocks.push({ chapter, full: match[0], intact, changes, sourceHash })
   }
   return blocks
 }

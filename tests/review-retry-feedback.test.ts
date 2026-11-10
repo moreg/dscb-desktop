@@ -50,7 +50,7 @@ it('同步重试仅刷新索引和同步日志时，已知错误不会被误判�
   expect((await store()).prompt()).toContain('明确的章节错误')
 })
 
-it.each(['LLM_ABORTED', 'LLM_RATE_LIMIT', 'LLM_TIMEOUT', 'LONGFORM_CONTEXT_CHANGED: 正文已变化',
+it.each(['LLM_ABORTED', 'LLM_RATE_LIMIT', 'LLM_TIMEOUT', 'CODEX_MODEL_CAPACITY', 'CODEX_FIRST_TOKEN_TIMEOUT', 'LONGFORM_CONTEXT_CHANGED: 正文已变化',
   'fetch failed', 'CHAPTER_REPAIR_BUDGET', '临时断网', 'EACCES: permission denied'])('执行错误不变成改剧情指令：%s', async error => {
   await (await store()).record(new Error(error), '未完成的输出。')
   expect((await store()).prompt()).toBe('')

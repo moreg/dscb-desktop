@@ -126,6 +126,11 @@ export function expandCharacterAliasTerms(
   return [...result]
 }
 
+export function characterNamesInText(names: string[], text: string): string[] {
+  const normalized = text.toLocaleLowerCase()
+  return names.filter(name => name.trim() && containsLabel(normalized, name.trim()))
+}
+
 function containsLabel(text: string, label: string): boolean {
   const normalized = label.toLocaleLowerCase()
   let start = text.indexOf(normalized)

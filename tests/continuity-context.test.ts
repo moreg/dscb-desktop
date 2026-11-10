@@ -95,6 +95,31 @@ describe('长期连续性记忆', () => {
     expect(await context(30)).not.toContain('终于知道赵伯')
   })
 
+  it('同章不同知情记录保留双方原文，不按摘要顺序或倒叙位置确认身份', async () => {
+    const known = '门一关，阿遥才敢拆信。看清底下那方印，她认出替码头送信的是程舟。'
+    const memory = '她记起刚进城那天。连船钱都只差两文，她还当送信的只是个讨赏的孩子。'
+    const fact = (subject: string, value: string, evidence: string): ContinuityFact => ({
+      kind: 'knowledge', subject, object: '送信人身份', aspect: '知情程度', value, evidence
+    })
+    await save(11, `${known}\n\n${memory}`, [
+      fact('遥', '误以为是讨赏的孩子', memory),
+      fact('阿遥', '已认出程舟', known)
+    ])
+    await save(23, '程舟把船票摊开，遥这才知道他借了表兄的名字。', [
+      fact('遥', '已知程舟使用了表兄的名字', '程舟把船票摊开，遥这才知道他借了表兄的名字。')
+    ])
+    const scene = { text: '阿遥在码头等船。', characters: ['遥', '阿遥'], aliases: [{ name: '遥', aliases: ['阿遥'] }], props: [] }
+    const section = (value: string[]) => value.join('\n').split('## 本章人物知情边界')[1].split('- [')[0]
+    const old = section(await buildContinuityContext(dir, 23, scene))
+    expect(old.match(/同章记录有出入，知情状态待核实/g)).toHaveLength(2)
+    expect(old).toContain(`:1；原文：${known}`)
+    expect(old).toContain(`:3；原文：${memory}`)
+    expect(old).not.toContain('表兄')
+    const after = section(await buildContinuityContext(dir, 24, scene))
+    expect(after).toContain('已知程舟使用了表兄的名字')
+    expect(after).not.toContain('误以为是讨赏的孩子')
+  })
+
   it('旧书没有结构化概要时，专项检索独立保留早期转交和后续状态，不被重复战斗淹没', async () => {
     await new ProseRepo(dir).write(3, '陆安把青铜钥匙交给妹妹保管，自己空着手离开。')
     for (let n = 10; n <= 70; n++) await new ProseRepo(dir).write(n, `陆安调查青铜钥匙的线索，第${n}次挥刀逼退敌人。`)
@@ -146,6 +171,39 @@ describe('长期连续性记忆', () => {
     expect(trajectory).not.toContain('伪造已经放弃寻找')
     await new ProseRepo(dir).write(90, '陆安到了驿站，却没有找到任何信件。')
     expect((await buildContinuityContext(dir, 100, { ...query, includeTrajectory: true })).join('\n')).not.toContain('第90站找到信件')
+  })
+
+  it('带原文与行号召回远章人物状态，截掉未来变化并拒用改稿前的概要', async () => {
+    const injury = '林遥捂着右腕从石阶爬起来。那只手使不上力，撑船时只能用左手。'
+    const cost = '纸符烧尽前她还能替人挡一刀，烧尽以后，伤口便会转到她自己身上。'
+    const original = ['石阶上没点灯，驳船碰在石桩上，响了一声。', '', injury, '', cost].join('\n')
+    await new ProseRepo(dir).write(7, original, '摸黑过江')
+    const repo = new ChapterSummaryRepo(dir)
+    await repo.write({ schemaVersion: 1, chapterNumber: 7, sourceHash: hashProse(original), generatedAt: '',
+      events: [], openThreads: [], stateChanges: [
+        { text: '林遥右腕受伤，撑船只能用左手。', evidence: injury },
+        { text: '林遥的纸符烧尽后，替人挡刀的伤口会转到她身上。', evidence: cost },
+        { text: '林遥已经痊愈。', evidence: '林遥右腕上的伤口已经完全长好。' }
+      ] })
+    const healed = '拆掉夹板时，林遥把右手伸进井水里试了试，手腕已经转得动了。'
+    await save(63, healed, [])
+    const future = (await repo.read(63))!
+    await repo.write({ ...future, stateChanges: [{ text: '林遥拆掉夹板，右腕已经能转动。', evidence: healed }] })
+    const stateQuery = { text: '林遥在渡口准备撑船接人', characters: ['林遥'], aliases: [], props: [] }
+    const recalled = (await buildContinuityContext(dir, 63, stateQuery)).join('\n')
+    expect(recalled).toContain('第 7 章 · 正文/第007章 摸黑过江.md:3：林遥右腕受伤')
+    expect(recalled).toContain(`原文：${injury}`)
+    expect(recalled).toContain(`原文：${cost}`)
+    expect(recalled).not.toContain('已经痊愈')
+    expect(recalled).not.toContain('拆掉夹板')
+    const later = (await buildContinuityContext(dir, 64, stateQuery)).join('\n')
+    const stateSection = later.split('## 相关角色与场景状态')[1]
+    expect(stateSection).toContain(`原文：${healed}`)
+    expect(stateSection.indexOf(healed)).toBeLessThan(stateSection.indexOf(injury))
+    await new ProseRepo(dir).write(7, '林遥踩稳最后一级石阶，顺手从石桩上解下了缆绳。', '摸黑过江')
+    const rewritten = (await buildContinuityContext(dir, 63, stateQuery)).join('\n')
+    expect(rewritten).not.toContain(injury)
+    expect(rewritten).not.toContain('林遥的纸符烧尽后')
   })
 
   it('知情别名归一后以最近记录为准，独立预算不被主角大量道具挤掉', async () => {
