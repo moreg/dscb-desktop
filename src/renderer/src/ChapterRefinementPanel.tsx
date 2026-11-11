@@ -18,7 +18,7 @@ export function clampRefinementPanel(
   const h = Math.min(Math.max(200, height), Math.max(200, viewport.height - margin * 2))
   return {
     left: Math.min(Math.max(margin, left), Math.max(margin, viewport.width - w - margin)),
-    top: Math.min(Math.max(margin, top), Math.max(margin, viewport.height - 80)),
+    top: Math.min(Math.max(margin, top), Math.max(margin, viewport.height - h - margin)),
     width: w,
     height: h
   }
@@ -100,6 +100,11 @@ export default function ChapterRefinementPanel(props: Props) {
   const [notice, setNotice] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [view, setView] = useState<'changes' | 'full'>('changes')
+  const [tab, setTab] = useState<'setup' | 'result'>('setup')
+  function selectTab(next: 'setup' | 'result'): void {
+    setTab(next)
+    body.current?.scrollTo({ top: 0 })
+  }
   const [auto, setAuto] = useState(() => {
     try { return localStorage.getItem(`refinement:auto:${props.projectId}`) === '1' } catch { return false }
   })
@@ -130,6 +135,7 @@ export default function ChapterRefinementPanel(props: Props) {
     void window.api.loadRefinement(props.projectId, props.chapterNumber).then(value => {
       if (!alive || busyRef.current || requestRun !== runId.current) return
       setRecord(value)
+      selectTab(value?.candidate ? 'result' : 'setup')
       if (value) { setExcerpts(value.input.detection?.excerpts ?? ['']); setBaselineScore(value.input.detection?.score?.toString() ?? ''); setGoal(value.input.goal); setInstruction(value.input.instruction); setPlan(value.input.content === current.current.content ? value.input.plan ?? '' : '') }
     }).catch(e => { if (alive && requestRun === runId.current) setError(String(e.message || e)) })
     return () => { alive = false }
@@ -170,7 +176,7 @@ export default function ChapterRefinementPanel(props: Props) {
       if (!mounted.current || id !== runId.current) return
       if (!result.ok) setError(result.error?.includes('LLM_ABORTED') ? '已停止，正文未修改。' : result.error || '精修未完成')
       if (result.plan) setPlan(result.plan)
-      if (result.candidate) { setTestConfirmed(false); setTestStatus('flagged'); setTestScore(''); setTestNote(''); setRecord(result.candidate); setSource(input.content); setView('changes') }
+      if (result.candidate) { setTestConfirmed(false); setTestStatus('flagged'); setTestScore(''); setTestNote(''); setRecord(result.candidate); setSource(input.content); setView('changes'); selectTab('result') }
       current.current.onUsage()
     } catch (e) { if (mounted.current && id === runId.current) setError((e as Error).message) }
     finally {
@@ -287,7 +293,7 @@ export default function ChapterRefinementPanel(props: Props) {
     ++runId.current
     const kept = typeof record.adoptedContent === 'string'
     setWorking(true); setError('')
-    try { await window.api.discardRefinement(props.projectId, props.chapterNumber, record.id); if (mounted.current) { setRecord(null); setNotice(kept ? '已放弃剩余候选，已采用的改动保留在正文中。' : '已放弃候选，正文保持不变。') } }
+    try { await window.api.discardRefinement(props.projectId, props.chapterNumber, record.id); if (mounted.current) { setRecord(null); selectTab('setup'); setNotice(kept ? '已放弃剩余候选，已采用的改动保留在正文中。' : '已放弃候选，正文保持不变。') } }
     catch (e) { if (mounted.current) setError((e as Error).message) }
     finally { if (mounted.current) setWorking(false) }
   }
@@ -317,14 +323,34 @@ export default function ChapterRefinementPanel(props: Props) {
     <header className="refinement-header" onMouseDown={startPanelDrag} title="拖动标题栏移动窗口">
       <div><span className="refinement-eyebrow">第 {props.chapterNumber} 章 · 独立候选稿</span><h2>正文精修</h2></div>
       <button className="btn btn-sm" onClick={props.onClose} title="收起面板，候选记录会保留">收起</button></header>
+    <div className="refinement-tabs" role="tablist" aria-label="精修步骤" onKeyDown={event => {
+      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault()
+        const focused = (event.target as HTMLElement).id === 'refinement-tab-setup' ? 'setup' : 'result'
+        const next = event.key === 'Home' ? 'setup' : event.key === 'End' ? 'result' : focused === 'setup' ? 'result' : 'setup'
+        selectTab(next)
+        panelRef.current?.querySelector<HTMLButtonElement>(`#refinement-tab-${next}`)?.focus()
+      }
+    }}>
+      <button type="button" id="refinement-tab-setup" role="tab" aria-selected={tab === 'setup'} aria-controls="refinement-setup"
+        tabIndex={tab === 'setup' ? 0 : -1} onClick={() => selectTab('setup')}>精修设置</button>
+      <button type="button" id="refinement-tab-result" role="tab" aria-selected={tab === 'result'} aria-controls="refinement-result"
+        tabIndex={tab === 'result' ? 0 : -1} onClick={() => selectTab('result')}>候选对照</button>
+    </div>
     <div className="refinement-body" ref={body}>
-      <p className="desc">原文保留，采用后才替换。默认保留剧情事实、人物关系和章节结局。</p>
+      {busy && <div className="refinement-progress" role="status"><span><i className="refinement-activity" aria-hidden="true" />{stream.current ? STAGES[stage] : '正在处理'} · {elapsed} 秒</span>
+        {stream.current && <button className="btn btn-sm" onClick={() => void stream.current?.abort().catch(e => setError(e.message))}>停止</button>}</div>}
+      {error && <div className="refinement-warning" role="alert">{error}</div>}
+      {notice && <div className="refinement-notice" role="status">{notice}</div>}
+      {(sourceChanged || stale) && <div className="refinement-warning" role="status">正文已变化，旧候选不能直接采用。<button className="btn btn-sm" disabled={busy} onClick={() => { setSource(props.content); setPlan(''); selectTab('setup'); setNotice('已使用当前正文，请重新生成候选。') }}>使用当前正文重新开始</button></div>}
+      <section id="refinement-setup" role="tabpanel" aria-labelledby="refinement-tab-setup" hidden={tab !== 'setup'}>
+      <div className="refinement-intro"><strong>让表达更好，保留故事本身</strong><p>默认保留剧情事实、人物关系和章节结局。先生成独立候选，对照满意后再采用。</p></div>
       <fieldset disabled={busy || props.disabled} className="refinement-controls"><legend>本次精修</legend>
-        <label>范围<select disabled={goal === 'detection'} value={goal === 'detection' ? 'chapter' : scope} onChange={e => { setScope(e.target.value as typeof scope); setPlan('') }}>
+        <div className="refinement-form-row"><label>范围<select disabled={goal === 'detection'} value={goal === 'detection' ? 'chapter' : scope} onChange={e => { setScope(e.target.value as typeof scope); setPlan('') }}>
           <option value="chapter">整章 · {source.length} 字符</option><option value="selection" disabled={!props.selection}>选区{props.selection ? ` · ${props.selection.end - props.selection.start} 字符` : '（请先选中文字）'}</option></select></label>
         <label>主要目标<select value={goal} onChange={e => { setGoal(e.target.value as RefinementGoal); setPlan('') }}>
-          {Object.entries(REFINEMENT_GOALS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
-        <p className="desc">{REFINEMENT_GOALS[goal].description}</p>
+          {Object.entries(REFINEMENT_GOALS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label></div>
+        <p className="refinement-goal-hint">{REFINEMENT_GOALS[goal].description}</p>
         {goal === 'detection' && <section aria-label="朱雀标黄反馈">
           <p className="desc">从当前正文逐字复制标黄片段，每个输入框一段，支持多个相隔片段。其余文字逐字保留。每个片段至少 8 字符，重复出现的短句请附上相邻原文。</p>
           {excerpts.map((excerpt, index) => <label key={index}>标黄原文 {index + 1}<textarea className="textarea" rows={3} maxLength={40000} value={excerpt}
@@ -335,26 +361,24 @@ export default function ChapterRefinementPanel(props: Props) {
         </section>}
         <label>补充要求{goal !== 'custom' && '（可选）'}<textarea className="textarea" rows={3} maxLength={10000} value={instruction} onChange={e => { setInstruction(e.target.value); setPlan('') }} placeholder="例如：保留双方和解的结果，减少直白解释，让试探更自然。" /></label>
         {plan && <label>修改方案 · 可编辑，生成候选即按此方案执行<textarea className="textarea" rows={6} maxLength={20000} value={plan} onChange={e => setPlan(e.target.value)} /></label>}
-        <div className="refinement-actions"><button className="btn" onClick={() => void run('plan')} disabled={sourceChanged}>先看修改方案</button>
-          <button className="btn btn-primary" onClick={() => void run('generate')} disabled={sourceChanged || (goal === 'scene' && !plan.trim())}>{record ? '重新生成候选' : '生成精修候选'}</button></div>
+        {goal === 'scene' && !plan.trim() && <p className="refinement-goal-hint">场景精修需要先查看修改方案，再生成候选。</p>}
       </fieldset>
-      {(sourceChanged || stale) && <div className="refinement-warning" role="status">正文已变化，旧候选不能直接采用。<button className="btn btn-sm" disabled={busy} onClick={() => { setSource(props.content); setPlan(''); setNotice('已使用当前正文，请重新生成候选。') }}>使用当前正文重新开始</button></div>}
+      <details className="refinement-preferences"><summary>自动精修设置<span>{auto ? '已开启' : '未开启'}</span></summary>
       <label className="refinement-auto"><input type="checkbox" checked={auto} onChange={e => {
         setAuto(e.target.checked)
         try { localStorage.setItem(`refinement:auto:${props.projectId}`, e.target.checked ? '1' : '0') } catch { setError('无法保存自动精修偏好，本次设置仅在当前页面有效。') }
       }} />完整单章写完后，为未通过表达验收的正文自动生成候选（额外调用模型，手动采用）</label>
-      <p className="desc">最多一次精修、一次补救。不会再次进入完整自动去 AI 味流程。</p>
-      {busy && <div className="refinement-progress" role="status"><span>{stream.current ? STAGES[stage] : '正在处理'} · {elapsed} 秒</span>
-        {stream.current && <button className="btn btn-sm" onClick={() => void stream.current?.abort().catch(e => setError(e.message))}>停止</button>}</div>}
-      {error && <div className="refinement-warning" role="alert">{error}</div>}
-      {notice && <div className="refinement-notice" role="status">{notice}</div>}
+      <p className="desc">最多一次精修、一次补救。自动候选仍需手动采用。</p></details>
+      </section>
+      <section id="refinement-result" role="tabpanel" aria-labelledby="refinement-tab-result" hidden={tab !== 'result'}>
+      {!record && <div className="refinement-empty"><span className="refinement-empty-mark" aria-hidden="true">文</span><h3>候选将在这里展示</h3><p>设置精修目标并生成候选后，可逐条对照改动、查看核验结果，再决定是否采用。</p><button className="btn" onClick={() => selectTab('setup')}>前往精修设置</button></div>}
       {record && <section className="refinement-result">
-        <div className="refinement-result-heading"><h3>候选与核验</h3><span className={`chip ${record.status === 'ready' ? 'refinement-passed' : ''}`}>{STATUS[record.status]}</span></div>
+        <div className="refinement-result-heading"><h3>候选与核验</h3><span className={`refinement-status refinement-status-${record.status}`}>{STATUS[record.status]}</span></div>
         <p className="desc">{REFINEMENT_GOALS[record.input.goal].label} · {record.input.goal === 'detection' ? `${record.input.detection?.excerpts.length ?? 0} 个标黄片段，其余文字保留` : record.input.selection ? '选区' : '整章'} · 已修订 {record.attempts} 次</p>
-        {!!record.changes.length && <ul>{record.changes.map((change, i) => <li key={i}>{change}</li>)}</ul>}
+        {!!record.changes.length && <details className="refinement-summary"><summary>修改摘要 <span>{record.changes.length} 项</span></summary><ul>{record.changes.map((change, i) => <li key={i}>{change}</li>)}</ul></details>}
         {record.error && <div className="refinement-warning">{record.error}</div>}
         {record.verdict && <div className="refinement-verdict"><strong>独立核验</strong><p>{record.verdict.assessment}</p>
-          <p>事实保留：{record.verdict.factsPreserved ? '通过' : '未通过'} · 目标达成：{record.verdict.goalMet ? '通过' : '未通过'}</p>
+          <div className="refinement-checks"><span className={record.verdict.factsPreserved ? 'is-passed' : 'is-failed'}>事实保留 <b>{record.verdict.factsPreserved ? '通过' : '未通过'}</b></span><span className={record.verdict.goalMet ? 'is-passed' : 'is-failed'}>目标达成 <b>{record.verdict.goalMet ? '通过' : '未通过'}</b></span></div>
           {!!record.verdict.issues.length && <ul>{record.verdict.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul>}
           <details><summary>查看核验依据</summary>{record.verdict.evidence.map((e, i) => <div key={i}><p>原文：{e.before}</p><p>候选：{e.after}</p><p className="desc">{e.reason}</p></div>)}</details>
         </div>}
@@ -374,10 +398,14 @@ export default function ChapterRefinementPanel(props: Props) {
             <button className="btn" disabled={!testConfirmed || busy} onClick={() => void recordDetection()}>保存人工复测结果</button>
           </fieldset>
         </section>}
-        {record.candidate && <><div className="refinement-actions" aria-label="对比视图">
+        <div className="refinement-result-tools">
+          <button className="btn btn-sm" disabled={busy} onClick={() => { selectTab('setup'); setNotice('修改目标或补充要求后重新生成。新一轮仍以原文为事实基线。') }}>继续调整</button>
+          {typeof record.adoptedContent === 'string' && record.status !== 'accepted' && <button className="btn btn-sm" disabled={!canUndo} onClick={() => void commit(true)}>撤销已采用条目</button>}
+        </div>
+        {record.candidate && <><div className="refinement-view-switch" role="group" aria-label="对比视图">
           <button className="btn btn-sm" aria-pressed={view === 'changes'} onClick={() => setView('changes')}>修改位置</button><button className="btn btn-sm" aria-pressed={view === 'full'} onClick={() => setView('full')}>完整对比</button></div>
           {view === 'changes' ? <><p className="desc">显示前 {hunks.length} 处改动，完整内容见“完整对比”。{record.input.goal === 'detection' ? '标黄精修须通过核验后整体采用；需要缩小范围时请调整片段后重新生成。' : '每条可单独采用或不采纳，核验未通过时也可以单条采用。'}</p>{hunks.length ? hunks.map((hunk, i) => <details className="refinement-diff" key={`${hunk.line}:${hunk.index}:${i}`} open={i === 0}>
-            <summary><span>改动 {i + 1}</span>{record.input.goal !== 'detection' && (record.status === 'ready' || record.status === 'rejected') && <span className="refinement-actions">
+            <summary><span className="refinement-diff-title">改动 {i + 1}<small>原文第 {hunk.line} 段</small></span>{record.input.goal !== 'detection' && (record.status === 'ready' || record.status === 'rejected') && <span className="refinement-actions">
               <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`不采纳改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void rejectHunk(i) }}>不采纳此条</button>
               <button type="button" className="btn btn-sm" disabled={!canPickHunk} aria-label={`采用改动 ${i + 1}`} onClick={event => { event?.preventDefault(); event?.stopPropagation(); void commit(false, i) }}>采用此条</button>
             </span>}</summary>
@@ -385,11 +413,16 @@ export default function ChapterRefinementPanel(props: Props) {
           </details>) : <p>没有剩余改动，候选与当前正文相同。</p>}</>
             : <div className="refinement-full"><section><h4>原文</h4><pre>{record.adoptedContent ?? record.input.content}</pre></section><section><h4>候选</h4><pre>{record.candidate}</pre></section></div>}</>}
       </section>}
+      </section>
     </div>
-    <footer className="refinement-footer"><span className="desc">{record?.input.goal === 'detection' ? '标黄精修核验通过后整体采用，朱雀结果以手动复测为准。' : '每条改动都能单独采用或不采纳，不采纳时保留该处原文。整章采用需核验通过。'}</span><div className="refinement-actions">
+    <footer className="refinement-footer">
+      <p className="refinement-footer-note">{tab === 'setup' ? '原文保留，生成候选不会覆盖正文。' : stale ? '正文已变化，请重新精修后采用。' : record?.status === 'accepted' ? '候选已保存，可撤销本次精修。' : record?.input.goal === 'detection' ? '标黄精修需整体核验通过；朱雀结果以人工复测为准。' : '逐条采用由你决定，整章采用须核验通过。'}</p>
+      <div className="refinement-actions refinement-setup-actions" hidden={tab !== 'setup'}>
+        <button className="btn" onClick={() => void run('plan')} disabled={busy || props.disabled || sourceChanged}>先看修改方案</button>
+        <button className="btn btn-primary" onClick={() => void run('generate')} disabled={busy || props.disabled || sourceChanged || (goal === 'scene' && !plan.trim())}>{record ? '重新生成候选' : '生成精修候选'}</button>
+      </div>
+      <div className="refinement-actions refinement-adopt-actions" hidden={tab !== 'result' || !record}>
       {record?.status === 'accepted' ? <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销本次精修</button> : <>
-        {typeof record?.adoptedContent === 'string' && <button className="btn" disabled={!canUndo} onClick={() => void commit(true)}>撤销已采用条目</button>}
-        {record && <button className="btn" disabled={busy} onClick={() => { body.current?.scrollTo({ top: 0, behavior: 'smooth' }); setNotice('修改目标或补充要求后重新生成。新一轮仍以原文为事实基线。') }}>继续调整</button>}
         <button className="btn" disabled={!record || busy || props.disabled} onClick={() => void discard()}>{typeof record?.adoptedContent === 'string' ? '放弃剩余候选' : '放弃候选'}</button>
         <button className="btn btn-primary" disabled={!canAdopt} onClick={() => void commit(false)}>{typeof record?.adoptedContent === 'string' ? '采用剩余并保存' : '采用并保存'}</button></>}
     </div></footer>

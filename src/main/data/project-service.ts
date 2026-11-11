@@ -24,6 +24,8 @@ import { toFolderName } from './folder-name'
 import { extractProjectPackage, writeProjectPackage } from './project-package'
 import { writeProseImport, type ProseImportPlan } from './prose-import'
 import type { ProseImportResult } from '../../shared/prose-import'
+import { withFileLock } from './file-lock'
+import { ProjectFolderInUseError, renameProjectDirectory } from './project-directory-rename'
 
 export { toFolderName } from './folder-name'
 
@@ -120,10 +122,17 @@ export class ProjectService {
   }
 
   /**
-   * 保存书名和简介。书名会同步成同级文件夹名，并写回大纲标题与核心设定。
+   * 保存书名和简介。尝试同步同级文件夹名，占用时先原地保存并标记待同步。
    * 文件夹名不能用的符号换成全角，返回的 name 就是最终文件夹名。
    */
   async updateProjectInfo(
+    projectId: string,
+    info: { name?: string; description?: string }
+  ): Promise<ProjectData> {
+    return withFileLock(`project-info:${projectId}`, () => this.saveProjectInfo(projectId, info))
+  }
+
+  private async saveProjectInfo(
     projectId: string,
     info: { name?: string; description?: string }
   ): Promise<ProjectData> {
@@ -136,10 +145,20 @@ export class ProjectService {
     if (!folderName) throw new Error('这个名称不能用作文件夹名')
 
     const currentDir = await this.resolveDir(projectId)
-    const nextDir = await this.renameProjectFolder(projectId, currentDir, folderName)
+    let nextDir = currentDir
+    let folderRenamePending = false
+    try {
+      nextDir = await this.renameProjectFolder(projectId, currentDir, folderName)
+    } catch (error) {
+      // Explorer 等程序的目录句柄会阻止改名，但通常不影响目录内的文件写入。
+      // 只降级处理目录占用；冲突、路径错误和实际写入失败仍必须报错。
+      if (!(error instanceof ProjectFolderInUseError) || !(await pathExists(currentDir))) throw error
+      folderRenamePending = true
+    }
     try {
       const next = await this.updateProjectData(projectId, {
         name: folderName,
+        folderRenamePending,
         ...(info.description !== undefined ? { description: info.description } : {})
       })
       await writeFolderTitle(nextDir, folderName)
@@ -173,6 +192,7 @@ export class ProjectService {
     try {
       await renameDir(currentDir, target)
     } catch (err) {
+      if (err instanceof ProjectFolderInUseError) throw err
       const code = (err as NodeJS.ErrnoException).code
       if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
         throw new Error('文件夹正在被占用，请关掉正在使用这本书的程序后再保存', { cause: err })
@@ -326,19 +346,7 @@ async function renameDir(from: string, to: string): Promise<void> {
 }
 
 async function renameDirOnce(from: string, to: string): Promise<void> {
-  let last: unknown
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      await fs.rename(from, to)
-      return
-    } catch (err) {
-      last = err
-      const code = (err as NodeJS.ErrnoException).code
-      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err
-      await new Promise((resolve) => setTimeout(resolve, 80 * (attempt + 1)))
-    }
-  }
-  throw last
+  await renameProjectDirectory(from, to)
 }
 
 /** 纯数字、uuid 这类目录名不是书名，扫描时不拿来覆盖大纲标题。 */

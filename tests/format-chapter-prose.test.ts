@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { formatChapterProse, joinContinuation, needsChapterProseFormat, separateDialogueInterruption } from '../src/shared/format-chapter-prose'
+import { findPublishedChapterLeak, stripPublishedChapterRefs } from '../src/shared/strip-chapter-meta'
 
 describe('formatChapterProse：最小格式化', () => {
   it.each([
@@ -42,9 +43,38 @@ describe('formatChapterProse：最小格式化', () => {
     expect(formatChapterProse('第九章\n他推开门。')).toBe('他推开门。')
     expect(formatChapterProse('话说完了。\n\n下章见。')).toBe('话说完了。')
     expect(formatChapterProse('“这本书还没完，未完待续是什么意思？”她问。')).toBe('“这本书还没完，未完待续是什么意思？”她问。')
-    expect(formatChapterProse('话说完了。下章见。')).toBe('话说完了。下章见。')
     expect(formatChapterProse('他说：“下章见。”')).toBe('他说：“下章见。”')
     expect(formatChapterProse('正文。\n\n（未完待续）')).toBe('正文。')
+    // 行内附语存在歧义，交给作者核对，不能连正常正文一起删。
+    expect(formatChapterProse('话说完了。下章见。')).toBe('话说完了。下章见。')
+  })
+
+  it.each([
+    '“未完待续。”', '“下章见。”', '「下章见！」', '"未完待续。"',
+    '他在纸上写下未完待续四个字。', '告别时，她说下章见。',
+    '“别改这三个字：\n下章见\n”', '“他留下四个字：\n未完待续',
+    '"这是暗号：\n下章见', '未完待续\n她把这四个字划掉了。',
+    '信上写道：\n\n未完待续', '纸上只有四个字：\n未完待续', '她说道：\n下章见',
+    '碑上刻着“未完待续”，，墨迹还没干。\n\n“下章见。”'
+  ])('保留对白和故事内使用的附语，检查与清理保持一致：%s', source => {
+    expect(findPublishedChapterLeak(source)).toBeNull()
+    expect(stripPublishedChapterRefs(source)).toBe(source)
+    expect(formatChapterProse(source)).toBe(source)
+  })
+
+  it.each(['未完待续', '下章见。', '（未完待续）', '(下章见)', '【未完待续】', '请看下回分解！'])(
+    '仅移除文末独立出版附语：%s', marker => {
+      const source = `“下章见。”\n\n她收好了信。\n\n${marker}\n`
+      expect(findPublishedChapterLeak(source)).not.toBeNull()
+      const cleaned = formatChapterProse(source)
+      expect(cleaned).toBe('“下章见。”\n\n她收好了信。')
+      expect(findPublishedChapterLeak(cleaned)).toBeNull()
+      expect(formatChapterProse(cleaned)).toBe(cleaned)
+    }
+  )
+
+  it('连续附语可移除，不顺带改变正文的重复标点', () => {
+    expect(formatChapterProse('“下章见。。”\n\n未完待续\n\n下章见。')).toBe('“下章见。。”')
   })
 
 })
@@ -64,6 +94,16 @@ describe('joinContinuation', () => {
     expect(joinContinuation('他说这件事', '恐怕没那么简单。')).toBe(
       '他说这件事恐怕没那么简单。'
     )
+  })
+
+  it('句末标点在未闭合对白内时直接接完发言', () => {
+    expect(joinContinuation('“你去吗？', '”她问。')).toBe('“你去吗？”她问。')
+    expect(joinContinuation('她问：「你听见他说『上船！』', '了吗？」')).toBe('她问：「你听见他说『上船！』了吗？」')
+    expect(joinContinuation('"Are you going?', '" she asked.')).toBe('"Are you going?" she asked.')
+    expect(joinContinuation('她问：「你听见他说『上船！』了吗？」', '他点头。'))
+      .toBe('她问：「你听见他说『上船！』了吗？」\n\n他点头。')
+    expect(joinContinuation('　　她问：“等水退了，\r\n你会过来吗？', '”岸边没动静。'))
+      .toBe('　　她问：“等水退了，\r\n你会过来吗？”岸边没动静。')
   })
 
   it('英文词间已有的接缝空格保留，词内断点仍直接接续', () => {

@@ -301,7 +301,7 @@ export const MOBILE_PAGE = String.raw`<!doctype html>
     try {
       const result = await request(projectPath('/chapters/' + chapterNumber + '?action=ai'), { method: 'POST', body: JSON.stringify({mode: mode, content: baseContent, instruction: instruction}), signal:controller.signal }, 180000);
       if (ticket !== state.aiId || state.view !== 'editor' || !state.chapter || state.project.id !== projectId || state.chapter.meta.chapterNumber !== chapterNumber) return;
-      state.aiProposal = { mode: result.mode, text: result.text || '', baseContent:baseContent };
+      state.aiProposal = { mode: result.mode, text: result.text || '', fullContent: result.fullContent, baseContent:baseContent };
     } catch (error) {
       if (ticket === state.aiId && !controller.signal.aborted) window.alert(error.message);
     } finally {
@@ -319,9 +319,16 @@ export const MOBILE_PAGE = String.raw`<!doctype html>
 
   function applyAiProposal() {
     if (!state.aiProposal || !state.aiProposal.text) return;
-    if (state.content !== state.aiProposal.baseContent && !window.confirm('生成期间正文有新的修改。采用结果可能覆盖或重复这些修改，确定采用吗？')) return;
-    if (state.aiProposal.mode === 'continue') state.content = state.content.replace(/\s+$/, '') + '\n\n' + state.aiProposal.text.trim();
-    else state.content = state.aiProposal.text.trim();
+    if (state.content !== state.aiProposal.baseContent || state.conflict) {
+      window.alert('生成期间正文已变化，请按当前版本重新生成。');
+      return;
+    }
+    const candidate = state.aiProposal.mode === 'continue' ? state.aiProposal.fullContent : state.aiProposal.text;
+    if (typeof candidate !== 'string') {
+      window.alert('续写预览不完整，请重新生成。');
+      return;
+    }
+    state.content = candidate;
     state.aiProposal = null;
     state.showAi = false;
     contentChanged();

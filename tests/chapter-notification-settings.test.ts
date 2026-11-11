@@ -39,3 +39,18 @@ it('预加载接口读写相同设置通道', async () => {
   expect(await api.setChapterCompletionNotification(false)).toBe(false)
   expect(invoke.mock.calls).toEqual([['settings:getChapterCompletionNotification'], ['settings:setChapterCompletionNotification', false]])
 })
+
+it('自动去 AI 味在旧配置中默认关闭，并通过预加载和 IPC 持久化开关', async () => {
+  await writeFile(file, JSON.stringify({ autoPostWritePipeline: 'full' }))
+  const invoke = (channel: string, input?: unknown) => handlers.get(channel)!({}, input)
+  const api = createRendererApi({ invoke, on: vi.fn(), removeListener: vi.fn() })
+  expect(await api.getAutoDeslopAfterContinue()).toBe(false)
+  expect(await api.setAutoDeslopAfterContinue(true)).toBe(true)
+  expect((await new SettingsRepository(file).get()).autoDeslopAfterContinue).toBe(true)
+  await expect(invoke('settings:setAutoDeslopAfterContinue', 'false')).rejects.toThrow()
+  expect(await api.getAutoDeslopAfterContinue()).toBe(true)
+  expect(await api.setAutoDeslopAfterContinue(false)).toBe(false)
+  expect(await new SettingsRepository(file).get()).toMatchObject({
+    autoDeslopAfterContinue: false, autoPostWritePipeline: 'full'
+  })
+})

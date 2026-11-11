@@ -18,6 +18,29 @@ import type {
   FanqieMultiBookProgress,
   FanqieIdeaOpeningChapter
 } from './fanqie-chart'
+import type {
+  AdoptScriptCandidateInput,
+  AdoptScriptCandidateResult,
+  BuildStudioPromptPackageInput,
+  BuildStudioPromptPackageResult,
+  CreateScriptProjectInput,
+  ExportStudioMarkdownInput,
+  ExportStudioMarkdownResult,
+  GenerateStudioScriptInput,
+  GenerateStudioScriptResult,
+  GenerateStudioStoryboardInput,
+  GenerateStudioStoryboardResult,
+  GenerationRun,
+  ListStudioRunsInput,
+  RecoverStudioRunsInput,
+  RecoverStudioRunsResult,
+  SaveScriptProjectInput,
+  SaveScriptProjectResult,
+  SaveScriptStoryboardInput,
+  SaveScriptStoryboardResult,
+  ScriptProject,
+  ScriptProjectSummary
+} from './script-studio'
 
 export interface ProjectMeta {
   id: string
@@ -183,6 +206,8 @@ export interface ProjectData {
   name: string
   genre?: string
   defaultStyleProfileId?: string
+  /** 目录被占用时先保存作品信息，下次保存书名时重试同步文件夹名。 */
+  folderRenamePending?: boolean
   description?: string
   openingChapters?: FanqieIdeaOpeningChapter[]
   /** 已采用脑洞的完整来源机制与长篇展开，独立保存以免简介限长截断。 */
@@ -882,7 +907,9 @@ export interface RendererApi {
     /** 按本章节奏临时调整本次续写的生成强度。 */
     autoStrength?: boolean,
     /** 只修复并核对已保存稿，不生成续写。 */
-    repairOnly?: boolean
+    repairOnly?: boolean,
+    /** 本次续写的自动去 AI 味选项，省略时使用全局设置。 */
+    autoDeslopAfterContinue?: boolean
   ) => ChapterStreamHandle
   getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterStreamResult['repairCandidate'] | null>
   /** 按要求重写 · 先出修改建议（不改正文） */
@@ -1241,6 +1268,8 @@ export interface RendererApi {
   getAutoMemorySync: () => Promise<boolean>
   getChapterCompletionNotification: () => Promise<boolean>
   setChapterCompletionNotification: (enabled: boolean) => Promise<boolean>
+  getAutoDeslopAfterContinue: () => Promise<boolean>
+  setAutoDeslopAfterContinue: (enabled: boolean) => Promise<boolean>
   setAutoMemorySync: (enabled: boolean) => Promise<boolean>
   /**
    * 续写成功后自动后处理：
@@ -1450,6 +1479,26 @@ export interface RendererApi {
     chapterLimit?: number,
     onProgress?: (progress: FanqieMultiBookProgress) => void
   ) => StreamHandleOf<Record<string, number>>
+
+  // ---- 剧本创作工作台（小说 → 剧本 → 分镜 → 视频提示词）----
+  listScriptProjects(): Promise<ScriptProjectSummary[]>
+  createScriptProject(input: CreateScriptProjectInput): Promise<ScriptProject>
+  getScriptProject(id: string): Promise<ScriptProject>
+  saveScriptProject(input: SaveScriptProjectInput): Promise<SaveScriptProjectResult>
+  adoptScriptCandidate(input: AdoptScriptCandidateInput): Promise<AdoptScriptCandidateResult>
+  saveScriptStoryboard(input: SaveScriptStoryboardInput): Promise<SaveScriptStoryboardResult>
+  generateStudioScript(
+    input: GenerateStudioScriptInput,
+    onToken: (token: string, done: boolean) => void
+  ): StreamHandleOf<GenerateStudioScriptResult>
+  generateStudioStoryboard(
+    input: GenerateStudioStoryboardInput,
+    onToken: (token: string, done: boolean) => void
+  ): StreamHandleOf<GenerateStudioStoryboardResult>
+  buildStudioPromptPackage(input: BuildStudioPromptPackageInput): Promise<BuildStudioPromptPackageResult>
+  exportStudioMarkdown(input: ExportStudioMarkdownInput): Promise<ExportStudioMarkdownResult>
+  listStudioRuns(input: ListStudioRunsInput): Promise<GenerationRun[]>
+  recoverStudioRuns(input: RecoverStudioRunsInput): Promise<RecoverStudioRunsResult>
 }
 
 export interface Character {

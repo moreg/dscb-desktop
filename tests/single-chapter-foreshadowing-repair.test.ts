@@ -9,6 +9,7 @@ import { WriteService } from '../src/main/data/write-service'
 import { WriteFlowService } from '../src/main/data/write-flow-service'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { createWritingProject } from './helpers/writing-project'
+import { ForeshadowingRepairRejectedError } from '../src/main/data/foreshadowing-repair'
 import type { LlmService } from '../src/main/data/llm-service'
 import type { SettingsRepository } from '../src/main/data/settings-repository'
 
@@ -73,6 +74,27 @@ describe('单章续写的交稿前伏笔补写', () => {
     const result = await service.repairChapterForeshadowings(projectId, 1, prose)
     expect(result).toMatchObject({ content: prose, report: { status: 'unchanged' } })
     expect(generate).not.toHaveBeenCalled()
+  })
+
+  it('单章手动重试将上次失败的两轮核验反馈传回补写模型', async () => {
+    vi.spyOn(flow, 'checkOutlineStream').mockResolvedValue(missing)
+    const bad = ['父亲承认自己就是三皇子。', '林远已经听清父亲的皇族身份。']
+    generate.mockReset()
+      .mockResolvedValueOnce(JSON.stringify({ insertions: [{ after: 1, text: bad[0] }] }))
+      .mockResolvedValueOnce(JSON.stringify({ insertions: [{ after: 1, text: bad[1] }] }))
+      .mockResolvedValue(patch)
+    vi.spyOn(flow, 'reviewForeshadowingRepair')
+      .mockRejectedValueOnce(new ForeshadowingRepairRejectedError([{ message: '提前揭晓父亲身份', evidence: bad[0] }]))
+      .mockRejectedValueOnce(new ForeshadowingRepairRejectedError([{ message: '不能让林远知道皇族身份', evidence: bad[1] }]))
+      .mockResolvedValue({ chapterNumber: 1, hasOutline: true, checked: true, passed: true, diffs: [] })
+    const first = await service.repairChapterForeshadowings(projectId, 1, prose)
+    expect(first.report.status).toBe('failed')
+    const retried = await service.repairChapterForeshadowings(projectId, 1, prose)
+    expect(retried.report.status).toBe('applied')
+    expect(generate.mock.calls[2][0]).toContain('提前揭晓父亲身份')
+    expect(generate.mock.calls[2][0]).toContain('不能让林远知道皇族身份')
+    expect(retried.content).toContain(addition)
+    expect(await new ProseRepo(dir).read(1)).toBe('磁盘中尚未采用的旧正文。')
   })
 
   it('整章漏掉关键剧情时不能当作伏笔无遗漏而放行同步', async () => {

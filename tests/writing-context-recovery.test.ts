@@ -227,8 +227,8 @@ describe('automatic writing context recovery', () => {
     expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'chapter')).toBe(false)
   })
 
-  it('creates a missing outline and continues writing without a manual resume', async () => {
-    await service.generateChapterStream(id, 1)
+  it('prepares a missing outline for the batch writing flow without a manual resume', async () => {
+    await service.generateChapterStream(id, 1, { prepareChapterOutline: true })
     expect((await new DetailedOutlineMdRepo(dir).readChapter(1))?.plotSummary).toContain('守门')
     expect(chapterPrompt()).toContain('守门')
     expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'chapter')).toHaveLength(1)
@@ -238,7 +238,7 @@ describe('automatic writing context recovery', () => {
     generate.mockImplementation(async (_prompt, opts) => opts?.meta?.feature === 'longformGuard'
       ? JSON.stringify({completed:true,checked:['mainline','knowledge','thread','item','boundary'],findings:[]})
       : opts?.meta?.feature === 'outline-generate' ? '不是 JSON' : '林远守在山门。')
-    await service.generateChapterStream(id, 1)
+    await service.generateChapterStream(id, 1, { prepareChapterOutline: true })
     expect(chapterPrompt()).toContain('自动补齐写作安排')
     expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'outline-generate')).toHaveLength(3)
     expect(generate.mock.calls.filter(call => call[1]?.meta?.feature === 'chapter')).toHaveLength(1)
@@ -264,7 +264,7 @@ describe('automatic writing context recovery', () => {
   it('rebuilds a missing previous outline from verified prose instead of inventing history', async () => {
     await plan(2)
     await new ProseRepo(dir).write(1, previous)
-    await service.generateChapterStream(id, 2)
+    await service.generateChapterStream(id, 2, { prepareChapterOutline: true })
     expect((await new DetailedOutlineMdRepo(dir).readChapter(1))?.plotSummary).toContain('交出钥匙')
     expect(generate.mock.calls.some(call => call[1]?.meta?.feature === 'outline-generate')).toBe(false)
   })

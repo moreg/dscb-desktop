@@ -62,7 +62,7 @@ describe('朱雀手动反馈的定向精修', () => {
     const record = await service.generate(input)
     expect(record.status).toBe('rejected')
     expect(record.verdict?.issues.join('')).toContain('全部标黄片段')
-    expect(model).toHaveBeenCalledTimes(4)
+    expect(model).toHaveBeenCalledTimes(3)
     await expect(service.commit(input.projectId, 1, record.id, original)).rejects.toThrow('尚未通过验收')
     await expect(service.commit(input.projectId, 1, record.id, original, false, 0)).rejects.toThrow('整体核验')
     await expect(service.rejectHunk(input.projectId, 1, record.id, original, 0)).rejects.toThrow('整体核验')

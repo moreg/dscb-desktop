@@ -127,6 +127,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
         existingText?: string
         autoStrength?: boolean
         repairOnly?: boolean
+        autoDeslopAfterContinue?: boolean
         requestId: string
       }
     ) => {
@@ -142,6 +143,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
             existingText: z.string().optional(),
             autoStrength: z.boolean().optional(),
             repairOnly: z.boolean().optional(),
+            autoDeslopAfterContinue: z.boolean().optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -150,6 +152,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
           const result = await service.deliverChapter(validated.projectId, validated.chapterNumber, validated.styleProfileId, {
             tempContext: validated.tempContext, existingText: validated.existingText,
             autoStrength: validated.autoStrength === true, repairOnly: validated.repairOnly === true, signal,
+            autoDeslopAfterContinue: validated.autoDeslopAfterContinue,
             onGenerationStage: stage => safeSend(win, 'write:generationStage', { requestId: validated.requestId, stage }),
             onToken: token => safeSend(win, 'llm:token', { requestId: validated.requestId, token, done: false })
           })

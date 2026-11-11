@@ -55,6 +55,15 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     registerWriteIpc(fake, notify)
   })
 
+  it.each([true, false])('续写 IPC 将本次自动去 AI 味选项 %s 交给写作流程', async enabled => {
+    generate.mockResolvedValue('生成的正文。')
+    const result = await handlers.get('write:generateChapter')!({ sender: {} }, {
+      projectId: 'project-1', chapterNumber: 1, autoDeslopAfterContinue: enabled, requestId: 'continue-deslop'
+    })
+    expect(result.ok).toBe(true)
+    expect(generate).toHaveBeenCalledWith('project-1', 1, undefined, expect.objectContaining({ autoDeslopAfterContinue: enabled }))
+  })
+
   it('重写检查超时仍返回失败和完整待复核稿，不发送成功完成事件', async () => {
     adjust.mockRejectedValue(new ChapterRewriteReviewError('已完整生成的新稿。', new Error('LONGFORM_REVIEW_INCOMPLETE: LLM_TIMEOUT')))
     expect(await handlers.get('write:adjustChapter')!({ sender: {} }, {

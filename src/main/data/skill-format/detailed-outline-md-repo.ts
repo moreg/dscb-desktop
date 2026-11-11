@@ -337,8 +337,8 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
   const { fields, order } = parseBoldFields(body)
   const writingRequirementTemplateId = toStr(fields.get('写作要求模板'))
   const writingRequirementCustomText = toMultilineStr(fields.get('自定义补充要求'))
-  const legacyWritingRequirements =
-    toMultilineStr(fields.get('本章写作要求')) ?? toMultilineStr(fields.get('写作要求'))
+  const legacyWritingRequirements = [fields.get('本章写作要求'), fields.get('写作要求')]
+    .map(toMultilineStr).filter(Boolean).join('\n')
 
   // 键名按前缀取：技能模板实际会写成「节奏标注（必填，对齐节奏图谱）」，严格等值匹配会整节读不到
   const rhythmAnn = toArr(findByPrefix(fields, '节奏标注')) ?? []
@@ -442,26 +442,11 @@ export function parseChapterBlock(heading: string, body: string, volumeDefault?:
     writingRequirementCustomText,
     rawFields: toRawFields(fields, order)
   }
-  const prose = dropDuplicatedProse(extractProseSections(body), detail.plotSummary)
+  const prose = extractProseSections(body).filter((section) =>
+    section.title !== '核心事件' || section.text.replace(/\s+/g, ' ') !== detail.plotSummary?.replace(/\s+/g, ' ')
+  )
   if (prose.length > 0) detail.proseSections = prose
   return detail
-}
-
-/**
- * 去掉已被结构化字段吃掉的段落，避免同一段内容在 prompt 里出现两次。
- * 典型：变体格式的 `## 核心事件` 纯段落已由 extractSectionBody 并入 plotSummary。
- */
-function dropDuplicatedProse(
-  sections: OutlineProseSection[],
-  plotSummary: string | undefined
-): OutlineProseSection[] {
-  if (!plotSummary) return sections
-  const normalize = (s: string): string => s.replace(/\s+/g, '')
-  const summary = normalize(plotSummary)
-  return sections.filter((s) => {
-    const text = normalize(s.text)
-    return !summary.includes(text) && !text.includes(summary)
-  })
 }
 
 /** 从新格式 H1 `# 细纲_第NNN章_标题.md` 提取标题 */
@@ -543,7 +528,8 @@ export function extractProseSections(body: string): OutlineProseSection[] {
 
   const flush = (): void => {
     // 段间空行保留，段首段尾的空行去掉
-    const text = buf.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+    const body = buf.join('\n').replace(/\n{3,}/g, '\n\n')
+    const text = title.startsWith('情节点序列') ? body.replace(/^\n+|\n+$/g, '') : body.trim()
     if (text) groups.push({ title, text })
     buf = []
   }
@@ -580,7 +566,8 @@ export function extractProseSections(body: string): OutlineProseSection[] {
       if (buf.length > 0) buf.push('')
       continue
     }
-    buf.push(line.trim())
+    // 情节点编号只认顶层列表，保留缩进以区别节点内部的子步骤。
+    buf.push(title.startsWith('情节点序列') ? line.trimEnd() : line.trim())
   }
   flush()
 

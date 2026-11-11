@@ -9,6 +9,7 @@ import type { MobileReferenceReader } from './mobile-reference-service'
 import { mobileBrainstormInputSchema, type MobileBrainstormGenerator } from './mobile-brainstorm-service'
 import { MobileBatchError, mobileBatchInputSchema, type MobileBatchRunner } from './mobile-batch-service'
 import { CHAPTER_NAME_MAX_LEN } from '../../shared/parsers'
+import { joinContinuation } from '../../shared/format-chapter-prose'
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024
 const MAX_CHAPTER_CHARS = 500_000
@@ -39,14 +40,14 @@ export interface MobileAiWriter {
   generateChapterStream(
     projectId: string,
     chapterNumber: number,
-    options: { existingText?: string; tempContext?: string; maxTokens?: number }
+    options: { existingText?: string; tempContext?: string; previewOnly: true; signal: AbortSignal }
   ): Promise<string>
   adjustChapterStream(
     projectId: string,
     chapterNumber: number,
     content: string,
     instruction: string,
-    options: { maxTokens?: number }
+    options: { previewOnly: true; signal: AbortSignal }
   ): Promise<string>
 }
 
@@ -480,20 +481,26 @@ export class MobileServer {
           this.sendJson(response, 400, { error: '重写时请输入具体要求' })
           return
         }
-        const text = mode === 'continue'
-          ? await this.ai.generateChapterStream(projectId, chapterNumber, {
-              existingText: content,
-              tempContext: instruction || undefined,
-              maxTokens: 4_096
-            })
-          : await this.ai.adjustChapterStream(
-              projectId,
-              chapterNumber,
-              content,
-              instruction,
-              { maxTokens: 8_192 }
-            )
-        this.sendJson(response, 200, { mode, text })
+        if (response.destroyed || request.aborted) return
+        const controller = new AbortController()
+        const cancel = () => controller.abort()
+        response.once('close', cancel)
+        try {
+          const options = { previewOnly: true, signal: controller.signal } as const
+          const text = mode === 'continue'
+            ? await this.ai.generateChapterStream(projectId, chapterNumber, {
+                ...options, existingText: content, tempContext: instruction || undefined
+              })
+            : await this.ai.adjustChapterStream(projectId, chapterNumber, content, instruction, options)
+          if (!controller.signal.aborted) {
+            this.sendJson(response, 200, { mode, text,
+              ...(mode === 'continue' ? { fullContent: joinContinuation(content, text) } : {}) })
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) throw error
+        } finally {
+          response.off('close', cancel)
+        }
         return
       }
     }

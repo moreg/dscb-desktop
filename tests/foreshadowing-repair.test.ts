@@ -199,3 +199,12 @@ describe('automatic foreshadowing repair', () => {
     expect(check).not.toHaveBeenCalled()
   })
 })
+it('续写伏笔按原文位置插入，保留已写前部及 CRLF，不插入前部中间', () => {
+  const prefix = '　　刘青走进驿站。\r\n\r\n\r\n　　窗纸早就破了。  '
+  const manuscript = prefix + '\r\n\r\n桌上搁着一只旧碗。\r\n\r\n他绕过桌子去扶窗框。'
+  const clue = '碗沿有一道旧刻痕，在灰下几乎看不出来。'
+  const raw = (after: number) => JSON.stringify({ insertions: [{ after, text: clue }] })
+  expect(() => applyForeshadowingInsertions(manuscript, raw(0), prefix.length)).toThrow('只读正文')
+  expect(applyForeshadowingInsertions(manuscript, raw(2), prefix.length)).toBe(
+    prefix + '\r\n\r\n桌上搁着一只旧碗。\r\n\r\n' + clue + '\r\n他绕过桌子去扶窗框。')
+})

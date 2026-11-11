@@ -25,6 +25,23 @@ const longPrompt = [
   '---', draft, ending
 ].join('\n')
 
+it('长稿重写不允许 AGY 截断原稿中段后提交', () => {
+  const rewrite = '## 任务：按用户追问调整第 2 章已生成正文\n' + '原稿。'.repeat(10_000)
+  expect(() => buildAntigravityPrompt(rewrite, '保留未授权事实。', '')).toThrow('AGY_WRITING_CONTEXT_TOO_LARGE')
+})
+
+it('压缩背景时保留完整作者规则、章界与同章前部', () => {
+  const rules = '# 作品自定义写作规则\n### 本作口吻\n' + '人物先依亲见判断。'.repeat(140) + '\n原样保留规则末尾。'
+  const prompt = longPrompt.replace(task, rules + '\n' + task)
+  const result = buildAntigravityPrompt(prompt, '短句按语境使用。', '')
+  expect(result.length).toBeLessThanOrEqual(AGY_PROMPT_BUDGET)
+  expect(result).toContain(rules)
+  expect(result).toContain(task)
+  expect(result).toContain(draft)
+  expect(result).toContain(ending)
+  expect(result).not.toBe(prompt)
+})
+
 describe('agy prompt budget', () => {
   it('将长篇检查的 10 分钟预算传给实际 AGY runner', async () => {
     const service = new LlmService({ read: async () => ({ activeId: 'agy', providers: [

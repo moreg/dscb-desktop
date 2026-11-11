@@ -12,6 +12,7 @@ import type { LlmService } from './llm-service'
 import { contentRevision } from './chapter-revision'
 import { ChapterVersionRepository } from './chapter-version-repository'
 import { writeJsonAtomic } from './atomic'
+import { createReviewRetryFeedback, ReviewCandidateRejectedError, type ReviewRetryFeedback } from './review-retry-feedback'
 import { acquireBatchProject, activeBatchProjects } from './write-batch-lock'
 import { findJsonObject } from '../../shared/json-extract'
 import { applyChangeHunks, rejectChangeHunk } from '../../shared/text-diff'
@@ -113,6 +114,8 @@ export class ChapterRefinementService {
   private async generateInWorkflow(input: RefinementInput, signal?: AbortSignal, progress?: (stage: RefinementStage) => void): Promise<RefinementCandidate> {
     const release = acquireBatchProject(input.projectId)
     let record: RefinementCandidate | undefined
+    let retryFeedback: ReviewRetryFeedback | undefined
+    let rejectedOutput = ''
     try {
       const target = this.target(input)
       if (input.goal === 'scene' && !input.plan?.trim()) throw new Error('场景精修请先查看并确认修改方案')
@@ -120,6 +123,8 @@ export class ChapterRefinementService {
       const savedSource = await this.chapters.getChapter(input.projectId, input.chapterNumber)
       const before = savedSource.content
       const context = await this.context(input)
+      retryFeedback = await createReviewRetryFeedback(await this.projects.resolveDir(input.projectId), input.chapterNumber,
+        'chapter-refinement', [input, before, context, await this.routingHash()])
       guard(signal)
       record = { version: 1, id: randomUUID(), input: structuredClone(input), baseRevision: contentRevision(before),
         contextHash: contentRevision(context), routingHash: await this.routingHash(), candidate: '', changes: [], attempts: 0, status: 'generating', updatedAt: '' }
@@ -129,7 +134,7 @@ export class ChapterRefinementService {
         ? ['【同版本自动表达修订的待处理项，不表示已经确认的事实】', prior.message,
           ...(prior.issues ?? []), ...(prior.dialogueQuality?.issues ?? []),
           ...(prior.dialogueQuality?.pendingDraft ? ['【尚未通过核验的旧候选，仅供定位失败改法；原文仍是唯一事实基线】', prior.dialogueQuality.pendingDraft] : [])].join('\n') : ''
-      const common = this.request(input, context) + '\n' + resume
+      const common = this.request(input, context) + '\n' + resume + '\n' + retryFeedback.prompt()
       for (let attempt = 0; attempt < 2; attempt++) {
         guard(signal)
         record.attempts = attempt + 1
@@ -145,6 +150,7 @@ export class ChapterRefinementService {
           meta: { feature: attempt ? 'chapter-refine-repair' : 'chapter-refine', projectId: input.projectId, chapterNumber: input.chapterNumber }
         })
         guard(signal)
+        rejectedOutput = raw
         const output = findJsonObject(raw)
         if (!output || (input.goal !== 'detection' && (typeof output.text !== 'string' || !output.text.trim())) || !Array.isArray(output.changes) ||
           !output.changes.every(x => typeof x === 'string')) throw new Error('候选稿格式不完整，原文未修改')
@@ -156,6 +162,7 @@ export class ChapterRefinementService {
         if (edited.length > Math.max(target.length * 2, target.length + 1000)) throw new Error('候选稿扩写幅度过大，原文未修改')
         record.candidate = directed?.content ?? (input.selection
           ? input.content.slice(0, input.selection.start) + edited + input.content.slice(input.selection.end) : edited)
+        retryFeedback.assertCandidate(record.candidate)
         record.verdict = undefined
         record.changes = (output.changes as string[]).slice(0, 20)
         record.status = 'verifying'
@@ -182,12 +189,14 @@ export class ChapterRefinementService {
         record.verdict = verdict
         record.status = verdict.passed ? 'ready' : 'rejected'
         await this.save(record)
-        if (verdict.passed) return record
+        if (verdict.passed) { await retryFeedback.clear(); return record }
+        await retryFeedback.record(JSON.stringify(verdict), record.candidate, true)
       }
       return record
     } catch (error) {
       if (!record) throw error
-      record.status = signal?.aborted ? 'cancelled' : 'failed'
+      if (!signal?.aborted) await retryFeedback?.record(error, rejectedOutput)
+      record.status = signal?.aborted ? 'cancelled' : error instanceof ReviewCandidateRejectedError ? 'rejected' : 'failed'
       record.error = signal?.aborted ? '已停止精修，原文未修改。' : (error as Error).message
       await this.save(record)
       return record

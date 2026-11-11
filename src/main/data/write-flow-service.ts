@@ -3,7 +3,8 @@ import { READER_NOTE_BOUNDARY } from '../../shared/prose-policy'
 import { createHash } from 'crypto'
 import type { LlmService, GenerateOptions } from './llm-service'
 import type { Foreshadowing, PrevEndingState } from '../../shared/types'
-import { foreshadowingsBeforeChapter } from '../../shared/foreshadowing-state'
+import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
+import { characterNamesInText } from './memory/character-memory-context'
 import { findJsonObject } from '../../shared/json-extract'
 import { repairMissingMemoryEvidence } from './memory-evidence-repair'
 import { ForeshadowingRepairRejectedError } from './foreshadowing-repair'
@@ -69,7 +70,7 @@ export class WriteFlowService {
   }
 
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
-    return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt, {
+    return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt + '\n' + (opts.retryFeedback ?? ''), {
       ...opts, maxTokens: 4096, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
     }))
   }
@@ -107,6 +108,7 @@ export class WriteFlowService {
       `输出紧凑 JSON，不缩进。各字段使用准确短语，保留全部有原文依据的结尾状态、持有关系、未完成事项及信息来源，不为缩短输出遗漏事实。`,
       `没有依据的情绪、身体、位置或时间用空字符串表示，不逐人反复解释“未明确/未描写”。characterStates.items 必须是字符串，多件物品用顿号连接。`,
       `只记录结尾仍有效的状态；已经完成的历史动作不能写成仍在进行。转述、请求、计划、待核事项保留其性质，不升级为已发生事实，不从常识补出位置或持有物。`,
+      `身份尚未确认时沿用原文可确认的称呼，不把怀疑对象改名为已确认身份；保留是谁猜测、听谁说、谁尚未获知，不把一人的知识分配给其他人。证据不足但影响承接的事项标为待核对，不补造确认过程；没有悬念的平静结尾 suspense 可为空。`,
       ``,
       `------ 上一章正文末尾 ------`,
       prevTail
@@ -194,6 +196,7 @@ export class WriteFlowService {
         '------ 全部新增段落 ------', JSON.stringify(repairVerification.inserted)
       ] : []),
       ``,
+      opts.retryFeedback ?? '',
       `------ 本章细纲 ------`,
       outline || '（无细纲文本）',
       ``,
@@ -267,7 +270,7 @@ export class WriteFlowService {
     const prompt = [
       `请从下面的小说正文中提取本章新增的记忆信息。`,
       ``,
-      `已知人物（不要重复提取）：${knownCharacters.join('、') || '（空）'}`,
+      `已知人物（本章原文中已提到的名字，不要重复提取）：${characterNamesInText(knownCharacters, content).join('、') || '（空）'}`,
       ``,
       `输出要求：严格 JSON，字段：`,
       `- newCharacters: [{ name, role, identity, personality, appearance?, abilities? }]（本章首次登场；外貌/能力有则填）`,
@@ -288,7 +291,7 @@ export class WriteFlowService {
       `完整回收必须回答原伏笔的核心疑问或兑现原承诺。再次出现道具、回忆、线索强化、部分揭示和细纲的计划回收都不能标成完整回收；不确定则输出空数组。无对应编号时不得编造或借用相似伏笔。`,
       `以下是待核对的伏笔台账，只提供原始问题，不是回收已发生的证据：`,
       JSON.stringify(foreshadowingsBeforeChapter(knownForeshadowings, chapterNumber).filter((f) =>
-        f.status !== 'collected' && f.status !== 'missed'
+        f.plantChapter != null && (isOpenForeshadowing(f) || f.status === 'deferred')
       ).map((f) => ({ id: f.id, content: f.content, status: f.status, plantChapter: f.plantChapter }))),
       `- settingsPatches: [{ target, fileName, op, sectionTitle?, title?, content, reason?, confidence?, evidence }]`,
       `  正文揭晓的可复用设定增量（只增不改旧文）。target: worldview|faction|relation|customRule|geography`,
@@ -303,6 +306,7 @@ export class WriteFlowService {
       `只提取已经实际发生的变化；传闻、台词里的猜测、谎言、计划、梦境和假设不能直接更新客观状态。无法确认时留空或写入 settingsSuggestions，不补造。`,
       `无新增时对应字段输出空数组。不要任何解释、Markdown 代码块。字段值尽量简短，避免冗长复述正文。`,
       ``,
+      opts.retryFeedback ?? '',
       `------ 第 ${chapterNumber} 章正文 ------`,
       body
     ].join('\n')

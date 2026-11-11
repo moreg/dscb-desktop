@@ -234,13 +234,16 @@ export class ReviewFlowService {
             const local = incomplete ? 0 : locateFinding(chunk.text, f)
             const offset = local === undefined ? undefined : chunk.offset + local
             let violation = toViolation(f, offset)
-            if (!incomplete && f.severity === 'error' && ['logic_hole', 'character_breakdown', 'quote_contradiction'].includes(spec.checkId)) {
+            if (!incomplete && f.severity === 'error') {
               const reference = f.reference?.trim()
               const validReference = reference && reference.length >= 4 && [content, ctx.characterCards, ctx.outline, ctx.continuityContext]
                 .some(source => source?.includes(reference))
-              if (!f.snippet?.trim() || local === undefined || !validReference) {
+              if ((!f.snippet?.trim() || local === undefined || !validReference) &&
+                  ['logic_hole', 'character_breakdown', 'quote_contradiction', 'spoiler'].includes(spec.checkId)) {
                 violation = toViolation(incompleteFinding(spec.checkId, '问题缺少本章引文或可定位的对照证据，未交给自动纠错'), chunk.offset)
-              } else violation.evidence = { sourceRevision: contentRevision(content), reference, scope: 'chapter' }
+              } else if (f.snippet?.trim() && local !== undefined && validReference) {
+                violation.evidence = { sourceRevision: contentRevision(content), reference, scope: 'chapter' }
+              }
             }
             if (incomplete) violation.message += `（第 ${chunk.offset + 1}—${chunk.offset + chunk.text.length} 字）`
             all.push(violation)
@@ -276,6 +279,7 @@ export class ReviewFlowService {
       ``,
       `## 检查任务`,
       spec.instruction,
+      opts.retryFeedback ? `以下是此前同版本检查的待核验项，不是新事实；逐项按当前原文重新核对，不得为了消除提示省略实际存在的问题。\n${opts.retryFeedback}` : '',
       PLANNING_RULES,
       ctx.chapterComplete === true ? `已确认整章完成，章末按细纲落实对话或事件收束。` : `章节完成状态未确认或仍在续写，不把末尾停点判为漏钩子，不要求整章完成项。`,
       ``,

@@ -44,9 +44,10 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const out = await service.buildChapterPrompt(projectId, 1)
     expect(out).toHaveProperty('system')
     expect(out).toHaveProperty('user')
-    expect(out.system).toContain('章末结尾硬性原则')
-    expect(out.system).toContain('禁用高频词')
-    expect(out.system).toContain('顺序铁律')
+    expect(out.system).toContain('章末结尾原则')
+    expect(out.system).not.toContain('高频套写排查参考')
+    expect(out.system).toContain('【从人物处境写场景】')
+    expect(out.system).not.toContain('顺序铁律')
   })
 
   it('番茄首章从零生成不再追加寄存语指令，任何平台与章号都直接进入故事', async () => {
@@ -72,7 +73,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const id2 = (await createWritingProject(ps, { name: '剑无名', genre: '古风仙侠' })).id
     const out2 = await new WriteService(ps, mockLlm('正文')).buildChapterPrompt(id2, 1)
     expect(out2.system).toContain('古风/仙侠')
-    expect(out2.system).toContain('勾了勾唇')
+    expect(out2.system).toContain('按情境选用的题材语气词')
     expect(out2.system).not.toContain('他心里直骂娘')
   })
 
@@ -109,8 +110,8 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).toContain('我不入轮回，谁入轮回')
     expect(user).toContain('击败长老后不留活口')
     expect(user).toContain('【本章硬性写作要求】')
-    expect(user).toContain('以下要求必须全部落实到正文里')
-    expect(user).toContain('下笔前先自检一次')
+    expect(user).toContain('按上方本章细纲落实关键事件、必要因果、信息边界与停止位置')
+    expect(user.split('击败长老后不留活口')).toHaveLength(2)
     expect(user).toContain('林远')
     // 未填细纲字数预估 → 兜底 2500，且为强约束"不少于"
     expect(user).toContain('正文目标约 2500 字')
@@ -134,7 +135,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     expect(user).not.toContain('（待生成）')
   })
 
-  it('renders chapter writing requirements as a checklist', async () => {
+  it('renders normalized chapter writing requirements once without making a second checklist', async () => {
     const dir = await ps.resolveDir(projectId)
     await new OutlineRepository(dir).upsertDetailed({
       chapterNumber: 2,
@@ -146,9 +147,8 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const { user } = await service.buildChapterPrompt(projectId, 2)
 
     expect(user).toContain('【本章硬性写作要求】')
-    expect(user).toContain('- 开头强情绪')
-    expect(user).toContain('- 结尾必须用对话收束')
-    expect(user).toContain('- 人物对话要贴合角色')
+    expect(user).toContain('开头强情绪\n结尾必须用对话收束\n人物对话要贴合角色')
+    expect(user.split('人物对话要贴合角色')).toHaveLength(2)
   })
 
   it('combines selected requirement template with custom additions', async () => {
@@ -165,9 +165,9 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 2)
 
-    expect(user).toContain('- 人物对话要符合各自身份、性格和当下情绪')
-    expect(user).toContain('- 台词尽量短促有来回，避免大段解释背景')
-    expect(user).toContain('- 结尾必须用一句试探意味很强的对话收束')
+    expect(user).toContain('人物对话要符合各自身份、性格和当下情绪')
+    expect(user).toContain('台词尽量短促有来回，避免大段解释背景')
+    expect(user.split('结尾必须用一句试探意味很强的对话收束')).toHaveLength(2)
   })
 
   it('user prompt includes the complete previous chapter when available', async () => {
@@ -188,7 +188,7 @@ describe('buildChapterPrompt (new system+user format)', () => {
     const service = new WriteService(ps, mockLlm('正文'))
     const { user } = await service.buildChapterPrompt(projectId, 1)
     expect(user).toContain('青云志')
-    expect(user).toContain('（本章无细纲')
+    expect(user).toContain('本章无细纲')
     expect(user).not.toContain('上一章完整正文')
   })
 
@@ -307,7 +307,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
 
     const service = new WriteService(ps, withPassingLongformGuard(llm))
     const onAutoDeslopResult = vi.fn()
-    await expect(service.generateChapterStream(projectId, 1, { onAutoDeslopResult })).resolves.toBe('正文')
+    await expect(service.generateChapterStream(projectId, 1, { autoDeslopAfterContinue: true, onAutoDeslopResult })).resolves.toBe('正文')
     expect(onAutoDeslopResult).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed', message: expect.stringContaining('已保留生成稿')
     }))
@@ -319,7 +319,7 @@ describe('generateChapterStream passes systemPrompt to llm', () => {
     ]
     expect(userPrompt).toContain('青云志')
     expect(opts.systemPrompt).toBeDefined()
-    expect(opts.systemPrompt).toContain('章末结尾硬性原则')
+    expect(opts.systemPrompt).toContain('章末结尾原则')
     expect(opts.meta?.feature).toBe('chapter')
     // 默认目标 2500 → 反算 maxTokens 应高于旧的硬编码 4096
     expect(opts.maxTokens).toBeDefined()
@@ -383,8 +383,8 @@ describe('buildChapterPrompt with structured prev ending state (Phase 12 Task 1)
     expect(user).toContain('深夜')
     expect(user).toContain('门外脚步声')
     expect(user).toContain('师父留下的玉佩')
-    expect(user).toContain('按本章细纲回应或延续')
-    expect(user).toContain('仅作为承接线索；按本章细纲安排处理')
+    expect(user).toContain('按本章进展回应或延续')
+    expect(user).toContain('承接与当前场景有关的事项')
   })
 
   it('omits structured state section when prevTail is empty', async () => {

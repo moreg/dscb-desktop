@@ -12,6 +12,8 @@ import { runClaude, probeClaude } from './claude-runner'
 import { createHash } from 'crypto'
 
 export interface GenerateOptions {
+  /** Failed check output supplied as data, never as author instructions. */
+  retryFeedback?: string
   onDiagnostic?: (event: Record<string, unknown>) => void
   onStatus?: (status: import('../../shared/types').AgyGenerationStatus) => void
   onToken?: (token: string) => void
@@ -174,6 +176,8 @@ const LARGE_TOKEN_THRESHOLD = 8192
 const LARGE_STREAM_TIMEOUT_MS = 600_000
 /** 短请求默认超时（2 分钟） */
 const LLM_STREAM_TIMEOUT_MS = 120_000
+/** Codex 容量退避可能静默数分钟，正文没开始输出时单独限制等待。 */
+const CODEX_CHAPTER_FIRST_OUTPUT_TIMEOUT_SEC = 180
 
 /**
  * 需要长超时的分析类 feature（会塞整章正文/细纲，Kimi 等 API 经常 >2 分钟）。
@@ -681,6 +685,7 @@ export class LlmService {
       model: p.model && p.model !== 'default' ? p.model : undefined,
       reasoningEffort: opts.strengthOverride?.reasoningEffort,
       timeoutSec: Math.ceil(timeoutMs / 1000),
+      ...(opts.meta?.feature === 'chapter' ? { firstOutputTimeoutSec: CODEX_CHAPTER_FIRST_OUTPUT_TIMEOUT_SEC } : {}),
       onToken: opts.onToken,
       signal: opts.signal,
       ...(opts.images?.length ? { images: opts.images } : {})

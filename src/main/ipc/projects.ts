@@ -5,6 +5,7 @@ import { ProjectService } from '../data/project-service'
 import { ProjectFileWatcher } from '../data/project-file-watcher'
 import { BrowserWindow, type WebContents } from 'electron'
 import type { CreateProjectDataInput } from '../../shared/types'
+import { withFileLock } from '../data/file-lock'
 
 const bookNameItemSchema = z.string().min(1).max(120)
 const benchmarkBooksSchema = z.array(bookNameItemSchema).max(20)
@@ -46,6 +47,9 @@ export function registerProjectsIpc(service: ProjectService): () => void {
   // cause window B to replace window A's subscription when two books are open.
   const watchers = new Map<number, ProjectFileWatcher>()
   const watchGenerations = new Map<number, number>()
+  const watchRequests = new Map<number, { sender: WebContents; projectId: string }>()
+  const pausedProjects = new Set<string>()
+  let disposed = false
 
   const watcherFor = (sender: WebContents): ProjectFileWatcher => {
     const id = sender.id
@@ -58,8 +62,21 @@ export function registerProjectsIpc(service: ProjectService): () => void {
       watcher.dispose()
       watchers.delete(id)
       watchGenerations.delete(id)
+      watchRequests.delete(id)
     })
     return watcher
+  }
+
+  const refreshWatch = async (senderId: number): Promise<boolean> => {
+    const request = watchRequests.get(senderId)
+    if (!request || disposed || request.sender.isDestroyed()) return false
+    if (pausedProjects.has(request.projectId)) return true
+    const generation = watchGenerations.get(senderId)
+    const dir = await service.resolveDir(request.projectId)
+    if (disposed || watchRequests.get(senderId) !== request ||
+      watchGenerations.get(senderId) !== generation || request.sender.isDestroyed()) return false
+    if (!pausedProjects.has(request.projectId)) watcherFor(request.sender).watchProject(request.projectId, dir)
+    return true
   }
 
   safeHandle('projects:create', (_e, input: CreateProjectDataInput) => {
@@ -78,21 +95,28 @@ export function registerProjectsIpc(service: ProjectService): () => void {
         ...(validated.name !== undefined ? { name: validated.name.trim() } : {}),
         ...(validated.description !== undefined ? { description: validated.description.trim() } : {})
       }
-      // Windows 上监听着的目录改不了名，先松开，保存完再听新路径。
-      const affected = [...watchers.values()].filter((watcher) => watcher.watchingProjectId() === validated.projectId)
-      for (const watcher of affected) watcher.stopWatching()
-      try {
-        const updated = await service.updateProjectInfo(validated.projectId, info)
-        const dir = await service.resolveDir(validated.projectId)
-        for (const watcher of affected) watcher.watchProject(validated.projectId, dir)
-        return updated
-      } catch (err) {
-        const dir = await service.resolveDir(validated.projectId).catch(() => null)
-        if (dir) {
-          for (const watcher of affected) watcher.watchProject(validated.projectId, dir)
+      return withFileLock(`project-info-watch:${validated.projectId}`, async () => {
+        pausedProjects.add(validated.projectId)
+        // Invalidate pending subscriptions too: an old resolveDir must not reopen the old path.
+        for (const [senderId, request] of watchRequests) {
+          if (request.projectId !== validated.projectId) continue
+          watchGenerations.set(senderId, (watchGenerations.get(senderId) ?? 0) + 1)
         }
-        throw err
-      }
+        for (const watcher of watchers.values()) {
+          if (watcher.watchingProjectId() === validated.projectId) watcher.stopWatching()
+        }
+        try { return await service.updateProjectInfo(validated.projectId, info) }
+        finally {
+          pausedProjects.delete(validated.projectId)
+          // A window may have switched books, stopped watching or closed during recovery.
+          const restores = [...watchRequests].filter(([, request]) => request.projectId === validated.projectId)
+            .map(([senderId]) => refreshWatch(senderId))
+          const results = await Promise.allSettled(restores)
+          if (results.some(result => result.status === 'rejected')) {
+            console.warn('[projects:updateInfo] Some file subscriptions could not be restored.')
+          }
+        }
+      })
     }
   )
   safeHandle(
@@ -132,25 +156,29 @@ export function registerProjectsIpc(service: ProjectService): () => void {
   // 渲染进程进入项目视图时驱动文件监听
   safeHandle('projects:watch', async (event, projectId: string) => {
     const validated = validateInput(projectIdSchema, projectId)
+    if (disposed || event.sender.isDestroyed()) return false
     const senderId = event.sender.id
     const generation = (watchGenerations.get(senderId) ?? 0) + 1
     watchGenerations.set(senderId, generation)
-    const dir = await service.resolveDir(validated)
-    // resolveDir may finish out of order during rapid project switches.
-    if (watchGenerations.get(senderId) !== generation || event.sender.isDestroyed()) return false
-    watcherFor(event.sender).watchProject(validated, dir)
-    return true
+    watchRequests.set(senderId, { sender: event.sender, projectId: validated })
+    // Release the previous book even if resolving the next path is slow.
+    watcherFor(event.sender).stopWatching()
+    return refreshWatch(senderId)
   })
   safeHandle('projects:stopWatch', (event) => {
     const senderId = event.sender.id
     watchGenerations.set(senderId, (watchGenerations.get(senderId) ?? 0) + 1)
+    watchRequests.delete(senderId)
     watchers.get(senderId)?.stopWatching()
     return true
   })
 
   return () => {
+    disposed = true
     for (const watcher of watchers.values()) watcher.dispose()
     watchers.clear()
     watchGenerations.clear()
+    watchRequests.clear()
+    pausedProjects.clear()
   }
 }

@@ -1,6 +1,7 @@
 import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MOBILE_PAGE } from '../src/main/mobile/mobile-page'
+import { joinContinuation } from '../src/shared/format-chapter-prose'
 
 type Listener = (event: Record<string, unknown>) => void
 
@@ -285,8 +286,9 @@ function createBackend() {
     const chapter = chapters.get(number)
     if (!chapter) throw new Error('Unexpected mobile request: ' + method + ' ' + path)
     if (method === 'POST' && url.searchParams.get('action') === 'ai') {
-      const body = JSON.parse(options.body || '{}') as { mode: string }
-      return response(await (aiResult || Promise.resolve({ mode: body.mode, text: 'AI 生成的正文' })))
+      const body = JSON.parse(options.body || '{}') as { mode: string; content: string }
+      const result = await (aiResult || Promise.resolve({ mode: body.mode, text: 'AI 生成的正文' }))
+      return response(result.mode === 'continue' ? { ...result, fullContent: joinContinuation(body.content, result.text) } : result)
     }
     if (method === 'PUT') {
       const body = JSON.parse(options.body || '{}') as { content: string; baseRevision?: string }
@@ -649,7 +651,7 @@ describe('mobile page interactions', () => {
     expect(page.get('[data-nav="home"]').getAttribute('aria-current')).toBe('page')
   })
 
-  it('asks before a rewrite replaces edits made during AI generation', async () => {
+  it('protects edits made during AI generation from a stale rewrite preview', async () => {
     const pending = deferred<{ mode: string; text: string }>()
     const backend = createBackend()
     backend.setAiResult(pending.promise)
@@ -661,13 +663,9 @@ describe('mobile page interactions', () => {
     await page.type('#prose', '生成期间新加入的重要内容')
     pending.resolve({ mode: 'rewrite', text: 'AI 重写的整章正文' })
     await flushRequests()
-    page.confirm.mockReturnValueOnce(false)
     await page.click('[data-action="ai-apply"]')
-    expect(page.confirm).toHaveBeenCalled()
+    expect(page.alert).toHaveBeenCalledWith('生成期间正文已变化，请按当前版本重新生成。')
     expect(page.get('#prose').value).toBe('生成期间新加入的重要内容')
-    page.confirm.mockReturnValueOnce(true)
-    await page.click('[data-action="ai-apply"]')
-    expect(page.get('#prose').value).toBe('AI 重写的整章正文')
   })
 })
 

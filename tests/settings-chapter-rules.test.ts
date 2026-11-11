@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { SettingsRepository } from '../src/main/data/settings-repository'
 import legacyFragments from './fixtures/legacy-dialogue-fragments.json'
+import legacyEnding from './fixtures/legacy-ending-rules.json'
 import { buildSystemPrompt } from '../src/main/data/skill-prompts'
 
 describe('SettingsRepository chapter rule overrides', () => {
@@ -16,6 +17,34 @@ describe('SettingsRepository chapter rule overrides', () => {
 
   it('returns empty object when unset (= 全用内置默认)', async () => {
     expect(await repo.getChapterRuleOverrides()).toEqual({})
+  })
+
+  it.each([undefined, 'extend', 'finish'] as const)('旧章末默认仅在提示词中迁移，保留附加作者规则和磁盘原文：%s', async mode => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'aw-ending-migration-'))
+    const file = path.join(dir, 'settings.json')
+    const settings = new SettingsRepository(file)
+    const saved = await settings.setChapterRuleOverrides({
+      ending: legacyEnding.ending.replace(/\n/g, '\r\n') + '\r\n作者自定义：本卷以温和的心理收束。',
+      output: legacyEnding.output + '\n作者自定义：保留方言和书信。'
+    })
+    const before = await readFile(file, 'utf8')
+    const prompt = buildSystemPrompt('都市', null, saved, null, mode)
+    expect(prompt).toContain('动作、心理或平静收束')
+    expect(prompt).not.toContain('每一章的结尾**必须**')
+    expect(prompt).not.toContain('违反此条立即视为失败')
+    expect(prompt).toContain('本卷以温和的心理收束')
+    expect(prompt).toContain('保留方言和书信')
+    expect(prompt).toContain('故事内对白、书信、题字等正常使用这些词语时保留')
+    expect(prompt).not.toContain('「下章见」都不许写')
+    expect(await readFile(file, 'utf8')).toBe(before)
+    expect(await settings.getChapterRuleOverrides()).toEqual(saved)
+  })
+
+  it('作者独立制定的章末规则和停用值不被迁移', () => {
+    const custom = '本书每章以完整台词结尾，禁止未说完的话。'
+    expect(buildSystemPrompt('悬疑', null, { ending: custom }, null, 'finish')).toContain(custom)
+    const disabled = buildSystemPrompt('都市', null, { ending: '' })
+    expect(disabled).not.toContain('【章末结尾原则】')
   })
 
   it('persists whitelisted keys and drops unknown keys', async () => {
@@ -76,7 +105,7 @@ describe('saved legacy dialogue rules at prompt time', () => {
     expect(prompt).toContain('自定义：沿用本书既定的方言分寸')
     expect(prompt).toContain('保留角色已有粗口，不新增口头禅')
     expect(prompt).toContain('【自定义章末】以当前事件结束')
-    expect(prompt).toContain('自检要求不进入故事')
+    expect(prompt).toContain('待核对标记和核对过程不进入小说正文')
     expect(prompt).toContain('不设强制比例')
     expect(await readFile(file, 'utf8')).toBe(before)
     expect((await repo.getChapterRuleOverrides()).dialogue).toBe(legacy)

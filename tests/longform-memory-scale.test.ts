@@ -43,6 +43,7 @@ describe('300万字符/千章长期记忆', () => {
     }
     expect(totalChars).toBe(3_000_000)
     const query = { text: '陆安和陆宁谈论内应身份和寻找母亲', characters: ['陆安', '陆宁', '赵伯'], aliases: [], props: [] }
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000)
     const start = performance.now()
     const cold = (await buildContinuityContext(dir, 1001, query)).join('\n')
     const coldMs = performance.now() - start
@@ -50,6 +51,7 @@ describe('300万字符/千章长期记忆', () => {
     const warmStart = performance.now()
     const warm = (await buildContinuityContext(dir, 1001, query)).join('\n')
     const warmMs = performance.now() - warmStart
+    clock.mockRestore()
     expect(warm).toBe(cold)
     expect(reads.mock.calls.filter(([path]) => dirname(String(path)) === join(dir, '正文'))).toHaveLength(0)
     expect(warm).toContain('陆安 → 内应身份：已知赵伯是内应，来源密信')

@@ -136,8 +136,8 @@ export const REVIEW_CHECK_SECTIONS: readonly ReviewCheckSection[] = [
     kind: 'algorithm',
     group: 'paragraph',
     label: '章末钩子强度',
-    defaultSeverity: 'warn',
-    hint: '末段缺乏悬念/冲突/反转/伏笔关键词，钩子偏弱'
+    defaultSeverity: 'info',
+    hint: '仅观察末段悬念类关键词，不据此判定质量；收束服从剧情、题材与作者要求'
   },
   // ── LLM 类 ──
   {

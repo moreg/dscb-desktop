@@ -35,6 +35,22 @@ describe('对白计量与自动验收', () => {
     expect(result.remainingFindings).toHaveLength(0)
     expect(vi.mocked(llm.generateStream).mock.calls.map(([, opts]) => opts?.meta?.feature)).toEqual(['deslop:dialogue-review', 'deslop:scene-dialogue-review'])
   })
+  it('联合与独立对白审核都收到本次作者表达要求', async () => {
+    const prefix = '渡口上只剩她和押船的老钱。'
+    const source = '“等你阿姐来。”\n\n老钱仍叫她小名，像没瞧见她手背上戴孝的白绳。'
+    const revisionInstruction = '保留老钱的乡音和含糊称呼，暂时不揭明丧事。'
+    const llm = llmWith(() => passed)
+
+    await ensureDialogueQuality(source, source, llm, { mode: 'write', existingText: prefix, revisionInstruction })
+
+    const calls = vi.mocked(llm.generateStream).mock.calls
+    expect(calls).toHaveLength(2)
+    for (const [prompt] of calls) {
+      expect(prompt).toContain(revisionInstruction)
+      expect(prompt).toContain(prefix)
+      expect(prompt).toContain(source)
+    }
+  })
   it('自动检查点恢复仍对照最初原稿，不能把恢复稿当作新的事实基线', async () => {
     const source = prose(40, 60)
     const draft = prose(70, 30)

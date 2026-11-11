@@ -12,6 +12,19 @@ function mockLlm(reply: string): LlmService {
 }
 
 describe('WriteFlowService.extractEndingState', () => {
+  it('身份未确认与各人所知在状态提取中保留性质，不强造章末悬念', async () => {
+    const source = '林遥只疑心船夫是哥哥，仍留在码头。顾宁独自在舱内看过信，没有把内容告诉林遥。'
+    const unfinished = ['林遥怀疑船夫是哥哥，身份待核对', '顾宁读过信，林遥尚未获知内容']
+    const llm = mockLlm(JSON.stringify({ characterPositions: [], characterStates: [], timePoint: '', unfinished, suspense: '', props: [] }))
+    const result = await new WriteFlowService(llm).extractEndingState(source, 1)
+    const prompt = vi.mocked(llm.generateStream).mock.calls[0][0]
+    expect(prompt).toContain('不把怀疑对象改名为已确认身份')
+    expect(prompt).toContain('不把一人的知识分配给其他人')
+    expect(prompt).toContain('没有悬念的平静结尾 suspense 可为空')
+    expect(result.unfinished).toEqual(unfinished)
+    expect(result.suspense).toBe('')
+  })
+
   it('keeps all source text and preserves extraction scope when requesting compact output', async () => {
     const llm = mockLlm('{}')
     const source = '首段关键事实。' + '正文内容。'.repeat(1000) + '末尾交接尚待核实。'

@@ -15,6 +15,7 @@ import { validateInput, projectIdSchema } from './validation'
 import { join } from 'path'
 import { countWords } from '../data/words'
 import { measureDialogue } from '../data/dialogue-quality'
+import { createReviewRetryFeedback } from '../data/review-retry-feedback'
 import type { DeslopStyleContext } from '../../shared/types'
 
 const deslopTextSchema = z.string().min(1).max(500_000)
@@ -88,7 +89,10 @@ export function registerDeslopIpc(
         const signal = beginStream(validated.requestId)
         let result: Awaited<ReturnType<typeof deslopService.deslop>>
         try {
+          const feedbackDir = await projectService.resolveDir(validated.projectId).catch(() => null)
           result = await deslopService.deslop(validated.text, {
+            feedback: feedbackDir ? await createReviewRetryFeedback(feedbackDir, 0,
+              'manual-expression', [validated.text, validated.levelOverride, deslopRules, styleContext]) : undefined,
             dialogueComposition: { mode: 'edit' },
             levelOverride: validated.levelOverride,
             polishNarrative: true,

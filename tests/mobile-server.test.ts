@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MobileServer } from '../src/main/mobile/mobile-server'
+import { MobileServer, type MobileAiWriter } from '../src/main/mobile/mobile-server'
 import type { MobileBrainstormInput, MobileBrainstormResult } from '../src/main/mobile/mobile-brainstorm-service'
 import {
   MobileBatchError,
@@ -86,7 +86,7 @@ describe('MobileServer', () => {
       }])
     }
     const ai = {
-      generateChapterStream: vi.fn(async () => 'AI 续写内容'),
+      generateChapterStream: vi.fn<MobileAiWriter['generateChapterStream']>(async () => 'AI 续写内容'),
       adjustChapterStream: vi.fn(async () => 'AI 重写后的整章')
     }
     const brainstorm = {
@@ -678,14 +678,15 @@ describe('MobileServer', () => {
     const continued = await fetch(endpoint, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ mode: 'continue', content: '现有正文', instruction: '加强悬念' })
+      body: JSON.stringify({ mode: 'continue', content: '他问：“', instruction: '加强悬念' })
     })
     expect(continued.status).toBe(200)
-    await expect(continued.json()).resolves.toEqual({ mode: 'continue', text: 'AI 续写内容' })
+    await expect(continued.json()).resolves.toEqual({ mode: 'continue', text: 'AI 续写内容', fullContent: '他问：“AI 续写内容' })
     expect(fixture.ai.generateChapterStream).toHaveBeenCalledWith('project-1', 1, {
-      existingText: '现有正文',
+      existingText: '他问：“',
       tempContext: '加强悬念',
-      maxTokens: 4_096
+      previewOnly: true,
+      signal: expect.any(AbortSignal)
     })
 
     const rewritten = await fetch(endpoint, {
@@ -695,8 +696,38 @@ describe('MobileServer', () => {
     })
     expect(rewritten.status).toBe(200)
     await expect(rewritten.json()).resolves.toEqual({ mode: 'rewrite', text: 'AI 重写后的整章' })
-    expect(fixture.ai.adjustChapterStream).toHaveBeenCalled()
+    expect(fixture.ai.adjustChapterStream).toHaveBeenCalledWith('project-1', 1, '现有正文', '改成第一人称', {
+      previewOnly: true, signal: expect.any(AbortSignal)
+    })
     expect(fixture.chapters.updateContent).not.toHaveBeenCalled()
     expect(fixture.getContent()).toBe('原始正文')
+  })
+
+  it('aborts chapter preview generation when the phone disconnects', async () => {
+    const fixture = createFixture()
+    let modelStarted!: (signal: AbortSignal) => void
+    let modelAborted!: () => void
+    const started = new Promise<AbortSignal>(resolve => { modelStarted = resolve })
+    const aborted = new Promise<void>(resolve => { modelAborted = resolve })
+    fixture.ai.generateChapterStream.mockImplementationOnce((_project, _chapter, { signal }) => new Promise((_resolve, reject) => {
+      modelStarted(signal)
+      signal.addEventListener('abort', () => {
+        modelAborted()
+        reject(new Error('LLM_ABORTED'))
+      }, { once: true })
+    }))
+    const { cookie, baseUrl } = await pair()
+    const request = new AbortController()
+    const pending = fetch(`${baseUrl}/api/projects/project-1/chapters/1?action=ai`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'continue', content: '原始正文' }), signal: request.signal
+    }).then(() => 'responded', () => 'disconnected')
+    const signal = await started
+    expect(signal.aborted).toBe(false)
+    request.abort()
+    expect(await pending).toBe('disconnected')
+    await aborted
+    expect(signal.aborted).toBe(true)
+    expect(fixture.chapters.updateContent).not.toHaveBeenCalled()
   })
 })

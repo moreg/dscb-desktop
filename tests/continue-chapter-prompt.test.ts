@@ -48,6 +48,61 @@ describe('续写 prompt', () => {
     )
   }
 
+  it('续写以作者明确的视角和排版为先，前部叙述语气仍保留作参照', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const bookRule = '本书用长段写码头夜景，只有换说话人才另起一段。'
+    await mkdir(path.join(dir, '设定'), { recursive: true })
+    await writeFile(path.join(dir, '设定', '叙述约定.md'), `# 叙述约定\n\n${bookRule}`, 'utf-8')
+    await writeOutline('2500')
+    const override = '人名之前不用称谓，保留人物自己的土话。'
+    const get = vi.fn().mockResolvedValue({ chapterRuleOverrides: { dialogue: override } })
+    const service = new WriteService(ps, mockLlm(''), undefined, undefined, undefined,
+      { get } as unknown as SettingsRepository)
+    const existing = '渡船撞着木桩，一下，又一下。阿姐的伞还立在脚边，伞柄上的红布叫水浸成了黑的。我把伞往灯底下挪了挪。\n\n“你去问一声，她认得这把伞。”'
+    const instruction = '这一段仍用第一人称，两个连贯的陈述句保留在同一段，先写等消息的心思。'
+    const prompt = await service.buildChapterPrompt(projectId, 1, null, instruction, existing)
+
+    expect(prompt.user).toContain(bookRule)
+    expect(prompt.user).toContain(existing)
+    expect(prompt.user).toContain(instruction)
+    expect(prompt.system).toContain('沿用本作既有视角、叙述语气和人物口吻，句段依当前场景组织')
+    expect(prompt.user.indexOf('**只输出新写的后续正文**')).toBeLessThan(prompt.user.lastIndexOf(instruction))
+    expect(prompt.system).toContain(override)
+    expect(prompt.system).toContain('本次临时要求优先')
+    expect(prompt.system).toContain('默认排版，作者明确指定其他排版时依其要求执行')
+    expect(prompt.system).not.toContain('与上文守则冲突时一律以本节为准')
+  })
+
+  it.each([500, 2400])('续写保留真实上下文，核对身份、逐人认知和叙述重复（已写 %i 字）', async words => {
+    await writeOutline('2500')
+    const dir = await ps.resolveDir(projectId)
+    await mkdir(path.join(dir, '正文'), { recursive: true })
+    const previous = '傍晚，林遥留在码头，钥匙已交给顾宁。林遥只怀疑船夫是哥哥，尚未看清他的脸。顾宁独自在船舱读到密信，没有告诉林遥。约好的接头人还没来。'
+    await writeFile(path.join(dir, '正文', '第001章 码头.md'), previous, 'utf-8')
+    const seam = '林遥没有上船，只问船夫能否等接头人。'
+    const existing = '甲'.repeat(words - seam.length) + seam
+    const ending = JSON.stringify({
+      characterPositions: [{ name: '林遥', location: '码头', action: '等接头人' }],
+      characterStates: [], timePoint: '傍晚', unfinished: ['船夫身份待核对', '接头人未到'],
+      suspense: '', props: ['钥匙已交给顾宁']
+    })
+    const prompt = await new WriteService(ps, mockLlm(ending)).buildChapterPrompt(
+      projectId, 2, null, '保留限知视角，以平静等待收束，不新增事件。', existing
+    )
+    expect(prompt.user).toContain(previous)
+    expect(prompt.user).toContain(existing)
+    expect(prompt.user).toContain('船夫身份待核对')
+    expect(prompt.user).toContain('此处为辅助提取')
+    expect(prompt.user).toContain('以已确认正文的最新状态承接人物位置、时间、道具和知情边界')
+    expect(prompt.user).not.toContain('写前/写后自检清单')
+    expect(prompt.system).toContain('疼痛、恐惧、迟疑、盘算或必要的空间因果可以直写')
+    expect(prompt.user).toContain('保留限知视角，以平静等待收束，不新增事件。')
+    expect(prompt.system).toContain('身份尚未确认时')
+    expect(prompt.system).toContain('读者从其他视角已知真相')
+    expect(prompt.system).toContain('结论只及证据支持的对象、时点与条件')
+    expect(prompt.system + prompt.user).not.toMatch(/章末必须以.*(?:对话|事件).*结尾/)
+  })
+
   it('无 existingText 时按整章参考字数出指令', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
@@ -216,7 +271,7 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('还没决定走不走')
     // 悬念也保留，但改成「前部没回应就本次补上」的措辞
     expect(prompt.user).toContain('上章悬念')
-    expect(prompt.user).toContain('若【本章已写正文前部】尚未回应')
+    expect(prompt.user).toContain('先看本章前部是否已回应')
   })
 
   /**
@@ -247,15 +302,14 @@ describe('续写 prompt', () => {
 
       expect(prompt.continueMode).toBe('extend')
       expect(prompt.system).toContain('续写模式覆盖声明')
-      // 与 OUTPUT_RULES「章末必须以对话或事件结尾，违反此条立即视为失败」冲突的改写
+      // 续写不能因一轮输出结束就强行完成整章。
       expect(prompt.system).toContain('不要强行收尾')
       expect(prompt.system).toContain('本次要新增')
       // 与 CONTINUITY_RULES「本章开头必须回应或延续」冲突的改写
       expect(prompt.system).toContain('禁止重写、复述或另起一个开头')
-      // 接缝起手硬性铁律与去 AI 报表句断言
-      expect(prompt.system).toContain('接缝起手硬性铁律')
-      expect(prompt.system).toContain('严禁首句复述前文末尾台词')
-      expect(prompt.system).toContain('机械双联报表句')
+      expect(prompt.system).toContain('接缝起手（第一句写法）')
+      expect(prompt.system).toContain('不要复述前文末尾台词')
+      expect(prompt.system).toContain('连续动作按目的、阻力与结果组织')
       expect(prompt.user).toContain('未完句或未闭合台词优先自然接完')
     })
 
@@ -308,12 +362,12 @@ describe('续写 prompt', () => {
     const cont = await service.buildChapterPrompt(projectId, 2, null, undefined, '甲'.repeat(500))
     expect(cont.user).not.toContain('本章开头必须对接')
     expect(cont.user).toContain('不要回头改开头')
-    expect(cont.user).toContain('前部若已回应就不要再回应一遍')
-    expect(cont.user).toContain('只处理本章细纲安排承接的事项')
+    expect(cont.user).toContain('前部已回应的照实际状态继续')
+    expect(cont.user).toContain('仅在与当前场景有关时承接')
 
     // 非续写路径保持原措辞
     const fresh = await service.buildChapterPrompt(projectId, 2)
-    expect(fresh.user).toContain('本章开头必须对接')
+    expect(fresh.user).toContain('承接前章实际状态')
   })
 
   it('续写时给出剧情点进度对齐指令（细纲每轮整份重发，不点明就会重复或跳点）', async () => {
@@ -327,8 +381,9 @@ describe('续写 prompt', () => {
       '甲'.repeat(500)
     )
 
-    expect(prompt.user).toContain('进度对齐')
-    expect(prompt.user).toContain('已完成 / 进行中 / 未开始')
+    expect(prompt.system).toContain('关键事件是已发生、进行中还是未开始')
+    expect(prompt.user).toContain('已发生的内容无需重述，提到或打算做的事仍是计划')
+    expect(prompt.user).not.toContain('执行清单')
   })
 
   it('中段省略标记不采用括号省略句式（deslop 占位符硬规则会拦这个形状）', async () => {
@@ -497,14 +552,14 @@ describe('续写 prompt', () => {
     }
   })
 
-  it('续写时自检清单改为对接已写前部，不再要求「开头」对齐上一章', async () => {
+  it('续写从已写前部的实际断点接起，不重新要求写章首', async () => {
     await writeOutline('2500')
     const service = new WriteService(ps, mockLlm(''))
     const existing = '甲'.repeat(500)
     const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, existing)
 
-    expect(prompt.user).toContain('接续点连续')
-    expect(prompt.user).toContain('不重复前部')
+    expect(prompt.user).toContain('从【本章已写正文前部】的实际断点接下去')
+    expect(prompt.user).toContain('已发生的内容无需重述')
     expect(prompt.user).not.toContain('上章结尾对接')
   })
   /**

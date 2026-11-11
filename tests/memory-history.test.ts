@@ -6,6 +6,9 @@ import { MemoryWriter } from '../src/main/data/memory-writer'
 import { TrackingMdRepo } from '../src/main/data/skill-format/tracking-md-repo'
 import { PlotPointRepo } from '../src/main/data/memory/plot-point-repo'
 import { CharacterRepo } from '../src/main/data/memory/character-repo'
+import { ChapterSummaryRepo } from '../src/main/data/memory/chapter-summary-repo'
+import { hashProse } from '../src/main/data/memory/prose-memory-index'
+import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import type { MemoryExtraction } from '../src/shared/types'
 
 function extraction(chapter: number, field: string, value: string): MemoryExtraction {
@@ -71,6 +74,88 @@ describe('automatic history remains recoverable', () => {
     expect((await new PlotPointRepo(dir).listSummariesBefore(6))[0]).toMatchObject({ source: 'memory', verified: true, summary: '成功找到母亲。' })
     await writeFile(join(dir, '正文', '005.md'), '林远打开了空无一人的密室。')
     expect((await new PlotPointRepo(dir).listSummariesBefore(6))[0].source).toBe('prose_excerpt')
+  })
+
+  it('excludes edited source chapters and inherited auto-tracking fields until the affected chapter is resynced', async () => {
+    const writer = new MemoryWriter(dir)
+    const prose = new ProseRepo(dir)
+    const tracking = new TrackingMdRepo(dir)
+    const handoff = '林远把铜钥匙塞进袖口。山门在他背后合上，他从此不再替守门人看库。'
+    const crossing = '船上已经没有空位。林远托船夫把包裹送到北岸，自己蹲在渡口，端详铜钥匙齿缝里的青锈。'
+    const rewritten = '林远把铜钥匙还给守门人，等对方锁好库门，才空着手下山。'
+    await prose.write(5, handoff, '下山')
+    await prose.write(10, crossing, '渡船')
+    const first = extraction(5, '持有物', '铜钥匙')
+    first.newPlotPoints = [{ title: '带走铜钥匙', event: '林远把铜钥匙塞进袖口。', evidence: handoff }]
+    first.itemStateChanges = [{ name: '铜钥匙', field: '持有者', oldValue: '守门人', newValue: '林远', evidence: handoff }]
+    await writer.applyAutomatic(first, { sourceContent: handoff })
+    const later = extraction(10, '目标', '到北岸接包裹')
+    later.itemStateChanges = [{ name: '铜钥匙', field: '材质外观', oldValue: '', newValue: '齿缝有青锈', evidence: crossing }]
+    await writer.applyAutomatic(later, { sourceContent: crossing })
+    expect((await tracking.read(11))!.characterStates[0]).toMatchObject({ items: '铜钥匙', goal: '到北岸接包裹' })
+
+    await prose.write(5, rewritten, '下山')
+    // Summary regeneration may finish before memory sync. It cannot authorize the old automatic rows.
+    await new ChapterSummaryRepo(dir).write({ schemaVersion: 1, chapterNumber: 5, sourceHash: hashProse(rewritten),
+      generatedAt: '', events: [{ text: '林远还了钥匙。', evidence: rewritten }], stateChanges: [], openThreads: [] })
+    const staleView = (await tracking.read(11))!
+    expect(staleView.characterStates[0]).toMatchObject({ items: '玉佩', goal: '到北岸接包裹' })
+    expect(staleView.stateChanges.map(state => state.chapter)).toEqual([10])
+    expect(staleView.timeline).not.toContain('带走铜钥匙')
+    expect(staleView.recentProgress.map(progress => progress.chapter)).toEqual(['第 10 章'])
+    expect((await tracking.readItemTracking(11))!.states[0]).toMatchObject({ holder: '-', material: '齿缝有青锈' })
+    expect((await tracking.readForDisplay())!.characterStates[0]).toMatchObject({ items: '铜钥匙' })
+
+    const refreshed = extraction(5, '持有物', '已归还铜钥匙')
+    refreshed.newPlotPoints = [{ title: '归还钥匙', event: '林远把铜钥匙还给守门人。', evidence: rewritten }]
+    refreshed.itemStateChanges = [{ name: '铜钥匙', field: '持有者', oldValue: '', newValue: '守门人', evidence: rewritten }]
+    await writer.applyAutomatic(refreshed, { sourceContent: rewritten })
+    const restored = (await tracking.read(11))!
+    expect(restored.characterStates[0]).toMatchObject({ items: '已归还铜钥匙', goal: '到北岸接包裹' })
+    expect(restored.timeline).toContain('归还钥匙')
+    expect((await tracking.readItemTracking(11))!.states[0]).toMatchObject({ holder: '守门人', material: '齿缝有青锈' })
+  })
+
+  it('filters a legacy managed row when its old summary proves the prose was rewritten', async () => {
+    const initial = '林远坐在门槛上，旧伤渗出血，脚下已经踩出一小摊。'
+    const updated = '林远坐在门槛上，把一碗凉透的茶泼在脚下。'
+    const prose = new ProseRepo(dir)
+    await prose.write(5, initial, '山门')
+    await new MemoryWriter(dir).applyAutomatic(extraction(5, '伤势', '旧伤渗血'))
+    await new ChapterSummaryRepo(dir).write({ schemaVersion: 1, chapterNumber: 5, sourceHash: hashProse(initial),
+      generatedAt: '', events: [], stateChanges: [{ text: '林远旧伤渗血。', evidence: initial }], openThreads: [] })
+    const tracking = new TrackingMdRepo(dir)
+    expect((await tracking.read(6))!.characterStates[0].power).toBe('旧伤渗血')
+    await prose.write(5, updated, '山门')
+    expect((await tracking.read(6))!.characterStates[0].power).toBe('炼气')
+    expect((await tracking.readForDisplay())!.characterStates[0].power).toBe('旧伤渗血')
+  })
+
+  it('refreshing a summary cannot revive legacy tracking written with older plot points', async () => {
+    const initial = '林远退出哨岗，把那本值夜簿锁回墙柜，没有交给赶来的守门人。'
+    const updated = '林远退出哨岗，把那本值夜簿亲手交给守门人，墙柜里只剩一截蜡烛。'
+    const prose = new ProseRepo(dir)
+    const writer = new MemoryWriter(dir)
+    await prose.write(5, initial, '交班')
+    const extractionBefore = extraction(5, '持有物', '值夜簿锁在墙柜')
+    extractionBefore.newPlotPoints = [{ title: '值夜簿', event: '值夜簿锁在墙柜', evidence: initial }]
+    await writer.applyAutomatic(extractionBefore, { sourceContent: initial })
+    const timeline = join(dir, '追踪', '时间线.md')
+    const oldRows = await readFile(timeline, 'utf8')
+    await writeFile(timeline, oldRows.replace(`:${hashProse(initial)} -->`, ' -->'))
+
+    const tracking = new TrackingMdRepo(dir)
+    expect((await tracking.read(6))!.timeline).toContain('值夜簿锁在墙柜')
+    await prose.write(5, updated, '交班')
+    await new ChapterSummaryRepo(dir).write({ schemaVersion: 1, chapterNumber: 5, sourceHash: hashProse(updated),
+      generatedAt: '', events: [{ text: '林远把值夜簿交给守门人。', evidence: updated }], stateChanges: [], openThreads: [] })
+    expect((await tracking.read(6))!.timeline).not.toContain('值夜簿锁在墙柜')
+    expect((await tracking.readForDisplay())!.timeline).toContain('值夜簿锁在墙柜')
+
+    const extractionAfter = extraction(5, '持有物', '值夜簿交给守门人')
+    extractionAfter.newPlotPoints = [{ title: '值夜簿', event: '值夜簿交给守门人', evidence: updated }]
+    await writer.applyAutomatic(extractionAfter, { sourceContent: updated })
+    expect((await tracking.read(6))!.timeline).toContain('值夜簿交给守门人')
   })
 
   it('replays later deltas after an early item acquisition is removed without losing later explicit changes', async () => {

@@ -60,6 +60,18 @@ describe('中断续写保留草稿', () => {
     expect(interruptedChapterRetryMessage('LLM_OUTPUT_TRUNCATED', false)).toContain('未保留新的正文')
     expect(interruptedChapterRetryMessage('LLM_AUTH_FAILED', false)).toBeUndefined()
   })
+
+  it('区分 Codex 无首字超时和容量中断，保留已有草稿', () => {
+    const initial = '林遥把信封换到左手。'
+    const preview = '船夫把缆绳绕回桩上。'
+    expect(failedChapterContinuationDraft(initial, '', { ok: false, error: 'CODEX_FIRST_TOKEN_TIMEOUT' })).toBe(initial)
+    expect(interruptedChapterRetryMessage('CODEX_FIRST_TOKEN_TIMEOUT', false)).toContain('正文首字超时')
+    expect(failedChapterContinuationDraft(initial, preview, { ok: false, error: 'CODEX_MODEL_CAPACITY' }))
+      .toBe(initial + '\n\n' + preview)
+    expect(interruptedChapterRetryMessage('CODEX_MODEL_CAPACITY', true)).toContain('已保留本次收到的正文')
+    expect(interruptedChapterRetryMessage('LONGFORM_REVIEW_INCOMPLETE: CODEX_MODEL_CAPACITY', true))
+      .toContain('待核对通过后再同步记忆')
+  })
 })
 
 describe('正文重写最终稿覆盖流式预览', () => {
@@ -80,6 +92,15 @@ describe('正文重写最终稿覆盖流式预览', () => {
 })
 
 describe('续写先采用补写稿再同步记忆', () => {
+  it('保存回执和失败候选都保持作者已有的 CRLF、缩进和留白', () => {
+    const initial = '　　刘青扶着窗棂。\r\n\r\n\r\n　　他没有推窗。  '
+    const suffix = '外头的风停了。'
+    const fullContent = initial + '\r\n\r\n' + suffix
+    expect(finalizeChapterContinuation(initial, suffix, { ok: true, fullContent }).content).toBe(fullContent)
+    expect(finalizeChapterContinuation(initial, suffix, { ok: true, content: suffix }).content).toBe(fullContent)
+    expect(failedChapterContinuationDraft(initial, suffix, { ok: false, retainedContent: fullContent })).toBe(fullContent)
+  })
+
   it.each([false, true])('增量与补写整章都在交付时统一排版（整章=%s）', (full) => {
     const raw = '“先签字。别等了！”他转身。门关了。'
     const result = finalizeChapterContinuation('已有正文。', '预览', {

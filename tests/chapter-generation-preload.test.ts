@@ -51,6 +51,12 @@ describe('正文 preload 阶段事件与最终内容', () => {
     expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({ autoStrength: true }))
   })
 
+  it.each([true, false])('本次自动去 AI 味选项 %s 原样传入 IPC', async enabled => {
+    invoke.mockResolvedValue({ ok: true, content: '正文' })
+    await api.generateChapterStream('project-1', 1, null, undefined, undefined, vi.fn(), undefined, undefined, false, enabled)
+    expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({ autoDeslopAfterContinue: enabled }))
+  })
+
   it('重试修复选项及原稿透传到 IPC，仍复用可取消的阶段事件', async () => {
     invoke.mockResolvedValue({ ok: true, fullContent: '修复后的正文。' })
     await api.generateChapterStream('project-1', 1, null, '保留章末', '原稿。', vi.fn(), vi.fn(), false, true)

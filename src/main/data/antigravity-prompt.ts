@@ -89,6 +89,9 @@ export function buildAntigravityPrompt(prompt: string, system: string | undefine
   const merge = (user: string) => preamble + (system?.trim() ? `${system}\n\n---\n\n${user}` : user)
   const original = merge(prompt)
   if (original.length <= AGY_PROMPT_BUDGET) return original
+  if (/^## 任务：按用户追问调整第 \d+ 章已生成正文/.test(prompt)) {
+    throw new Error('AGY_WRITING_CONTEXT_TOO_LARGE: 完整原稿、作者要求与重写资料超过模型输入上限，请缩小改写范围或换用支持更长上下文的模型。')
+  }
   // Continuity repair has a large optional context between the precise issue
   // and the full draft. Generic middle truncation can remove the chapter plan.
   const contextMarker = '--- 前文、细纲、记忆及作者要求（按来源使用） ---'

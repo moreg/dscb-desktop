@@ -47,6 +47,7 @@ export interface DeslopCallbacks {
  * IPC 层解析后注入 whitelist/bannedWords/textOverrides/styleContext。
  */
 export interface DeslopOptions {
+  feedback?: import('../review-retry-feedback').ReviewRetryFeedback
   /** 自动写作的对白修复总预算；0 表示仅复核。 */
   dialogueRepairLimit?: number
   /** 事实修复后的复核仍使用最初原稿；不能将修复稿当成新事实。 */
@@ -154,16 +155,22 @@ export class DeslopService {
    */
   async scan(
     text: string,
-    opts: { whitelist?: Set<string>; bannedWords?: string[]; isTail?: boolean } = {}
+    opts: Pick<DeslopOptions, 'whitelist' | 'bannedWords' | 'isTail' | 'dialogueComposition'> = {}
   ): Promise<DeslopScanReport> {
     const isTail = opts.isTail ?? true
+    const continuation = opts.dialogueComposition?.mode === 'write' && Boolean(opts.dialogueComposition.existingText?.trim())
     const aiFindings = scanAiPatterns(text, {
       whitelist: opts.whitelist,
       bannedWords: opts.bannedWords,
       isTail
     })
     const degenFindings = scanDegeneration(text, { isTail })
-    const findings = [...aiFindings, ...degenFindings]
+    // 续写的句式、心理和段长交给场景复核，词面命中不能触发自动改稿。
+    // 仍检查作者明确配置的用词约束以及复读、截断、占位符等文本故障。
+    const enforcedAiFindings = continuation
+      ? aiFindings.filter(finding => finding.type === 'banned-word' && opts.bannedWords !== undefined)
+      : aiFindings
+    const findings = [...enforcedAiFindings, ...degenFindings]
     const counts = {
       blocking: findings.filter((f) => f.severity === 'blocking').length,
       advisory: findings.filter((f) => f.severity === 'advisory').length
@@ -311,7 +318,7 @@ export class DeslopService {
         // 同一候选只诊断一次；修订后的新候选必须重新检查。
         const scan = opts.polishNarrative
           ? await this.scanWithNarrative(value, opts)
-          : await this.scan(value, { whitelist: opts.whitelist, bannedWords: opts.bannedWords, isTail: opts.isTail })
+          : await this.scan(value, opts)
         if (scan.narrative?.status === 'failed') {
           throw new Error(`整章叙事检查未完成：${scan.narrative.error}`)
         }
@@ -328,7 +335,7 @@ export class DeslopService {
           opts.onProgress?.(message)
           opts.onToken?.(`\n${message}\n`)
         },
-        context: [opts.dialogueComposition.context ?? '',
+        context: [opts.dialogueComposition.context ?? '', opts.feedback?.prompt() ?? '',
           opts.styleContext ? `【项目题材与文风】\n${JSON.stringify(opts.styleContext)}` : '',
           opts.textOverrides ? `【作者润色表达偏好（不覆盖事实保真）】\n${serializeProseOverrides(opts.textOverrides)}` : ''
         ].filter(Boolean).join('\n\n'),
@@ -342,6 +349,8 @@ export class DeslopService {
       })
       throwIfAborted(opts.signal)
       const scan = await scanOnce(result.text)
+      if (!result.report.passed) await opts.feedback?.record(result.report.issues.join('\n'), result.report.pendingDraft ?? result.text)
+      else await opts.feedback?.clear()
       return { rewritten: result.text, processedGates: [...new Set(['E', ...initialScan.findings.map(f => f.gate)])] as DeslopResult['processedGates'],
         beforeWords: countWords(text), afterWords: countWords(result.text),
         deleteRatio: 1 - countWords(result.text) / Math.max(1, countWords(text)),
@@ -549,7 +558,7 @@ ${PROSE_POLICY_RULES}`
           // uniformityNote 已移除：它让模型「拉开长短句落差」，但语料实测 AI 稿的句长/段长 CV
           // 本来就高于真人稿，这条指令方向是反的。见 FINDINGS.md。
         })
-        const llmOutput = await this.llm.generateStream(prompt, {
+        const llmOutput = await this.llm.generateStream(prompt + '\n' + (opts.feedback?.prompt() ?? ''), {
           systemPrompt: effectiveSystemPrompt,
           maxTokens: tokensForDeslop(finalText),
           meta: { feature: `deslop:pass${passNum}`, ...opts.meta },
@@ -642,7 +651,7 @@ ${PROSE_POLICY_RULES}`
         const prompt = buildDeslopPrompt(finalText, level, narrativeFindings, ['G'], opts.styleContext, {
           textOverrides: opts.textOverrides?.gates, bannedWords: opts.bannedWords
         }) + '\n\n本轮专门修复场景残留：对照命中原因通读相关问答和反应链，不能仅删修饰、替换词语或合并句号。删除重复内容后检查答句、反驳和代词是否仍有上下文依据；不补造话题或事件。保留说话人及必要的设定、心理和情绪变化，无把握时保留并在改动说明中标记 [需复核]。'
-        const raw = await this.llm.generateStream(prompt, {
+        const raw = await this.llm.generateStream(prompt + '\n' + (opts.feedback?.prompt() ?? ''), {
           systemPrompt: effectiveSystemPrompt, maxTokens: tokensForDeslop(finalText),
           meta: { ...opts.meta, feature: 'deslop:narrative-repair' }, onToken: emit, signal: opts.signal
         })

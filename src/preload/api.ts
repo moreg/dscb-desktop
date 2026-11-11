@@ -89,6 +89,29 @@ import type {
   FanqieMultiBookItem,
   FanqieMultiBookProgress
 } from '../shared/fanqie-chart'
+import type {
+  AdoptScriptCandidateInput,
+  AdoptScriptCandidateResult,
+  BuildStudioPromptPackageInput,
+  BuildStudioPromptPackageResult,
+  CreateScriptProjectInput,
+  ExportStudioMarkdownInput,
+  ExportStudioMarkdownResult,
+  GenerateStudioScriptInput,
+  GenerateStudioScriptResult,
+  GenerateStudioStoryboardInput,
+  GenerateStudioStoryboardResult,
+  GenerationRun,
+  ListStudioRunsInput,
+  RecoverStudioRunsInput,
+  RecoverStudioRunsResult,
+  SaveScriptProjectInput,
+  SaveScriptProjectResult,
+  SaveScriptStoryboardInput,
+  SaveScriptStoryboardResult,
+  ScriptProject,
+  ScriptProjectSummary
+} from '../shared/script-studio'
 
 export interface IpcTransport {
   // 与 Electron ipcRenderer 对齐：参数和返回值由各调用点自行收窄。
@@ -207,6 +230,47 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.on('shortStory:token', handler)
       const result = ipcRenderer.invoke('shortStory:generate', { ...input, requestId })
         .finally(() => ipcRenderer.removeListener('shortStory:token', handler)) as Promise<{ ok: boolean; error?: string }>
+      return makeStreamHandle(result, requestId)
+    },
+    // ---- 剧本创作工作台：10 个 invoke 包装 + 2 个可取消流式包装 ----
+    listScriptProjects: () =>
+      ipcRenderer.invoke('scriptStudio:listProjects') as Promise<ScriptProjectSummary[]>,
+    createScriptProject: (input: CreateScriptProjectInput) =>
+      ipcRenderer.invoke('scriptStudio:createProject', input) as Promise<ScriptProject>,
+    getScriptProject: (id: string) =>
+      ipcRenderer.invoke('scriptStudio:getProject', { projectId: id }) as Promise<ScriptProject>,
+    saveScriptProject: (input: SaveScriptProjectInput) =>
+      ipcRenderer.invoke('scriptStudio:saveProject', input) as Promise<SaveScriptProjectResult>,
+    adoptScriptCandidate: (input: AdoptScriptCandidateInput) =>
+      ipcRenderer.invoke('scriptStudio:adoptCandidate', input) as Promise<AdoptScriptCandidateResult>,
+    saveScriptStoryboard: (input: SaveScriptStoryboardInput) =>
+      ipcRenderer.invoke('scriptStudio:saveStoryboard', input) as Promise<SaveScriptStoryboardResult>,
+    buildStudioPromptPackage: (input: BuildStudioPromptPackageInput) =>
+      ipcRenderer.invoke('scriptStudio:buildPromptPackage', input) as Promise<BuildStudioPromptPackageResult>,
+    exportStudioMarkdown: (input: ExportStudioMarkdownInput) =>
+      ipcRenderer.invoke('scriptStudio:exportMarkdown', input) as Promise<ExportStudioMarkdownResult>,
+    listStudioRuns: (input: ListStudioRunsInput) =>
+      ipcRenderer.invoke('scriptStudio:listRuns', input) as Promise<GenerationRun[]>,
+    recoverStudioRuns: (input: RecoverStudioRunsInput) =>
+      ipcRenderer.invoke('scriptStudio:recoverRuns', input) as Promise<RecoverStudioRunsResult>,
+    generateStudioScript: (input: GenerateStudioScriptInput, onToken: (token: string, done: boolean) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
+        if (payload.requestId === requestId) onToken(payload.token, payload.done)
+      }
+      ipcRenderer.on('scriptStudio:scriptToken', handler)
+      const result = ipcRenderer.invoke('scriptStudio:generateScript', { ...input, requestId })
+        .finally(() => ipcRenderer.removeListener('scriptStudio:scriptToken', handler)) as Promise<GenerateStudioScriptResult>
+      return makeStreamHandle(result, requestId)
+    },
+    generateStudioStoryboard: (input: GenerateStudioStoryboardInput, onToken: (token: string, done: boolean) => void) => {
+      const requestId = crypto.randomUUID()
+      const handler = (_e: unknown, payload: { requestId: string; token: string; done: boolean }) => {
+        if (payload.requestId === requestId) onToken(payload.token, payload.done)
+      }
+      ipcRenderer.on('scriptStudio:storyboardToken', handler)
+      const result = ipcRenderer.invoke('scriptStudio:generateStoryboard', { ...input, requestId })
+        .finally(() => ipcRenderer.removeListener('scriptStudio:storyboardToken', handler)) as Promise<GenerateStudioStoryboardResult>
       return makeStreamHandle(result, requestId)
     },
     getAppUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<AppUpdateState>,
@@ -462,7 +526,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       onToken: (token: string, done: boolean) => void,
       onGenerationStage?: (stage: ChapterGenerationStage) => void,
       autoStrength?: boolean,
-      repairOnly?: boolean
+      repairOnly?: boolean,
+      autoDeslopAfterContinue?: boolean
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -488,6 +553,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           existingText,
           autoStrength,
           repairOnly,
+          autoDeslopAfterContinue,
           requestId
         })
         .finally(() => {
@@ -1200,6 +1266,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       >,
     getChapterCompletionNotification: () => ipcRenderer.invoke('settings:getChapterCompletionNotification') as Promise<boolean>,
     setChapterCompletionNotification: (enabled: boolean) => ipcRenderer.invoke('settings:setChapterCompletionNotification', enabled) as Promise<boolean>,
+    getAutoDeslopAfterContinue: () => ipcRenderer.invoke('settings:getAutoDeslopAfterContinue') as Promise<boolean>,
+    setAutoDeslopAfterContinue: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoDeslopAfterContinue', enabled) as Promise<boolean>,
     setAutoPostWritePipeline: (mode: 'off' | 'memory_only' | 'full') =>
       ipcRenderer.invoke('settings:setAutoPostWritePipeline', mode) as Promise<
         'off' | 'memory_only' | 'full'

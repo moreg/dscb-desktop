@@ -2,7 +2,7 @@
  * 续写质检（PR2 + zh-humanizer v3.1.1 增量）。
  *
  * 对正文文本做规则化检查：
- * 1. 章末形式：最后 3 段必须包含对话引号 或 事件描述；
+ * 1. 章末套话检查：不按对话、动作、心理或平静收束的形式判定质量；
  *    命中"说教/感慨/AI 味抒怀"模板时直接判 error。
  * 2. 禁用词扫描：12 类禁用高频词（字面）+ 「嘴角+弧度」等底层模式（正则）。
  *    题材例外（古风/民国/历史允许"渐渐/此刻/一丝/一抹"等）自动降为 info。
@@ -70,8 +70,6 @@ export interface AuditOptions {
 const DEFAULT_PER_WORD_CAP = 3
 /** 章末抽样：最后 N 个非空段落参与检查 */
 const ENDING_PARA_COUNT = 3
-/** 章末上下文展示长度上限 */
-const ENDING_SNIPPET_MAX = 120
 
 /**
  * 说教/感慨/AI 味抒怀模板。
@@ -89,54 +87,6 @@ const ENDING_TABOO_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /命运的齿轮(开始|缓缓)?转动/, reason: '"命运的齿轮开始转动" 是 AI 套话' },
   { pattern: /故事.*?才(开始|刚刚)/, reason: '"故事才刚刚开始" 是 AI 味结尾' }
 ]
-
-/** 引号台词正则（中文/英文/日式/嵌套都覆盖） */
-const DIALOGUE_PATTERN = /["'“‘「『][^"'“”‘’「」『』\n]{1,200}["'”’」』]/
-
-/**
- * 事件描述启发式（关键词 + 动作/悬念句式）。
- * 旧版关键词过窄：像「越过桌面 / 对准心口 / 却朝着胸口幽幽地转」这类
- * 典型章末卡点会被误判为「纯心理/纯动作」error。
- */
-const EVENT_KEYWORDS = [
-  '突然', '猛地', '骤然', '陡然', '忽然',
-  '砰', '咔', '轰', '哐当', '咚',
-  '出现', '冒出', '闪出', '蹦出',
-  '推开', '撞开', '踹开', '冲进', '冲出',
-  '响起', '传来', '炸开', '崩塌',
-  '倒下', '跪下', '站起', '转身', '回头',
-  '伸手', '抓住', '抬手', '甩出',
-  '断了', '裂开', '爆炸', '坠落',
-  // 网文章末常见动作/瞄准/对峙（避免「看着/望着」过宽误放行）
-  '越过', '跨过', '翻过', '掠过',
-  '对准', '瞄准', '指向', '朝着', '对着', '顶住', '抵住',
-  '盯着', '扫过', '瞥见',
-  '拔出', '抽出', '按下', '扣下', '举起', '放下',
-  '刺向', '砍向', '射向', '砸向', '扑向', '冲向',
-  '心口', '胸口', '咽喉', '太阳穴',
-  '刀尖', '枪口', '剑尖', '指针'
-]
-
-/**
- * 事件/悬念句式。注意：多字词必须用 (a|b) 非捕获组，不能用 [ab] 字符类
- * （[慢慢|缓缓] 只会匹配单字 慢/缓 和字面 |，语义错误）。
- */
-const EVENT_ACTION_PATTERNS: readonly RegExp[] = [
-  /却(?:朝着|向着|对着|朝向).{0,16}/,
-  /对准.{0,16}(?:位置|心口|胸口|咽喉|太阳穴|眉心)/,
-  /[刀枪剑弹箭].{0,8}(?:指|对|顶|抵|架)/,
-  /(?:慢慢|缓缓|幽幽|轻轻|悄然).{0,6}(?:转|动|晃|抬|落|停)/,
-  /最后.{0,12}(?:对准|瞄准|指向|按下|扣下|刺|砍|射)/,
-  /正要.{0,12}(?:时|候)/,
-  /就在这(?:时|一)/,
-  /门(?:被)?(?:忽然|猛地)?.{0,6}(?:开|响|震)/,
-  /[手掌拳脚].{0,6}(?:按|压|推|打|踢|踩)/
-]
-
-function hasEventEnding(text: string): boolean {
-  if (EVENT_KEYWORDS.some((k) => text.includes(k))) return true
-  return EVENT_ACTION_PATTERNS.some((re) => re.test(text))
-}
 
 // ============================================================
 // zh-humanizer 1-16 规则中算法可检测的（其余靠 LLM 改写）
@@ -313,7 +263,6 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
 
   const endingStart = paragraphEntries(content).slice(-ENDING_PARA_COUNT)[0].offset
   const ending = content.slice(endingStart).trimEnd()
-  const snippet = truncate(ending, ENDING_SNIPPET_MAX)
 
   // 1. 先查"说教/AI 味抒怀"模板——命中直接 error
   for (const taboo of ENDING_TABOO_PATTERNS) {
@@ -329,21 +278,7 @@ function pushEndingViolations(content: string, out: AuditViolation[]): void {
     }
   }
 
-  // 2. 再判断是否含对话或事件（事件含关键词 + 动作/悬念句式）
-  const hasDialogue = DIALOGUE_PATTERN.test(ending)
-  const hasEvent = hasEventEnding(ending)
-  if (!hasDialogue && !hasEvent) {
-    // 仅当真像「睡着了/梦里什么都没有」类空收束才提示；降为 warn，避免把合法卡点标成必须修复
-    out.push({
-      category: 'ending',
-      severity: 'warn',
-      message: '章末未检测到对话或明确事件卡点，钩子可能偏弱',
-      snippet,
-      offset: endingStart,
-      suggestion: '可考虑对话留白（如"我不会让你——"）或具体事件/动作卡点收尾'
-    })
-  }
-  // 有对话或事件即视为合规章末，不再额外 info 打扰
+  // 结尾形式不能证明收束好坏；正常心理、动作与平静结尾均保留。
 }
 
 function splitParagraphs(content: string): string[] {
@@ -1192,14 +1127,14 @@ function pushHookStrengthViolations(
     return
   }
 
-  // 场景型/无钩子 → warn
+  // 关键词观察只作 info，不依据结尾形式扣分或要求补写。
   out.push({
     category: 'paragraph',
-    severity: 'warn',
-    message: '章末钩子偏弱：末段未检测到悬念/冲突/反转/伏笔关键词或对话留白',
+    severity: 'info',
+    message: '章末观察：未匹配悬念类关键词；不代表收束质量有问题',
     snippet: tailParas[tailParas.length - 1]?.slice(-60) ?? '',
     ruleId: 'hook_strength',
-    suggestion: '建议章末以对话留白、悬念问句、突发事件或反转收尾，增强读者追读动力'
+    suggestion: '结合剧情、题材和作者要求核对落点；动作、心理或平静收束可以保留，不因关键词缺失添加悬念或事件'
   })
 }
 

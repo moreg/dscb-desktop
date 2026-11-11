@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { createReviewRetryFeedback } from '../src/main/data/review-retry-feedback'
 import { autoDeslopProse } from '../src/main/data/auto-deslop'
 import { formatChapterProse } from '../src/shared/format-chapter-prose'
 import type { DeslopOptions, DeslopService } from '../src/main/data/deslop/deslop-service'
@@ -71,6 +75,22 @@ function setup({
 }
 
 describe('自动去 AI 味事实修复和核验重试', () => {
+  it('去 AI 味的事实否决跨次保留，重试把失败原因交给修稿步骤并重新核验', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'expression-feedback-'))
+    try {
+      const feedback = () => createReviewRetryFeedback(dir, 1, 'expression', [ORIGINAL])
+      const first = setup({ verifyReplies: [DIFFERENCE], repairReplies: ['不是有效修复JSON'] })
+      expect((await first.run({ feedback: await feedback() })).report.status).toBe('review_required')
+      expect((await feedback()).prompt()).toContain('钥匙数量从一把变成两把')
+      const second = setup({ candidate: CANDIDATE.replace('用手指沿着', '手指沿着'), verifyReplies: [DIFFERENCE, PASSED] })
+      const retried = await second.run({ feedback: await feedback() })
+      expect(second.calls('deslop:repair')[0][0]).toContain('钥匙数量从一把变成两把')
+      expect(retried.report.status).toBe('applied')
+      expect(retried.content).toBe(FIXED)
+      expect(second.calls('deslop:verify')).toHaveLength(2)
+      expect((await feedback()).prompt()).toBe('')
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
   it('自动精修共用对白与场景级诊断', async () => {
     const context = setup()
     await context.run()

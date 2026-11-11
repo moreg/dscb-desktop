@@ -869,7 +869,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
     verdict = cleared
     const internal = service as unknown as { autoDeslopGeneratedProse: () => Promise<string> }
     vi.spyOn(internal, 'autoDeslopGeneratedProse').mockRejectedValue(new Error('LLM_ABORTED'))
-    await expect(service.generateChapterStream(id, 1)).rejects.toThrow('LLM_ABORTED')
+    await expect(service.generateChapterStream(id, 1, { autoDeslopAfterContinue: true })).rejects.toThrow('LLM_ABORTED')
     expect(await new ProseRepo(dir).read(1)).toBe(bad)
     expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
     expect(await new ProseMemoryIndex(dir).searchBefore(2, '陆安寻找母亲')).toEqual([])
@@ -882,7 +882,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
     }
     const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse')
     vi.spyOn(internal, 'repairLongformConflict').mockRejectedValue(new Error('修复仍有冲突'))
-    await expect(service.generateChapterStream(id, 1)).rejects.toThrow('修复仍有冲突')
+    await expect(service.generateChapterStream(id, 1, { autoDeslopAfterContinue: true })).rejects.toThrow('修复仍有冲突')
     expect(polish).not.toHaveBeenCalled()
     expect(await new ProseRepo(dir).read(1)).toBe(bad)
     expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
@@ -897,7 +897,7 @@ describe('长篇核对绕过与记忆污染回归', () => {
     const polished = good + '船夫指向上游。'
     const polish = vi.spyOn(internal, 'autoDeslopGeneratedProse').mockResolvedValue(polished)
     const final = vi.fn(), repaired = vi.fn()
-    await expect(service.generateChapterStream(id, 1, { proseFirst: true, onFinalProseReady: final, onConflictRepaired: repaired }))
+    await expect(service.generateChapterStream(id, 1, { autoDeslopAfterContinue: true, proseFirst: true, onFinalProseReady: final, onConflictRepaired: repaired }))
       .resolves.toBe(polished)
     expect(repair).toHaveBeenCalledWith(id, 1, bad, expect.any(String), expect.any(Function), expect.objectContaining({ proseFirst: true }))
     expect(polish.mock.calls[0][2]).toBe(good)
@@ -912,12 +912,12 @@ describe('长篇核对绕过与记忆污染回归', () => {
 
   it('新章润色未改变正文时，前置与最终核对只请求一次真实检查', async () => {
     verdict = cleared
-    await expect(service.generateChapterStream(id, 1)).resolves.toBe(bad)
+    await expect(service.generateChapterStream(id, 1, { autoDeslopAfterContinue: true })).resolves.toBe(bad)
     expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')).toHaveLength(1)
     expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
   })
 
-  it.each(['rejected', 'failed', 'changed', 'incomplete'] as const)('补跑 %s 表达检查时仅复用同稿已完成的拒绝结论，仍执行事实和写后检查', async mode => {
+  it.each(['rejected', 'failed', 'changed', 'incomplete'] as const)('补跑 %s 表达检查时继续定向修订，不把旧否决当作已完成而跳过', async mode => {
     verdict = cleared
     await new ProseRepo(dir).write(1, good)
     stubSuccessfulPostChecks()
@@ -929,11 +929,11 @@ describe('长篇核对绕过与记忆污染回归', () => {
     const content = mode === 'changed' ? good + '船夫走到河边。' : good
     if (mode === 'changed') await new ProseRepo(dir).write(1, content)
     const polish = vi.spyOn(service as unknown as { autoDeslopGeneratedProse: () => Promise<string> }, 'autoDeslopGeneratedProse')
-    const result = await service.runFullFlowForChapter(id, 1, () => {}, { contentOverride: content })
-    expect(polish).toHaveBeenCalledTimes(mode === 'rejected' ? 0 : 1)
+    const result = await service.runFullFlowForChapter(id, 1, () => {}, { contentOverride: content, autoDeslopAfterContinue: true })
+    expect(polish).toHaveBeenCalledOnce()
     expect(generate.mock.calls.some(([, opts]) => opts?.meta?.feature === 'longformGuard')).toBe(true)
     expect(result.outlineDiff.checked).toBe(true)
-    if (mode === 'rejected') expect(result.autoDeslop).toMatchObject({ status: 'review_required', issues: ['频道重复播报'] })
+    expect(result.autoDeslop).toBeDefined()
   })
 
   it('连续流程把正文优先策略传入生成；修复预算耗尽后不再重复检查与修复', async () => {

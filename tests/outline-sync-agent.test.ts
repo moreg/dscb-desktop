@@ -13,6 +13,14 @@ describe('细纲对照自动判断', () => {
  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'outline-sync-')); await mkdir(join(dir, '正文')); await mkdir(join(dir, '细纲')); await writeFile(join(dir, '正文', '004.md'), prose) })
  afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
  const decision = async () => JSON.stringify({ resolved: [{ index: 0, evidence: prose, reason: '称谓相同且事件已发生。' }] })
+ it('误报判断未被批准时，下次决策携带否决信息且仍需独立批准', async () => {
+   expect(await adjudicateOutlineDiffs(dir, 4, prose, report, decision, async () => '{"approved":[]}')).toEqual([])
+   const generate = vi.fn(async (_prompt: string) => decision())
+   const verify = vi.fn(async () => '{"approved":[0]}')
+   expect(await adjudicateOutlineDiffs(dir, 4, prose, report, generate, verify)).toEqual([0])
+   expect(generate.mock.calls[0][0]).toContain('独立复核未批准消除这些差异')
+   expect(verify).toHaveBeenCalledOnce()
+ })
  it('独立复核后记录原始差异和原文依据', async () => {
    expect(await adjudicateOutlineDiffs(dir, 4, prose, report, decision, async () => '{"approved":[0]}')).toEqual([0])
    const folder = join(dir, '.versions', 'outline-sync-decisions')

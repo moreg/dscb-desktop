@@ -88,16 +88,16 @@ describe('章节概要', () => {
     expect(llm.generateStream).toHaveBeenCalledTimes(2)
   })
 
-  it('uses actual source quotes after repeated extraction failures without asking to resync or inventing events', async () => {
+  it('重复提取失败不能用首尾摘录冒充完整概要，重试首轮带着原错误修复', async () => {
     await new ProseRepo(dir).write(1, prose)
     vi.mocked(llm.generateStream).mockResolvedValue(reply('虚构事件', '正文从未出现的句子。'))
-    const result = await service.generateChapterSummary(projectId, 1, prose, { requireContinuity: true })
+    await expect(service.generateChapterSummary(projectId, 1, prose, { requireContinuity: true })).rejects.toThrow('章节概要复核未通过')
     expect(llm.generateStream).toHaveBeenCalledTimes(3)
-    expect(result.events.length).toBeGreaterThan(0)
-    expect(result.events.every(item => prose.includes(item.evidence))).toBe(true)
-    expect(result.events[0].text).toContain('前文原文')
-    expect(result.stateChanges).toEqual([])
-    expect(result.continuity).toEqual([])
+    expect(await new ChapterSummaryRepo(dir).read(1)).toBeNull()
+    vi.mocked(llm.generateStream).mockClear().mockResolvedValue(reply('账册交接', prose))
+    const result = await service.generateChapterSummary(projectId, 1, prose, { requireContinuity: true })
+    expect(vi.mocked(llm.generateStream).mock.calls[0][0]).toContain('章节概要的依据与当前正文不符')
+    expect(vi.mocked(llm.generateStream).mock.calls[0][0]).toContain('正文从未出现的句子。')
     expect(JSON.stringify(result)).not.toContain('虚构事件')
     expect(await new ProseRepo(dir).read(1)).toBe(prose)
   })

@@ -13,6 +13,7 @@ import { LibraryRepository } from '../src/main/data/library-repository'
 import { SettingsRepository } from '../src/main/data/settings-repository'
 import { ProseRepo } from '../src/main/data/skill-format/prose-repo'
 import { ForeshadowingMdRepo } from '../src/main/data/skill-format/foreshadowing-md-repo'
+import { OutlineRepository } from '../src/main/data/outline-repository'
 
 function foreshadowing(patch: Partial<Foreshadowing> = {}): Foreshadowing {
   return { id: 'FB-001', content: '铜铃为何在午夜响起？', status: 'planted', plantChapter: 2,
@@ -82,9 +83,12 @@ describe('伏笔提取与旧回执的事实边界', () => {
       foreshadowing({ id: 'FB-002', content: '铁盒中藏着谁的姓名？', status: 'collected', actualCollect: 30,
         reinforcementChapters: [5], partialCollectChapters: [8, 20] }),
       foreshadowing({ id: 'FB-003', content: '尚未登场的雪山密令', plantChapter: 12 }),
-      foreshadowing({ id: 'FB-004', content: '前章已经解开的井底身份', status: 'collected', actualCollect: 8 })
+      foreshadowing({ id: 'FB-004', content: '前章已经解开的井底身份', status: 'collected', actualCollect: 8 }),
+      foreshadowing({ id: 'FB-005', content: '未埋设的钟楼密道', status: 'pending', plantChapter: undefined }),
+      foreshadowing({ id: 'FB-006', content: '同章旧稿埋下的红玉', plantChapter: 10 }),
+      foreshadowing({ id: 'FB-007', content: '尚未埋设且暂缓的错认', status: 'deferred', plantChapter: undefined })
     ]
-    await flow.extractMemoryStream('林远再次听见铜铃响，仍未找到声音的来源。', 10, ['林远'], {}, known)
+    await flow.extractMemoryStream('林远再次听见铜铃响，仍未找到声音的来源。', 10, ['林远', '未来才出场的游商'], {}, known)
 
     const prompt = generateStream.mock.calls[0][0] as string
     expect(ledgerFromPrompt(prompt)).toEqual([
@@ -93,6 +97,11 @@ describe('伏笔提取与旧回执的事实边界', () => {
     ])
     expect(prompt).not.toContain('尚未登场的雪山密令')
     expect(prompt).not.toContain('前章已经解开的井底身份')
+    expect(prompt).not.toContain('未埋设的钟楼密道')
+    expect(prompt).not.toContain('同章旧稿埋下的红玉')
+    expect(prompt).not.toContain('尚未埋设且暂缓的错认')
+    expect(prompt).not.toContain('未来才出场的游商')
+    expect(prompt).toContain('不要重复提取）：林远')
     expect(prompt).toContain('foreshadowingId')
     expect(prompt).toContain('evidence')
     expect(prompt).toContain('chapter 必须为 10')
@@ -123,6 +132,21 @@ describe('伏笔提取与旧回执的事实边界', () => {
       { id: 'FB-001', content: '铜铃为何在午夜响起？', status: 'planted', plantChapter: 2 }
     ])
     expect(prompt).toContain(prose)
+  })
+
+  it('未埋设的暂缓伏笔只在本章细纲明确安排时作为计划提示', async () => {
+    await writeFile(join(dir, '追踪', '伏笔.md'), [
+      '# 伏笔追踪', '', '| 伏笔编号 | 伏笔内容 | 埋设章节 | 预计回收章节 | 实际回收章节 | 状态 |',
+      '|---|---|---|---|---|---|',
+      '| FB-011 | 老陶为何只补第三把椅子？ | 未埋设 | 第 15 章 | 未回收 | 暂缓 |',
+      '| FB-012 | 井底封着亡父写给船夫的信 | 未埋设 | 第 30 章 | 未回收 | 暂缓 |'
+    ].join('\n'))
+    await new OutlineRepository(dir).upsertDetailed({ chapterNumber: 10, plotSummary: '林远请老陶补一把椅子。',
+      foreshadowings: ['FB-011 可在此章点出，暂不回答'] })
+    const prompt = await service.buildChapterPrompt(projectId, 10, null, undefined, '林远进门时，老陶已经磨好了凿子。')
+    expect(prompt.user).toContain('暂缓伏笔 · 作者计划')
+    expect(prompt.user).toContain('老陶为何只补第三把椅子')
+    expect(prompt.user).not.toContain('井底封着亡父写给船夫的信')
   })
 
   it('字符串回执无论用编号还是原内容，都不能写入实际埋设或回收状态', async () => {

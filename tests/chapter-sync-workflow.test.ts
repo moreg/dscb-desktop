@@ -52,6 +52,34 @@ describe('backend sync orchestration', () => {
     expect(sync.mock.calls[0][2]).toBe(source)
     expect(generate).not.toHaveBeenCalled(); expect(polish).not.toHaveBeenCalled()
   })
+
+  it('手动同步的检查修复失败后，重试也携带上轮错误，复核通过后才保存与提交记忆', async () => {
+    const fixed = source.replace('核对印章。', '核对印章后将账册封好。')
+    vi.spyOn(service, 'buildChapterPrompt').mockResolvedValue({ system: '', user: '保持账册交接，补齐封存动作。' } as Awaited<ReturnType<WriteService['buildChapterPrompt']>>)
+    vi.spyOn(service, 'selfCheckChapter').mockImplementation(async (_pid, _ch, text) => ({ schemaVersion: 1,
+      chapterNumber: 1, generatedAt: '', counts: { pass: 0, fail: text === source ? 1 : 0, warn: 0, skip: 0 },
+      ok: text !== source, summary: '', items: text === source ? [{ id: 'confirmed_seal', category: 'plot', verdict: 'fail',
+        label: '封存动作缺失', detail: '交接后应封好账册。' }] : [] }))
+    vi.spyOn(service as unknown as { assertLongformConsistency: () => Promise<() => Promise<void>> }, 'assertLongformConsistency').mockResolvedValue(async () => {})
+    let reviews = 0
+    let candidates = 0
+    const endings = ['核对了印章后将账册封好。', '核验印章后将账册封好。', '核对印章后将账册封好。']
+    const generate = vi.fn(async (_prompt: string, opts?: import('../src/main/data/llm-service').GenerateOptions) =>
+      opts?.meta?.feature === 'continuityRepairVerify'
+        ? JSON.stringify({ passed: reviews++ >= 2, issues: reviews <= 2 ? ['补写不能省略核印动作。'] : [] })
+        : JSON.stringify({ replacements: [{ before: '核对印章。', after: endings[candidates++] ?? endings[2] }] }))
+    ;(service as unknown as { llm: LlmService }).llm = { generateStream: generate } as unknown as LlmService
+    const first = await run()
+    expect(first.error).toContain('补写不能省略核印动作')
+    expect(await repo.read(1)).toBe(source)
+    expect(summary).not.toHaveBeenCalled(); expect(sync).not.toHaveBeenCalled()
+    const retried = await run()
+    expect(retried.error).toBeUndefined()
+    expect(await repo.read(1)).toBe(fixed)
+    const repairs = generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'continuityRepair')
+    expect(repairs[2][0]).toContain('补写不能省略核印动作')
+    expect(sync.mock.calls[0][2]).toBe(fixed)
+  })
   it('does not analyze unsaved content or overwrite another author edit', async () => {
     await repo.write(1, '另一窗口的新正文。')
     const result = await run()

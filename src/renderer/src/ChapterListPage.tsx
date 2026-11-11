@@ -728,42 +728,43 @@ export default function ChapterListPage({
                 const cast = (c.appearingCharacters ?? []).slice(0, 4)
                 const extra = (c.appearingCharacters?.length ?? 0) - cast.length
                 return (
-                  <button
-                    key={c.chapterNumber}
-                    type="button"
-                    className="chapter-row"
-                    onClick={() => onOpenChapter(c.chapterNumber)}
-                  >
-                    <div className="ch-top">
-                      <span className="ch-num">第 {c.chapterNumber} 章</span>
-                      <span className="ch-title">{c.title}</span>
-                      <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
-                        {BUCKET_LABEL[chapterListBucket(c)]}
-                      </span>
-                    </div>
-                    {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
-                    <div className="ch-foot">
-                      <div className="ch-cast">
-                        {cast.length > 0 ? (
-                          <>
-                            <span className="lbl">登场</span>
-                            {cast.map((id) => (
-                              <span key={id} className="outline-tag emotion">
-                                {charName(id)}
-                              </span>
-                            ))}
-                            {extra > 0 ? (
-                              <span className="outline-tag">+{extra}</span>
-                            ) : null}
-                          </>
-                        ) : null}
+                  <div key={c.chapterNumber} className="ss-chapter-item">
+                    <button
+                      type="button"
+                      className="chapter-row"
+                      onClick={() => onOpenChapter(c.chapterNumber)}
+                    >
+                      <div className="ch-top">
+                        <span className="ch-num">第 {c.chapterNumber} 章</span>
+                        <span className="ch-title">{c.title}</span>
+                        <span className={`chip ${BUCKET_CLASS[chapterListBucket(c)]}`}>
+                          {BUCKET_LABEL[chapterListBucket(c)]}
+                        </span>
                       </div>
-                      <div className="ch-meta">
-                        {c.emotion ? <span className="words">情绪 {c.emotion}</span> : null}
-                        <span className="words">{c.wordCount.toLocaleString()} 字</span>
+                      {c.synopsis ? <div className="ch-synopsis">{c.synopsis}</div> : null}
+                      <div className="ch-foot">
+                        <div className="ch-cast">
+                          {cast.length > 0 ? (
+                            <>
+                              <span className="lbl">登场</span>
+                              {cast.map((id) => (
+                                <span key={id} className="outline-tag emotion">
+                                  {charName(id)}
+                                </span>
+                              ))}
+                              {extra > 0 ? (
+                                <span className="outline-tag">+{extra}</span>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="ch-meta">
+                          {c.emotion ? <span className="words">情绪 {c.emotion}</span> : null}
+                          <span className="words">{c.wordCount.toLocaleString()} 字</span>
+                        </div>
                       </div>
-                    </div>
-                  </button>
+                    </button>
+                  </div>
                 )
               })}
             </div>
@@ -2276,7 +2277,7 @@ function BatchWriteDialog({
           </p>
         ) : null}
         <p className="desc" style={{ margin: '0 0 12px' }}>
-          逐章先保存生成原稿，再自动去 AI 味并核对事实。每章每轮剧情纠错最多 {CHAPTER_REPAIR_LIMIT} 次、表达润色最多 {CHAPTER_EXPRESSION_REPAIR_LIMIT} 次，分别计数，独立核验仍须完成。表达验收未通过则保留原稿，章节仍显示为正文，验收结果标记为待修订；事实冲突未解决时暂停，不进入下一章。流程完成不代表正文质量验收通过。
+          逐章保存生成原稿并核对事实。开启「续写完成后自动去 AI 味」时，每章最多润色 {CHAPTER_EXPRESSION_REPAIR_LIMIT} 次，表达验收未通过时保留原稿并标记待修订。每章每轮剧情纠错最多 {CHAPTER_REPAIR_LIMIT} 次。事实冲突未解决时暂停本批。
           {autoContinue
             ? '连续模式：逐章写到结束章号，以正文为准——每章写完先修复必需剧情和伏笔遗漏并复核，再将合理差异回写本章及后续细纲，再重跑自检、同步记忆，下一章对着更新后的细纲和记忆写。细纲缺失、同步失败或阻断性冲突未解决时暂停，已保存的正文保留，可随时点停止。'
             : '每章完成后暂停等你确认。'}
@@ -2882,7 +2883,7 @@ function BatchWriteDialog({
                 pendingPostProcessChapter !== undefined
                   ? `保留第 ${pendingPostProcessChapter} 章正文，重新执行检查和同步流程`
                   : resumeRewritesCurrent
-                  ? `继续将重新生成第 ${resumeChapter} 章并自动去 AI 味`
+                  ? `继续将重新生成第 ${resumeChapter} 章，并按全局设置决定是否自动去 AI 味`
                   : autoContinue
                   ? `从第 ${resumeChapter} 章继续写到第 ${progress?.toChapter ?? ''} 章，重要问题时暂停`
                   : '生成下一章后再次暂停'

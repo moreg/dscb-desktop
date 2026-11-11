@@ -1,7 +1,6 @@
 import ChapterRefinementPanel from './ChapterRefinementPanel'
 import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
-import { FORESHADOWING_STATUS_LABELS } from './foreshadowingBoardState'
 import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, savedChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from './chapter-generation-finalize'
 import { resolveForeshadowCheckContext, type ChapterForeshadowContextSnapshot } from '../../shared/foreshadowing-check-context'
 import {
@@ -27,7 +26,6 @@ import type {
   ChapterVersion,
   Character,
   Foreshadowing,
-  MemoryEntity,
   ProviderSummary,
   ReasoningEffort,
   WriteStyleSelection
@@ -176,7 +174,6 @@ interface Props {
   chapterNumber: number
   onBack: () => void
   onOpenOutline?: () => void
-  onOpenCharacters?: () => void
   onNavigateChapter?: (chapterNumber: number) => void
 }
 
@@ -193,6 +190,7 @@ function friendlyLlmError(err: string | undefined): string {
     LLM_AUTH_FAILED: 'API Key 认证失败，请检查 provider 配置',
     AGY_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
     CODEX_AUTH_EXPIRED: 'AI 服务暂时连接失败，请稍后重试',
+    CODEX_MODEL_CAPACITY: 'Codex 模型当前繁忙，请稍后重试或更换模型',
     GROK_AUTH_EXPIRED: 'Grok 登录态失效，请在终端运行 grok login',
     LLM_RATE_LIMIT: '请求过于频繁，请稍后再试',
     LLM_TIMEOUT: '生成超时（内容过长或网络较慢），请重试',
@@ -275,7 +273,6 @@ export default function ChapterEditor({
   projectId,
   chapterNumber,
   onOpenOutline,
-  onOpenCharacters,
   onBack,
   onNavigateChapter
 }: Props) {
@@ -680,9 +677,6 @@ export default function ChapterEditor({
   const [showCast, setShowCast] = useState(false)
   const [savingCast, setSavingCast] = useState(false)
   const [foreshadowings, setForeshadowings] = useState<Foreshadowing[]>([])
-  const [locations, setLocations] = useState<MemoryEntity[]>([])
-  const [showPreview, setShowPreview] = useState(false)
-  const [previewTab, setPreviewTab] = useState<'highlight' | 'markdown'>('highlight')
   const [chapterOutline, setChapterOutline] = useState<DetailedOutlineItem | null>(null)
   const [generatingOutline, setGeneratingOutline] = useState(false)
   const [isEditingReqs, setIsEditingReqs] = useState(false)
@@ -774,6 +768,23 @@ export default function ChapterEditor({
   const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
   const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [defaultContinueAutoDeslop, setDefaultContinueAutoDeslop] = useState<boolean | null>()
+  const [continueAutoDeslopOverride, setContinueAutoDeslopOverride] = useState<boolean>()
+
+  useEffect(() => {
+    let active = true
+    void window.api.getAutoDeslopAfterContinue().then(enabled => {
+      if (active) setDefaultContinueAutoDeslop(enabled)
+    }).catch(() => {
+      if (active) setDefaultContinueAutoDeslop(null)
+    })
+    return () => { active = false }
+  }, [])
+
+  function openContinueDialog(context = ''): void {
+    setTempContextInput(context)
+    setShowContinueDialog(true)
+  }
   const [showAdjustDialog, setShowAdjustDialog] = useState(false)
   const [adjustInstruction, setAdjustInstruction] = useState('')
   /** 按要求重写：AI 给出的修改建议（可编辑，确认后作为落笔方案） */
@@ -865,13 +876,6 @@ export default function ChapterEditor({
   const [namingLoading, setNamingLoading] = useState(false)
   const [savingTitle, setSavingTitle] = useState(false)
   const [alertInfo, setAlertInfo] = useState<{ message: string } | null>(null)
-  const [previewCard, setPreviewCard] = useState<{
-    kind: 'char' | 'foreshadow' | 'location'
-    text: string
-    x: number
-    y: number
-    details: { title: string; subtitle?: string; content?: string }
-  } | null>(null)
   const [flowSyncTrigger, setFlowSyncTrigger] = useState(0)
   const [summaryRefreshTrigger, setSummaryRefreshTrigger] = useState(0)
   /** 写后自动同步结果，回填流程面板避免二次 extract */
@@ -1203,7 +1207,6 @@ export default function ChapterEditor({
   }
   const refreshMemory = () => {
     void window.api.listForeshadowings(projectId).then(setForeshadowings)
-    void window.api.listMemoryEntities(projectId, 'location').then(setLocations)
   }
   const refreshWritingRequirementTemplates = () => {
     if (typeof writingTemplateApi.getWritingRequirementTemplates !== 'function') {
@@ -1250,6 +1253,8 @@ export default function ChapterEditor({
     setGenerating(false)
     setGenerationStage(null)
     setGenerationRetry(null)
+    setContinueAutoDeslopOverride(undefined)
+    setShowContinueDialog(false)
     setRepairReviewCandidate(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
@@ -1541,7 +1546,7 @@ export default function ChapterEditor({
     localStorage.setItem(`ai-writer:word-target:${projectId}:${chapterNumber}`, String(val))
   }
 
-  // 点 popover 或预览卡片外区域关闭
+  // 点击更多菜单外部时关闭菜单
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null
@@ -1550,15 +1555,10 @@ export default function ChapterEditor({
           setToolbarMoreOpen(false)
         }
       }
-      if (previewCard) {
-        if (!(target && target.closest('.preview-inline-card'))) {
-          setPreviewCard(null)
-        }
-      }
     }
     document.addEventListener('mousedown', onClick)
     return () => document.removeEventListener('mousedown', onClick)
-  }, [toolbarMoreOpen, previewCard])
+  }, [toolbarMoreOpen])
 
   // P11-A：每 10 秒重渲染一次，让"X 秒前"指示器保持新鲜
   const [, setTick] = useState(0)
@@ -2043,6 +2043,8 @@ export default function ChapterEditor({
     streamCompletedRef.current = false
     setGenerating(true)
     setGenerationRetry(null)
+    const autoDeslopAfterContinue = repairOnly ? undefined : continueAutoDeslopOverride
+    if (!repairOnly) setContinueAutoDeslopOverride(undefined)
     setRepairReviewCandidate(null)
     generationContextRef.current = tempContextVal
     generationPreviewRef.current = ''
@@ -2120,7 +2122,8 @@ export default function ChapterEditor({
           }
         },
         autoContinueStrength,
-        repairOnly
+        repairOnly,
+        autoDeslopAfterContinue
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -2160,14 +2163,10 @@ export default function ChapterEditor({
       refreshUsage()
       // extend：本章仍是分轮续写的半成品，写后自检的完成度项据此降级（见 lastContinueMode）
       setLastContinueMode(result.continueMode ?? null)
-      // 续写完成后自动格式化（去空格/空行，保留换行），写入撤销栈以便 Ctrl+Z
       {
-        // token 只作预览；最终回包含自动精修结果，必须以它交稿和同步记忆。
+        // 交稿和同步使用后端保存的原文；再次格式化整章会改动续写前部。
         const finalized = finalizeChapterContinuation(initialDraft, finalDraft, result)
-        const formatted = formatDraftProse(finalized.content, {
-          silent: true,
-          recordHistory: true
-        })
+        const formatted = finalized.content
         foreshadowCheckContextRef.current = { projectId: targetProjectId, chapterNumber: targetChapter, content: formatted,
           foreshadowContext: { partialChapter: result.continueMode === 'extend', tempContext: tempContextVal } }
         setAutoDeslopResult(result.autoDeslop ?? null)
@@ -3172,8 +3171,7 @@ export default function ChapterEditor({
       setUndoToast({ message: '当前自检无失败/留意项', type: 'info' })
       return
     }
-    setTempContextInput(text)
-    setShowContinueDialog(true)
+    openContinueDialog(text)
     setUndoToast({
       message: '已填入续写临时要求，确认后点「带临时要求续写」',
       type: 'success'
@@ -3914,110 +3912,6 @@ export default function ChapterEditor({
     () => Math.max(0, draftWordCount - sessionStartWords),
     [draftWordCount, sessionStartWords]
   )
-
-  // 联动高亮：构建 (text, kind) 序列
-  const previewSegments = useMemo(() => {
-    if (!showPreview) return null
-    type Hit = { start: number; end: number; kind: 'char' | 'foreshadow' | 'location'; label: string }
-    const hits: Hit[] = []
-    const pushHits = (terms: string[], kind: Hit['kind'], label: string) => {
-      for (const t of terms) {
-        if (!t) continue
-        let idx = 0
-        while ((idx = draft.indexOf(t, idx)) >= 0) {
-          hits.push({ start: idx, end: idx + t.length, kind, label })
-          idx += t.length
-        }
-      }
-    }
-    pushHits(
-      characters.map((c) => c.name),
-      'char',
-      '人物'
-    )
-    pushHints()
-    function pushHints() {
-      for (const f of foreshadowings) {
-        if (f.content) {
-          let idx = 0
-          while ((idx = draft.indexOf(f.content, idx)) >= 0) {
-            hits.push({ start: idx, end: idx + f.content.length, kind: 'foreshadow', label: '伏笔' })
-            idx += f.content.length
-          }
-        }
-      }
-      for (const l of locations) {
-        if (l.name) {
-          let idx = 0
-          while ((idx = draft.indexOf(l.name, idx)) >= 0) {
-            hits.push({ start: idx, end: idx + l.name.length, kind: 'location', label: '地点' })
-            idx += l.name.length
-          }
-        }
-      }
-    }
-    // 合并重叠区间，保留 kind 优先级 char > foreshadow > location
-    if (hits.length === 0) return []
-    hits.sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start))
-    const merged: Hit[] = []
-    for (const h of hits) {
-      const last = merged[merged.length - 1]
-      if (last && h.start < last.end) {
-        // 重叠：跳过，避免嵌套
-        continue
-      }
-      merged.push(h)
-    }
-    const out: { text: string; hl?: Hit }[] = []
-    let cursor = 0
-    for (const h of merged) {
-      if (h.start > cursor) out.push({ text: draft.slice(cursor, h.start) })
-      out.push({ text: draft.slice(h.start, h.end), hl: h })
-      cursor = h.end
-    }
-    if (cursor < draft.length) out.push({ text: draft.slice(cursor) })
-    return out
-  }, [showPreview, draft, characters, foreshadowings, locations])
-
-  const onPreviewClick = (kind: 'char' | 'foreshadow' | 'location', text: string, e: React.MouseEvent) => {
-    e.stopPropagation()
-    let details: { title: string; subtitle?: string; content?: string } | null = null
-    if (kind === 'char') {
-      const c = characters.find((x) => x.name === text)
-      if (c) {
-        details = {
-          title: `人物 · ${c.name}`,
-          subtitle: c.identity ? `身份: ${c.identity}` : undefined,
-          content: c.personality ? `性格: ${c.personality}` : undefined
-        }
-      }
-    } else if (kind === 'foreshadow') {
-      const f = foreshadowings.find((x) => x.content === text)
-      if (f) {
-        details = {
-          title: `伏笔 · ${f.content}`,
-          subtitle: `状态: ${FORESHADOWING_STATUS_LABELS[f.status]}`
-        }
-      }
-    } else if (kind === 'location') {
-      const l = locations.find((x) => x.name === text)
-      if (l) {
-        details = {
-          title: `地点 · ${l.name}`,
-          subtitle: l.category ? `分类: ${l.category}` : undefined
-        }
-      }
-    }
-    if (details) {
-      setPreviewCard({
-        kind,
-        text,
-        x: e.clientX,
-        y: e.clientY,
-        details
-      })
-    }
-  }
 
   /**
    * offset → scrollTop：优先用 mirror 实测的每行高度（lineHeights 含软折行），
@@ -4893,13 +4787,6 @@ export default function ChapterEditor({
           🔍 查找
         </button>
         <button
-          className="btn btn-sm"
-          onClick={() => setShowPreview((s) => !s)}
-          title="按人物/伏笔/地点高亮正文"
-        >
-          {showPreview ? '收起预览' : '👁 预览'}
-        </button>
-        <button
           className={`btn btn-sm${showLineNumbers ? ' btn-primary' : ''}`}
           onClick={() => setShowLineNumbers((s) => !s)}
           title="显示/隐藏行号"
@@ -4962,26 +4849,41 @@ export default function ChapterEditor({
             {generationStage === 'foreshadowRepair' || generationStage?.startsWith('foreshadow:') ? '⏹ 停止伏笔补写' : isDeslopStage(generationStage) ? '⏹ 停止自动润色' : '⏹ 停止生成'}
           </button>
         ) : (
-          <button
-            className="btn btn-primary btn-sm mobile-primary-action"
-            onClick={() => {
-              const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
-              if (skip) {
-                void aiGenerate()
-              } else {
-                setTempContextInput('')
-                setShowContinueDialog(true)
-              }
-            }}
-          >
-            ✦ 续写
-          </button>
+          <div className="editor-continue-controls mobile-primary-action">
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                const skip = localStorage.getItem('ai-writer:skip-continue-dialog') === 'true'
+                if (skip) {
+                  void aiGenerate()
+                } else {
+                  openContinueDialog()
+                }
+              }}
+            >
+              ✦ 续写
+            </button>
+            <label
+              className="editor-continue-deslop"
+              title={defaultContinueAutoDeslop === null
+                ? '无法读取全局设置。未手动选择时，续写仍按全局设置执行。'
+                : '默认跟随全局设置，修改只对本次续写生效。'}
+            >
+              <input
+                type="checkbox"
+                checked={continueAutoDeslopOverride ?? defaultContinueAutoDeslop ?? false}
+                disabled={defaultContinueAutoDeslop === undefined}
+                onChange={e => setContinueAutoDeslopOverride(e.target.checked)}
+              />
+              本次自动去 AI 味
+            </label>
+          </div>
         )}
         {!generating && !adjusting && !adjustPlanning ? (
           <button
             className="btn btn-ghost btn-sm"
-            onClick={() => { setTempContextInput(''); setShowContinueDialog(true) }}
-            title="打开续写设置，可单独开启或关闭自动调整强度"
+            onClick={() => openContinueDialog()}
+            title="打开续写设置，可填写本次临时要求或调整生成强度"
           >
             ⚙ 续写设置
           </button>
@@ -5708,58 +5610,6 @@ export default function ChapterEditor({
         />
         <div ref={mirrorRef} className="editor-text-mirror" aria-hidden="true" />
       </div>
-
-      {showPreview ? (
-        <div className="chapter-main-preview">
-          <div className="row" style={{ marginTop: 16, marginBottom: 4, justifyContent: 'space-between', alignItems: 'center' }}>
-            <div className="btn-group">
-              <button
-                className={`btn btn-sm ${previewTab === 'highlight' ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => setPreviewTab('highlight')}
-              >
-                👁 联动高亮
-              </button>
-              <button
-                className={`btn btn-sm ${previewTab === 'markdown' ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => setPreviewTab('markdown')}
-              >
-                📝 Markdown 排版
-              </button>
-            </div>
-            {previewTab === 'highlight' && (
-              <div className="row" style={{ gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
-                <span><span className="hl char" style={{ padding: '1px 4px' }}>人物</span></span>
-                <span><span className="hl foreshadow" style={{ padding: '1px 4px' }}>伏笔</span></span>
-                <span><span className="hl location" style={{ padding: '1px 4px' }}>地点</span></span>
-              </div>
-            )}
-          </div>
-          <div className="editor-preview">
-            {previewTab === 'highlight' ? (
-              previewSegments && previewSegments.length > 0 ? (
-                previewSegments.map((seg, i) =>
-                  seg.hl ? (
-                    <span
-                      key={i}
-                      className={`hl ${seg.hl.kind}`}
-                      title={`${seg.hl.label} · ${seg.text}`}
-                      onClick={(e) => onPreviewClick(seg.hl!.kind as 'char' | 'foreshadow' | 'location', seg.text, e)}
-                    >
-                      {seg.text}
-                    </span>
-                  ) : (
-                    <span key={i}>{seg.text}</span>
-                  )
-                )
-              ) : (
-                <span className="muted">暂无可联动高亮的内容。</span>
-              )
-            ) : (
-              renderMarkdownPreview(draft)
-            )}
-          </div>
-        </div>
-      ) : null}
 
         </div>
 
@@ -6532,38 +6382,6 @@ export default function ChapterEditor({
         </div>
       ) : null}
 
-      {previewCard ? (
-        <div
-          className="preview-inline-card"
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: 'fixed',
-            left: Math.min(previewCard.x, window.innerWidth - 300),
-            top: Math.min(previewCard.y + 12, window.innerHeight - 180),
-            zIndex: 9999
-          }}
-        >
-          <header className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-            <strong style={{ fontSize: 13 }}>{previewCard.details.title}</strong>
-            <button className="btn btn-ghost btn-sm close-btn" onClick={() => setPreviewCard(null)}>✕</button>
-          </header>
-          <div className="card-body">
-            {previewCard.details.subtitle && <p className="subtitle">{previewCard.details.subtitle}</p>}
-            {previewCard.details.content && <p className="desc">{previewCard.details.content}</p>}
-          </div>
-          {previewCard.kind === 'char' && onOpenCharacters && (
-            <footer className="card-footer">
-              <button className="btn btn-ghost btn-sm link-btn" onClick={() => {
-                setPreviewCard(null)
-                onOpenCharacters()
-              }}>
-                查看人物卡 ↗
-              </button>
-            </footer>
-          )}
-        </div>
-      ) : null}
-
       {showAdjustDialog ? (
         <div
           className="dialog-overlay"
@@ -7181,36 +6999,6 @@ function CustomModelDialog({
   )
 }
 
-function renderMarkdownPreview(text: string) {
-  if (!text.trim()) return <span className="muted">暂无内容排版预览。</span>
-  const paragraphs = text.split(/\n+/)
-  return paragraphs.map((p, index) => {
-    const trimmed = p.trim()
-    if (!trimmed) return null
-    if (trimmed.startsWith('### ')) return <h3 key={index} style={{ margin: '14px 0 6px 0', fontSize: '14.5px', fontWeight: 700 }}>{trimmed.slice(4)}</h3>
-    if (trimmed.startsWith('## ')) return <h2 key={index} style={{ margin: '18px 0 8px 0', fontSize: '16px', fontWeight: 700 }}>{trimmed.slice(3)}</h2>
-    if (trimmed.startsWith('# ')) return <h1 key={index} style={{ margin: '22px 0 10px 0', fontSize: '18px', fontWeight: 700 }}>{trimmed.slice(2)}</h1>
-    if (trimmed === '***' || trimmed === '---' || trimmed === '___') return <hr key={index} style={{ border: 'none', borderTop: '1px solid var(--line)', margin: '16px 0' }} />
-    
-    const parts: React.ReactNode[] = []
-    const boldRegex = /\*\*(.*?)\*\*/g
-    let lastIdx = 0
-    let m: RegExpExecArray | null
-    while ((m = boldRegex.exec(trimmed)) !== null) {
-      if (m.index > lastIdx) parts.push(trimmed.slice(lastIdx, m.index))
-      parts.push(<strong key={m.index}>{m[1]}</strong>)
-      lastIdx = boldRegex.lastIndex
-    }
-    if (lastIdx < trimmed.length) parts.push(trimmed.slice(lastIdx))
-
-    return (
-      <p key={index} className="preview-paragraph" style={{ textIndent: '2em', margin: '0 0 16px 0', textAlign: 'justify' }}>
-        {parts.length > 0 ? parts : trimmed}
-      </p>
-    )
-  })
-}
-
 function OutlineDetailField({ row }: { row: { label: string; value?: string; items?: string[] } }) {
   // 角色出场用横排标签展示，其余列表字段保持竖排
   const isInline = row.label === '角色出场'
@@ -7512,7 +7300,6 @@ interface AskChatDialogProps {
 
 /**
  * 把 AI 作答文本渲染为简易 markdown（标题/列表/加粗/段落）。
- * 与 renderMarkdownPreview 不同：面向分析文本，不做正文首行缩进。
  */
 function renderAnswerText(text: string): React.ReactNode {
   if (!text.trim()) return null

@@ -28,17 +28,20 @@ describe('chapter-audit (PR2 baseline)', () => {
     expect(endingErr?.offset).toBeGreaterThanOrEqual(0)
   })
 
-  it('weak hollow ending is warn (not must-fix error)', () => {
-    // 末三段都无对话/事件，避免 makeValidContent 前几段「盯着」等词污染窗口
+  it('平静收束不因缺少对话或事件被要求改写', () => {
     const content =
       '白天没什么事。\n\n夜里风很小。\n\n他躺下，睡着了，梦里什么都没有。'
     const report = auditChapter(content)
     const hit = report.violations.find((v) => v.category === 'ending')
-    expect(hit?.severity).toBe('warn')
-    expect(hit?.message).toMatch(/钩子可能偏弱|章末未检测/)
-    // 不再 error 级阻断 passed.ending
+    expect(hit).toBeUndefined()
     expect(report.passed.ending).toBe(true)
   })
+
+  it.each(['她终于肯原谅自己了。', '他关好灯，回屋睡了。', '“晚安。”', '两个人吃完了这顿饭。'])(
+    '心理、动作、对话和日常结尾不按形式判失败：%s', ending => {
+      expect(auditChapter(ending).violations.filter(v => v.category === 'ending')).toEqual([])
+    }
+  )
 
   it('accepts action cliffhanger ending without dialogue quotes', () => {
     // 用户真实章末：瞄准心口 + 罗盘指针却朝胸口转 —— 事件卡点，不应报错

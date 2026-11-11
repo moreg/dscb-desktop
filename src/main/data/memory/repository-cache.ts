@@ -29,6 +29,14 @@ export async function memoryFileFingerprint(file: string): Promise<string> {
   }
 }
 
+/** Rapid same-size writes can share timestamps on Windows. Re-read recently changed files. */
+export function isRecentMemoryFileFingerprint(fingerprint: string): boolean {
+  if (fingerprint === 'missing') return false
+  const [, modified, changed] = fingerprint.split(':')
+  const latest = BigInt(modified) > BigInt(changed) ? BigInt(modified) : BigInt(changed)
+  return Date.now() - Number(latest / 1_000_000n) < 100
+}
+
 export function invalidateMemoryFile(file: string): void {
   const key = resolve(file)
   directories.delete(key)

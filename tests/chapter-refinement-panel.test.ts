@@ -152,7 +152,7 @@ describe('refinement panel behavior', () => {
       left: 8, top: 8, width: 720, height: 784
     })
     expect(clampRefinementPanel(4000, 4000, 720, 400, { width: 1000, height: 600 })).toMatchObject({
-      left: 272, top: 520, width: 720, height: 400
+      left: 272, top: 192, width: 720, height: 400
     })
   })
   it('drags from the title bar without starting when the handle has no layout yet', () => {
