@@ -292,6 +292,8 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('今日下午')
     expect(prompt).not.toContain('夏季健康提醒')
     expect(prompt).toContain('保留使后果成立的动作、先后、位置和交接')
+    expect(prompt).toContain('细纲是事件和边界的规划，不是逐句施工单')
+    expect(prompt).toContain('作者明确要求、规则限制或后续依赖的细节仍须落实')
     expect(prompt).toContain('不靠逗号把所有操作串成一句')
   })
 
