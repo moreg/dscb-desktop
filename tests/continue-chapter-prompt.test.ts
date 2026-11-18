@@ -512,13 +512,20 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('本次新增目标约 1500 字')
   })
 
-  it('finish：「不超过 X 字」已写满时仍保留至少 150 字收尾增量，不会算出 0 字', async () => {
+  it.each([
+    [2100, 300],
+    [2450, 50],
+    [2499, 1],
+    [2500, 0],
+    [2600, 0]
+  ])('finish：「不超过 2500 字」已写 %i 字时，收尾预算为 %i 字', async (writtenWords, expectedBudget) => {
     await writeOutline('不超过 2500 字')
     const service = new WriteService(ps, mockLlm(''))
-    const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, '甲'.repeat(2600))
+    const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, '甲'.repeat(writtenWords))
 
     expect(prompt.continueMode).toBe('finish')
-    expect(prompt.targetWords).toBe(150)
+    expect(prompt.targetWords).toBe(expectedBudget)
+    expect(prompt.user).toContain(`本次剩余额度为 ${expectedBudget} 字，新增正文不得超过该额度`)
   })
 
   /**

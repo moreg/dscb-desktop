@@ -417,8 +417,6 @@ const EXISTING_TEXT_MAX_CHARS = 40_000
 const CONTINUE_MIN_WORDS = 500
 /** 续写收尾模式的建议字数（只求收束，不求篇幅）。 */
 const CONTINUE_FINISH_WORDS = 300
-/** 续写收尾模式的保底增量（防止已写字数达到「约X字」上限时算出 0 字）。 */
-const CONTINUE_FINISH_MIN_WORDS = 150
 
 /** 上一章结尾状态缓存条数上限。 */
 const ENDING_STATE_CACHE_MAX = 16
@@ -887,7 +885,7 @@ export class WriteService {
       } else {
         continueMode = 'finish'
         targetWords = wordTarget.bound === 'about'
-          ? Math.min(CONTINUE_FINISH_WORDS, Math.max(CONTINUE_FINISH_MIN_WORDS, remaining))
+          ? Math.min(CONTINUE_FINISH_WORDS, Math.max(0, remaining))
           : CONTINUE_FINISH_WORDS
       }
     }
@@ -7232,7 +7230,7 @@ function renderUserPrompt(input: RenderInput): string {
         `**本章篇幅已接近或达到参考目标**。新增约 ${input.targetWords} 字仅供收尾参考；情节尚需展开时自然推进，已完整时即可收束，不要为了凑字数拉长。`
       )
       if (input.wordBound === 'about') {
-        parts.push(`细纲字数是上限，本次剩余额度为 ${input.targetWords} 字，不能再当作必须补足的目标；额度为零且末句已完整时无需新增正文。`)
+        parts.push(`细纲字数是上限，本次剩余额度为 ${input.targetWords} 字，新增正文不得超过该额度；额度为零且末句已完整时无需新增正文。`)
       }
     } else {
       // 已写字数要写进指令：只给增量数字时，模型会拿它和细纲的整章目标对比，
