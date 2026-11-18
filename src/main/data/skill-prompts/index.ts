@@ -1,5 +1,6 @@
 import { FANQIE_OPENING_RULES } from './skill-contracts'
 import { CHAPTER_RULE_SECTIONS, PROSE_PARAGRAPH_RULES, buildContinueModeRules, normalizeLegacyDialogueOverride, normalizeLegacyEndingOverride, normalizeLegacyParagraphOverride, type ChapterRuleSection } from './chapter-rules'
+import { NATURAL_PARAGRAPHS, DIALOGUE_PARAGRAPHS, SEMANTIC_PUNCTUATION, SCENE_DIALOGUE, PROSE_POLICY_VERSION } from '../../../shared/prose-policy'
 import { renderGenreVoiceMarkdown, resolveGenreVoice } from './genre-voice'
 import type { StyleProfile } from '../../../shared/types'
 import { DESLOP_PLAIN_WRITING_RULES } from './deslop/anti-ai-methods'
@@ -123,7 +124,12 @@ export function buildSystemPrompt(
     sections.push(buildContinueModeRules(continueMode, hasChapterOutline))
   }
 
-  sections.push('---', '下方分段、对白与标点是默认排版，作者明确指定其他排版时依其要求执行。', PROSE_PARAGRAPH_RULES)
+  const writeProseRules = `【正文保真共享规则 ${PROSE_POLICY_VERSION}】\n${NATURAL_PARAGRAPHS}\n${DIALOGUE_PARAGRAPHS}\n${SEMANTIC_PUNCTUATION}\n${SCENE_DIALOGUE}`
+  sections.push(
+    '---',
+    '下方分段、对白与标点是默认排版，作者明确指定其他排版时依其要求执行。',
+    operation === 'write' ? writeProseRules : PROSE_PARAGRAPH_RULES
+  )
   return sections.join('\n\n')
 }
 

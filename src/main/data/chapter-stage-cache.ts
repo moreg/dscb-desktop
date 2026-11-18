@@ -51,7 +51,7 @@ export async function chapterDependencyHash(dir: string, config: unknown, ignore
   async function walk(relative: string): Promise<void> {
     const entries = await fs.readdir(join(dir, relative), { withFileTypes: true })
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (excluded.has(entry.name) || entry.name.endsWith('.tmp')) continue
+      if (excluded.has(entry.name) || entry.name.endsWith('.tmp') || entry.name.startsWith('.draft-')) continue
       const path = join(relative, entry.name)
       if (ignore?.(path.replace(/\\/g, '/'))) continue
       if (entry.isSymbolicLink()) throw new Error('External dependency')

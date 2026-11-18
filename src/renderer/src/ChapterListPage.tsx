@@ -921,6 +921,7 @@ function NewChapterDialog({
  * 中间哪一章质检不过、哪一章偏离细纲全部被覆盖掉，用户无从返工。
  */
 export interface BatchChapterSummary {
+  direction?: { title: string; reason: string }
   chapter: number
   /** 本章按节奏自动调整的生成强度建议（开启 autoStrength 时记录） */
   strengthSuggestion?: ChapterStrengthSuggestion
@@ -1009,6 +1010,7 @@ export function summarizeChapterResult(
   const apply = result.memoryApply
   return {
     chapter: result.chapterNumber,
+    ...(result.direction ? { direction: result.direction } : {}),
     ...(strengthSuggestion ? { strengthSuggestion } : {}),
     summaryReady: result.chapterSummary?.stale === false,
     words: result.content.length,
@@ -2793,6 +2795,7 @@ function BatchWriteDialog({
                     {item.autoDeslop?.issues?.length ? (
                       <span style={{ color: 'var(--warn)' }}>{item.autoDeslop.issues.join('；')}</span>
                     ) : null}
+                   {item.direction ? <span title={item.direction.reason}>采用推荐：{item.direction.title}</span> : null}
                    <span>{item.summaryReady ? '概要已生成' : '概要待补'}</span>
                   <span>
                     {item.auditError > 0

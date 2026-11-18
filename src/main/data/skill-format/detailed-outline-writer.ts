@@ -32,6 +32,19 @@ export interface DetailedOutlinePatch {
   writingRequirements?: string
   writingRequirementTemplateId?: string
   writingRequirementCustomText?: string
+  /** Managed source/evidence block, scoped to this chapter even in a volume file. */
+  generatedNotes?: string
+}
+
+export function withGeneratedOutlineNotes(body: string, notes?: string): string {
+  if (notes === undefined) return body
+  const start = '<!-- chapter-direction-source:start -->'
+  const end = '<!-- chapter-direction-source:end -->'
+  const block = `${start}\n${notes.trim()}\n${end}`
+  const from = body.indexOf(start)
+  const to = from < 0 ? -1 : body.indexOf(end, from)
+  if (from >= 0 && to >= 0) return body.slice(0, from) + block + body.slice(to + end.length)
+  return `${body.trimEnd()}\n\n${block}\n`
 }
 
 /**
@@ -129,7 +142,7 @@ export class DetailedOutlineWriter {
           ? `细纲_第${String(chapterNumber).padStart(3, '0')}章_${safeTitle}.md`
           : fileName
         const targetFile = join(dirname(file), newFileName)
-        await writeTextAtomic(targetFile, nextText)
+        await writeTextAtomic(targetFile, withGeneratedOutlineNotes(nextText, patch.generatedNotes))
         if (targetFile !== file) {
           try {
             await fs.unlink(file)
@@ -219,7 +232,7 @@ export class DetailedOutlineWriter {
     }
 
     // 生成新的 body（就地改写字段行，保留引用块等非字段内容）
-    const newBody = this.renderBody(nextBodyLines, newFields, newOrder, fields)
+    const newBody = withGeneratedOutlineNotes(this.renderBody(nextBodyLines, newFields, newOrder, fields), patch.generatedNotes)
 
     // 替换 section body
     let nextText = this.replaceSectionBody(text, chSec.title, newTitle, newBody)

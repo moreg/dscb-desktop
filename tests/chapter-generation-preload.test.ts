@@ -27,6 +27,21 @@ function emit(channel: string, payload: unknown): void {
 describe('正文 preload 阶段事件与最终内容', () => {
   beforeEach(() => { listeners.clear(); invoke.mockReset() })
 
+  it('生成五个方向的请求可取消，采用方向与作者调整通过正文接口传入', async () => {
+    invoke.mockResolvedValue(null)
+    const directions = api.generateChapterDirections('project-1', 2, '', '保留悬念。', true)
+    expect(directions.requestId).toBeTruthy()
+    await directions.abort()
+    expect(invoke).toHaveBeenCalledWith('llm:abort', directions.requestId)
+    await directions
+    expect(invoke).toHaveBeenCalledWith('write:generateChapterDirections', expect.objectContaining({
+      projectId: 'project-1', chapterNumber: 2, existingText: '', instruction: '保留悬念。', force: true
+    }))
+    const choice = { token: '3d0e5c48-c738-471f-aadc-c676892400d7', directionId: 'c', adjustment: '先交涉。' }
+    await api.generateChapterStream('project-1', 2, null, '', '', vi.fn(), undefined, false, false, false, choice)
+    expect(invoke).toHaveBeenCalledWith('write:generateChapter', expect.objectContaining({ directionChoice: choice }))
+  })
+
   it.each(['repairChapterForeshadowings', 'syncChapterAfterWrite'] as const)('%s 的进度按请求隔离，异常后清理监听', async method => {
     let fail!: (error: Error) => void
     invoke.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))

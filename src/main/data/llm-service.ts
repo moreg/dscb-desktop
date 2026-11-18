@@ -183,7 +183,22 @@ const CODEX_CHAPTER_FIRST_OUTPUT_TIMEOUT_SEC = 180
  * 需要长超时的分析类 feature（会塞整章正文/细纲，Kimi 等 API 经常 >2 分钟）。
  * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
  */
+/** 后台结构化 JSON 提取/核对任务默认使用 low 推理强度，避免沿用正文高思考档位拖慢数倍。 */
+const LOW_REASONING_FEATURES = new Set([
+  'chapterSummary',
+  'autoMemorySync',
+  'memoryExtract',
+  'batchMemory',
+  'memoryEvidenceRepair',
+  'chapterOutlineFromProse',
+  'chapterDirectionReview',
+  'endingState'
+])
+
 const LONG_TIMEOUT_FEATURES = new Set([
+  'chapterDirections',
+  'chapterDirectionReview',
+  'chapterOutlineFromProse',
   // Structured ending extraction can still be streaming after two minutes.
   // Do not discard that work and restart the whole prewriting task.
   'endingState',
@@ -475,15 +490,21 @@ export class LlmService {
      * 读到的配置、也不持久化。codex 只取当次 opts.strengthOverride.reasoningEffort，
      * 避免误用 provider 中可能残留的旧值；antigravity 根据本次覆盖选择模型档位，grok 不读取覆盖值。
      */
-    const p: ProviderConfig = opts.strengthOverride
+    const defaultLowEffort =
+      opts.strengthOverride?.reasoningEffort === undefined &&
+      opts.meta?.feature !== undefined &&
+      LOW_REASONING_FEATURES.has(opts.meta.feature)
+    const p: ProviderConfig = opts.strengthOverride || defaultLowEffort
       ? {
           ...resolved,
-          ...(opts.strengthOverride.temperature !== undefined
+          ...(opts.strengthOverride?.temperature !== undefined
             ? { temperature: opts.strengthOverride.temperature }
             : {}),
-          ...(opts.strengthOverride.reasoningEffort !== undefined
+          ...(opts.strengthOverride?.reasoningEffort !== undefined
             ? { reasoningEffort: opts.strengthOverride.reasoningEffort }
-            : {})
+            : defaultLowEffort
+              ? { reasoningEffort: 'low' as const }
+              : {})
         }
       : resolved
     recordChapterRoute(createHash('sha256').update(JSON.stringify([p.id, p.model, protocolOf(p), p.temperature, p.reasoningEffort])).digest('hex'))
@@ -561,7 +582,7 @@ export class LlmService {
 
         if (truncated) {
           console.warn(
-            '[llm-service] Returning partial text from truncated stream:',
+            '[llm-service] Preserving streamed text, but rejecting incomplete output:',
             opts.meta?.feature ?? 'unknown-feature'
           )
         }
@@ -578,6 +599,9 @@ export class LlmService {
             console.error('[llm-service] Failed to record usage:', err)
           }
         }
+        // Tokens already reached the caller's recoverable preview. A truncated
+        // manuscript must not be delivered as a completed chapter or seed its next chapter.
+        if (truncated) throw new Error('LLM_OUTPUT_TRUNCATED')
         return full
       } catch (err) {
         if (isAbortError(err)) {
@@ -681,9 +705,15 @@ export class LlmService {
 
     const timeoutMs = resolveStreamTimeoutMs(opts)
     const { full, usage } = await runCodex(merged, {
-      isolatedTextTask: opts.meta?.feature === 'longformGuard' || opts.meta?.feature === 'endingState',
+      isolatedTextTask:
+        opts.meta?.feature === 'longformGuard' ||
+        opts.meta?.feature === 'endingState' ||
+        opts.meta?.feature === 'chapterDirections' ||
+        opts.meta?.feature === 'chapterDirectionReview' ||
+        opts.meta?.feature === 'chapterOutlineFromProse',
       model: p.model && p.model !== 'default' ? p.model : undefined,
-      reasoningEffort: opts.strengthOverride?.reasoningEffort,
+      reasoningEffort: opts.strengthOverride?.reasoningEffort ??
+        (opts.meta?.feature && LOW_REASONING_FEATURES.has(opts.meta.feature) ? 'low' : undefined),
       timeoutSec: Math.ceil(timeoutMs / 1000),
       ...(opts.meta?.feature === 'chapter' ? { firstOutputTimeoutSec: CODEX_CHAPTER_FIRST_OUTPUT_TIMEOUT_SEC } : {}),
       onToken: opts.onToken,

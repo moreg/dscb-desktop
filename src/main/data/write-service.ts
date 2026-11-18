@@ -1,4 +1,6 @@
 import { ChapterFactSnapshot } from './chapter-fact-snapshot'
+import { ChapterDirectionService, type SelectedChapterDirection } from './chapter-direction-service'
+import { storyEndingPolicy, type ChapterDirections, type ChapterDirectionChoice } from '../../shared/chapter-directions'
 import { MemorySyncService } from './memory/sync-service'
 import type { ChapterSyncOptions, ChapterSyncResult, ChapterSyncStep } from '../../shared/chapter-workflow'
 import { ChapterWorkflow, type ChapterWorkflowMode } from './chapter-workflow'
@@ -95,7 +97,7 @@ import {
 import { writeJsonAtomic } from './atomic'
 import { reconcileOutlineWithHistory } from './outline-conflict-agent'
 import { extractPowerBoundaryBullets } from './power-boundary'
-import { readText, parseDoc } from './skill-format/md-parser'
+import { readText, parseDoc, parseVolumeNumber } from './skill-format/md-parser'
 import { parseForeshadowReceipt } from '../../shared/parsers'
 import { findJsonArray, findJsonObject } from '../../shared/json-extract'
 import { foreshadowingsBeforeChapter, isOpenForeshadowing } from '../../shared/foreshadowing-state'
@@ -211,6 +213,7 @@ interface ChapterPostWriteOptions {
 }
 
 interface ChapterFlowOptions extends ChapterGenerateOptions {
+  autoRecommendMissingOutline?: boolean
   styleProfileId?: string | null
   readonlyPrefix?: string
   /** 批量模式先保存正文，再运行会改变记忆/细纲的后处理。 */
@@ -302,6 +305,9 @@ export function needsDownstreamOutlineAdjustment(diff: OutlineDiffItem): boolean
  * 这些编排回调在下发给 LlmService 前被剔除，不进 provider 层。
  */
 export interface ChapterGenerateOptions extends GenerateOptions {
+  directionChoice?: ChapterDirectionChoice
+  /** Backend-owned plan; never accepted directly from IPC. */
+  selectedDirection?: SelectedChapterDirection
   /** 手机配对页先生成候选，采用后走普通版本化保存。 */
   previewOnly?: boolean
   /** 批量写作需要细纲才能完成逐章核验；单章缺纲时直接写正文。 */
@@ -411,6 +417,8 @@ const EXISTING_TEXT_MAX_CHARS = 40_000
 const CONTINUE_MIN_WORDS = 500
 /** 续写收尾模式的建议字数（只求收束，不求篇幅）。 */
 const CONTINUE_FINISH_WORDS = 300
+/** 续写收尾模式的保底增量（防止已写字数达到「约X字」上限时算出 0 字）。 */
+const CONTINUE_FINISH_MIN_WORDS = 150
 
 /** 上一章结尾状态缓存条数上限。 */
 const ENDING_STATE_CACHE_MAX = 16
@@ -665,6 +673,96 @@ export class WriteService {
       })
   }
 
+  private directionService(dir: string, projectId: string, chapter: number): ChapterDirectionService {
+    return new ChapterDirectionService(dir, chapter, this.llm, projectId)
+  }
+
+  private async pendingChapterDirection(projectId: string, chapter: number): Promise<SelectedChapterDirection | undefined> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const state = await this.directionService(dir, projectId, chapter).read()
+    return state?.completedHash ? undefined : state?.selected
+  }
+
+  async generateChapterDirections(projectId: string, chapterNumber: number, existingText = '', instruction = '',
+    opts: { signal?: AbortSignal; force?: boolean } = {}): Promise<ChapterDirections | null> {
+    throwIfAborted(opts.signal)
+    const dir = await this.projectService.resolveDir(projectId)
+    if (hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined)) return null
+    if (existingText.length > EXISTING_TEXT_MAX_CHARS) throw new Error('CHAPTER_CONTEXT_TOO_LARGE')
+    const service = this.directionService(dir, projectId, chapterNumber)
+    let migration = this.observationMigrations.get(dir)
+    if (!migration) {
+      migration = new MemoryWriter(dir).dateLegacyObservations().catch(err => {
+        this.observationMigrations.delete(dir)
+        throw err
+      })
+      this.observationMigrations.set(dir, migration)
+    }
+    await migration
+    const before = await service.fingerprint(existingText, instruction)
+    if (!opts.force) {
+      const cached = await service.read()
+      if (cached?.candidates.contextHash === before) return cached.candidates
+    }
+    const project = await this.projectService.getProjectData(projectId)
+    const ctx = await this.loadChapterContext(dir, chapterNumber, { existingText, strict: true, allowMissingPrevious: true, signal: opts.signal })
+    const main = await service.readPlan()
+    if (!ctx.mainSynopsis.trim() && (!main.trim() || main === '""')) throw new Error('DIRECTION_OUTLINE_MISSING: 请先提供全书大纲。')
+    const hasFullMain = Boolean(main.trim() && main !== '""')
+    const promptBody = renderUserPrompt({ ...ctx, mainSynopsis: hasFullMain ? '' : ctx.mainSynopsis,
+      projectName: project.name, genre: project.genre, chapterNumber,
+      targetWords: project.chapterWordCount ?? TARGET_WORDS, existingText, tempContext: undefined,
+      chapterDetail: undefined, nextDetail: (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber + 1)) ?? undefined })
+      .replace(/\n\n---\n\n# 现在请写第 \d+ 章正文[\s\S]*$/, '')
+    const context = [
+      '【完整总纲，全部是计划，不是既成事实】', main,
+      promptBody,
+      ctx.prevProse.trim() ? '' : '【前文可用性】没有上一章正文，仅依据大纲和可核对的记忆规划，不编造上一章结尾。'
+    ].filter(Boolean).join('\n\n')
+    if (context.length > 100_000) throw new Error('DIRECTION_CONTEXT_TOO_LARGE: 大纲及必要上下文超过可完整提交的范围，请精简资料后重试；未截断总纲。')
+    if (before !== await service.fingerprint(existingText, instruction)) throw new Error('DIRECTION_CONTEXT_CHANGED: 资料读取期间有变化，请重新生成方向。')
+    return service.generate(context, existingText, instruction, !ctx.prevProse.trim(), opts.signal, opts.force, before)
+  }
+
+  private async adoptChapterDirection(projectId: string, chapter: number, choice: ChapterDirectionChoice,
+    existingText = '', instruction = '', signal?: AbortSignal): Promise<SelectedChapterDirection> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const project = await this.projectService.getProjectData(projectId)
+    return this.directionService(dir, projectId, chapter).select(choice, existingText, instruction,
+      project.chapterWordCount ?? TARGET_WORDS, signal)
+  }
+
+  private async finishDirectionChapter(projectId: string, chapter: number, content: string,
+    selected: SelectedChapterDirection, signal?: AbortSignal,
+    progress?: (stage: ChapterGenerationStage) => void): Promise<void> {
+    const dir = await this.projectService.resolveDir(projectId)
+    const service = this.directionService(dir, projectId, chapter)
+    await service.beginPostProcessing(content, selected, signal)
+    progress?.('preparing:正在核对选定方向与禁止主动完结规则')
+    await service.verify(content, selected, signal)
+    progress?.('preparing:正文已保存，正在生成本章细纲')
+    await this.memoryCoordinator.exclusive(projectId, async () => {
+      const title = (await this.chapterService.getChapter(projectId, chapter)).meta.title
+      await service.createOutline(content, title, selected, signal)
+    })
+    progress?.('preparing:正在生成章节概要并同步记忆')
+    const [, sync] = await Promise.all([
+      this.generateChapterSummary(projectId, chapter, content, { signal }),
+      this.syncChapterAfterWrite(projectId, chapter, content, {
+        signal, skipIfDisabled: false, tempContext: selected.authorInstruction,
+        onProgress: value => progress?.(`preparing:${postWriteProgressLabel(value)}`)
+      })
+    ])
+    const errors = [...(sync?.memory.errors ?? []), ...(sync?.memory.heldBack ?? []),
+      ...(sync?.memory.reviewRequired ?? []), ...(sync?.settings.errors ?? [])]
+    if (!sync || sync.memory.superseded || sync.extraction.parseError || errors.length) {
+      throw new Error(`DIRECTION_SYNC_INCOMPLETE: 正文已保存，记忆同步尚未完成。${sync?.extraction.parseError ?? errors.join('；')}`)
+    }
+    throwIfAborted(signal)
+    if (await new ProseRepo(dir).read(chapter) !== content) throw new Error('DIRECTION_CONTEXT_CHANGED: 正文已变化，请补跑同步。')
+    await service.complete(content)
+  }
+
   async buildChapterPrompt(
     projectId: string,
     chapterNumber: number,
@@ -675,7 +773,8 @@ export class WriteService {
     signal?: AbortSignal,
     onPreparation?: (detail: string) => void,
     onEndingPreparation?: (ready: Promise<void>) => void,
-    prepareChapterOutline = false
+    prepareChapterOutline = false,
+    selectedDirection?: SelectedChapterDirection
   ): Promise<{
     system: string
     user: string
@@ -713,9 +812,15 @@ export class WriteService {
       return { context, writingBoundary }
     }
     const prepared = strictContext
-      ? await this.prepareWritingContext(projectId, chapterNumber, { signal, onPreparation, onEndingPreparation, existingText, prepareChapterOutline })
+      ? await this.prepareWritingContext(projectId, chapterNumber, { signal, onPreparation, onEndingPreparation, existingText, prepareChapterOutline,
+        allowMissingPrevious: Boolean(selectedDirection) })
       : await loadPreviewContext()
     const ctx = prepared.context
+    if (selectedDirection) {
+      ctx.detail = { ...ctx.detail, chapterNumber, title: ctx.detail?.title ?? `第${chapterNumber}章`, plotSummary: selectedDirection.plan,
+        hook: selectedDirection.candidates.directions.find(d => d.id === selectedDirection.choice.directionId)?.hook,
+        wordEstimate: `约${selectedDirection.targetWords}字` }
+    }
     let { writingBoundary } = prepared
     const confirmWritingBoundary = async () => {
       if (writingBoundary !== await readChapterBoundary(dir, chapterNumber)) {
@@ -724,7 +829,7 @@ export class WriteService {
     }
     await confirmWritingBoundary()
 
-    if (strictContext && chapterNumber > 1 && hasChapterPlan(ctx.detail)) {
+    if (strictContext && !selectedDirection && chapterNumber > 1 && hasChapterPlan(ctx.detail)) {
       onPreparation?.('正在根据已确认前文检查本章细纲')
       const generate = (feature: string) => (text: string): Promise<string> => this.llm.generateStream(text, {
         signal, maxTokens: 4096, meta: { feature, projectId, chapterNumber }
@@ -782,7 +887,7 @@ export class WriteService {
       } else {
         continueMode = 'finish'
         targetWords = wordTarget.bound === 'about'
-          ? Math.min(CONTINUE_FINISH_WORDS, Math.max(0, remaining))
+          ? Math.min(CONTINUE_FINISH_WORDS, Math.max(CONTINUE_FINISH_MIN_WORDS, remaining))
           : CONTINUE_FINISH_WORDS
       }
     }
@@ -797,7 +902,7 @@ export class WriteService {
       platformConfig,
       'write',
       hasChapterPlan(ctx.detail)
-    )
+    ) + '\n\n' + storyEndingPolicy(tempContext)
 
     const [recalledProse, continuityContext, longformPlan] = await Promise.all([
       this.recallChapterEvidence(dir, chapterNumber, ctx, existingText, tempContext),
@@ -852,7 +957,8 @@ export class WriteService {
       recalledProse,
       recalledSummaries,
       continuityContext,
-      longformPlan,
+      longformPlan: selectedDirection ? [longformPlan, '【完整总纲，只作计划约束】', selectedDirection.sourcePlan,
+        '【本章已选择的方向】', selectedDirection.plan].join('\n\n') : longformPlan,
       chapterNumber,
       targetWords,
       chapterTargetWords,
@@ -881,6 +987,14 @@ export class WriteService {
   async deliverChapter(projectId: string, chapterNumber: number, styleProfileId?: string | null,
     opts: ChapterGenerateOptions = {}): Promise<import('../../shared/types').ChapterStreamResult> {
     return this.runChapterWrite(projectId, chapterNumber, async () => {
+      const selected = opts.directionChoice
+        ? await this.adoptChapterDirection(projectId, chapterNumber, opts.directionChoice, opts.existingText, opts.tempContext, opts.signal)
+        : opts.selectedDirection ?? (opts.repairOnly ? await this.pendingChapterDirection(projectId, chapterNumber) : undefined)
+      opts = { ...opts, selectedDirection: selected, ...(selected ? { tempContext: selected.authorInstruction } : {}) }
+      const directionState = opts.repairOnly && selected
+        ? await this.directionService(await this.projectService.resolveDir(projectId), projectId, chapterNumber).read() : undefined
+      const resumePostProcessing = Boolean(directionState?.postProcessing ||
+        (directionState?.generated && directionState.generated.sourceHash === hashProse(opts.existingText ?? '')))
       const autoDeslopAfterContinue = !opts.repairOnly &&
         (opts.autoDeslopAfterContinue ?? ((await this.settings?.get())?.autoDeslopAfterContinue === true))
       const prefix = opts.repairOnly ? undefined : opts.existingText
@@ -891,7 +1005,10 @@ export class WriteService {
       let retained: string | undefined
       try {
         const content = await this.generateChapterStream(projectId, chapterNumber, styleProfileId, { ...opts, autoDeslopAfterContinue, deferExpression: true,
-          onPromptMeta: meta => { promptMeta = meta; opts.onPromptMeta?.(meta) },
+          onPromptMeta: meta => {
+            promptMeta = resumePostProcessing ? { ...meta, continueMode: 'finish' } : meta
+            opts.onPromptMeta?.(promptMeta)
+          },
           onAutoDeslopResult: report => { autoDeslop = report; opts.onAutoDeslopResult?.(report) },
           onFinalProseReady: async text => { full = text; await opts.onFinalProseReady?.(text) },
           onConflictRepaired: text => { full = text; conflictRepaired = true; opts.onConflictRepaired?.(text) }
@@ -933,7 +1050,16 @@ export class WriteService {
             }
           }
         }
+        if (selected) {
+          if (promptMeta?.continueMode === 'extend') {
+            const dir = await this.projectService.resolveDir(projectId)
+            await this.directionService(dir, projectId, chapterNumber).verify(saved.content, selected, opts.signal, true)
+          } else {
+            await this.finishDirectionChapter(projectId, chapterNumber, saved.content, selected, opts.signal, opts.onGenerationStage)
+          }
+        }
         return { ok: true, content, fullContent: saved.content, saved, autoDeslop: saved.meta.autoDeslop,
+          ...(selected && promptMeta?.continueMode !== 'extend' ? { directionSyncCompleted: true } : {}),
           continueMode: promptMeta?.continueMode, wordBudget: promptMeta,
           ...(conflictRepaired ? { conflictRepaired: true } : {}), foreshadowRepair: repaired.report }
       } catch (error) {
@@ -1037,7 +1163,7 @@ export class WriteService {
     maybeOpts: ChapterGenerateOptions = {}
   ): Promise<string> {
     const { styleProfileId, opts } = normalizeStyleGenerateArgs(styleProfileIdOrOpts, maybeOpts)
-    const { deferExpression, autoDeslopAfterContinue, autoStrength, previewOnly, prepareChapterOutline, repairOnly, proseFirst, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
+    const { directionChoice: _directionChoice, selectedDirection, deferExpression, autoDeslopAfterContinue, autoStrength, previewOnly, prepareChapterOutline, repairOnly, proseFirst, onPromptMeta, onGenerationStage: reportStage, onAutoDeslopResult, onProseGenerated, onFinalProseReady, onConflictRepaired, ...llmOpts } = opts as ChapterGenerateOptions
     const polishAfterGeneration = !repairOnly &&
       (autoDeslopAfterContinue ?? ((await this.settings?.get())?.autoDeslopAfterContinue === true))
     const onGenerationStage = (stage: ChapterGenerationStage): void => {
@@ -1060,7 +1186,8 @@ export class WriteService {
       opts.signal,
       detail => onGenerationStage?.(`preparing:${detail}`),
       ready => { endingPreparations.push(ready.catch(error => { endingError = error })) },
-      prepareChapterOutline
+      prepareChapterOutline && !selectedDirection,
+      selectedDirection
     )).catch((error: unknown) => {
       if (opts.signal?.aborted || (error as Error).message?.includes('LLM_ABORTED')) throw error
       throw new Error(`WRITING_CONTEXT_MISSING: 写作上下文准备未完成。${(error as Error).message}`)
@@ -1156,6 +1283,9 @@ export class WriteService {
       await onProseGenerated?.(prose)
       if (!onProseGenerated) await this.chapterService.updateContent(projectId, chapterNumber, rawContent,
         contentRevision(savedBefore.content), { source: 'ai', note: '生成原稿（自动润色前保存）' })
+      if (selectedDirection && prompt.continueMode !== 'extend') {
+        await this.directionService(writingDir, projectId, chapterNumber).beginPostProcessing(rawContent, selectedDirection, opts.signal)
+      }
       const consistencyOptions = {
         signal: opts.signal, instruction: opts.tempContext, styleProfileId, proseFirst,
         onStart: () => onGenerationStage('continuity:正在核对章节边界、长期记忆、人物知情与主线'),
@@ -1271,6 +1401,12 @@ export class WriteService {
     options: { signal?: AbortSignal; instruction?: string; continuationStart?: number; onStart?: () => void; previewOnly?: boolean } = {}): Promise<() => Promise<void>> {
     throwIfAborted(options.signal)
     const dir = await this.projectService.resolveDir(projectId)
+    if (options.instruction === undefined) {
+      const direction = await this.directionService(dir, projectId, chapterNumber).read()
+      if (direction?.selected && (!direction.completedHash || direction.completedHash === hashProse(content))) {
+        options = { ...options, instruction: direction.selected.authorInstruction }
+      }
+    }
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const savedBefore = await new ProseRepo(dir).read(chapterNumber)
     const readContext = async () => {
@@ -1318,7 +1454,15 @@ export class WriteService {
       ].join('\n') : ''
       const history = [...renderRecalledProse(recalled.filter(hit => !hit.nearby)), ...continuity,
         ...(itemTable ? [itemTable] : [])].join('\n\n')
-      return { plan, boundary, history, crossChapterClues: renderCrossChapterClues(recalled), hints: renderItemDriftHints(drifts),
+      const directionService = this.directionService(dir, projectId, chapterNumber)
+      const directionState = await directionService.read()
+      const selected = !directionState?.completedHash ? directionState?.selected : undefined
+      if (selected && selected.sourcePlan !== await directionService.readPlan()) {
+        throw new Error('DIRECTION_CONTEXT_CHANGED: 完整总纲已变化，请重新核对本章方向。')
+      }
+      const guardPlan = selected ? [plan, '【方向生成时的完整总纲，属于计划】', selected.sourcePlan,
+        '【作者采用的本章方向】', selected.plan].join('\n\n') : plan
+      return { plan: guardPlan, boundary, history, crossChapterClues: renderCrossChapterClues(recalled), hints: renderItemDriftHints(drifts),
         sources: hashProse(JSON.stringify(sources.map(s => [s.chapterNumber, s.sourcePath, s.sourceHash]))) }
     }
     const before = await readContext()
@@ -4201,13 +4345,34 @@ export class WriteService {
       (report.status === 'applied' || report.status === 'unchanged') && report.dialogueQuality?.passed !== false
 
     // 1. 生成正文（流式 token 由 opts.onToken 推送）
-    const { onContentGenerated, contentOverride, proseFirst, localRepairOnly, ...generateOpts } = opts
+    const directionService = this.directionService(dir, projectId, chapterNumber)
+    let selectedDirection = opts.selectedDirection
+    if (!selectedDirection && opts.contentOverride !== undefined) {
+      const pending = await directionService.read()
+      if (!pending?.completedHash) selectedDirection = pending?.selected
+    }
+    if (opts.autoRecommendMissingOutline && !selectedDirection && opts.contentOverride === undefined &&
+      !hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined)) {
+      onProgress('directions', '正在根据大纲与可用前文生成五个方向')
+      opts.onGenerationStage?.('preparing:正在根据大纲与可用前文生成五个方向')
+      const candidates = await this.generateChapterDirections(projectId, chapterNumber, opts.existingText, opts.tempContext, { signal: opts.signal })
+      if (candidates) {
+        selectedDirection = await this.adoptChapterDirection(projectId, chapterNumber,
+          { token: candidates.token, directionId: candidates.recommendedId }, opts.existingText, opts.tempContext, opts.signal)
+        const recommended = candidates.directions.find(d => d.id === candidates.recommendedId)!
+        onProgress('directions', `采用推荐方向：${recommended.title}；${candidates.recommendationReason}`)
+        opts.onGenerationStage?.(`preparing:采用推荐方向：${recommended.title}；${candidates.recommendationReason}`)
+      }
+    }
+    opts = { ...opts, selectedDirection, ...(selectedDirection ? { tempContext: selectedDirection.authorInstruction } : {}) }
+    const { autoRecommendMissingOutline, onContentGenerated, contentOverride, proseFirst, localRepairOnly, ...generateOpts } = opts
     const autoDeslopAfterContinue = opts.autoDeslopAfterContinue ?? ((await this.settings?.get())?.autoDeslopAfterContinue === true)
     throwIfAborted(opts.signal)
     if (contentOverride === undefined) onProgress('generating')
     let autoDeslop: AutoDeslopResult | undefined
     if (contentOverride !== undefined) {
-      await this.prepareWritingContext(projectId, chapterNumber, { signal: opts.signal, prepareChapterOutline: true })
+      await this.prepareWritingContext(projectId, chapterNumber, { signal: opts.signal, prepareChapterOutline: !autoRecommendMissingOutline && !selectedDirection,
+        allowMissingPrevious: Boolean(selectedDirection) })
       // Reject stale recovered facts before polishing them or extracting candidates.
       // Final checks still run again if later stages change the saved manuscript.
       await this.assertLongformConsistency(projectId, chapterNumber, contentOverride, {
@@ -4217,7 +4382,7 @@ export class WriteService {
     }
     const originalRevision = hashProse(await new ProseRepo(dir).read(chapterNumber))
     let content = contentOverride ?? await this.generateChapterStream(projectId, chapterNumber, {
-      ...generateOpts, proseFirst, autoDeslopAfterContinue, deferExpression: true, prepareChapterOutline: true,
+      ...generateOpts, proseFirst, autoDeslopAfterContinue, deferExpression: true, prepareChapterOutline: !autoRecommendMissingOutline && !selectedDirection,
       onGenerationStage: (stage) => {
         onProgress(stage)
         opts.onGenerationStage?.(stage)
@@ -4438,7 +4603,21 @@ export class WriteService {
     // 以正文为准：先回写细纲，再用新细纲重跑自检，最后才同步记忆。顺序不能反——
     // 旧细纲下的自检失败会把记忆整章拦下，下一章又对着旧细纲/旧记忆写，问题逐章滚大。
     // 上次已回写成功（缓存里的报告带 proseSynced）时不再重复回写。
-    if (proseFirst && outlineDiff.proseSynced === undefined && !memoryTicket.controller.signal.aborted) {
+    if (selectedDirection) {
+      onProgress('outlineSync', '核对选定方向并根据最终正文生成本章细纲')
+      opts.onGenerationStage?.('preparing:核对选定方向并根据最终正文生成本章细纲')
+      await directionService.verify(content, selectedDirection, memoryTicket.controller.signal)
+      await this.memoryCoordinator.exclusive(projectId, async () => {
+        await directionService.createOutline(content, (await this.chapterService.getChapter(projectId, chapterNumber)).meta.title,
+          selectedDirection!, memoryTicket.controller.signal)
+      })
+      outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
+      outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+      assertChapterOutlineRequirements(outlineDiff)
+      outlineDiff.proseSynced = 1
+      selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+    }
+    if (proseFirst && !selectedDirection && outlineDiff.proseSynced === undefined && !memoryTicket.controller.signal.aborted) {
       onProgress('outlineSync')
       // 回写失败时本章细纲保持原样（见 syncOutlineFromProse），可以安全地原样重跑。
       const checkedDiff = outlineDiff
@@ -4463,9 +4642,22 @@ export class WriteService {
       }
     }
 
-    if (await repairContinuityIfNeeded() && proseFirst) {
-      onProgress('outlineSync')
-      outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
+    if (await repairContinuityIfNeeded()) {
+      if (selectedDirection) {
+        onProgress('outlineSync', '依据修复后的最终正文更新本章细纲')
+        await directionService.verify(content, selectedDirection, memoryTicket.controller.signal)
+        await this.memoryCoordinator.exclusive(projectId, async () => {
+          await directionService.createOutline(content, (await this.chapterService.getChapter(projectId, chapterNumber)).meta.title,
+            selectedDirection!, memoryTicket.controller.signal)
+        })
+        outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
+        outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+        outlineDiff.proseSynced = 1
+        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+      } else if (proseFirst) {
+        onProgress('outlineSync')
+        outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
+      }
     }
     assertChapterOutlineRequirements(outlineDiff, requiredPlans)
     readyForMemory = true
@@ -4473,11 +4665,13 @@ export class WriteService {
     if (proseFirst || await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
     const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
       { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore, tempContext: opts.tempContext,
-        ...(proseFirst ? { proseFirst: true, skipIfDisabled: false } : {}) })
+        ...(proseFirst || selectedDirection ? { proseFirst: true, skipIfDisabled: false } : {}) })
     onProgress('done')
     return {
       chapterNumber,
       content,
+      ...(selectedDirection ? { direction: { title: selectedDirection.candidates.directions.find(d => d.id === selectedDirection!.choice.directionId)!.title,
+        reason: selectedDirection.candidates.recommendationReason } } : {}),
       autoDeslop,
       audit,
       outlineDiff,
@@ -4498,7 +4692,9 @@ export class WriteService {
 
   private async loadChapterOutlineText(dir: string, chapterNumber: number): Promise<string> {
     const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
-    return d && hasChapterPlan(d) ? renderChapterDetail(d, '本章细纲') : ''
+    if (d && hasChapterPlan(d)) return renderChapterDetail(d, '本章细纲')
+    const state = await new ChapterDirectionService(dir, chapterNumber, this.llm, '').read()
+    return state?.selected && !state.completedHash ? `本章已选方向（计划，尚未生成正式细纲）：\n${state.selected.plan}` : ''
   }
 
   /**
@@ -4931,6 +5127,7 @@ export class WriteService {
               ;(opts as BatchGenerateOptions).onFlowProgress?.(detail ? `${step}:${detail}` : step, ch)
             }, {
               ...opts, styleProfileId, strengthOverride,
+              autoRecommendMissingOutline: true,
               providerOverride: runOptions?.chapterRoute,
               onGenerationStage: (stage: ChapterGenerationStage) => (opts as BatchGenerateOptions).onGenerationStage?.(stage, ch),
               onAutoDeslopResult: (report: AutoDeslopResult) => (opts as BatchGenerateOptions).onAutoDeslopResult?.(report, ch),
@@ -4962,7 +5159,7 @@ export class WriteService {
 
         // 后处理取消/失败只允许复用当前稿重试，不能当作已经检查完成跳到下一章。
         let pendingReason = ''
-        const autoMemory = runOptions?.autoContinue || await this.isAutoMemorySyncEnabled()
+        const autoMemory = Boolean(result.direction) || runOptions?.autoContinue || await this.isAutoMemorySyncEnabled()
         if (opts.signal?.aborted) pendingReason = '已停止，本章写后检查尚未完成'
         else if (hashProse(await new ProseRepo(dir).read(ch)) !== hashProse(result.content)) pendingReason = '本章正文在检查期间发生变化，请重新检查当前保存稿'
         else if (result.outlineDiff.hasOutline === false) pendingReason = '缺少本章细纲，请补齐细纲后重试检查'
@@ -4977,12 +5174,13 @@ export class WriteService {
           (result.autoDeslop.status === 'failed' && !result.autoDeslop.message.includes('服务未启用')))) {
           pendingReason = `表达复核未通过：${[result.autoDeslop.message, ...(result.autoDeslop.issues ?? []), ...(result.autoDeslop.dialogueQuality?.issues ?? [])].join('；')}`
         }
+        else if (result.direction && !result.memoryApply) pendingReason = '本章记忆尚未同步完成'
         else if (autoMemory && result.memory.parseError) pendingReason = result.memory.parseError
         else if (autoMemory && result.memoryApply?.superseded) pendingReason = '本章记忆同步已中断或正文发生变化'
         else if (autoMemory && result.memoryApply?.errors.length) pendingReason = `记忆同步失败：${result.memoryApply.errors.join('；')}`
         else if (autoMemory && result.memoryApply?.heldBack?.length) pendingReason = `记忆条目复核未通过：${result.memoryApply.heldBack.join('；')}`
         // 连续写作下一章要读本章记忆，整章记忆没写进去就不能往下写。
-        else if (runOptions?.autoContinue && result.memoryApply?.reviewRequired?.length) {
+        else if ((runOptions?.autoContinue || result.direction) && result.memoryApply?.reviewRequired?.length) {
           pendingReason = `记忆未能按正文同步：${result.memoryApply.reviewRequired.join('；')}`
         }
         else if (result.settingsApply?.errors.length) pendingReason = `设定同步失败：${result.settingsApply.errors.join('；')}`
@@ -5005,6 +5203,7 @@ export class WriteService {
         if (!pendingReason) {
           throwIfAborted(opts.signal)
           if (await new ProseRepo(dir).read(ch) !== result.content) throw new Error('核对结束前正文已变化，请补跑当前保存稿')
+          if (result.direction) await this.directionService(dir, projectId, ch).complete(result.content)
           if (batchReviewToken) await clearBatchReviewPending(dir, ch, batchReviewToken)
           this.postProcessCache.delete(postProcessCacheKey(projectId, ch, result.content))
           // 执行完成不等于质量通过：表达/自检仍有问题的章节保持草稿。
@@ -5782,6 +5981,7 @@ export class WriteService {
     onEndingPreparation?: (ready: Promise<void>) => void
     existingText?: string
     prepareChapterOutline?: boolean
+    allowMissingPrevious?: boolean
   }): Promise<{ context: ChapterContext; writingBoundary: string }> {
     const { signal, onPreparation, onEndingPreparation, existingText, prepareChapterOutline } = options
     const dir = await this.projectService.resolveDir(projectId)
@@ -5791,11 +5991,12 @@ export class WriteService {
       try {
         // Each chapter sees author edits even when filesystem timestamps collide.
         invalidateMemoryProject(dir)
-        await this.completeWritingContext(projectId, dir, chapterNumber, signal, onPreparation, onEndingPreparation, prepareChapterOutline)
+        await this.completeWritingContext(projectId, dir, chapterNumber, signal, onPreparation, onEndingPreparation, prepareChapterOutline, options.allowMissingPrevious)
         onPreparation?.('正在加载写作记忆与前文')
         const writingBoundary = await readChapterBoundary(dir, chapterNumber)
         const context = await this.loadChapterContext(dir, chapterNumber, {
-          needEndingState: !onEndingPreparation, strict: true, requireOutline: prepareChapterOutline, signal, existingText
+          needEndingState: !onEndingPreparation, strict: true, requireOutline: prepareChapterOutline, signal, existingText,
+          allowMissingPrevious: options.allowMissingPrevious
         })
         throwIfAborted(signal)
         return { context, writingBoundary }
@@ -5810,7 +6011,7 @@ export class WriteService {
 
   private async completeWritingContext(projectId: string, dir: string, chapterNumber: number, signal?: AbortSignal,
     onPreparation?: (detail: string) => void,
-    onEndingPreparation?: (ready: Promise<void>) => void, prepareChapterOutline = false): Promise<void> {
+    onEndingPreparation?: (ready: Promise<void>) => void, prepareChapterOutline = false, allowMissingPrevious = false): Promise<void> {
     onPreparation?.('正在检查历史审核状态与衔接正文')
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const outlines = new DetailedOutlineMdRepo(dir)
@@ -5818,7 +6019,7 @@ export class WriteService {
     let previous = ''
     if (chapterNumber > 1) {
       previous = await prose.read(chapterNumber - 1)
-      if (!previous.trim()) {
+      if (!previous.trim() && !allowMissingPrevious) {
         const version = (await new ChapterVersionRepository(dir).list(chapterNumber - 1)).find(item => item.content.trim())
         if (version) {
           await this.chapterService.updateContent(projectId, chapterNumber - 1, version.content, contentRevision(previous),
@@ -5986,7 +6187,7 @@ export class WriteService {
   private async loadChapterContext(
     dir: string,
     chapterNumber: number,
-    opts?: { needEndingState?: boolean; strict?: boolean; requireOutline?: boolean; signal?: AbortSignal; existingText?: string }
+    opts?: { needEndingState?: boolean; strict?: boolean; requireOutline?: boolean; allowMissingPrevious?: boolean; signal?: AbortSignal; existingText?: string }
   ): Promise<ChapterContext> {
     let migration = this.observationMigrations.get(dir)
     if (!migration) {
@@ -6037,10 +6238,12 @@ export class WriteService {
       // 总纲 synopsis + 卷结构：优先 OutlineMdRepo（大纲/大纲.md），回退旧 OutlineRepository（outlines/main.json）
       let mainSynopsis = ''
       let volumeOutline: VolumeOutline | undefined
+      let rhythmFallbackEntry: RhythmEntry | undefined
       try {
         const outlineRead = await new OutlineMdRepo(dir).read()
         if (outlineRead) {
           mainSynopsis = outlineRead.main.synopsis ?? ''
+          rhythmFallbackEntry = outlineRead.rhythmFallback?.find((r) => r.chapter === chapterNumber)
           // 找本章所属卷，加载卷纲文件
           const vol = outlineRead.volumes.find(
             (v) => chapterNumber >= v.chapterStart && chapterNumber <= v.chapterEnd
@@ -6054,6 +6257,9 @@ export class WriteService {
                 chapterEnd: vol.chapterEnd
               }
             }
+          }
+          if (!volumeOutline) {
+            volumeOutline = await this.loadSupplementalVolumeOutline(dir, chapterNumber, vol?.number)
           }
         }
       } catch (err) {
@@ -6073,7 +6279,7 @@ export class WriteService {
           // skip
         }
       }
-      return { mainSynopsis, volumeOutline }
+      return { mainSynopsis, volumeOutline, rhythmFallbackEntry }
     })()
 
     const previousTask = (async () => {
@@ -6093,7 +6299,7 @@ export class WriteService {
           // skip
         }
       }
-      if (opts?.strict && chapterNumber > 1 && !prevProse.trim()) {
+      if (opts?.strict && !opts.allowMissingPrevious && chapterNumber > 1 && !prevProse.trim()) {
         prevProse = await this.previousContextFallback(dir, chapterNumber - 1)
         // Plans cannot be fed to a factual ending-state extractor.
         prevTail = ''
@@ -6110,7 +6316,7 @@ export class WriteService {
           this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), prevEndingState)
         }
       }
-      if (opts?.strict && opts.needEndingState && chapterNumber > 1 && !prevEndingState) {
+      if (opts?.strict && !opts.allowMissingPrevious && opts.needEndingState && chapterNumber > 1 && !prevEndingState) {
         prevEndingState = emptyEndingState(chapterNumber - 1)
         this.endingStateCache.set(this.endingStateKey(dir, chapterNumber, prevTail), prevEndingState)
         this.endingStateExtractionFailures.add(this.endingStateKey(dir, chapterNumber, prevTail))
@@ -6219,7 +6425,7 @@ export class WriteService {
       return settingsEvolution
     })()
     const [
-      { detail, prevDetail }, rhythmEntry, { mainSynopsis, volumeOutline },
+      { detail, prevDetail }, rhythmEntry, { mainSynopsis, volumeOutline, rhythmFallbackEntry },
       { prevTail, prevProse, prevEndingState }, loadedCharacters, foreshadowings,
       tracking, recentPlotSummaries, settings, settingsEvolution
     ] = await Promise.all([
@@ -6242,8 +6448,13 @@ export class WriteService {
       tracking?.staleCharacterChapters ?? []
     )
     const characterAliases = buildCharacterAliasGroups(visibleCharacters.filter(c => !ungroundedCard(c)), chapterNumber, { excludeUndated: laterProseExists })
+    const baselineProfiles = await this.loadRoleSettingBaselines(dir)
     const characters = projectCharactersForChapter(visibleCharacters, chapterNumber, tracking?.characterStates ?? [], laterProseExists)
       .map(c => !laterProseExists && ungroundedCard(c) ? projectCharactersForChapter([c], chapterNumber, [], true)[0] : c)
+      .map(c => {
+        const baseline = baselineProfiles.get(normalizeName(c.name))
+        return baseline && !c.personality ? { ...c, personality: baseline } : c
+      })
 
     return {
       mainSynopsis,
@@ -6255,7 +6466,7 @@ export class WriteService {
       prevTail,
       prevProse,
       prevEndingState,
-      rhythmEntry,
+      rhythmEntry: rhythmEntry ?? rhythmFallbackEntry,
       foreshadowings: foreshadowingsBeforeChapter(foreshadowings, chapterNumber),
       characters,
       characterAliases,
@@ -6412,6 +6623,105 @@ export class WriteService {
       console.warn('[loadChapterContext] Failed to load volume outline:', err)
       return undefined
     }
+  }
+
+  /**
+   * 兼容把多卷逐章规划放在 大纲/前100章章节规划.md 等独立规划文件中的项目。
+   * 提取包含当前章节的卷级 H2 节（如 `## 第一卷：史莱姆的新员工（第1—10章）`）及各章 H3 块。
+   */
+  private async loadSupplementalVolumeOutline(
+    dir: string,
+    chapterNumber: number,
+    volumeNumber?: number
+  ): Promise<VolumeOutline | undefined> {
+    try {
+      const outlineDir = join(dir, '大纲')
+      const files = (await fs.readdir(outlineDir)).sort()
+      for (const f of files) {
+        if (!f.endsWith('.md') || f === '大纲.md' || /^第\d+卷/.test(f)) continue
+        const text = await readText(join(outlineDir, f))
+        if (!text) continue
+        const doc = parseDoc(text)
+        for (const sec of doc.sections) {
+          const vNum = parseVolumeNumber(sec.title)
+          const rangeMatch = sec.title.match(/第\s*(\d+)\s*[-–—]\s*(\d+)\s*章/)
+          const start = rangeMatch ? parseInt(rangeMatch[1], 10) : undefined
+          const end = rangeMatch ? parseInt(rangeMatch[2], 10) : undefined
+          const blocks = splitVolumeChapterBlocks(sec.body)
+          const inRange =
+            (start != null && end != null && chapterNumber >= start && chapterNumber <= end) ||
+            blocks.some((b) => b.chapter === chapterNumber) ||
+            (volumeNumber != null && vNum === volumeNumber)
+          if (!inRange) continue
+          const nameMatch = sec.title.match(/[：:]\s*([^\n（(]+)/)
+          const name = nameMatch
+            ? nameMatch[1].trim()
+            : sec.title
+                .replace(/^第\s*[\d一二三四五六七八九十百]+\s*卷[_\s：:]*/, '')
+                .replace(/[（(][^）)]*[）)]\s*$/, '')
+                .trim()
+          const firstH3 = sec.body.indexOf('###')
+          const intro = (firstH3 >= 0 ? sec.body.slice(0, firstH3) : sec.body).trim()
+          const curBlock = blocks.find((b) => b.chapter === chapterNumber)
+          const coreLines = [
+            intro,
+            curBlock
+              ? `本章规划：第 ${curBlock.chapter} 章${curBlock.title ? `「${curBlock.title}」` : ''}——${curBlock.summary}`
+              : ''
+          ]
+            .filter(Boolean)
+            .join('\n')
+          return {
+            number: vNum ?? volumeNumber ?? 1,
+            name: name || `第${vNum ?? volumeNumber ?? 1}卷`,
+            h1Title: sec.title,
+            fileName: f,
+            chapterStart: start ?? blocks[0]?.chapter,
+            chapterEnd: end ?? blocks[blocks.length - 1]?.chapter,
+            sections: [
+              ...(coreLines ? [{ title: '卷核心', body: coreLines }] : []),
+              ...(blocks.length > 0 ? [{ title: '各章核心事件', body: sec.body }] : [])
+            ]
+          }
+        }
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 读取 `设定/角色/*.md` 中的作者初始人设描述，用于在 `记忆/人物/*.md` 仅有状态观察时补齐性格/人设基底。
+   */
+  private async loadRoleSettingBaselines(dir: string): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    try {
+      const rolesDir = join(dir, '设定', '角色')
+      const files = (await fs.readdir(rolesDir)).filter((f) => f.endsWith('.md')).sort()
+      for (const f of files) {
+        const text = await readText(join(rolesDir, f))
+        if (!text) continue
+        const doc = parseDoc(text)
+        const name = (doc.h1Title || f.replace(/\.md$/, '')).trim()
+        if (!name) continue
+        const plain = doc.body
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(
+            (l) =>
+              l &&
+              !l.startsWith('#') &&
+              !/^[-*]\s+\*\*/.test(l) &&
+              !/^(?:各字段是标注章节的观察记录|本档为项目设计)/.test(l)
+          )
+          .join('；')
+        if (plain) out.set(normalizeName(name), plain)
+      }
+    } catch {
+      // ignore
+    }
+    return out
   }
 }
 
@@ -6801,16 +7111,54 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push('---')
     parts.push('# 角色信息')
     const appearing = (input.chapterDetail?.charactersAppearing ?? []) as string[]
-    const appearSet = new Set(appearing.map((n) => normalizeName(n)))
-    const appearingList = input.characters.filter((c) => appearSet.has(normalizeName(c.name)))
-    const otherList = input.characters.filter((c) => !appearSet.has(normalizeName(c.name)))
-    if (appearingList.length > 0) {
-      parts.push('**本章出场角色**（完整人设）：')
-      for (const c of appearingList) parts.push(renderCharacterDetail(c))
-    }
-    if (otherList.length > 0) {
-      parts.push('**其他已知角色**（参考用，本章不应擅自登场）：')
-      parts.push(otherList.map((c) => `- ${c.name}（${c.role ?? '角色'}）`).join('\n'))
+    if (appearing.length > 0) {
+      const appearSet = new Set(appearing.map((n) => normalizeName(n)))
+      const appearingList = input.characters.filter((c) => appearSet.has(normalizeName(c.name)))
+      const otherList = input.characters.filter((c) => !appearSet.has(normalizeName(c.name)))
+      if (appearingList.length > 0) {
+        parts.push('**本章出场角色**（完整人设）：')
+        for (const c of appearingList) parts.push(renderCharacterDetail(c))
+      }
+      if (otherList.length > 0) {
+        parts.push('**其他已知角色**（参考用，本章不应擅自登场）：')
+        parts.push(otherList.map((c) => `- ${c.name}（${c.role ?? '角色'}）`).join('\n'))
+      }
+    } else {
+      const volText = input.volumeOutline?.sections.map((s) => s.body).join('\n') ?? ''
+      const contextText = [
+        input.chapterDetail?.title,
+        input.chapterDetail?.plotSummary,
+        input.chapterDetail?.coolPoint,
+        input.chapterDetail?.hook,
+        input.chapterDetail?.writingRequirements,
+        input.tempContext,
+        input.existingText,
+        input.prevTail,
+        volText,
+        input.longformPlan,
+        input.mainSynopsis
+      ]
+        .filter(Boolean)
+        .join('\n')
+      const isRelevant = (c: Character): boolean =>
+        Boolean(
+          (c.role && /主角|男主|女主/.test(c.role)) ||
+            (c.name && contextText.includes(c.name))
+        )
+      const prioritized = [
+        ...input.characters.filter(isRelevant),
+        ...input.characters.filter((c) => !isRelevant(c))
+      ]
+      const detailedList = prioritized.slice(0, 12)
+      const restList = prioritized.slice(12)
+      if (detailedList.length > 0) {
+        parts.push('**本章可用角色档案**（完整人设，按本章剧情与场景需要选用）：')
+        for (const c of detailedList) parts.push(renderCharacterDetail(c))
+      }
+      if (restList.length > 0) {
+        parts.push('**其他已知角色**（按本章剧情需要参考）：')
+        parts.push(restList.map((c) => `- ${c.name}（${c.role ?? '角色'}）`).join('\n'))
+      }
     }
   }
 
@@ -6913,6 +7261,19 @@ function renderUserPrompt(input: RenderInput): string {
       '**落笔核对**',
       '- 按上方本章细纲落实关键事件、必要因果、信息边界与停止位置。允许在同一场景合写相关步骤；分轮续写按实际进度写到自然停点。',
       '- 核对上方已有的写作禁区与作者要求，后章的结果与揭晓留在其计划范围内。'
+    ].join('\n'))
+  }
+  if (!input.chapterDetail?.proseSections?.length) {
+    const climax = input.rhythmEntry?.climax ?? 0
+    const emotion = input.rhythmEntry?.emotion ?? 0
+    parts.push([
+      '**【无逐节细纲时的篇幅配比与去AI味硬约束】**',
+      '- **过渡从简（≤20%篇幅）**：离职交接、清点工具、结算离场、赶路住宿、门岗盘问、入职填表等程序性环节须三五句话利落带过，严禁逐项清点杂物、指认拐弯或把面试写成一问一答的行政办事流水账。',
+      '- **主戏重墨（≥65%篇幅）**：把字数预算集中在核心冲突、正面交锋与关键转折上，写出具体的试探、博弈、动作细节与现场反应。涉及已知角色时直接使用角色档案或大纲中的真实姓名（如管事、首领已有名字则直呼其名），不降级为无名岗位代称。',
+      climax > 0 || emotion >= 8
+        ? `- **高潮与金手指反差兑现（本章情绪值 ${emotion} / 爽点 ${climax}）**：必须对照上方已记录的角色实力与状态及已生效的金手指/属性加成（如已累积的全属性、特殊技能或等级优势），在交锋中正面打出干脆利落的实力反差与压制感，严禁把爽点章写成憋屈挂彩、靠旁人帮忙才勉强过关的平庸苦战。`
+        : '- **人物状态与能力落地**：对照上方已记录的角色实力与状态体现主角已获得的实力与处事底气，言行贴合人设（如务实、直接、冷幽默），打破“提问—解释—确认—执行”的客服式问答循环。',
+      '- **句段节奏错落**：一句一段不等于满屏十几个字的“主语+简单动作”电报体；将同一连贯动作与直接反馈自然衔接，句长随冲突缓急错落。'
     ].join('\n'))
   }
   // 作者本轮指令只注入一次，放在上下文之后。

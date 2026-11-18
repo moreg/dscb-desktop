@@ -244,15 +244,39 @@ export class CharacterRepo {
       customFields[k] = Array.isArray(v) ? [...v] : v
     }
 
+    const plainSummary = doc.body
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(
+        (l) =>
+          l &&
+          !l.startsWith('#') &&
+          !/^[-*]\s+\*\*/.test(l) &&
+          !/^(?:各字段是标注章节的观察记录|本档为项目设计)/.test(l)
+      )
+      .join('；')
+    const hasStructured = Boolean(
+      identity ||
+        personality ||
+        abilities ||
+        fields.get('当前状态') ||
+        fields.get('核心动机') ||
+        Object.keys(customFields).length
+    )
+    const fallbackProfile = !hasStructured && plainSummary ? plainSummary : undefined
+
     return {
       id: charId(name),
       name,
       role,
       identity,
-      personality,
+      personality: personality ?? (source.startsWith('设定/角色/') ? fallbackProfile : undefined),
       abilities,
       tags: tags.length ? tags : undefined,
-      synopsis: fieldToStr(fields.get('当前状态')) ?? fieldToStr(fields.get('核心动机')),
+      synopsis:
+        fieldToStr(fields.get('当前状态')) ??
+        fieldToStr(fields.get('核心动机')) ??
+        (!source.startsWith('设定/角色/') ? fallbackProfile : undefined),
       customFields: Object.keys(customFields).length ? customFields : undefined,
       sources: [{ path: source, mtime: new Date().toISOString() }]
     }

@@ -567,6 +567,8 @@ export interface SavedChapterPolishResult {
  * extend 表示这一章是**故意还没写完**的半成品，写后自检的完成度类项据此降级。
  */
 export interface ChapterStreamResult {
+  /** The outline, summary and required memory sync were completed by the backend. */
+  directionSyncCompleted?: boolean
   ok: boolean
   /** 最终正文实际落盘后的回执；表达待修订也可保存，不表示验收通过。 */
   saved?: ChapterContent
@@ -896,6 +898,8 @@ export interface RendererApi {
   openFigure: (projectId: string, fileName: string) => Promise<void>
   /** 取消进行中的流式生成（requestId 来自 StreamHandle） */
   abortStream: (requestId: string) => Promise<{ ok: boolean }>
+  generateChapterDirections: (projectId: string, chapterNumber: number, existingText: string, instruction: string,
+    force?: boolean) => StreamHandleOf<import('./chapter-directions').ChapterDirections | null>
   generateChapterStream: (
     projectId: string,
     chapterNumber: number,
@@ -909,7 +913,8 @@ export interface RendererApi {
     /** 只修复并核对已保存稿，不生成续写。 */
     repairOnly?: boolean,
     /** 本次续写的自动去 AI 味选项，省略时使用全局设置。 */
-    autoDeslopAfterContinue?: boolean
+    autoDeslopAfterContinue?: boolean,
+    directionChoice?: import('./chapter-directions').ChapterDirectionChoice
   ) => ChapterStreamHandle
   getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) => Promise<ChapterStreamResult['repairCandidate'] | null>
   /** 按要求重写 · 先出修改建议（不改正文） */
@@ -2772,6 +2777,7 @@ export interface MemoryCandidateDetail {
 
 /** 单章完整流程结果（生成→质检→细纲对照→记忆→节奏→图解） */
 export interface ChapterFlowResult {
+  direction?: { title: string; reason: string }
   chapterNumber: number
   /** 生成的正文 */
   content: string

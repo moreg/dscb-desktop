@@ -1,4 +1,6 @@
 import ChapterRefinementPanel from './ChapterRefinementPanel'
+import ChapterDirectionsDialog from './ChapterDirectionsDialog'
+import type { ChapterDirections, ChapterDirectionChoice } from '../../shared/chapter-directions'
 import { CHAPTER_STATUS_LABELS as STATUS_FULL, CHAPTER_STATUS_CLASSES as STATUS_CLASS, CHAPTER_STATUS_OPTIONS, normalizeChapterStatus } from '../../shared/chapter-status'
 import { isDeslopStage, deslopProgressLabel, generationProgressLabel, postWriteProgressLabel } from '../../shared/generation-progress'
 import { chapterReviewFailureMessage, failedChapterContinuationDraft, failedChapterRewriteDraft, finalizeChapterContinuation, savedChapterContinuation, finalizeChapterRewrite, interruptedChapterDraft, interruptedChapterRetryMessage, shouldRepairChapterOnRetry } from './chapter-generation-finalize'
@@ -240,6 +242,9 @@ function friendlyLlmError(err: string | undefined): string {
     return `grok 执行出错：${detail.slice(0, 120)}`
   }
   return err
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^(?:Error:\s*)+/i, '')
+    .replace(/^DIRECTION_[A-Z_]+:\s*/, '')
 }
 
 interface CastSuggestion {
@@ -768,6 +773,9 @@ export default function ChapterEditor({
   const [currentResultIndex, setCurrentResultIndex] = useState(-1)
   const [sessionStartWords, setSessionStartWords] = useState(0)
   const [showContinueDialog, setShowContinueDialog] = useState(false)
+  const [directionDialog, setDirectionDialog] = useState<{ candidates: ChapterDirections | null; instruction: string; error: string } | null>(null)
+  const [directionPlanning, setDirectionPlanning] = useState(false)
+  const directionRequestRef = useRef<symbol | null>(null)
   const [defaultContinueAutoDeslop, setDefaultContinueAutoDeslop] = useState<boolean | null>()
   const [continueAutoDeslopOverride, setContinueAutoDeslopOverride] = useState<boolean>()
 
@@ -1255,6 +1263,8 @@ export default function ChapterEditor({
     setGenerationRetry(null)
     setContinueAutoDeslopOverride(undefined)
     setShowContinueDialog(false)
+    setDirectionDialog(null)
+    setDirectionPlanning(false)
     setRepairReviewCandidate(null)
     setAutoDeslopResult(null)
     setAutoDeslopSnapshot(null)
@@ -1415,14 +1425,14 @@ export default function ChapterEditor({
       if (e.projectId !== projectId) return
       if (e.kind !== 'outline' && e.kind !== 'rhythm' && e.kind !== 'progress') return
       refreshChapterNavigation()
-      if (dirty || streamBusyRef.current) return
+      if (dirty || streamBusyRef.current || Boolean(directionDialog)) return
       const refreshEpoch = sessionEpochRef.current
       const refreshDraft = draftRef.current
       void window.api
         .getChapter(projectId, chapterNumber)
         .then((c) => {
           // 文件事件可能在生成开始前发起，回包时不能覆盖流式正文、手动编辑或另一章。
-          if (sessionEpochRef.current !== refreshEpoch || streamBusyRef.current || draftRef.current !== refreshDraft) return
+          if (sessionEpochRef.current !== refreshEpoch || streamBusyRef.current || Boolean(directionDialog) || draftRef.current !== refreshDraft) return
           setData(c)
           setDraft(c.content, { captureScroll: false })
           setSessionStartWords(c.meta.wordCount)
@@ -1851,14 +1861,14 @@ export default function ChapterEditor({
   // P19-A：离开页面/切章前提醒未保存内容
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (dirty || saving || generating || adjusting || adjustPlanning) {
+      if (dirty || saving || generating || adjusting || adjustPlanning || directionPlanning) {
         e.preventDefault()
         e.returnValue = '' // 触发浏览器原生确认弹窗
       }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [dirty, saving, generating, adjusting, adjustPlanning])
+  }, [dirty, saving, generating, adjusting, adjustPlanning, directionPlanning])
 
   /**
    * 切章/返回前把未保存输入立即落盘为草稿。
@@ -1954,6 +1964,9 @@ export default function ChapterEditor({
 
   /** 取消续写 / 出建议 / 落笔重写。立即停 UI 与 token 写入，并通知主进程 abort 子进程/请求。 */
   const cancelActiveStream = () => {
+    directionRequestRef.current = null
+    setDirectionPlanning(false)
+    setDirectionDialog(null)
     // 流已正常完成且 UI 已空闲：忽略迟到的停止点击，以免误回滚
     if (
       streamCompletedRef.current &&
@@ -2015,7 +2028,47 @@ export default function ChapterEditor({
     return error === 'LLM_ABORTED' || error.includes('LLM_ABORTED')
   }
 
-  const aiGenerate = async (tempContextVal?: string, repairOnly = false) => {
+  const prepareDirections = async (instruction: string, force = false): Promise<boolean> => {
+    if (streamBusyRef.current) return true
+    const epoch = sessionEpochRef.current
+    const task = Symbol('direction-request')
+    directionRequestRef.current = task
+    streamBusyRef.current = true
+    streamCompletedRef.current = false
+    userAbortedRef.current = false
+    preStreamDraftRef.current = null
+    setDirectionPlanning(true)
+    setDirectionDialog(current => ({ candidates: force ? current?.candidates ?? null : null, instruction, error: '' }))
+    let requestId: string | undefined
+    try {
+      const stream = window.api.generateChapterDirections(projectId, chapterNumber, draftRef.current, instruction, force)
+      requestId = stream.requestId
+      trackStreamRequest(requestId)
+      const candidates = await stream
+      if (sessionEpochRef.current !== epoch || userAbortedRef.current || directionRequestRef.current !== task) return true
+      if (candidates) {
+        setDirectionDialog({ candidates, instruction, error: '' })
+        return true
+      }
+      setDirectionDialog(null)
+      return false
+    } catch (error) {
+      if (sessionEpochRef.current === epoch && !userAbortedRef.current && directionRequestRef.current === task) {
+        setDirectionDialog(current => ({ candidates: current?.candidates ?? null, instruction,
+          error: friendlyLlmError(error instanceof Error ? error.message : String(error)) }))
+      }
+      return true
+    } finally {
+      if (requestId) activeStreamRequestIdsRef.current.delete(requestId)
+      if (sessionEpochRef.current === epoch && directionRequestRef.current === task) {
+        directionRequestRef.current = null
+        streamBusyRef.current = false
+        setDirectionPlanning(false)
+      }
+    }
+  }
+
+  const aiGenerate = async (tempContextVal?: string, repairOnly = false, directionChoice?: ChapterDirectionChoice) => {
     if (streamBusyRef.current || generating || adjusting || adjustPlanning) return
     const myEpoch = sessionEpochRef.current
     const targetProjectId = projectId
@@ -2035,6 +2088,8 @@ export default function ChapterEditor({
     }
     if (sessionEpochRef.current !== myEpoch) return
     if (streamBusyRef.current) return
+    if (!repairOnly && !directionChoice && await prepareDirections(tempContextVal ?? '')) return
+    if (sessionEpochRef.current !== myEpoch || userAbortedRef.current) return
 
     // 改前自检快照：写后复检对比用（按自检续写补洞时可见改善）
     const previousSelfCheck: ChapterSelfCheckReport | null =
@@ -2123,7 +2178,8 @@ export default function ChapterEditor({
         },
         autoContinueStrength,
         repairOnly,
-        autoDeslopAfterContinue
+        autoDeslopAfterContinue,
+        directionChoice
       )
       requestId = stream.requestId
       trackStreamRequest(stream.requestId)
@@ -2193,7 +2249,14 @@ export default function ChapterEditor({
         // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
         void runPostGenerateAudit(myGen, formatted)
         // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
-        if (finalized.canSyncMemory) {
+        if (result.directionSyncCompleted) {
+          void window.api.listDetailedOutline(targetProjectId).then(items => {
+            if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setChapterOutline(items.find(item => item.chapterNumber === targetChapter) ?? null)
+          }).catch(() => undefined)
+          setUndoToast({ type: 'info', message: '本章细纲、概要和记忆已同步完成。' })
+          setPostWriteSync({ phase: 'ok', message: '本章细纲、概要和记忆已同步完成。', errors: [], contentForRetry: formatted,
+            at: Date.now(), canUndo: false, undoDepth: 0, receipt: null })
+        } else if (finalized.canSyncMemory) {
           void runPostGenerateMemorySync(myGen, formatted, { previousSelfCheck }).then(() => {
             if (sessionEpochRef.current === myEpoch && genRef.current === myGen && result.continueMode !== 'extend') {
               setRefinementAutoTrigger(value => value + 1)
@@ -4840,7 +4903,7 @@ export default function ChapterEditor({
         >
           {deslopScanning ? '词句与场景检查中…' : '🧹 去 AI 味'}
         </button>
-        {generating || adjusting || adjustPlanning ? (
+        {generating || adjusting || adjustPlanning || directionPlanning ? (
           <button
             className="btn btn-danger btn-sm mobile-primary-action"
             onClick={cancelActiveStream}
@@ -6785,6 +6848,10 @@ export default function ChapterEditor({
         />
       ) : null}
 
+      {directionDialog ? <ChapterDirectionsDialog candidates={directionDialog.candidates} loading={directionPlanning} error={directionDialog.error}
+        onCancel={() => { if (directionPlanning) cancelActiveStream(); setDirectionDialog(null) }}
+        onRegenerate={() => void prepareDirections(directionDialog.instruction, true)}
+        onChoose={choice => { const instruction = directionDialog.instruction; setDirectionDialog(null); void aiGenerate(instruction, false, choice) }} /> : null}
       {showContinueDialog ? (
         <div className="dialog-overlay" onClick={() => setShowContinueDialog(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
           <div className="dialog-card" onClick={(e) => e.stopPropagation()} style={{ width: 440, background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-md)', padding: 16, boxShadow: 'var(--shadow-lg)' }}>

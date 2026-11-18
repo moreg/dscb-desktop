@@ -766,6 +766,9 @@ describe('自动写作去 AI 味', () => {
   })
 
   it('批量润色失败仍保存原稿，未完成的写后检查必须暂停且不误报保存失败', async () => {
+    // This test isolates polishing a planned chapter; missing-outline recommendation has its own integration coverage.
+    await mkdir(path.join(dir, '细纲'), { recursive: true })
+    await writeFile(path.join(dir, '细纲', '第01卷.md'), `# 第01卷\n\n## 第1章：交接\n\n- **核心事件**：${RAW}\n`)
     vi.mocked(deslop.deslop).mockImplementation(async () => {
       expect(await new ProseRepo(dir).read(1)).toBe(RAW)
       throw new Error('LLM_TIMEOUT')

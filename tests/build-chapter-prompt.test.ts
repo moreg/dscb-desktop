@@ -607,5 +607,56 @@ describe('buildChapterPrompt with new skill-format context (outline md / trackin
     // 基本功能仍正常
     expect(user).toContain('民国老六')
   })
+
+  it('无细纲/脑洞方向续写时注入完整人设卡、补充规划卷纲及高潮篇幅配比约束', async () => {
+    const dir = await ps.resolveDir(projectId)
+    const fs = await import('fs/promises')
+    await fs.writeFile(
+      path.join(dir, '大纲', '大纲.md'),
+      '# 《打工封神》大纲\n\n## 逐章节奏标注\n\n| 章节 | 标题 | 情绪值 | 爽点类型 | 卷 |\n|---|---|---|---|---|\n| 第3章 | 跳槽龙巢，工资翻十倍 | 9 | 3 | 第1卷 |\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(dir, '大纲', '前100章章节规划.md'),
+      '# 前100章章节规划\n\n## 第一卷：史莱姆的新员工（第1—10章）\n\n卷目标：兑现给怪物打工、加班成长、跳槽龙巢的卖点。\n\n### 第3章 跳槽龙巢，工资翻十倍\n王磊辞职后应聘龙巢守卫，击退20级剑士，保住龙蛋通道。\n\n### 第4章 龙巢守卫的第一天\n管事赤鳞质疑王磊的来历，查明后暂时留用。\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(dir, '设定', '角色', '王磊.md'),
+      '# 王磊\n\n资深社畜，三年加班经验，说话直接，幽默偏自嘲。\n\n本档为项目设计，实际经历以未来确认的正文为准。\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(dir, '设定', '角色', '赤鳞.md'),
+      '# 赤鳞\n\n龙巢管事，重视龙蛋安全和岗位纪律。\n\n本档为项目设计，实际经历以未来确认的正文为准。\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(dir, '记忆', '人物', '王磊.md'),
+      '# 王磊\n\n## 基本信息\n\n- **身份（第2章观察）**：职业是打工人。\n',
+      'utf8'
+    )
+
+    const service = new WriteService(ps, mockLlm('正文'))
+    const { user } = await service.buildChapterPrompt(projectId, 3)
+
+    // 1. 注入补充规划中的卷目标、本章规划与后章防超纲（含赤鳞）
+    expect(user).toContain('卷级定位：第 1 卷 史莱姆的新员工')
+    expect(user).toContain('本章规划：第 3 章「跳槽龙巢，工资翻十倍」——王磊辞职后应聘龙巢守卫，击退20级剑士')
+    expect(user).toContain('第 4 章「龙巢守卫的第一天」：管事赤鳞质疑王磊的来历')
+
+    // 2. 无细纲出场白名单时，不把角色误标为「本章不应擅自登场」，且补齐设定/角色的人设基底
+    expect(user).toContain('本章可用角色档案')
+    expect(user).not.toContain('本章不应擅自登场')
+    expect(user).toContain('### 王磊')
+    expect(user).toContain('资深社畜，三年加班经验，说话直接，幽默偏自嘲。')
+    expect(user).toContain('### 赤鳞')
+    expect(user).toContain('龙巢管事，重视龙蛋安全和岗位纪律。')
+
+    // 3. 无逐节细纲时注入篇幅配比与高潮爽点兑现约束
+    expect(user).toContain('【无逐节细纲时的篇幅配比与去AI味硬约束】')
+    expect(user).toContain('过渡从简（≤20%篇幅）')
+    expect(user).toContain('高潮与金手指反差兑现（本章情绪值 9 / 爽点 3）')
+  })
 })
 

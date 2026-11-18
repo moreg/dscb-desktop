@@ -20,11 +20,18 @@ import {
   batchWriteInputSchema
 } from './validation'
 import { z } from 'zod'
+import { directionChoiceSchema } from '../../shared/chapter-directions'
 
 const styleProfileIdSchema = z.string().min(1).max(255).nullable().optional()
 
 export type ChapterCompletedNotifier = (chapter: number, window: BrowserWindow | null, signal: AbortSignal) => Promise<void>
 export function registerWriteIpc(service: WriteService, onChapterCompleted?: ChapterCompletedNotifier): void {
+  safeHandle('write:generateChapterDirections', async (event, raw: unknown) => {
+    const input = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
+      existingText: chapterContentSchema, instruction: z.string().max(20000), force: z.boolean().optional(), requestId: z.string().uuid() }), raw)
+    return chapterRequest(event, input.requestId, signal => service.generateChapterDirections(input.projectId, input.chapterNumber,
+      input.existingText, input.instruction, { signal, force: input.force }))
+  })
   safeHandle('write:syncChapterWorkflow', async (event, payload: unknown) => {
     const value = validateInput(z.object({ projectId: projectIdSchema, chapterNumber: chapterNumberSchema,
       content: chapterContentSchema, requestId: z.string().uuid(), force: z.boolean().optional(),
@@ -128,6 +135,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
         autoStrength?: boolean
         repairOnly?: boolean
         autoDeslopAfterContinue?: boolean
+        directionChoice?: import('../../shared/chapter-directions').ChapterDirectionChoice
         requestId: string
       }
     ) => {
@@ -144,6 +152,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
             autoStrength: z.boolean().optional(),
             repairOnly: z.boolean().optional(),
             autoDeslopAfterContinue: z.boolean().optional(),
+            directionChoice: directionChoiceSchema.optional(),
             requestId: z.string().min(1)
           }),
           payload
@@ -153,6 +162,7 @@ export function registerWriteIpc(service: WriteService, onChapterCompleted?: Cha
             tempContext: validated.tempContext, existingText: validated.existingText,
             autoStrength: validated.autoStrength === true, repairOnly: validated.repairOnly === true, signal,
             autoDeslopAfterContinue: validated.autoDeslopAfterContinue,
+            directionChoice: validated.directionChoice,
             onGenerationStage: stage => safeSend(win, 'write:generationStage', { requestId: validated.requestId, stage }),
             onToken: token => safeSend(win, 'llm:token', { requestId: validated.requestId, token, done: false })
           })

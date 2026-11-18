@@ -517,6 +517,12 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       ipcRenderer.invoke('llm:abort', requestId) as Promise<{ ok: boolean }>,
     getChapterRepairProposal: (projectId: string, chapterNumber: number, content: string) =>
       ipcRenderer.invoke('write:getChapterRepairProposal', { projectId, chapterNumber, content }),
+    generateChapterDirections: (projectId: string, chapterNumber: number, existingText: string, instruction: string, force = false) => {
+      const requestId = crypto.randomUUID()
+      const result = ipcRenderer.invoke('write:generateChapterDirections', { projectId, chapterNumber, existingText, instruction, force, requestId }) as
+        Promise<import('../shared/chapter-directions').ChapterDirections | null>
+      return makeStreamHandle(result, requestId)
+    },
     generateChapterStream: (
       projectId: string,
       chapterNumber: number,
@@ -527,7 +533,8 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
       onGenerationStage?: (stage: ChapterGenerationStage) => void,
       autoStrength?: boolean,
       repairOnly?: boolean,
-      autoDeslopAfterContinue?: boolean
+      autoDeslopAfterContinue?: boolean,
+      directionChoice?: import('../shared/chapter-directions').ChapterDirectionChoice
     ) => {
       const requestId = crypto.randomUUID()
       const handler = (
@@ -554,6 +561,7 @@ export function createRendererApi(ipcRenderer: IpcTransport) {
           autoStrength,
           repairOnly,
           autoDeslopAfterContinue,
+          directionChoice,
           requestId
         })
         .finally(() => {

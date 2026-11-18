@@ -72,7 +72,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     label: '现代都市',
     tone: '口语化、接地气；幽默随人物与场合自然出现',
     pace: '快、干脆',
-    syntax: '短句为主，对话多；必要的内心反应简短呈现，不要求持续吐槽',
+    syntax: '长短句结合，对话多；必要的内心反应简短呈现，不要求持续吐槽',
     taboo: '禁用文绉绉书面腔、古风称谓',
     replacements: [
       ['嘴角带了点弧度', '笑了一下'],
@@ -127,7 +127,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     label: '悬疑/推理',
     tone: '克制、留白、信息量密',
     pace: '紧凑、步步紧逼',
-    syntax: '短句、断句、倒装、碎片化',
+    syntax: '长短句结合，紧要处用断句与留白，避免通篇碎句',
     taboo: '禁用啰嗦解释、全盘托出',
     replacements: [
       ['嘴角带了点弧度', '没有表情'],
@@ -141,7 +141,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     label: '搞笑/沙雕',
     tone: '玩梗、自嘲、荒诞',
     pace: '快、跳跃',
-    syntax: '短句、感叹号、省略号',
+    syntax: '长短句结合，节奏明快，善用转折与反差',
     taboo: '禁用正经煽情',
     replacements: [
       ['嘴角带了点弧度', '咧着大嘴傻乐'],
@@ -180,7 +180,7 @@ export const GENRE_VOICES: readonly GenreVoice[] = [
     label: '末日/废土',
     tone: '粗粝、冷硬、生存感',
     pace: '紧张、喘不过气',
-    syntax: '短句、碎片、感官描写',
+    syntax: '长短句结合，动作与感官描写干脆有力，避免碎句电报体',
     taboo: '禁用温馨浪漫',
     replacements: [
       ['嘴角带了点弧度', '咬了咬牙'],

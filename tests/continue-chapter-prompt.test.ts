@@ -512,6 +512,15 @@ describe('续写 prompt', () => {
     expect(prompt.user).toContain('本次新增目标约 1500 字')
   })
 
+  it('finish：「不超过 X 字」已写满时仍保留至少 150 字收尾增量，不会算出 0 字', async () => {
+    await writeOutline('不超过 2500 字')
+    const service = new WriteService(ps, mockLlm(''))
+    const prompt = await service.buildChapterPrompt(projectId, 1, null, undefined, '甲'.repeat(2600))
+
+    expect(prompt.continueMode).toBe('finish')
+    expect(prompt.targetWords).toBe(150)
+  })
+
   /**
    * 回归：旧解析只认 3-5 位半角数字，细纲写「3千字」会静默掉回兜底 2500。
    */

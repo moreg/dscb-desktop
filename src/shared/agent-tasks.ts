@@ -16,6 +16,9 @@ const task = (role: AgentRole, category: FeatureCategory, mutation: AgentMutatio
 /** The model only proposes changes. Repository writes and adoption belong to the workflow. */
 export const AGENT_TASKS: Readonly<Record<string, AgentTask>> = {
   chapter: task('writer', 'chapter', 'prose_candidate', 'author'),
+  chapterDirections: task('planner', 'auxiliary', 'plan_candidate', 'author'),
+  chapterDirectionReview: task('reviewer', 'auxiliary', 'none', 'evidence'),
+  chapterOutlineFromProse: task('extractor', 'auxiliary', 'plan_candidate', 'evidence'),
   'chapter-adjust': task('writer', 'chapter', 'prose_candidate', 'author'),
   'chapter-adjust-plan': task('planner', 'chapter', 'plan_candidate', 'author'),
   continuityRepair: task('editor', 'chapter', 'prose_candidate', 'evidence', 'content'),

@@ -42,6 +42,7 @@ describe('正文生成 IPC 以精修最终稿交稿', () => {
     repair.mockReset().mockImplementation(async (_pid, _ch, content) => ({ content, report: { status: 'unchanged', message: '无遗漏' } }))
     let expression: AutoDeslopResult | undefined
     const fake = {
+      pendingChapterDirection: async () => undefined,
       generateChapterStream: async (pid: string, ch: number, style: string | null | undefined, opts: Parameters<WriteService['deliverChapter']>[3]) =>
         generate(pid, ch, style, { ...opts, onAutoDeslopResult: value => { expression = value; opts?.onAutoDeslopResult?.(value) } }),
       adjustChapterStream: adjust, repairChapterForeshadowings: async (...args: Parameters<WriteService['repairChapterForeshadowings']>) => repair(...args.slice(0, 3) as [string, number, string], { ...args[3], onAutoDeslopResult: value => { expression = value; args[3]?.onAutoDeslopResult?.(value) } }), syncChapterAfterWrite: sync,
