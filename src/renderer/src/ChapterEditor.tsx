@@ -2199,6 +2199,15 @@ export default function ChapterEditor({
         if (result.repairCandidate) setRepairReviewCandidate(result.repairCandidate)
         setDirty(retained !== data?.content)
         releaseIfMine()
+        if (result.retainedContent?.trim()) {
+          void window.api.getChapter(targetProjectId, targetChapter).then(fresh => {
+            if (sessionEpochRef.current !== myEpoch || genRef.current !== myGen) return
+            if (fresh && fresh.content === retained) {
+              setData(fresh)
+              setDirty(false)
+            }
+          }).catch(() => undefined)
+        }
         const interruptionMessage = interruptedChapterRetryMessage(result.error ?? '', retained !== initialDraft)
         if (interruptionMessage || result.retainedContent?.trim()) {
           setGenerationRetry({ context: tempContextVal, repairOnly: repairOnly || shouldRepairChapterOnRetry(result, retained), message: interruptionMessage ??

@@ -414,3 +414,90 @@ describe('续写格式化后的正文质量回归', () => {
   })
 })
 
+describe('chapter-audit (番茄投稿优化项)', () => {
+  it('第三人称同段连续多个同性代词 → pov_mix warn', () => {
+    const content = '王五冲向李四，他挥出一拳，他侧身躲过，他反手又是一剑，他满眼惊愕。'
+    const hit = auditChapter(content, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'pov_mix')
+    expect(hit).toBeDefined()
+    expect(hit?.severity).toBe('warn')
+  })
+
+  it('单章明喻超过 2 处 → simile_density info', () => {
+    const content = [
+      '雨丝像针一样刺在脸上。',
+      '远处的山影仿佛巨兽蹲伏在黑暗里。',
+      '他的声音犹如寒冰碎裂般刺耳。'
+    ].join('\n\n')
+    const hit = auditChapter(content, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'simile_density')
+    expect(hit).toBeDefined()
+    expect(hit?.severity).toBe('info')
+  })
+
+  it('开篇静态天气环境描写无动作对白 → opening_template info', () => {
+    const content = [
+      '清晨的阳光透过树叶间的缝隙洒在大地上，微风吹拂着院子。',
+      '苏锦推门走进院子，看见地上多了一封信。',
+      '“谁送来的？”她问。'
+    ].join('\n\n')
+    const hit = auditChapter(content, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'opening_template')
+    expect(hit).toBeDefined()
+    expect(hit?.severity).toBe('info')
+  })
+
+  it('章内同姓形近人名笔误 → name_drift warn；已登记同名角色不误报', () => {
+    const content = '林枫握紧长剑。\n\n话音未落，林风怒喝一声拔剑斩出。'
+    const hit = auditChapter(content, {
+      reviewRules: reviewRulesOn(),
+      characterNames: ['林枫']
+    }).violations.find((v) => v.ruleId === 'name_drift')
+    expect(hit).toBeDefined()
+    expect(hit?.word).toBe('林风')
+
+    const clean = auditChapter(content, {
+      reviewRules: reviewRulesOn(),
+      characterNames: ['林枫', '林风']
+    }).violations.find((v) => v.ruleId === 'name_drift')
+    expect(clean).toBeUndefined()
+  })
+
+  it('连续 5 段纯短对白堆砌 → bare_dialogue_stack info；弹幕/短信场景豁免', () => {
+    const bare = [
+      '“你来了。”',
+      '“我来了。”',
+      '“你确定？”',
+      '“我确定。”',
+      '“那就走吧。”'
+    ].join('\n\n')
+    const hit = auditChapter(bare, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'bare_dialogue_stack')
+    expect(hit).toBeDefined()
+    expect(hit?.severity).toBe('info')
+
+    const barrage = '直播间屏幕上的弹幕瞬间刷屏。\n\n' + bare
+    const skipped = auditChapter(barrage, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'bare_dialogue_stack')
+    expect(skipped).toBeUndefined()
+  })
+
+  it('连续 4 行参数清单罗列 → list_enumeration info；系统面板场景豁免', () => {
+    const list = [
+      '炉径：五寸三分',
+      '炉壁：一寸一分',
+      '炉高：七寸五分',
+      '炉底：弧形内凹三分'
+    ].join('\n')
+    const hit = auditChapter(list, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'list_enumeration')
+    expect(hit).toBeDefined()
+    expect(hit?.severity).toBe('info')
+
+    const panel = '【系统面板已展开】\n' + list
+    const skipped = auditChapter(panel, { reviewRules: reviewRulesOn() }).violations
+      .find((v) => v.ruleId === 'list_enumeration')
+    expect(skipped).toBeUndefined()
+  })
+})
+

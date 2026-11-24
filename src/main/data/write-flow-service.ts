@@ -71,7 +71,7 @@ export class WriteFlowService {
 
   async repairMemoryEvidence(content: string, extraction: MemoryExtraction, opts: GenerateOptions = {}): Promise<MemoryExtraction> {
     return repairMissingMemoryEvidence(content, extraction, (prompt) => this.llm.generateStream(prompt + '\n' + (opts.retryFeedback ?? ''), {
-      ...opts, maxTokens: 4096, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
+      ...opts, maxTokens: opts.maxTokens ?? 8192, meta: { ...opts.meta, feature: 'memoryEvidenceRepair' }
     }))
   }
 
@@ -115,6 +115,7 @@ export class WriteFlowService {
     ].join('\n')
     const raw = await this.llm.generateStream(prompt, {
       ...opts,
+      maxTokens: opts.maxTokens ?? 8192,
       meta: { feature: 'endingState', ...opts.meta }
     })
     return parseEndingStateJson(raw, chapterNumber, prevTail)
@@ -206,6 +207,7 @@ export class WriteFlowService {
     ].join('\n')
     return this.llm.generateStream(prompt, {
       ...llmOpts,
+      maxTokens: llmOpts.maxTokens ?? 8192,
       meta: { feature: 'outlineCheck', ...opts.meta }
     })
   }
@@ -274,13 +276,13 @@ export class WriteFlowService {
       `已知人物（本章原文中已提到的名字，不要重复提取）：${characterNamesInText(knownCharacters, content).join('、') || '（空）'}`,
       ``,
       `输出要求：严格 JSON，字段：`,
-      `- newCharacters: [{ name, role, identity, personality, appearance?, abilities? }]（本章首次登场；外貌/能力有则填）`,
+      `- newCharacters: [{ name, role, identity, personality, speechStyle?, appearance?, abilities? }]（本章首次登场；有台词或鲜明语气时提炼 speechStyle 说话方式/口吻，外貌/能力有则填）`,
       `- newLocations: [{ name, category, notes, scope? }]（新地点；scope=scene 场景点 / world 常驻地理）`,
       `- newItems: [{ name, category, notes }]（本章首次出现的新道具/物品，如法宝、兵器、灵物、信物）`,
       `- newForeshadowings: [{ content, expectedCollect?, note? }]（本章新埋设的伏笔）`,
       `- newPlotPoints: [{ title, event, coolPoint?, evidence }]（本章核心情节）`,
       `- characterStateChanges: [{ name, field, oldValue, newValue, evidence }]（既有角色的状态或设定变化）`,
-      `  field 优先用标准名：伤势 / 情绪 / 位置 / 当前状态 / 身份 / 性格 / 能力 / 境界 / 外貌 / 关系 / 持有物`,
+      `  field 优先用标准名：伤势 / 情绪 / 位置 / 当前状态 / 身份 / 性格 / 说话方式 / 能力 / 境界 / 外貌 / 关系 / 持有物`,
       `  若本章揭晓了身份真相、性格侧面、能力边界、外貌特征、关系质变，也必须写入（不要只记伤势）`,
       `  道具转移必须记录交出者与接收者各自的实际持有变化，区分借用、保管与所有权，销毁/耗尽不可记成仍可使用。关系按方向记录，不能推导对方也信任。`,
       `  对明确的知情变化用 field=知情，写清角色知道/不知/怀疑/误信哪件事以及信息来源；不能因旁白揭晓或同伴得知就记成全员知道。`,

@@ -65,6 +65,8 @@ export interface AuditOptions {
    * 项目设定里已经立过的词，按世界观词处理（降为 info，不阻断）。
    */
   worldTerms?: readonly string[]
+  /** 本项目已登记的角色名，用于检测章内同姓形近人名笔误（如 林枫→林风）。 */
+  characterNames?: readonly string[]
 }
 
 const DEFAULT_PER_WORD_CAP = 3
@@ -226,6 +228,8 @@ export function auditChapter(content: string, opts: AuditOptions = {}): AuditRep
     pushDialogueTagViolations(content, rules, violations)
     pushSensitiveViolations(content, rules, violations)
     pushHookStrengthViolations(content, rules, violations)
+    pushCraftObservations(content, violations)
+    pushCharacterNameDriftViolations(content, opts.characterNames ?? [], violations)
     // 用户自定义算法检查项（keyword/regex）；传入 checks 开关表，关掉的项跳过
     runCustomAlgorithmChecks(content, rules.customChecks, violations, rules.checks)
   }
@@ -656,6 +660,25 @@ function pushPovMixViolations(
         offset: rel,
         ruleId: 'pov_mix',
         suggestion: '统一叙事视角，或在人称切换处明确交代'
+      })
+      reported++
+      continue
+    }
+    // 第三人称叙述段内同性代词连续出现 ≥4 次，易造成“谁打谁”指代混乱
+    const narrative = para.replace(/[“「『"'][^”」』"']*[”」』"']/g, ' ')
+    const heCount = (narrative.match(/他/g) || []).length
+    const sheCount = (narrative.match(/她/g) || []).length
+    if (heCount >= 4 || sheCount >= 4) {
+      const pronoun = heCount >= sheCount ? '他' : '她'
+      const count = Math.max(heCount, sheCount)
+      out.push({
+        category: 'toxic',
+        severity: 'warn',
+        message: `指代可能混乱：单段叙述出现 ${count} 次“${pronoun}”，动作指向易混淆`,
+        snippet: truncate(para, 80),
+        offset: rel,
+        ruleId: 'pov_mix',
+        suggestion: '在关键动作交互处用角色姓名或身份称呼替换代词，保持主语清晰'
       })
       reported++
     }
@@ -1136,6 +1159,152 @@ function pushHookStrengthViolations(
     ruleId: 'hook_strength',
     suggestion: '结合剧情、题材和作者要求核对落点；动作、心理或平静收束可以保留，不因关键词缺失添加悬念或事件'
   })
+}
+
+/**
+ * 番茄向文风观察：单章明喻过密（>2 处）与章首静态环境模板化。
+ * 仅作 info 提醒，不阻断提交。
+ */
+function pushCraftObservations(content: string, out: AuditViolation[]): void {
+  const simileRe = /(?:仿佛|犹如|宛如)[^，。！？\n]{2,16}|像[^，。！？\n]{1,14}(?:一样|一般|似的)/g
+  const simileHits = content.match(simileRe) || []
+  if (simileHits.length > 2) {
+    const firstHit = simileHits[0]
+    const firstIdx = firstHit ? content.indexOf(firstHit) : 0
+    out.push({
+      category: 'quality',
+      severity: 'info',
+      message: `比喻偏密：本章命中 ${simileHits.length} 处明喻（建议单章不超过 2 处）`,
+      snippet: simileHits.slice(0, 3).join(' / '),
+      offset: firstIdx >= 0 ? firstIdx : 0,
+      ruleId: 'simile_density',
+      suggestion: '保留最贴切、有画面感的一两处比喻，其余改为直接动作或感官描写'
+    })
+  }
+
+  const paras = splitParagraphs(content).filter((p) => p.trim().length > 0)
+  if (paras.length >= 3) {
+    const first = paras[0].trim()
+    const hasDialogue = /[“「『"]/.test(first)
+    const hasWeatherOpening = /(清晨|朝阳|阳光|微风|树叶|鸟儿|晨雾|月光|夜色|细雨)/.test(first)
+    const hasActionOrConflict = /(冲|砸|踹|拔|刺|响|炸|喊|骂|拦|摔|冷笑|皱眉|睁眼|惊)/.test(first)
+    if (hasWeatherOpening && !hasDialogue && !hasActionOrConflict && first.length <= 120) {
+      out.push({
+        category: 'paragraph',
+        severity: 'info',
+        message: '章首观察：首段偏重静态环境描写，若连续多章如此易显模板化',
+        snippet: truncate(first, 60),
+        offset: content.indexOf(first),
+        ruleId: 'opening_template',
+        suggestion: '可考虑直接从人物动作、对白或现场异动切入，让读者更快入戏'
+      })
+    }
+  }
+
+  // 连续纯短对话堆砌（≥5 段连续无动作/神态的纯引号短对白）
+  const isBareShortDialogue = (p: string): boolean => {
+    const t = p.trim()
+    if (!/^[“「『"][^”」』"]{1,25}[”」』"]$/.test(t)) return false
+    return !/[”」』"]/.test(t.slice(1, -1))
+  }
+  let dialogueRun: string[] = []
+  const flushDialogueRun = (): void => {
+    if (dialogueRun.length >= 5) {
+      const start = content.indexOf(dialogueRun[0])
+      const ctx = content.slice(Math.max(0, start - 100), start)
+      if (!/(短信|微信|弹幕|评论|留言|屏幕|手机|群里|齐声)/.test(ctx)) {
+        out.push({
+          category: 'dialogue',
+          severity: 'info',
+          message: `短对话堆砌：连续 ${dialogueRun.length} 段为无动作/神态穿插的纯短对白`,
+          snippet: truncate(dialogueRun.slice(0, 3).join(' '), 60),
+          offset: start >= 0 ? start : 0,
+          ruleId: 'bare_dialogue_stack',
+          suggestion: '适当穿插人物动作、神态或场景细节，避免像念剧本（短信/弹幕/口号场景可忽略）'
+        })
+      }
+    }
+    dialogueRun = []
+  }
+  for (const p of paras) {
+    if (isBareShortDialogue(p)) dialogueRun.push(p)
+    else flushDialogueRun()
+  }
+  flushDialogueRun()
+
+  // 大段参数/清单罗列（≥4 行连续「项：说明」格式，排除系统面板）
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  const isListLine = (l: string): boolean =>
+    !/^[“「『"]/.test(l) && /^【?[一-龥A-Za-z0-9_]{1,12}】?[：:]\s*\S+/.test(l)
+  let listRun: string[] = []
+  const flushListRun = (): void => {
+    if (listRun.length >= 4) {
+      const start = content.indexOf(listRun[0])
+      const ctx = content.slice(Math.max(0, start - 120), start + listRun[0].length)
+      if (!/(系统|面板|属性|任务|提示音|界面|抽奖|商城)/.test(ctx)) {
+        out.push({
+          category: 'paragraph',
+          severity: 'info',
+          message: `清单罗列：连续 ${listRun.length} 行参数/条目式描写，行文偏像表格`,
+          snippet: truncate(listRun.slice(0, 2).join(' / '), 60),
+          offset: start >= 0 ? start : 0,
+          ruleId: 'list_enumeration',
+          suggestion: '非系统面板场景下，建议只保留关键信息并融入人物观察、动作或对话中'
+        })
+      }
+    }
+    listRun = []
+  }
+  for (const l of lines) {
+    if (isListLine(l)) listRun.push(l)
+    else flushListRun()
+  }
+  flushListRun()
+}
+
+/**
+ * 角色名漂移检测：当已登记角色名在章内出现时，排查同姓同长、仅差 1 字且紧接动作/说话动词的疑似笔误。
+ */
+function pushCharacterNameDriftViolations(
+  content: string,
+  characterNames: readonly string[],
+  out: AuditViolation[]
+): void {
+  const validNames = [...new Set(characterNames.map((n) => n.trim()).filter((n) => /^[\u4e00-\u9fa5]{2,3}$/.test(n)))]
+  if (validNames.length === 0) return
+  const nameSet = new Set(validNames)
+  const activeNames = validNames.filter((n) => content.includes(n))
+  if (activeNames.length === 0) return
+
+  const verbSuffix = '(?:说|道|问|答|笑|冷笑|怒喝|喝道|拔|挥|冲|看|盯|站|坐|走|抬|点|摇|哼|便|却|一)'
+  let reported = 0
+  for (const name of activeNames) {
+    if (reported >= 3) break
+    const surname = name[0]
+    const restLen = name.length - 1
+    const candidateRe = new RegExp(`${surname}[\\u4e00-\\u9fa5]{${restLen}}(?=${verbSuffix})`, 'g')
+    let m: RegExpExecArray | null
+    while ((m = candidateRe.exec(content)) !== null && reported < 3) {
+      const candidate = m[0]
+      if (candidate === name || nameSet.has(candidate)) continue
+      let diff = 0
+      for (let i = 1; i < name.length; i++) {
+        if (candidate[i] !== name[i]) diff++
+      }
+      if (diff !== 1) continue
+      out.push({
+        category: 'toxic',
+        severity: 'warn',
+        message: `疑似人名笔误：「${candidate}」与本章角色「${name}」仅差一字`,
+        snippet: extractContext(content, m.index, candidate.length),
+        offset: m.index,
+        ruleId: 'name_drift',
+        word: candidate,
+        suggestion: `核对是否为「${name}」误写；若为新角色请先明确身份标签`
+      })
+      reported++
+    }
+  }
 }
 
 const CONTEXT_RADIUS = 12

@@ -48,6 +48,36 @@ export class ChapterDirectionService {
   constructor(private dir: string, private chapter: number, private llm: LlmService, private projectId: string) {}
   private file(): string { return join(this.dir, '.cache', 'chapter-directions', `${this.chapter}.json`) }
   async read(): Promise<DirectionState | null> { return readJson(this.file(), null) }
+
+  /** True when the chapter already has an author-supplied or author-edited formal outline superseding this direction task. */
+  async hasAuthorOwnedOutline(state?: DirectionState | null): Promise<boolean> {
+    const current = state === undefined ? await this.read() : state
+    if (!current?.selected) return false
+    const repo = new DetailedOutlineMdRepo(this.dir)
+    const before = await repo.readRaw(this.chapter)
+    if (!before) return false
+    if (current.generated) {
+      return hashProse(before.text) !== current.generated.fileHash
+    }
+    if (before.text.includes(`方向任务：${current.selected.candidates.token}`)) return false
+    const detail = await repo.readChapter(this.chapter)
+    const isMeaningful = (value?: string): boolean => {
+      const trimmed = value?.trim()
+      return Boolean(trimmed && !/^(?:[（(]?待(?:生成|补充|填写|完善)[）)]?|无|暂无)[。.]?$/.test(trimmed))
+    }
+    return Boolean(detail && (
+      [detail.plotSummary, detail.hook, ...(detail.foreshadowings ?? [])].some(isMeaningful) ||
+      detail.proseSections?.some(section => isMeaningful(section.text) && !/^(?:本章)?写作要求$/.test(section.title.trim()))
+    ))
+  }
+
+  /** Returns the pending selected direction unless already completed or superseded by an author-owned outline. */
+  async readActiveSelected(): Promise<SelectedChapterDirection | undefined> {
+    const state = await this.read()
+    if (!state?.selected || state.completedHash) return undefined
+    if (await this.hasAuthorOwnedOutline(state)) return undefined
+    return state.selected
+  }
   async readPlan(): Promise<string> {
     const outlineDir = join(this.dir, '大纲')
     const primary = await readText(join(outlineDir, '大纲.md'))
@@ -83,6 +113,7 @@ export class ChapterDirectionService {
     requests.set(key, task)
     try {
       let feedback = ''
+      let maxTokens = 8192
       for (let attempt = 0; attempt < 2; attempt++) {
         cancelled(signal)
         const prompt = [
@@ -100,7 +131,7 @@ export class ChapterDirectionService {
         ].join('\n\n')
         try {
           const value = candidateSchema.parse(findJsonObject(await this.llm.generateStream(prompt, {
-            signal, maxTokens: 4500, systemPrompt: '你是小说剧情规划编辑，依据作品资料规划，严格输出 JSON。',
+            signal, maxTokens, systemPrompt: '你是小说剧情规划编辑，依据作品资料规划，严格输出 JSON。',
             meta: { feature: 'chapterDirections', projectId: this.projectId, chapterNumber: this.chapter }
           })))
           cancelled(signal)
@@ -119,7 +150,8 @@ export class ChapterDirectionService {
         } catch (error) {
           cancelled(signal)
           if (/DIRECTION_CONTEXT_|LLM_ABORTED|LLM_RATE_LIMIT/.test((error as Error).message) || attempt === 1) throw error
-          feedback = `【重新生成要求】上次结果无效：${(error as Error).message}。请修正并重新输出完整的五个方向。`
+          if ((error as Error).message === 'LLM_OUTPUT_TRUNCATED') maxTokens = 12288
+          feedback = `【重新生成要求】上次结果无效：${(error as Error).message}。请保持每项简明扼要，修正并重新输出完整的五个方向 JSON。`
         }
       }
       throw new Error('未能生成有效的五个方向。')
@@ -148,13 +180,13 @@ export class ChapterDirectionService {
     cancelled(signal)
     assertNoUnauthorizedStoryEnding(content, selected.authorInstruction)
     const raw = findJsonObject(await this.llm.generateStream([
-      '核验本章实际正文是否落实作者选择的方向、遵守大纲边界，并检查是否未经授权写成全书完结。',
+      '核验本章实际正文是否大体落实作者选择的方向、遵守大纲边界，并检查是否未经授权写成全书完结。',
       storyEndingPolicy(selected.authorInstruction),
-      partial ? '本轮为章内分轮续写，只核对已经写到的部分，不要求后续事件及章末任务全部完成。' : '本章已完成，须核对选定方向的主要推进及本章停止位置。',
-      '可以合理细化场景，不要求逐字照抄方向；不能凭事后反向生成的细纲认定正文合格。',
-      '只输出 JSON：{"completed":true,"passed":true,"issues":[]}；有问题 passed=false，issues 为说明问题及正文原句的字符串数组。',
+      partial ? '本轮为章内分轮续写，只核对已经写到的部分，不要求后续事件及章末任务全部完成。' : '本章已完成，核对选定方向的核心主线推进是否成立、是否越界进入后章核心事件。',
+      '选定方向是写前大方向参考，不是逐条验收清单。只拦实质性硬伤（完全写偏成另一个无关剧情、提前兑现后章核心事件、违背作者明确禁令、或未经授权写成全书完结）。合理细化或微调过程细节、道具/文书载体、人物分工、以及换用同样自然且留有后续空间的章末悬念，均属于正常创作发挥，应判 passed=true 且 issues=[]；不要为次要细节差异拒稿。不能凭事后反向生成的细纲认定正文合格。',
+      '只输出 JSON：{"completed":true,"passed":true,"issues":[]}；确有上述实质性硬伤才 passed=false，issues 为说明硬伤及正文原句的字符串数组。',
       '【选定方向】', selected.plan, '【作者要求】', selected.authorInstruction, '【实际正文】', content
-    ].join('\n\n'), { signal, maxTokens: 2200, meta: { feature: 'chapterDirectionReview', projectId: this.projectId, chapterNumber: this.chapter } }))
+    ].join('\n\n'), { signal, maxTokens: 4096, meta: { feature: 'chapterDirectionReview', projectId: this.projectId, chapterNumber: this.chapter } }))
     cancelled(signal)
     const result = z.object({ completed: z.literal(true), passed: z.boolean(), issues: z.array(z.string()).max(12) }).parse(raw)
     if (!result.passed || result.issues.length) throw new Error(`LONGFORM_CONFLICT: 选定方向或禁止主动完结核验未通过：${result.issues.join('；') || '请重新核对本章。'}`)
@@ -200,6 +232,7 @@ export class ChapterDirectionService {
     }
     let facts: z.infer<typeof outlineSchema> | undefined
     let feedback = ''
+    let maxTokens = 8192
     for (let attempt = 0; attempt < 2; attempt++) {
       cancelled(signal)
       try {
@@ -208,7 +241,7 @@ export class ChapterDirectionService {
           '不得补写情节或把猜测、传闻、计划写成事实。每项 evidence 必须连续逐字引用正文，text 是忠实概括。',
           '只输出 JSON：{"events":[{"text":"按发生顺序概括事件","evidence":"正文原句"}],"hook":{"text":"实际章末落点","evidence":"结尾原句"},"characters":[{"text":"实际出场人物姓名","evidence":"人物出现的原句"}],"foreshadowings":[{"text":"实际埋设、强化或回收的伏笔，保留性质","evidence":"正文原句"}]}。没有的数组输出 []，events 至少一项。',
           '【本章最终正文】', content, feedback
-        ].join('\n\n'), { signal, maxTokens: 4500, meta: { feature: 'chapterOutlineFromProse', projectId: this.projectId, chapterNumber: this.chapter } })))
+        ].join('\n\n'), { signal, maxTokens, meta: { feature: 'chapterOutlineFromProse', projectId: this.projectId, chapterNumber: this.chapter } })))
         for (const fact of [...facts.events, facts.hook, ...facts.characters, ...facts.foreshadowings]) {
           if (!locateMemoryEvidence(content, fact.evidence)) throw new Error('反向细纲缺少可定位的正文原句。')
         }
@@ -216,7 +249,12 @@ export class ChapterDirectionService {
       } catch (error) {
         cancelled(signal)
         if (attempt === 1) throw error
-        feedback = `【修正要求】${(error as Error).message}，请重新输出完整 JSON。`
+        if ((error as Error).message === 'LLM_OUTPUT_TRUNCATED') {
+          maxTokens = 12288
+          feedback = '【修正要求】上次输出达到长度上限被截断，请精简每条 text 和 evidence（只取能支撑该条的最短连续短句，合并细碎事件），重新输出完整 JSON。'
+        } else {
+          feedback = `【修正要求】${(error as Error).message}，请重新输出完整 JSON。`
+        }
       }
     }
     if (!facts) throw new Error('未能根据正文生成有效细纲。')

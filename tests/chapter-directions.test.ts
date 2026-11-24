@@ -187,11 +187,24 @@ describe('无细纲方向与反向细纲', () => {
     const plan = await selected()
     await new ProseRepo(dir).write(3, prose)
     await service.createOutline(prose, '纸条', plan)
+    expect(await service.hasAuthorOwnedOutline()).toBe(false)
+    expect(await service.readActiveSelected()).toEqual(plan)
     const raw = (await new DetailedOutlineMdRepo(dir).readRaw(3))!
     const file = join(dir, '细纲', raw.fileName)
     await writeFile(file, raw.text + '\n作者补充：保留船夫身份的悬念。')
     await expect(service.createOutline(prose, '纸条', plan)).rejects.toThrow('已被作者修改')
     expect(await readFile(file, 'utf8')).toContain('作者补充')
+    expect(await service.hasAuthorOwnedOutline()).toBe(true)
+    expect(await service.readActiveSelected()).toBeUndefined()
+  })
+
+  it('作者另建正式细纲后，未结单的旧方向自动让位，不再作为生效方向返回', async () => {
+    await selected()
+    expect(await service.readActiveSelected()).toBeDefined()
+    await mkdir(join(dir, '细纲'), { recursive: true })
+    await writeFile(join(dir, '细纲', '细纲_第003章_新细纲.md'), '# 细纲_第003章_新细纲.md\n\n## 第 3 章：新细纲\n\n- **核心事件**：林遥在渡口拿到推荐薄片，并留待复核签署。\n- **章尾钩子**：签署栏空着。\n')
+    expect(await service.hasAuthorOwnedOutline()).toBe(true)
+    expect(await service.readActiveSelected()).toBeUndefined()
   })
 })
 

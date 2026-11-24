@@ -1536,6 +1536,8 @@ export interface CreateCharacterInput {
   abilities?: string
   tags?: string[]
   synopsis?: string
+  /** v4：自定义字段（如 说话方式） */
+  customFields?: Record<string, string | string[]>
 }
 
 export interface UpdateCharacterInput {
@@ -2463,6 +2465,7 @@ export interface MemoryExtraction {
     role: string
     identity: string
     personality: string
+    speechStyle?: string
     appearance?: string
     abilities?: string
   }[]

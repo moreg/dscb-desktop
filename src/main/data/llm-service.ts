@@ -183,16 +183,27 @@ const CODEX_CHAPTER_FIRST_OUTPUT_TIMEOUT_SEC = 180
  * 需要长超时的分析类 feature（会塞整章正文/细纲，Kimi 等 API 经常 >2 分钟）。
  * 与正文续写一样走 10 分钟，避免「模型已切换但仍 aborted due to timeout」。
  */
-/** 后台结构化 JSON 提取/核对任务默认使用 low 推理强度，避免沿用正文高思考档位拖慢数倍。 */
+/** 后台结构化 JSON 提取/核对任务默认使用 low 推理强度，避免沿用正文高思考档位拖慢数倍或挤占 max_output_tokens。 */
 const LOW_REASONING_FEATURES = new Set([
   'chapterSummary',
   'autoMemorySync',
   'memoryExtract',
   'batchMemory',
   'memoryEvidenceRepair',
+  'chapterDirections',
   'chapterOutlineFromProse',
   'chapterDirectionReview',
-  'endingState'
+  'endingState',
+  'outlineCheck',
+  'batchOutline',
+  'outlineConflictDecision',
+  'outlineConflictVerify',
+  'outlineSyncDecision',
+  'outlineSyncVerify',
+  'continuityRepairPlan',
+  'continuityRepairVerify',
+  'foreshadowRepairVerify',
+  'foreshadowRepairReview'
 ])
 
 const LONG_TIMEOUT_FEATURES = new Set([

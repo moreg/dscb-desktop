@@ -44,6 +44,9 @@ export function interruptedChapterDraft(initial: string, preview: string, error:
 export function interruptedChapterRetryMessage(error: string, hasRetainedProse: boolean): string | undefined {
   const reviewError = chapterReviewFailureMessage(error)
   if (reviewError) return reviewError + (hasRetainedProse ? ' 已生成的正文已保留，待核对通过后再同步记忆。' : '')
+  if (error.includes('DIRECTION_SYNC_INCOMPLETE')) {
+    return error.split('DIRECTION_SYNC_INCOMPLETE:').pop()?.trim() || error
+  }
   if (error.includes('CODEX_MODEL_CAPACITY')) {
     return 'Codex 模型当前繁忙。' + (hasRetainedProse ? '已保留本次收到的正文。' : '原有草稿已保留。') + '可以稍后重试，或更换本章模型后再续写。'
   }

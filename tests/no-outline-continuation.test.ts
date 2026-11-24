@@ -193,4 +193,56 @@ describe('无细纲单章与一键十章的真实编排', () => {
     expect(resumed.status).toBe('completed')
     expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'chapter' && opts.meta.chapterNumber === 5)).toHaveLength(1)
   })
+
+  it('无细纲批次中断后作者补入/改写正式细纲，补跑按正式细纲结单，不再拿旧方向拒稿或卡死后章', async () => {
+    const normal = generate.getMockImplementation()!
+    let failMemory = true
+    let failDirectionReview = false
+    generate.mockImplementation(async (prompt, opts) => {
+      if (failMemory && ['autoMemorySync', 'batchMemory'].includes(opts?.meta?.feature)) throw new Error('记忆服务暂时不可用。')
+      if (failDirectionReview && opts?.meta?.feature === 'chapterDirectionReview' && opts?.meta?.chapterNumber === 5) {
+        return JSON.stringify({ completed: true, passed: false, issues: ['旧方向要求改回原结尾'] })
+      }
+      return normal(prompt, opts)
+    })
+    const stopped = await writer.generateChaptersBatch(id, 5, 6, () => {}, {}, {}, undefined, { autoContinue: true })
+    expect(stopped.pendingPostProcessChapter).toBe(5)
+    // Author replaces the auto-generated chapter 5 outline with a formal outline that diverges from the old direction.
+    const raw = (await new DetailedOutlineMdRepo(dir).readRaw(5))!
+    await writeFile(join(dir, '细纲', raw.fileName),
+      '# 细纲_第005章_正式版.md\n\n## 第 5 章：正式版\n\n- **核心事件**：林遥在渡口拿到纸条后沿河前往仓库。\n- **章尾钩子**：纸条背面还有空白签署栏。\n')
+    failMemory = false
+    failDirectionReview = true
+    const callsBeforeResume = generate.mock.calls.length
+    const restarted = new WriteService((writer as unknown as { projectService: ProjectService }).projectService, llm)
+    vi.spyOn(restarted, 'selfCheckChapter').mockImplementation(writer.selfCheckChapter)
+    vi.spyOn(restarted, 'auditChapter').mockImplementation(writer.auditChapter)
+    const resumed = await restarted.generateChaptersBatch(id, 5, 6, () => {}, {}, {},
+      { fromChapter: 5, total: 2, completed: stopped.completed, pendingPostProcessChapter: 5 }, { autoContinue: true })
+    expect(resumed.status).toBe('completed')
+    const resumedCalls = generate.mock.calls.slice(callsBeforeResume)
+    expect(resumedCalls.some(([, opts]) => opts?.meta?.feature === 'chapterDirectionReview' && opts?.meta?.chapterNumber === 5)).toBe(false)
+    expect(await new ProseRepo(dir).read(6)).toBe(prose(6))
+  })
+
+  it('章节概要遇到 LLM_OUTPUT_TRUNCATED 时自动提高 maxTokens 并精简重提，不直接中断交稿', async () => {
+    const normal = generate.getMockImplementation()!
+    let summaryAttempts = 0
+    generate.mockImplementation(async (prompt, opts) => {
+      if (opts?.meta?.feature === 'chapterSummary') {
+        summaryAttempts++
+        if (summaryAttempts === 1) throw new Error('LLM_OUTPUT_TRUNCATED')
+      }
+      return normal(prompt, opts)
+    })
+    const directions = (await writer.generateChapterDirections(id, 5))!
+    const result = await writer.deliverChapter(id, 5, null, { directionChoice: { token: directions.token, directionId: 'c' } })
+    expect(result.ok).toBe(true)
+    expect(result.directionSyncCompleted).toBe(true)
+    const summaryCalls = generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'chapterSummary')
+    expect(summaryCalls).toHaveLength(2)
+    expect(summaryCalls[0][1]?.maxTokens).toBe(12288)
+    expect(summaryCalls[1][1]?.maxTokens).toBe(16384)
+    expect(summaryCalls[1][0]).toContain('精简')
+  })
 })

@@ -79,7 +79,8 @@ export default function CharacterManagerPage({ projectId, onOpenChapter }: Props
         personality: c.personality ?? '',
         abilities: c.abilities ?? '',
         tags: c.tags ?? [],
-        synopsis: c.synopsis ?? ''
+        synopsis: c.synopsis ?? '',
+        customFields: c.customFields ? { ...c.customFields } : undefined
       }
     })
 
@@ -315,6 +316,14 @@ export default function CharacterManagerPage({ projectId, onOpenChapter }: Props
 }
 
 function trimInput(input: CreateCharacterInput): CreateCharacterInput {
+  const speechStyle = typeof input.customFields?.['说话方式'] === 'string'
+    ? input.customFields['说话方式'].trim()
+    : ''
+  const nextCustomFields = { ...(input.customFields ?? {}) }
+  if (speechStyle) nextCustomFields['说话方式'] = speechStyle
+  else if ('说话方式' in nextCustomFields) nextCustomFields['说话方式'] = ''
+  const hasCustomFields = Object.keys(nextCustomFields).length > 0
+
   return {
     name: input.name.trim(),
     role: input.role?.trim() || undefined,
@@ -322,7 +331,8 @@ function trimInput(input: CreateCharacterInput): CreateCharacterInput {
     personality: input.personality?.trim() || undefined,
     abilities: input.abilities?.trim() || undefined,
     tags: input.tags?.filter((t) => t.trim()).map((t) => t.trim()),
-    synopsis: input.synopsis?.trim() || undefined
+    synopsis: input.synopsis?.trim() || undefined,
+    ...(hasCustomFields ? { customFields: nextCustomFields } : {})
   }
 }
 
@@ -366,6 +376,18 @@ function CharacterDialog({
         <div className="field">
           <label>性格</label>
           <input className="input" {...f('personality')} />
+        </div>
+        <div className="field">
+          <label>说话方式 / 台词口吻</label>
+          <input
+            className="input"
+            value={typeof input.customFields?.['说话方式'] === 'string' ? input.customFields['说话方式'] : ''}
+            onChange={(e) => setInput({
+              ...input,
+              customFields: { ...(input.customFields ?? {}), 说话方式: e.target.value }
+            })}
+            placeholder="如：习惯用反问压人、很少说完整长句、生气时反而语气温吞"
+          />
         </div>
         <div className="field">
           <label>能力 / 功法 / 武器</label>

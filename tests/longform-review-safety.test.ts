@@ -1082,4 +1082,81 @@ describe('长篇核对绕过与记忆污染回归', () => {
     expect(generate.mock.calls.filter(([, opts]) => opts?.meta?.feature === 'longformGuard')).toHaveLength(2)
     expect(apply).not.toHaveBeenCalled()
   })
+
+  it('已过审历史章在重核时被取消或遇到临时故障，不留下僵尸 pending 隔离锁；查出真实冲突时仍隔离', async () => {
+    await new ProseRepo(dir).write(1, good)
+    const internal = service as unknown as {
+      assertLongformConsistency: (pid: string, chapter: number, content: string, opts?: { signal?: AbortSignal }) => Promise<() => Promise<void>>
+    }
+    const controller = new AbortController()
+    generate.mockImplementationOnce(async () => {
+      controller.abort()
+      throw new Error('LLM_ABORTED')
+    })
+    await expect(internal.assertLongformConsistency(id, 1, good, { signal: controller.signal })).rejects.toThrow('LLM_ABORTED')
+    expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
+
+    generate.mockRejectedValueOnce(new Error('network timeout')).mockRejectedValueOnce(new Error('network timeout'))
+    await expect(internal.assertLongformConsistency(id, 1, good)).rejects.toThrow('LONGFORM_REVIEW_INCOMPLETE')
+    expect((await readLongformReviewState(dir)).pending['1']).toBeUndefined()
+
+    await new ProseRepo(dir).write(1, bad)
+    generate.mockResolvedValue(rejected)
+    await expect(internal.assertLongformConsistency(id, 1, bad)).rejects.toThrow('LONGFORM_CONFLICT')
+    expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
+  })
+
+  it('补跑后章时前章查出 LONGFORM_CONFLICT，不误当作当前章冲突去修当前章', async () => {
+    await new ProseRepo(dir).write(1, bad)
+    await new ProseRepo(dir).write(2, good)
+    generate.mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'longformGuard' && opts?.meta?.chapterNumber === 1) return rejected
+      if (opts?.meta?.feature === 'longformGuard') return cleared
+      if (opts?.meta?.feature === 'endingState') return JSON.stringify({ characterPositions: [], characterStates: [], timePoint: '', unfinished: [], suspense: '', props: [] })
+      return '[]'
+    })
+    const repairSpy = vi.spyOn(service as unknown as { repairLongformConflict: () => Promise<string> }, 'repairLongformConflict')
+    await expect(service.runFullFlowForChapter(id, 2, () => {}, { contentOverride: good }))
+      .rejects.toThrow(/LONGFORM_PREVIOUS_CONFLICT: 第 1 章正文未通过长篇核对/)
+    expect(repairSpy).not.toHaveBeenCalled()
+    expect((await readLongformReviewState(dir)).pending['1']).toBeDefined()
+  })
+
+  it('单章重新生成新稿替换旧批次稿时，自动清除指向旧稿的过期 batchPending', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, '旧批次残留稿件。')
+    await markBatchReviewPending(dir, 1, hashProse('旧批次残留稿件。'))
+    generate.mockImplementation(async (_prompt, opts) => {
+      if (opts?.meta?.feature === 'chapter') return good
+      if (opts?.meta?.feature === 'longformGuard') return cleared
+      return '[]'
+    })
+    await service.generateChapterStream(id, 1, { autoDeslopAfterContinue: false })
+    expect(await new ProseRepo(dir).read(1)).toBe(good)
+    expect((await readLongformReviewState(dir)).batchPending?.['1']).toBeUndefined()
+  })
+
+  it('已过审且无变动的前章写下持久化通过凭证，重启后写后章不再随机重跑 longformGuard；改动大纲或正文时仍重新核对', async () => {
+    verdict = cleared
+    await new ProseRepo(dir).write(1, good)
+    await seedSummary(1, good)
+    const internal = service as unknown as {
+      assertLongformConsistency: (pid: string, chapter: number, content: string, opts?: { trustVerifiedPass?: boolean }) => Promise<() => Promise<void>>
+    }
+    await (await internal.assertLongformConsistency(id, 1, good))()
+    expect(generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard')).toHaveLength(1)
+
+    // Restart service and prepare chapter 2 with unchanged chapter 1 & plan: reuses persisted pass receipt.
+    const restarted = new WriteService(projects, { generateStream: generate } as unknown as LlmService)
+    const restartedInternal = restarted as unknown as {
+      assertLongformConsistency: (pid: string, chapter: number, content: string, opts?: { trustVerifiedPass?: boolean }) => Promise<() => Promise<void>>
+    }
+    await (await restartedInternal.assertLongformConsistency(id, 1, good, { trustVerifiedPass: true }))()
+    expect(generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard')).toHaveLength(1)
+
+    // Changing 大纲.md invalidates the persisted fingerprint and forces a fresh longformGuard review.
+    await writeFile(join(dir, '大纲', '大纲.md'), `# 寻母\n\n## 主线剧情走向\n\n${goal}必须核实渡船。`)
+    await (await restartedInternal.assertLongformConsistency(id, 1, good, { trustVerifiedPass: true }))()
+    expect(generate.mock.calls.filter(([, o]) => o?.meta?.feature === 'longformGuard')).toHaveLength(2)
+  })
 })

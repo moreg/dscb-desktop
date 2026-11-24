@@ -140,9 +140,12 @@ export class CharacterRepo {
     const displayName = patch.name ?? existing.name
     const oldPath = memorySourcePath(this.projectDir, '人物', existing.sources?.[0]?.path) ?? join(dir, `${sanitizeForFileName(existing.name)}.md`)
     const newPath = displayName === existing.name ? oldPath : join(dir, `${sanitizeForFileName(displayName)}.md`)
-    // customFields 浅合并：patch 里的 key 覆盖原值，未列出的 key 保留
+    // customFields 浅合并：patch 里的 key 覆盖原值，空字符串视为清除该自定义字段，未列出的 key 保留
     const mergedCustomFields = patch.customFields
-      ? { ...(existing.customFields ?? {}), ...patch.customFields }
+      ? Object.fromEntries(
+          Object.entries({ ...(existing.customFields ?? {}), ...patch.customFields })
+            .filter(([, v]) => (Array.isArray(v) ? v.length > 0 : v.trim() !== ''))
+        )
       : existing.customFields
     const merged: Character = {
       ...existing,
@@ -396,6 +399,7 @@ export class CharacterRepo {
       abilities: input.abilities,
       tags: input.tags,
       synopsis: input.synopsis,
+      ...(input.customFields && Object.keys(input.customFields).length > 0 ? { customFields: input.customFields } : {}),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }

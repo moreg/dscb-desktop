@@ -514,13 +514,16 @@ export class MemoryWriter {
         n++
         continue
       }
+      const customFields: Record<string, string> = {}
+      if (c.appearance?.trim()) customFields['外貌'] = c.appearance.trim()
+      if (c.speechStyle?.trim()) customFields['说话方式'] = c.speechStyle.trim()
       const input = {
           name,
           role: c.role,
           identity: c.identity,
           personality: c.personality,
           abilities: c.abilities,
-          ...(c.appearance?.trim() ? { customFields: { 外貌: c.appearance.trim() } } : {})
+          ...(Object.keys(customFields).length > 0 ? { customFields } : {})
       }
       await this.recordEntityIntent(chapter, '人物', name, repo.serialize(input))
       try {

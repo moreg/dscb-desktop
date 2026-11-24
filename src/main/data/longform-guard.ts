@@ -91,6 +91,7 @@ export class LongformGuard {
       ...(input.boundary ? [
         '还必须独立检查 boundary（章节边界），并在 checked 中包含 "boundary"；只有主线检查不能代替章节边界检查。',
         '按本章细纲逐项核对允许推进的事件、明确禁区、揭示范围和停止位置，并对照后章计划：不得提前完成后章核心事件、人物状态变化或身份揭晓。发现违反时 kind="boundary"，reference 必须引用章节边界契约或作者主线与卷纲计划中的原文。',
+        '当本章细纲（章节边界契约）对本章的具体道具载体、场景拆解或章末悬念给出了比粗略卷纲/章节规划更具体的安排时，以本章细纲为准；只要没有替换全书主线目标、没有提前兑现后章/卷末核心事件，不得用粗略卷纲里的单句概写去否定已按本章细纲落地的正文。',
         '章末钩子与后章事件重叠时，本章只到触发信号或征兆出现，完成、见效、揭晓和结果留给后章。既有正文中的猜测、提及或开始治疗不等于已经揭晓、复明或治愈。',
         '不同章节可以延续同一事件；本章明确安排的阶段可以完成，后章重复提及不代表本章禁止。须指出被提前兑现的具体后续结果，不能把共同人物、地点或同一调查主题当作抢写。',
         '比较提前兑现时必须对齐事件主体、行为和完成状态。人物通过已建立的预知、后台查询等能力看到待发生结果，不等于另一人物已经抽取、获得或使用该结果；后章计划写某人获得某物，也不自动禁止当前视角人物预先看到信息。只有明确限制首次揭示时点、该信息超出既有能力，或正文确实提前完成了相同事件时才报冲突。',
@@ -132,11 +133,12 @@ export class LongformGuard {
     let findings: Finding[] | undefined
     let failure: unknown
     let retryFeedback = ''
+    let maxTokens = 8192
     for (let attempt = 0; attempt < 2; attempt++) {
       abort()
       try {
         const previous = feedback?.prompt()
-        const raw = await this.llm.generateStream(prompt + (previous ? '\n' + previous : '') + retryFeedback, { ...opts, onToken: undefined, maxTokens: 3000,
+        const raw = await this.llm.generateStream(prompt + (previous ? '\n' + previous : '') + retryFeedback, { ...opts, onToken: undefined, maxTokens,
           systemPrompt: '你是长篇小说连续性编辑，严格按原文与作者计划核对，输出完整JSON。',
           meta: { ...opts.meta, feature: 'longformGuard', chapterNumber: input.chapterNumber } })
         abort()
@@ -150,6 +152,10 @@ export class LongformGuard {
       } catch (error) {
         abort()
         if ((error as Error)?.name === 'AbortError' || (error as Error)?.message?.includes('LLM_ABORTED')) throw error
+        if ((error as Error)?.message === 'LLM_OUTPUT_TRUNCATED') {
+          maxTokens = 12288
+          retryFeedback = '\n\n【上次输出达到长度上限被截断】请精简每条 message 与引句，只报告确实存在的明确冲突并确保一次性输出完整合法 JSON。'
+        }
         failure = error
       }
     }
