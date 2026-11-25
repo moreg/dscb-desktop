@@ -28,11 +28,12 @@ export function parseOutlineDiffJson(raw: string, chapterNumber: number): Outlin
   const resolutions = new Set(['updateOutline', 'updateContent', 'either', 'review'])
   const fail = (error: string): OutlineDiffReport => ({ chapterNumber, diffs: [], passed: false, checked: false, error })
   try {
+    const obj = findJsonObject(raw)
+    if (obj && obj.hasOutline === false && Array.isArray(obj.diffs) && !raw.trim().startsWith('[')) {
+      return { chapterNumber, diffs: [], passed: true, hasOutline: false, checked: false }
+    }
     // 也接受 {"diffs": [...]} 包装。
-    const found = findJsonArray(raw) ?? (() => {
-      const obj = findJsonObject(raw)
-      return Array.isArray(obj?.diffs) ? obj.diffs : undefined
-    })()
+    const found = findJsonArray(raw) ?? (Array.isArray(obj?.diffs) ? obj.diffs : undefined)
     if (!found) return fail('细纲对照未返回可解析的 JSON 数组')
     // 模型常把 type 写成 "1"、priority 写成 "p0"；只做无歧义的规整，越界值仍判失败。
     const arr = found.map((x) => x && typeof x === 'object' && !Array.isArray(x)

@@ -1,6 +1,6 @@
 import { ChapterFactSnapshot } from './chapter-fact-snapshot'
-import { ChapterDirectionService, type SelectedChapterDirection } from './chapter-direction-service'
-import { storyEndingPolicy, type ChapterDirections, type ChapterDirectionChoice } from '../../shared/chapter-directions'
+import { ChapterDirectionService, isUntouchedGeneratedOutline, type SelectedChapterDirection } from './chapter-direction-service'
+import { assertNoUnauthorizedStoryEnding, storyEndingPolicy, type ChapterDirections, type ChapterDirectionChoice } from '../../shared/chapter-directions'
 import { MemorySyncService } from './memory/sync-service'
 import type { ChapterSyncOptions, ChapterSyncResult, ChapterSyncStep } from '../../shared/chapter-workflow'
 import { ChapterWorkflow, type ChapterWorkflowMode } from './chapter-workflow'
@@ -246,6 +246,8 @@ export interface BatchRunOptions {
    * 只传给正文生成，不写全局功能路由；去 AI 味、审稿和后处理仍走各自路由。
    */
   chapterRoute?: ChapterModelRoute
+  /** 恢复无细纲隔离章时允许无细纲完成核对与概要同步。 */
+  allowMissingOutline?: boolean
 }
 
 function diffText(diff: OutlineDiffItem): string {
@@ -477,7 +479,7 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean } = {}
+    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean; trustVerifiedPass?: boolean } = {}
   ): Promise<ChapterSummaryView> {
     return this.generateChapterSummaryChecked(projectId, chapterNumber, content, opts)
   }
@@ -514,7 +516,7 @@ export class WriteService {
     projectId: string,
     chapterNumber: number,
     content: string,
-    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean },
+    opts: { force?: boolean; signal?: AbortSignal; expectedRevision?: string; requireContinuity?: boolean; trustVerifiedPass?: boolean },
     reviewed?: () => Promise<void>
   ): Promise<ChapterSummaryView> {
     if (!content.trim()) throw new Error('正文为空，无法生成章节概要')
@@ -535,7 +537,9 @@ export class WriteService {
       }
       throwIfAborted(opts.signal)
       // Neither reuse nor regeneration can approve a rejected manuscript. Share only non-cancellable identical requests.
-      const confirmLongform = reviewed ?? await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: opts.signal })
+      const confirmLongform = reviewed ?? await this.assertLongformConsistency(projectId, chapterNumber, content, {
+        signal: opts.signal, trustVerifiedPass: opts.trustVerifiedPass
+      })
       if (reviewed) await reviewed()
       const vocabulary = (await buildContinuityContext(dir, chapterNumber, {
         text: content, characters: [], aliases: [], props: []
@@ -585,7 +589,7 @@ export class WriteService {
           hashProse(await new ProseRepo(dir).read(chapterNumber)) !== hashProse(savedBefore)) {
           throw new Error('章节正文已改变，旧概要未写入')
         }
-        let raw = ''
+        let raw: string
         try {
           raw = await this.llm.generateStream(prompt + '\n' + summaryFeedback.prompt() + (repairFeedback
             ? `\n\n--- 自动修复并重新提取 ---\n${repairFeedback}\n逐条重新检查摘要与原文。仅修正标点排版不足以修复被改写的引句，必须重新复制正文中连续存在的原句；不拼接句子，不补写不存在的事实。无法找到依据的条目删除或重新概括，重新输出完整 JSON。`
@@ -698,7 +702,8 @@ export class WriteService {
     opts: { signal?: AbortSignal; force?: boolean } = {}): Promise<ChapterDirections | null> {
     throwIfAborted(opts.signal)
     const dir = await this.projectService.resolveDir(projectId)
-    if (hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined)) return null
+    if (hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined) &&
+      !(await isUntouchedGeneratedOutline(dir, chapterNumber))) return null
     if (existingText.length > EXISTING_TEXT_MAX_CHARS) throw new Error('CHAPTER_CONTEXT_TOO_LARGE')
     const service = this.directionService(dir, projectId, chapterNumber)
     let migration = this.observationMigrations.get(dir)
@@ -723,7 +728,8 @@ export class WriteService {
     const promptBody = renderUserPrompt({ ...ctx, mainSynopsis: hasFullMain ? '' : ctx.mainSynopsis,
       projectName: project.name, genre: project.genre, chapterNumber,
       targetWords: project.chapterWordCount ?? TARGET_WORDS, existingText, tempContext: undefined,
-      chapterDetail: undefined, nextDetail: (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber + 1)) ?? undefined })
+      chapterDetail: undefined, nextDetail: (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber + 1)) ?? undefined,
+      prevSummary: ctx.prevSummary })
       .replace(/\n\n---\n\n# 现在请写第 \d+ 章正文[\s\S]*$/, '')
     const context = [
       '【完整总纲，全部是计划，不是既成事实】', main,
@@ -745,53 +751,45 @@ export class WriteService {
 
   private async finishDirectionChapter(projectId: string, chapter: number, content: string,
     selected: SelectedChapterDirection, signal?: AbortSignal,
-    progress?: (stage: ChapterGenerationStage) => void): Promise<void> {
+    progress?: (stage: ChapterGenerationStage) => void) {
     const dir = await this.projectService.resolveDir(projectId)
     const service = this.directionService(dir, projectId, chapter)
     await service.beginPostProcessing(content, selected, signal)
-    progress?.('preparing:正在核对选定方向与禁止主动完结规则')
-    await service.verify(content, selected, signal)
-    progress?.('preparing:正文已保存，正在生成本章细纲')
-    let outlineSuperseded = false
-    await this.memoryCoordinator.exclusive(projectId, async () => {
-      const title = (await this.chapterService.getChapter(projectId, chapter)).meta.title
-      try {
-        await service.createOutline(content, title, selected, signal)
-      } catch (err) {
-        if (!isAuthorModifiedOutlineError(err)) throw err
-        outlineSuperseded = true
-      }
-    })
+    progress?.('preparing:正在核对禁止主动完结规则')
+    assertNoUnauthorizedStoryEnding(content, selected.authorInstruction)
+    const outlineSuperseded = await service.hasAuthorOwnedOutline()
     if (outlineSuperseded) {
       const outlineText = await this.loadChapterOutlineText(dir, chapter)
-      const checked = await this.checkOutlineWithRetry(chapter, outlineText, content, {
-        signal, tempContext: selected.authorInstruction, meta: { feature: 'outlineCheck', projectId, chapterNumber: chapter }
-      }, signal ?? new AbortController().signal)
-      if (checked.hasOutline && checked.checked !== true) {
-        throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 作者修改细纲后的复核未完成，${checked.error ?? '请稍后补跑同步'}`)
+      if (outlineText) {
+        const checked = await this.checkOutlineWithRetry(chapter, outlineText, content, {
+          signal, tempContext: selected.authorInstruction, meta: { feature: 'outlineCheck', projectId, chapterNumber: chapter }
+        }, signal ?? new AbortController().signal)
+        if (checked.hasOutline && checked.checked !== true) {
+          throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 作者修改细纲后的复核未完成，${checked.error ?? '请稍后补跑同步'}`)
+        }
+        assertChapterOutlineRequirements(checked, (await new DetailedOutlineMdRepo(dir).readChapter(chapter))?.foreshadowings)
       }
-      assertChapterOutlineRequirements(checked, (await new DetailedOutlineMdRepo(dir).readChapter(chapter))?.foreshadowings)
     }
-    progress?.('preparing:正在生成章节概要并同步记忆')
+    progress?.('preparing:正文已保存，正在生成章节概要并同步记忆')
     const [, sync] = await Promise.all([
-      this.generateChapterSummary(projectId, chapter, content, { signal }).catch(err => {
+      this.generateChapterSummary(projectId, chapter, content, { signal, requireContinuity: true, trustVerifiedPass: true }).catch(err => {
         throwIfAborted(signal)
         const msg = err instanceof Error ? err.message : String(err)
         throw new Error(`DIRECTION_SYNC_INCOMPLETE: 正文已保存，章节概要生成未完成（${msg}），请点击「重试修复当前稿」补完收尾。`, { cause: err })
       }),
       this.syncChapterAfterWrite(projectId, chapter, content, {
-        signal, skipIfDisabled: false, tempContext: selected.authorInstruction,
+        signal, skipIfDisabled: false, proseFirst: true, tempContext: selected.authorInstruction, trustVerifiedPass: true,
         onProgress: value => progress?.(`preparing:${postWriteProgressLabel(value)}`)
       })
     ])
-    const errors = [...(sync?.memory.errors ?? []), ...(sync?.memory.heldBack ?? []),
-      ...(sync?.memory.reviewRequired ?? []), ...(sync?.settings.errors ?? [])]
+    const errors = [...(sync?.memory.errors ?? []), ...(sync?.memory.reviewRequired ?? []), ...(sync?.settings.errors ?? [])]
     if (!sync || sync.memory.superseded || sync.extraction.parseError || errors.length) {
       throw new Error(`DIRECTION_SYNC_INCOMPLETE: 正文已保存，记忆同步尚未完成。${sync?.extraction.parseError ?? errors.join('；')}`)
     }
     throwIfAborted(signal)
     if (await new ProseRepo(dir).read(chapter) !== content) throw new Error('DIRECTION_CONTEXT_CHANGED: 正文已变化，请补跑同步。')
     if (!outlineSuperseded) await service.complete(content)
+    return sync
   }
 
   async buildChapterPrompt(
@@ -977,6 +975,7 @@ export class WriteService {
       chapterDetail: ctx.detail,
       nextDetail: nextDetail ?? undefined,
       prevDetail: ctx.prevDetail,
+      prevSummary: ctx.prevSummary,
       prevTail: ctx.prevTail,
       prevProse: ctx.prevProse,
       prevEndingState: ctx.prevEndingState,
@@ -1024,8 +1023,11 @@ export class WriteService {
       opts = { ...opts, selectedDirection: selected, ...(selected ? { tempContext: selected.authorInstruction } : {}) }
       const directionState = opts.repairOnly && selected
         ? await this.directionService(await this.projectService.resolveDir(projectId), projectId, chapterNumber).read() : undefined
-      const resumePostProcessing = Boolean(directionState?.postProcessing ||
-        (directionState?.generated && directionState.generated.sourceHash === hashProse(opts.existingText ?? '')))
+      const existingHash = hashProse(opts.existingText ?? '')
+      const resumePostProcessing = Boolean(
+        (directionState?.postProcessing && directionState.postProcessing.sourceHash === existingHash) ||
+        (directionState?.generated && directionState.generated.sourceHash === existingHash)
+      )
       const autoDeslopAfterContinue = !opts.repairOnly &&
         (opts.autoDeslopAfterContinue ?? ((await this.settings?.get())?.autoDeslopAfterContinue === true))
       const prefix = opts.repairOnly ? undefined : opts.existingText
@@ -1056,7 +1058,7 @@ export class WriteService {
         throwIfAborted(opts.signal)
         let saved = await this.saveGeneratedChapter(projectId, chapterNumber, retained, candidate, autoDeslop, prefix)
         retained = saved.content
-        {
+        if (this.projectService) {
           const deliverDir = await this.projectService.resolveDir(projectId)
           await clearStaleBatchReviewPending(deliverDir, chapterNumber, async () => hashProse(await new ProseRepo(deliverDir).read(chapterNumber)))
         }
@@ -1067,35 +1069,43 @@ export class WriteService {
           retained = saved.content
           if (candidate !== retained) {
             const dir = await this.projectService.resolveDir(projectId)
-            try {
-              const checked = await this.checkOutlineWithRetry(chapterNumber, await this.loadChapterOutlineText(dir, chapterNumber),
-                retained, { signal: opts.signal, partialChapter: promptMeta?.continueMode === 'extend', tempContext: opts.tempContext,
-                  meta: { feature: 'outlineCheck', projectId, chapterNumber } }, opts.signal ?? new AbortController().signal)
-              throwIfAborted(opts.signal)
-              if (checked.hasOutline && checked.checked !== true) {
-                throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 最终细纲核验未完成，${checked.error ?? '请稍后补跑核对'}`)
+            const outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
+            if (outlineText) {
+              try {
+                const checked = await this.checkOutlineWithRetry(chapterNumber, outlineText,
+                  retained, { signal: opts.signal, partialChapter: promptMeta?.continueMode === 'extend', tempContext: opts.tempContext,
+                    meta: { feature: 'outlineCheck', projectId, chapterNumber } }, opts.signal ?? new AbortController().signal)
+                throwIfAborted(opts.signal)
+                if (checked.hasOutline && checked.checked !== true) {
+                  throw new Error(`LONGFORM_REVIEW_INCOMPLETE: 最终细纲核验未完成，${checked.error ?? '请稍后补跑核对'}`)
+                }
+                assertChapterOutlineRequirements(checked, (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings,
+                  promptMeta?.continueMode === 'extend')
+              } catch (error) {
+                if (await new ProseRepo(dir).read(chapterNumber) === retained) {
+                  await markLongformPending(dir, chapterNumber, hashProse(retained))
+                }
+                throw error
               }
-              assertChapterOutlineRequirements(checked, (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings,
-                promptMeta?.continueMode === 'extend')
-            } catch (error) {
-              if (await new ProseRepo(dir).read(chapterNumber) === retained) {
-                await markLongformPending(dir, chapterNumber, hashProse(retained))
-              }
-              throw error
             }
           }
         }
+        let directionSync: Awaited<ReturnType<WriteService['finishDirectionChapter']>> | undefined
+        let finalContinueMode = promptMeta?.continueMode
         if (selected) {
-          if (promptMeta?.continueMode === 'extend') {
-            const dir = await this.projectService.resolveDir(projectId)
-            await this.directionService(dir, projectId, chapterNumber).verify(saved.content, selected, opts.signal, true)
+          const targetThreshold = Math.max(0, (promptMeta?.chapterTargetWords ?? TARGET_WORDS) - CONTINUE_MIN_WORDS)
+          const isPartialExtend = promptMeta?.continueMode === 'extend' && !resumePostProcessing &&
+            countWords(saved.content) < targetThreshold
+          if (isPartialExtend) {
+            assertNoUnauthorizedStoryEnding(saved.content, selected.authorInstruction)
           } else {
-            await this.finishDirectionChapter(projectId, chapterNumber, saved.content, selected, opts.signal, opts.onGenerationStage)
+            directionSync = await this.finishDirectionChapter(projectId, chapterNumber, saved.content, selected, opts.signal, opts.onGenerationStage)
+            if (finalContinueMode === 'extend') finalContinueMode = 'finish'
           }
         }
         return { ok: true, content, fullContent: saved.content, saved, autoDeslop: saved.meta.autoDeslop,
-          ...(selected && promptMeta?.continueMode !== 'extend' ? { directionSyncCompleted: true } : {}),
-          continueMode: promptMeta?.continueMode, wordBudget: promptMeta,
+          ...(directionSync ? { directionSyncCompleted: true, directionSync } : {}),
+          continueMode: finalContinueMode, wordBudget: promptMeta,
           ...(conflictRepaired ? { conflictRepaired: true } : {}), foreshadowRepair: repaired.report }
       } catch (error) {
         if (error instanceof ChapterWriteReviewError) throw error
@@ -1450,10 +1460,12 @@ export class WriteService {
     await this.assertLongformHistoryReady(dir, chapterNumber)
     const savedBefore = await new ProseRepo(dir).read(chapterNumber)
     const readContext = async () => {
-      const [plan, detail, characters, chapterNumbers, boundary] = await Promise.all([
+      const [plan, rawDetail, untouchedCurrent, characters, chapterNumbers, boundary] = await Promise.all([
         readLongformPlan(dir, chapterNumber), new DetailedOutlineMdRepo(dir).readChapter(chapterNumber),
+        isUntouchedGeneratedOutline(dir, chapterNumber),
         new CharacterRepo(dir).list(), new ProseRepo(dir).listChapterNumbers(), readChapterBoundary(dir, chapterNumber)
       ])
+      const detail = rawDetail && !untouchedCurrent ? rawDetail : null
       const [sources, itemCards] = await Promise.all([
         new ProseMemoryIndex(dir).readBefore(chapterNumber, true),
         new ItemRepo(dir).list()
@@ -1496,10 +1508,8 @@ export class WriteService {
         ...(itemTable ? [itemTable] : [])].join('\n\n')
       const directionService = this.directionService(dir, projectId, chapterNumber)
       const selected = await directionService.readActiveSelected()
-      if (selected && selected.sourcePlan !== await directionService.readPlan()) {
-        throw new Error('DIRECTION_CONTEXT_CHANGED: 完整总纲已变化，请重新核对本章方向。')
-      }
-      const guardPlan = selected ? [plan, '【方向生成时的完整总纲，属于计划】', selected.sourcePlan,
+      const currentPlan = selected ? (await directionService.readPlan()) || selected.sourcePlan : ''
+      const guardPlan = selected ? [plan, '【完整总纲，属于计划】', currentPlan,
         '【作者采用的本章方向】', selected.plan].join('\n\n') : plan
       return { plan: guardPlan, boundary, history, crossChapterClues: renderCrossChapterClues(recalled), hints: renderItemDriftHints(drifts),
         sources: hashProse(JSON.stringify(sources.map(s => [s.chapterNumber, s.sourcePath, s.sourceHash]))) }
@@ -2373,19 +2383,22 @@ export class WriteService {
       } catch {
         // skip
       }
-      try {
-        const all = await new DetailedOutlineMdRepo(dir).listAll()
-        const d = all.find((x) => x.chapterNumber === chapterNumber)
-        if (d) {
-          const lines: string[] = []
-          if (d.title) lines.push(`标题：${d.title}`)
-          if (d.plotSummary) lines.push(`核心事件：${d.plotSummary}`)
-          if (d.coolPoint) lines.push(`爽点：${d.coolPoint}`)
-          if (d.hook) lines.push(`钩子：${d.hook}`)
-          outline = lines.join('\n')
+      const untouchedAutoOutline = await isUntouchedGeneratedOutline(dir, chapterNumber)
+      if (!untouchedAutoOutline) {
+        try {
+          const all = await new DetailedOutlineMdRepo(dir).listAll()
+          const d = all.find((x) => x.chapterNumber === chapterNumber)
+          if (d) {
+            const lines: string[] = []
+            if (d.title) lines.push(`标题：${d.title}`)
+            if (d.plotSummary) lines.push(`核心事件：${d.plotSummary}`)
+            if (d.coolPoint) lines.push(`爽点：${d.coolPoint}`)
+            if (d.hook) lines.push(`钩子：${d.hook}`)
+            outline = lines.join('\n')
+          }
+        } catch {
+          // skip
         }
-      } catch {
-        // skip
       }
       // 审稿与写作使用同一份有来源的历史证据；否则跨章矛盾无法核对。
       try {
@@ -2400,7 +2413,7 @@ export class WriteService {
         characterCards = ctx.characters
           .filter((c) => content.includes(c.name) || ctx.detail?.charactersAppearing?.includes(c.name))
           .map(renderCharacterDetail).join('\n')
-        outline = ctx.detail ? renderChapterDetail(ctx.detail, '本章细纲（计划，不能当成已发生）') : outline
+        outline = ctx.detail && !untouchedAutoOutline ? renderChapterDetail(ctx.detail, '本章细纲（计划，不能当成已发生）') : outline
         continuityContext = [
           '正文原文优先于摘要；细纲是计划。引文中的猜测、否定、谎言或计划不能直接当成已发生事实。',
           `上一章实际正文末尾：\n${ctx.prevTail || '（无可用正文）'}`,
@@ -2545,14 +2558,15 @@ export class WriteService {
     if (!outlineText) {
       try {
         const dir = await this.projectService.resolveDir(projectId)
-        const all = await new DetailedOutlineMdRepo(dir).listAll()
-        const d = all.find((x) => x.chapterNumber === chapterNumber)
-        if (d) {
-          outlineText = renderChapterDetail(d, '本章细纲')
-        }
+        outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
       } catch {
         // skip
       }
+    }
+    if (!outlineText.trim()) {
+      const empty = JSON.stringify({ hasOutline: false, diffs: [] })
+      opts.onToken?.(empty)
+      return empty
     }
     return this.flow.checkOutlineStream(outlineText, content, chapterNumber, opts)
   }
@@ -2664,8 +2678,10 @@ export class WriteService {
         if (selfCheck.items.some(item => item.repairKind === 'execution_error' || item.id === 'self_check_error') ||
           deepReview.some(item => item.ruleId?.startsWith('review_incomplete:'))) throw new Error('章节修复后的复检未完成')
         const checked = await this.checkOutlineWithRetry(chapterNumber, outline, candidate, options('batchOutline'), signal)
-        if (checked.checked !== true) throw new Error('章节修复后的细纲复核未完成')
-        assertChapterOutlineRequirements(checked, plans, true)
+        if (outline) {
+          if (checked.checked !== true) throw new Error('章节修复后的细纲复核未完成')
+          assertChapterOutlineRequirements(checked, plans, true)
+        }
         if (await readChapterBoundary(dir, chapterNumber) !== boundary ||
           (chapterNumber > 1 && await new ProseRepo(dir).read(chapterNumber - 1) !== previous)) {
           throw new Error('LONGFORM_CONTEXT_CHANGED: 章节修复期间细纲或前文已变化，候选稿未采用。')
@@ -2741,10 +2757,11 @@ export class WriteService {
             const outline = await this.loadChapterOutlineText(dir, chapterNumber)
             const inspect = () => this.checkOutlineWithRetry(chapterNumber, outline, content,
               { signal, meta: { feature: 'outlineCheck', projectId, chapterNumber } }, signal ?? new AbortController().signal)
-            const report = opts.force ? await inspect() : await cache.run('sync-outline', inspect,
+            const report = opts.force || !outline ? await inspect() : await cache.run('sync-outline', inspect,
               value => value.checked === true && value.hasOutline !== false)
             result.outline = report
-            if (report.checked !== true || report.hasOutline === false) throw new Error(report.error ?? '细纲核验未完成')
+            if (report.hasOutline === false) return
+            if (report.checked !== true) throw new Error(report.error ?? '细纲核验未完成')
             const resolved = await this.autoResolveOutlineDiffs(projectId, chapterNumber, content, report, signal)
             report.diffs = report.diffs.filter((_item, index) => !resolved.includes(index))
             report.passed = !report.diffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)
@@ -2760,24 +2777,25 @@ export class WriteService {
           }
         }, () => result.outline?.diffs.length ? 'preview' : 'handled')
         await checkSource()
-        if (result.outline?.diffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)) {
+        if (result.outline?.hasOutline !== false && result.outline?.diffs.some(item => item.priority !== 'P2' || item.boundaryViolation === true)) {
           throw new Error('正文或细纲仍有关键差异，已保存当前稿；概要和记忆暂不提交，请查看待处理项。')
         }
+        const outlineLess = result.outline?.hasOutline === false
         // Both consume the same immutable factual manuscript; neither waits on optional expression work.
         const jobs: Promise<unknown>[] = [step('summary', async () => {
           result.summary = await this.generateChapterSummary(projectId, chapterNumber, content, {
-            signal, force: opts.force, requireContinuity: true, expectedRevision: contentRevision(content)
+            signal, force: opts.force, requireContinuity: true, trustVerifiedPass: true, expectedRevision: contentRevision(content)
           })
         })]
         if (!opts.skipMemory) jobs.push(step('memory', async () => {
           result.memory = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
-            { skipIfDisabled: false, signal }) ?? undefined
+            { skipIfDisabled: false, proseFirst: outlineLess, trustVerifiedPass: true, signal }) ?? undefined
         }, () => result.memory?.memory.errors.length || result.memory?.memory.reviewRequired?.length ||
           result.memory?.memory.heldBack?.length || result.memory?.settings.errors.length ? 'preview' : 'handled'))
         const outcomes = await Promise.allSettled(jobs)
         const failed = outcomes.find(item => item.status === 'rejected')
         if (failed?.status === 'rejected') throw failed.reason
-        const unresolved = [...(result.memory?.memory.reviewRequired ?? []), ...(result.memory?.memory.heldBack ?? []),
+        const unresolved = [...(result.memory?.memory.reviewRequired ?? []),
           ...(result.memory?.memory.errors ?? []), ...(result.memory?.settings.errors ?? [])]
         if (unresolved.length) throw new Error(`记忆或设定仍有未通过复核的项目：${unresolved.join('；')}`)
         if (!opts.skipMemory) {
@@ -2787,7 +2805,6 @@ export class WriteService {
           const directionService = this.directionService(dir, projectId, chapterNumber)
           const directionState = await directionService.read()
           if (directionState?.selected && !directionState.completedHash &&
-            directionState.generated?.sourceHash === syncedHash &&
             await new ProseRepo(dir).read(chapterNumber) === content) {
             await directionService.complete(content)
           }
@@ -3161,6 +3178,7 @@ export class WriteService {
     dir: string,
     chapterNumber: number
   ): Promise<{ plotSummary?: string; hook?: string; wordEstimate?: string } | undefined> {
+    if (await isUntouchedGeneratedOutline(dir, chapterNumber)) return undefined
     try {
       const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       if (d) return { plotSummary: d.plotSummary, hook: d.hook, wordEstimate: d.wordEstimate }
@@ -3259,7 +3277,7 @@ export class WriteService {
     chapterNumber: number,
     content: string,
     opts?: { signal?: AbortSignal; skipIfDisabled?: boolean; tempContext?: string; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
-      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean
+      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean; trustVerifiedPass?: boolean
       /** 以正文为准：正文自检失败不再整章拦下记忆（逐条证据校验照旧） */
       proseFirst?: boolean; onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void }
   ): Promise<{
@@ -3278,7 +3296,7 @@ export class WriteService {
     chapterNumber: number,
     content: string,
     opts?: { signal?: AbortSignal; skipIfDisabled?: boolean; tempContext?: string; extraction?: MemoryExtraction; selfCheck?: ChapterSelfCheckReport | null;
-      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean
+      deepReview?: AuditViolation[]; ticket?: MemorySyncTicket; savedBefore?: string; memoryOnly?: boolean; trustVerifiedPass?: boolean
       /** 以正文为准：正文自检失败不再整章拦下记忆（逐条证据校验照旧） */
       proseFirst?: boolean; onProgress?: (progress: import('../../shared/types').PostWriteProgress) => void }
   ): Promise<{
@@ -3360,7 +3378,7 @@ export class WriteService {
 
     try {
       const confirmLongform = await this.assertLongformConsistency(projectId, chapterNumber, content, {
-        signal: ticket.controller.signal, instruction: opts?.tempContext,
+        signal: ticket.controller.signal, instruction: opts?.tempContext, trustVerifiedPass: opts?.trustVerifiedPass,
         onStart: () => opts?.onProgress?.({ stage: 'deepReview', detail: '核对长期记忆、人物知情与主线' })
       })
       if (memorySyncDisabled) return { memory: emptyMemory, settings: emptySettings, extraction: emptyExtraction, selfCheck }
@@ -3424,12 +3442,15 @@ export class WriteService {
         ? { ...selfCheck, items: selfCheck.items.filter((item) => item.verdict !== 'fail' || item.category === 'continuity') }
         : selfCheck
       const gateReview = opts?.proseFirst ? deepReview.filter(item => isBlockingContinuityReview(item) || item.ruleId?.startsWith('review_incomplete:')) : deepReview
+      const priorCandidateForSync = await readMemoryCandidate(dir, chapterNumber)
+      const keptForced = priorCandidateForSync?.sourceHash === sourceHash ? priorCandidateForSync.forced ?? [] : []
       let partition = partitionMemoryCandidate(
         content,
         extraction,
         gateReview,
         gateCheck,
-        foreshadowings
+        foreshadowings,
+        keptForced
       )
       // One bounded repair pass for missing quotes, only when the chapter itself is eligible.
       if (partition.itemIssues.length) await memoryFeedback.record(partition.itemIssues.join('；'), JSON.stringify(extraction))
@@ -3437,15 +3458,13 @@ export class WriteService {
         extraction = await this.flow.repairMemoryEvidence(content, extraction, {
           signal: ticket.controller.signal, retryFeedback: memoryFeedback.prompt(), meta: { feature: 'memoryEvidenceRepair', projectId, chapterNumber }
         })
-        partition = partitionMemoryCandidate(content, extraction, gateReview, gateCheck, foreshadowings)
+        partition = partitionMemoryCandidate(content, extraction, gateReview, gateCheck, foreshadowings, keptForced)
       }
       // 重引证据仍救不回时，换一次全新提取再分诊：复核面板的经验是重跑后第二次引对
       // 原文的概率不低。校验口径与分诊规则不变，只采用严格更好的结果（滞留更少且整章
       // 仍可入库）；作者已逐条确认过的候选不动，避免确认的条目换 key 后重新报待核对。
-      const priorCandidateNow = await readMemoryCandidate(dir, chapterNumber)
-      const priorForcedCount = priorCandidateNow?.sourceHash === sourceHash ? priorCandidateNow?.forced?.length ?? 0 : 0
       if (selfCheck && !partition.chapterIssues.length && partition.itemIssues.length &&
-        !priorForcedCount && this.memoryCoordinator.current(ticket) && !ticket.controller.signal.aborted) {
+        !keptForced.length && this.memoryCoordinator.current(ticket) && !ticket.controller.signal.aborted) {
         try {
           opts?.onProgress?.({ stage: 'extract' })
           const retried = await this.extractMemoryWithRetry(dir, chapterNumber, content, knownCharacters,
@@ -3453,12 +3472,12 @@ export class WriteService {
             ticket.controller.signal)
           if (!retried.parseError && !ticket.controller.signal.aborted) {
             let retryExtraction = normalizeMemoryEvidence(content, retried)
-            let retryPartition = partitionMemoryCandidate(content, retryExtraction, gateReview, gateCheck, foreshadowings)
+            let retryPartition = partitionMemoryCandidate(content, retryExtraction, gateReview, gateCheck, foreshadowings, keptForced)
             if (!retryPartition.chapterIssues.length && retryPartition.itemIssues.length) {
               retryExtraction = await this.flow.repairMemoryEvidence(content, retryExtraction, {
                 signal: ticket.controller.signal, meta: { feature: 'memoryEvidenceRepair', projectId, chapterNumber }
               })
-              retryPartition = partitionMemoryCandidate(content, retryExtraction, gateReview, gateCheck, foreshadowings)
+              retryPartition = partitionMemoryCandidate(content, retryExtraction, gateReview, gateCheck, foreshadowings, keptForced)
             }
             if (!retryPartition.chapterIssues.length && retryPartition.itemIssues.length < partition.itemIssues.length) {
               extraction = retryExtraction
@@ -4464,7 +4483,8 @@ export class WriteService {
       selectedDirection = await directionService.readActiveSelected()
     }
     if (opts.autoRecommendMissingOutline && !selectedDirection && opts.contentOverride === undefined &&
-      !hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined)) {
+      !(hasChapterPlan((await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)) ?? undefined) &&
+        !(await isUntouchedGeneratedOutline(dir, chapterNumber)))) {
       onProgress('directions', '正在根据大纲与可用前文生成五个方向')
       opts.onGenerationStage?.('preparing:正在根据大纲与可用前文生成五个方向')
       const candidates = await this.generateChapterDirections(projectId, chapterNumber, opts.existingText, opts.tempContext, { signal: opts.signal })
@@ -4579,14 +4599,16 @@ export class WriteService {
     ])
     onProgress('postChecks')
     const [checkedOutline, postChecks] = await Promise.all([
-      cached.outline && cached.outline.outlineHash === outlineFingerprint(outlineText)
-        ? structuredClone(cached.outline.report)
-        : stages.run('outline', () => this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal), value => !!value && value.checked === true && Array.isArray(value.diffs)),
+      !outlineText
+        ? Promise.resolve<OutlineDiffReport>({ chapterNumber, diffs: [], passed: true, hasOutline: false, checked: false })
+        : cached.outline && cached.outline.outlineHash === outlineFingerprint(outlineText)
+          ? structuredClone(cached.outline.report)
+          : stages.run('outline', () => this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal), value => !!value && value.checked === true && Array.isArray(value.diffs)),
       runPostChecks()
     ])
     let outlineDiff = checkedOutline
     let [memory, deepReview] = postChecks
-    const requiredPlans = (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings ?? []
+    let requiredPlans = (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings ?? []
     const repairContinuityIfNeeded = async (): Promise<boolean> => {
       const issue = blockingChapterReviewIssue(selfCheck, deepReview, audit)
       if (!issue) return false
@@ -4605,7 +4627,7 @@ export class WriteService {
       }
       outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
       const repairedOutline = repaired.check.outline
-      if (repairedOutline.checked === false) throw new Error('衔接修复后的细纲复检未完成，候选稿未采用')
+      if (outlineText && repairedOutline.checked === false) throw new Error('衔接修复后的细纲复检未完成，候选稿未采用')
       const original = content
       await this.chapterService.updateContent(projectId, chapterNumber, repaired.content, savedBefore, { source: 'reviewed', note: '自动修复衔接矛盾并复检通过' })
       content = repaired.content
@@ -4629,8 +4651,8 @@ export class WriteService {
     }
     await repairContinuityIfNeeded()
     // Required non-foreshadow events enter the same verified repair path as single writing.
-    assertChapterOutlineRequirements(outlineDiff, requiredPlans, true)
-    if (proseFirst && outlineDiff.checked !== false && outlineDiff.hasOutline !== false) {
+    if (outlineText) assertChapterOutlineRequirements(outlineDiff, requiredPlans, true)
+    if (proseFirst && outlineText && outlineDiff.checked !== false && outlineDiff.hasOutline !== false) {
       const detail = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
       const plans = detail?.foreshadowings ?? []
       if (missingForeshadowings(outlineDiff, plans).length) {
@@ -4685,7 +4707,7 @@ export class WriteService {
       }
     }
     await repairContinuityIfNeeded()
-    assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+    if (outlineText) assertChapterOutlineRequirements(outlineDiff, requiredPlans)
     await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
     if (autoDeslopAfterContinue && !priorPolish && !localRepairOnly) {
       const beforeExpression = content
@@ -4698,8 +4720,10 @@ export class WriteService {
       savedBefore = hashProse(content)
       if (content !== beforeExpression) {
         await onContentGenerated?.(content)
-        outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
-        assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+        if (outlineText) {
+          outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+          assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+        }
         audit = await this.auditChapter(projectId, content)
         selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
         this.postProcessCache.delete(postProcessCacheKey(projectId, chapterNumber, beforeExpression))
@@ -4710,32 +4734,25 @@ export class WriteService {
       if (autoDeslop && polishPassed(autoDeslop)) await stages.remember('polish', autoDeslop)
     }
     await this.assertLongformConsistency(projectId, chapterNumber, content, { signal: memoryTicket.controller.signal, instruction: opts.tempContext })
-    if (outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
+    if (outlineText && outlineDiff.checked) cachePut({ outline: { outlineHash: outlineFingerprint(outlineText), report: structuredClone(outlineDiff) } })
 
-    // 以正文为准：先回写细纲，再用新细纲重跑自检，最后才同步记忆。顺序不能反——
-    // 旧细纲下的自检失败会把记忆整章拦下，下一章又对着旧细纲/旧记忆写，问题逐章滚大。
-    // 上次已回写成功（缓存里的报告带 proseSynced）时不再重复回写。
+    // 以正文为准：有正式细纲时先回写细纲再用新细纲重跑自检；无细纲时不写细纲，直接核对概要并同步记忆。
     let directionSuperseded = false
     if (selectedDirection) {
-      onProgress('outlineSync', '核对选定方向并根据最终正文生成本章细纲')
-      opts.onGenerationStage?.('preparing:核对选定方向并根据最终正文生成本章细纲')
-      await directionService.verify(content, selectedDirection, memoryTicket.controller.signal)
-      await this.memoryCoordinator.exclusive(projectId, async () => {
-        try {
-          await directionService.createOutline(content, (await this.chapterService.getChapter(projectId, chapterNumber)).meta.title,
-            selectedDirection!, memoryTicket.controller.signal)
-        } catch (err) {
-          if (!isAuthorModifiedOutlineError(err)) throw err
-          directionSuperseded = true
+      directionSuperseded = await directionService.hasAuthorOwnedOutline()
+      if (directionSuperseded) {
+        outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
+        if (outlineText) {
+          requiredPlans = (await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber))?.foreshadowings ?? []
+          outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
+          assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+          selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
         }
-      })
-      outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
-      outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
-      assertChapterOutlineRequirements(outlineDiff)
-      outlineDiff.proseSynced = 1
-      selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
+      } else {
+        outlineDiff = { chapterNumber, diffs: [], passed: true, hasOutline: false, checked: false }
+      }
     }
-    if (proseFirst && !selectedDirection && outlineDiff.proseSynced === undefined && !memoryTicket.controller.signal.aborted) {
+    if (proseFirst && (!selectedDirection || directionSuperseded) && outlineText && outlineDiff.proseSynced === undefined && !memoryTicket.controller.signal.aborted) {
       onProgress('outlineSync')
       // 回写失败时本章细纲保持原样（见 syncOutlineFromProse），可以安全地原样重跑。
       const checkedDiff = outlineDiff
@@ -4751,7 +4768,7 @@ export class WriteService {
         cachePut({ outline: { outlineHash: outlineFingerprint(syncedOutline), report: structuredClone(outlineDiff) } })
       }
     }
-    if (proseFirst && outlineDiff.proseSynced) {
+    if (proseFirst && outlineText && outlineDiff.proseSynced) {
       try {
         selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
       } catch (err) {
@@ -4762,32 +4779,23 @@ export class WriteService {
 
     if (await repairContinuityIfNeeded()) {
       if (selectedDirection && !directionSuperseded) {
-        onProgress('outlineSync', '依据修复后的最终正文更新本章细纲')
-        await directionService.verify(content, selectedDirection, memoryTicket.controller.signal)
-        await this.memoryCoordinator.exclusive(projectId, async () => {
-          try {
-            await directionService.createOutline(content, (await this.chapterService.getChapter(projectId, chapterNumber)).meta.title,
-              selectedDirection!, memoryTicket.controller.signal)
-          } catch (err) {
-            if (!isAuthorModifiedOutlineError(err)) throw err
-            directionSuperseded = true
-          }
-        })
+        directionSuperseded = await directionService.hasAuthorOwnedOutline()
+      }
+      if (directionSuperseded || (proseFirst && !selectedDirection)) {
         outlineText = await this.loadChapterOutlineText(dir, chapterNumber)
-        outlineDiff = await this.checkOutlineWithRetry(chapterNumber, outlineText, content, flowOpts('batchOutline'), memoryTicket.controller.signal)
-        outlineDiff.proseSynced = 1
-        selfCheck = await this.selfCheckChapter(projectId, chapterNumber, content)
-      } else if (proseFirst) {
-        onProgress('outlineSync')
-        outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
+        if (outlineText) {
+          onProgress('outlineSync')
+          outlineDiff = await this.syncOutlineFromProse(projectId, chapterNumber, content, outlineDiff, memoryTicket.controller.signal, opts.tempContext)
+        }
       }
     }
-    assertChapterOutlineRequirements(outlineDiff, requiredPlans)
+    if (outlineText) assertChapterOutlineRequirements(outlineDiff, requiredPlans)
     readyForMemory = true
     ;[memory, deepReview] = await runPostChecks()
     if (proseFirst || await this.isAutoMemorySyncEnabled()) onProgress('memoryApply')
     const sync = await this.syncChapterAfterWrite(projectId, chapterNumber, content,
       { extraction: memory, selfCheck, deepReview, ticket: memoryTicket, savedBefore, tempContext: opts.tempContext,
+        trustVerifiedPass: true,
         ...(proseFirst || selectedDirection ? { proseFirst: true, skipIfDisabled: false } : {}) })
     onProgress('done')
     return {
@@ -4815,9 +4823,9 @@ export class WriteService {
 
   private async loadChapterOutlineText(dir: string, chapterNumber: number): Promise<string> {
     const d = await new DetailedOutlineMdRepo(dir).readChapter(chapterNumber)
-    if (d && hasChapterPlan(d)) return renderChapterDetail(d, '本章细纲')
-    const selected = await new ChapterDirectionService(dir, chapterNumber, this.llm, '').readActiveSelected()
-    return selected ? `本章已选方向（计划，尚未生成正式细纲）：\n${selected.plan}` : ''
+    if (!d || !hasChapterPlan(d)) return ''
+    if (await isUntouchedGeneratedOutline(dir, chapterNumber)) return ''
+    return renderChapterDetail(d, '本章细纲')
   }
 
   /**
@@ -4835,6 +4843,7 @@ export class WriteService {
     signal: AbortSignal
   ): Promise<OutlineDiffReport> {
     let report: OutlineDiffReport = { chapterNumber, diffs: [], passed: true, hasOutline: Boolean(outlineText), checked: false }
+    if (!outlineText) return report
     const dir = opts.meta?.projectId ? await this.projectService.resolveDir(opts.meta.projectId) : undefined
     const feedback = dir ? await createReviewRetryFeedback(dir, chapterNumber, 'outline-check-format',
       [content, outlineText, opts.tempContext, opts.partialChapter]) : undefined
@@ -5075,6 +5084,7 @@ export class WriteService {
       }
       // 升序补跑：前章解除隔离后，后章的写前历史核对才能读到它。
       opts.onRepairProgress?.(`开始完整补跑第 ${chapter} 章（去 AI 味、深度审稿、记忆与概要逐项补齐，约需十几分钟）`, chapter)
+      const allowMissingOutline = !(await this.loadChapterOutlineText(dir, chapter))
       const progress = await this.generateChaptersBatch(projectId, chapter, chapter, onChapterComplete,
         opts.styleProfileId ?? null,
         { ...opts, onFlowProgress: (step, ch) => {
@@ -5082,7 +5092,7 @@ export class WriteService {
           opts.onRepairProgress?.(step, ch)
         } },
         { fromChapter: chapter, total: 1, completed: [chapter], pendingPostProcessChapter: chapter },
-        { autoContinue: true })
+        { autoContinue: true, ...(allowMissingOutline ? { allowMissingOutline: true } : {}) })
       if (progress.status === 'completed') repaired.push(chapter)
       else failures.push({ chapter, error: progress.pauseReason ?? progress.error ?? '补跑未完成' })
     }
@@ -5284,7 +5294,7 @@ export class WriteService {
         completed.sort((a, b) => a - b)
 
         // 连续写作以正文为准。替代 fullFlow 实现没做正文回写时，这里补做细纲回写。
-        if (runOptions?.autoContinue && result.outlineDiff.proseSynced === undefined && !opts.signal?.aborted) {
+        if (runOptions?.autoContinue && result.outlineDiff.hasOutline !== false && result.outlineDiff.proseSynced === undefined && !opts.signal?.aborted) {
           result.outlineDiff = await this.syncOutlineFromProse(projectId, ch, result.content, result.outlineDiff, opts.signal, opts.tempContext)
         }
 
@@ -5293,8 +5303,8 @@ export class WriteService {
         const autoMemory = Boolean(result.direction) || runOptions?.autoContinue || await this.isAutoMemorySyncEnabled()
         if (opts.signal?.aborted) pendingReason = '已停止，本章写后检查尚未完成'
         else if (hashProse(await new ProseRepo(dir).read(ch)) !== hashProse(result.content)) pendingReason = '本章正文在检查期间发生变化，请重新检查当前保存稿'
-        else if (result.outlineDiff.hasOutline === false) pendingReason = '缺少本章细纲，请补齐细纲后重试检查'
-        else if (result.outlineDiff.checked === false) {
+        else if (!result.direction && !runOptions?.allowMissingOutline && result.outlineDiff.hasOutline === false) pendingReason = '缺少本章细纲，请补齐细纲后重试检查'
+        else if (result.outlineDiff.hasOutline !== false && result.outlineDiff.checked === false) {
           pendingReason = result.outlineDiff.proseSynced !== undefined ? '以正文回写细纲未完成' : '细纲对照未完成'
           if (result.outlineDiff.error) pendingReason += `（${result.outlineDiff.error}）`
         }
@@ -5309,7 +5319,7 @@ export class WriteService {
         else if (autoMemory && result.memory.parseError) pendingReason = result.memory.parseError
         else if (autoMemory && result.memoryApply?.superseded) pendingReason = '本章记忆同步已中断或正文发生变化'
         else if (autoMemory && result.memoryApply?.errors.length) pendingReason = `记忆同步失败：${result.memoryApply.errors.join('；')}`
-        else if (autoMemory && result.memoryApply?.heldBack?.length) pendingReason = `记忆条目复核未通过：${result.memoryApply.heldBack.join('；')}`
+        else if (!result.direction && !runOptions?.allowMissingOutline && autoMemory && result.memoryApply?.heldBack?.length) pendingReason = `记忆条目复核未通过：${result.memoryApply.heldBack.join('；')}`
         // 连续写作下一章要读本章记忆，整章记忆没写进去就不能往下写。
         else if ((runOptions?.autoContinue || result.direction) && result.memoryApply?.reviewRequired?.length) {
           pendingReason = `记忆未能按正文同步：${result.memoryApply.reviewRequired.join('；')}`
@@ -5322,7 +5332,13 @@ export class WriteService {
         if (!pendingReason && !opts.signal?.aborted &&
           hashProse(await new ProseRepo(dir).read(ch)) === hashProse(result.content)) {
           try {
-            result.chapterSummary = { ...await this.completeChapterSummary(projectId, dir, ch, result.content, opts.signal), stale: false }
+            result.chapterSummary = {
+              ...await this.completeChapterSummary(projectId, dir, ch, result.content, opts.signal, {
+                trustVerifiedPass: true,
+                allowQuoteFallback: !(result.direction || runOptions?.allowMissingOutline)
+              }),
+              stale: false
+            }
           } catch (err) {
             pendingReason = pendingReason
               ? `${pendingReason}；章节概要生成失败：${(err as Error).message}`
@@ -5330,6 +5346,9 @@ export class WriteService {
           }
         }
 
+        if ((result.direction || runOptions?.allowMissingOutline) && result.outlineDiff.hasOutline === false) {
+          result.outlineOptional = true
+        }
         // 本章写后处理全部完成，缓存用不上了。
         if (!pendingReason) {
           throwIfAborted(opts.signal)
@@ -6222,7 +6241,7 @@ export class WriteService {
   }
 
   private async completeChapterSummary(projectId: string, dir: string, chapterNumber: number, content: string, signal?: AbortSignal,
-    opts?: { trustVerifiedPass?: boolean }): Promise<ChapterSummary> {
+    opts?: { trustVerifiedPass?: boolean; allowQuoteFallback?: boolean }): Promise<ChapterSummary> {
     const confirmLongform = await this.assertLongformConsistency(projectId, chapterNumber, content, { signal, trustVerifiedPass: opts?.trustVerifiedPass })
     const repo = new ChapterSummaryRepo(dir)
     const saved = await repo.readCurrent(chapterNumber, content)
@@ -6237,16 +6256,21 @@ export class WriteService {
       }
       catch (error) { if ((error as Error).message?.includes('LONGFORM_')) throw error }
     }
+    let lastError: unknown
     for (let attempt = 0; attempt < POST_PROCESS_ATTEMPTS; attempt++) {
       try {
         const summary = await this.generateChapterSummaryChecked(projectId, chapterNumber, content,
           { signal, requireContinuity: true }, confirmLongform)
         return { ...summary, schemaVersion: 1 }
       } catch (error) {
+        lastError = error
         throwIfAborted(signal)
         if ((error as Error).message?.includes('LLM_ABORTED') || (error as Error).message?.includes('LONGFORM_') ||
           (error as Error).message?.includes('MEMORY_KNOWLEDGE_INCOMPLETE')) throw error
       }
+    }
+    if (opts?.allowQuoteFallback === false) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError ?? '章节概要生成失败'))
     }
     // Extraction unavailable: preserve dated quotes instead of inventing state.
     const quotes = [content.slice(0, 100), content.slice(-100)].filter(Boolean)
@@ -6345,15 +6369,16 @@ export class WriteService {
     const detailTask = (async () => {
       try {
         const repo = new DetailedOutlineMdRepo(dir)
-        const [current, previous] = await Promise.all([
+        const [current, untouchedCurrent, previous] = await Promise.all([
           repo.readChapter(chapterNumber),
+          isUntouchedGeneratedOutline(dir, chapterNumber),
           chapterNumber > 1 ? repo.readChapter(chapterNumber - 1) : Promise.resolve(null)
         ])
-        if (opts?.requireOutline && !hasChapterPlan(current ?? undefined)) {
+        const effectiveCurrent = current && !untouchedCurrent ? current : null
+        if (opts?.requireOutline && !hasChapterPlan(effectiveCurrent ?? undefined)) {
           throw new Error(`第 ${chapterNumber} 章缺少有效细纲`)
         }
-        if (opts?.requireOutline && chapterNumber > 1 && !previous) throw new Error(`缺少第 ${chapterNumber - 1} 章细纲`)
-        return { detail: current ?? undefined, prevDetail: previous ?? undefined }
+        return { detail: effectiveCurrent ?? undefined, prevDetail: previous ?? undefined }
       } catch (err) {
         contextFailure('细纲', err)
         console.warn('[loadChapterContext] Failed to load detailed outline:', err)
@@ -6573,6 +6598,27 @@ export class WriteService {
       detailTask, rhythmTask, outlineTask, previousTask, charactersTask, foreshadowingsTask,
       trackingTask, summariesTask, settingsTask, evolutionTask
     ])
+    const hasPrevOutline = Boolean(prevDetail && hasChapterPlan(prevDetail) &&
+      !(chapterNumber > 1 && await isUntouchedGeneratedOutline(dir, chapterNumber - 1)))
+    let prevSummary: string | undefined
+    if (chapterNumber > 1 && !hasPrevOutline) {
+      try {
+        const summaryRepo = new ChapterSummaryRepo(dir)
+        if (prevProse.trim() && !prevProse.startsWith('【自动补齐的衔接资料')) {
+          const summary = await summaryRepo.readCurrent(chapterNumber - 1, prevProse)
+          if (summary) prevSummary = chapterSummaryText(summary)
+        } else if (!blockedLongformChapters(await readLongformReviewState(dir))[String(chapterNumber - 1)]) {
+          const summary = await summaryRepo.read(chapterNumber - 1)
+          if (summary) prevSummary = `（上一章原文缺失，以下为旧概要仅供参考）\n${chapterSummaryText(summary)}`
+        }
+      } catch (err) {
+        contextFailure('上一章概要', err)
+        console.warn('[loadChapterContext] Failed to load previous chapter summary:', err)
+      }
+    }
+    if (opts?.requireOutline && chapterNumber > 1 && !hasPrevOutline && !prevProse.trim() && !prevSummary) {
+      contextFailure('细纲', new Error(`缺少第 ${chapterNumber - 1} 章细纲或前文概要`))
+    }
     const laterProseExists = (await new ProseRepo(dir).listChapterNumbers()).some(number => number >= chapterNumber)
     const memoryWriter = new MemoryWriter(dir)
     const provenance = loadedCharacters.length ? await memoryWriter.readAutomaticEntityProvenance(['人物'], chapterNumber) : undefined
@@ -6603,7 +6649,8 @@ export class WriteService {
       settings,
       settingsEvolution,
       detail,
-      prevDetail,
+      prevDetail: hasPrevOutline ? prevDetail : undefined,
+      prevSummary,
       prevTail,
       prevProse,
       prevEndingState,
@@ -6874,6 +6921,7 @@ interface ChapterContext {
   settingsEvolution: SettingsEvolutionEntry[]
   detail?: ChapterDetail
   prevDetail?: ChapterDetail
+  prevSummary?: string
   prevTail: string
   prevProse: string
   prevEndingState?: PrevEndingState
@@ -6916,6 +6964,7 @@ interface RenderInput {
   /** 下一章细纲：只作防超纲的负面清单，不作为本章素材 */
   nextDetail?: ChapterDetail
   prevDetail?: ChapterDetail
+  prevSummary?: string
   prevTail: string
   prevProse?: string
   prevEndingState?: PrevEndingState
@@ -7191,12 +7240,14 @@ function renderUserPrompt(input: RenderInput): string {
     parts.push(lines.join('\n'))
   }
 
-  // 4. 上一章细纲 + 完整正文（衔接原料）
-  if (input.prevDetail || input.prevProse || input.prevTail) {
+  // 4. 上一章细纲或概要 + 完整正文（衔接原料）
+  if (input.prevDetail || input.prevSummary || input.prevProse || input.prevTail) {
     parts.push('---')
     parts.push(`# 第 ${input.chapterNumber - 1} 章 衔接原料`)
-    if (input.prevDetail) {
+    if (input.prevDetail && hasChapterPlan(input.prevDetail)) {
       parts.push(renderChapterDetail(input.prevDetail, '上一章细纲', { includeProse: false }))
+    } else if (input.prevSummary) {
+      parts.push(`**上一章概要**（无前文细纲，基于上一章实际正文生成）：\n${input.prevSummary}`)
     }
     if (input.prevProse || input.prevTail) {
       parts.push(input.prevProse?.startsWith('【自动补齐的衔接资料')
@@ -7933,11 +7984,6 @@ function renderCharacterDetail(c: Character): string {
     }
   }
   return lines.join('\n')
-}
-
-function isAuthorModifiedOutlineError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err)
-  return msg.includes('自动细纲已被作者修改') || msg.includes('用户已补入细纲')
 }
 
 function normalizeName(name: string): string {

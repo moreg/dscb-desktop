@@ -9,7 +9,10 @@ export const BATCH_QUALITY_LABELS: Record<BatchQuality, string> = {
 export function batchQuality(result: ChapterFlowResult): BatchQuality {
   const polish = result.autoDeslop
   if (polish?.status === 'failed' || polish?.status === 'review_required' || polish?.dialogueQuality?.passed === false) return 'expression_pending'
-  if (!polish || !result.memoryApply || result.chapterSummary?.stale !== false || !result.selfCheck || result.outlineDiff.checked !== true || result.outlineDiff.hasOutline !== true) return 'unverified'
+  const outlineVerified = Boolean(result.direction || result.outlineOptional) && result.outlineDiff.hasOutline === false
+    ? result.chapterSummary?.stale === false
+    : result.outlineDiff.checked === true && result.outlineDiff.hasOutline === true
+  if (!polish || !result.memoryApply || result.chapterSummary?.stale !== false || !result.selfCheck || !outlineVerified) return 'unverified'
   if (result.audit.counts.error > 0 || !result.selfCheck.ok || result.outlineDiff.passed === false ||
       result.deepReview?.some(item => item.severity === 'error' || item.ruleId?.startsWith('review_incomplete:')) ||
       result.memory.parseError || result.memoryApply?.errors.length || result.memoryApply?.superseded ||

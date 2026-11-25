@@ -21,6 +21,7 @@ import type {
   AutoDeslopResult,
   AutoForeshadowRepairResult,
   AuditReport,
+  AuditViolation,
   ChapterContent,
   ChapterGenerationStage,
   PostWriteProgress,
@@ -2256,15 +2257,61 @@ export default function ChapterEditor({
         setFlowPanelOpen(true)
         // Phase 12 Task 2：续写完成后自动跑质检 + 自动审核。
         // 两者相互独立，并行启动（不再串行 await），各走各的失败兜底。
-        void runPostGenerateAudit(myGen, formatted)
+        void runPostGenerateAudit(
+          myGen,
+          formatted,
+          result.directionSyncCompleted ? result.directionSync?.deepReview : undefined
+        )
         // 后台自动同步记忆/设定（受 autoPostWritePipeline 控制）；失败不阻断续写成功
         if (result.directionSyncCompleted) {
           void window.api.listDetailedOutline(targetProjectId).then(items => {
             if (sessionEpochRef.current === myEpoch && genRef.current === myGen) setChapterOutline(items.find(item => item.chapterNumber === targetChapter) ?? null)
           }).catch(() => undefined)
-          setUndoToast({ type: 'info', message: '本章细纲、概要和记忆已同步完成。' })
-          setPostWriteSync({ phase: 'ok', message: '本章细纲、概要和记忆已同步完成。', errors: [], contentForRetry: formatted,
-            at: Date.now(), canUndo: false, undoDepth: 0, receipt: null })
+          setSummaryRefreshTrigger((value) => value + 1)
+          const dirSync = result.directionSync
+          if (dirSync) {
+            if (dirSync.selfCheck && dirSync.selfCheck.chapterNumber === targetChapter) {
+              const source = selfCheckTrackerRef.current.capture()
+              if (source.projectId === targetProjectId && source.chapterNumber === targetChapter && source.content === formatted) {
+                setSelfCheckSnapshot({ report: dirSync.selfCheck, source })
+                setSelfCheckError(null)
+              }
+            }
+            setAutoSyncSeed({
+              extraction: dirSync.extraction,
+              memory: dirSync.memory,
+              settings: dirSync.settings,
+              selfCheck: dirSync.selfCheck ?? null
+            })
+            const summary = summarizePostWriteSync({ ...dirSync, selfCheck: null })
+            if (summary.phase !== 'failed') clearFailedSyncForChapter()
+            const syncMsg = `${summary.message}；本章概要已更新`
+            setUndoToast({ type: summary.phase === 'ok' ? 'info' : 'error', message: syncMsg })
+            setPostWriteSync({
+              phase: summary.phase,
+              message: syncMsg,
+              errors: summary.errors,
+              contentForRetry: formatted,
+              at: Date.now(),
+              canUndo: false,
+              undoDepth: 0,
+              receipt: null,
+              selfCheck: dirSync.selfCheck ?? null
+            })
+          } else {
+            clearFailedSyncForChapter()
+            setUndoToast({ type: 'info', message: '本章概要与记忆已同步完成。' })
+            setPostWriteSync({
+              phase: 'ok',
+              message: '本章概要与记忆已同步完成。',
+              errors: [],
+              contentForRetry: formatted,
+              at: Date.now(),
+              canUndo: false,
+              undoDepth: 0,
+              receipt: null
+            })
+          }
         } else if (finalized.canSyncMemory) {
           void runPostGenerateMemorySync(myGen, formatted, { previousSelfCheck }).then(() => {
             if (sessionEpochRef.current === myEpoch && genRef.current === myGen && result.continueMode !== 'extend') {
@@ -2723,11 +2770,20 @@ export default function ChapterEditor({
    * 和「本章很干净」长得一模一样，用户会以为已经查过了。
    * 中途切走（genRef 变化）则丢弃结果。
    */
-  const runPostGenerateAudit = async (myGen: number, finalDraft: string) => {
+  const runPostGenerateAudit = async (myGen: number, finalDraft: string, precomputedDeepReview?: AuditViolation[]) => {
     try {
       const report = await window.api.auditChapter(projectId, finalDraft)
       if (genRef.current !== myGen) return
       setAutoAudit(report)
+      if (precomputedDeepReview !== undefined) {
+        if (draftRef.current !== finalDraft) return
+        if (precomputedDeepReview.length > 0) {
+          const counts = { ...report.counts }
+          for (const finding of precomputedDeepReview) counts[finding.severity]++
+          setAutoAudit({ ...report, counts, violations: [...report.violations, ...precomputedDeepReview] })
+        }
+        return
+      }
       // 普通续写也遵守自动深审开关；以前只有批量/full 流程会读取此设置。
       try {
         const { config } = await window.api.getReviewRules()

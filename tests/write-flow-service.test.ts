@@ -34,7 +34,7 @@ describe('WriteFlowService.extractEndingState', () => {
     expect(prompt).toContain('保留全部有原文依据')
     expect(prompt).toContain('不升级为已发生事实')
     expect(opts?.strengthOverride).toBeUndefined()
-    expect(opts?.maxTokens).toBeUndefined()
+    expect(opts?.maxTokens).toBe(8192)
   })
 
   it('parses structured ending state from LLM JSON', async () => {

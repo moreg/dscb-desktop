@@ -26,7 +26,7 @@ export default function ChapterDirectionsDialog({ candidates, loading, error, on
           {candidates?.missingPreviousProse
             ? '未找到上一章正文，本次依据全书大纲与可用资料规划。'
             : '本章暂无有效细纲，将结合大纲与已有正文规划五个方向。'}
-          写完后自动生成本章细纲、概要并同步记忆，未经你明确要求不会写全书完结。
+          写完后自动生成本章概要并同步记忆，后续章节无前文细纲时自动读取概要；未经你明确要求不会写全书完结。
         </p>
         {loading ? <p role="status">正在生成五个方向和推荐理由…</p> : null}
         {error ? <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p> : null}

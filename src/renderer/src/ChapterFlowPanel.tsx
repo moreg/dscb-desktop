@@ -524,7 +524,7 @@ export default function ChapterFlowPanel(props: Props) {
         return
       }
       const report = parseOutlineDiffJson(buffer, chapterNumber)
-      if (report.checked === false) throw new Error(report.error || '细纲对照结果无效')
+      if (report.hasOutline !== false && report.checked === false) throw new Error(report.error || '细纲对照结果无效')
       lastOutlineRef.current = report
       setOutlineDiff(report)
       onCompleteOutline?.()
@@ -1007,7 +1007,20 @@ export default function ChapterFlowPanel(props: Props) {
         const sync = result.memory
         setMemoryExtraction(sync.extraction); lastExtractionRef.current = sync.extraction
         setMemoryResult(sync.memory); setSettingsResult(sync.settings)
-        setMemoryError([...(sync.memory.errors ?? []), ...(sync.memory.reviewRequired ?? []), ...(sync.memory.heldBack ?? [])].join('；'))
+        const syncMemErrors = [
+          ...(sync.memory.errors ?? []),
+          ...(sync.memory.reviewRequired ?? []).map((issue) => `记忆待核对：${issue}`)
+        ].filter(Boolean)
+        const syncAppliedTotal =
+          (sync.memory.applied?.stateChanges ?? 0) +
+          (sync.memory.applied?.plotPoints ?? 0) +
+          (sync.memory.applied?.collected ?? 0) +
+          (sync.settings.applied ?? 0)
+        setMemoryError(
+          syncMemErrors.length > 0 && syncAppliedTotal === 0
+            ? syncMemErrors.map((msg) => friendlyFlowError(msg)).join('；')
+            : ''
+        )
         if (sync.settings.errors.length) setSyncError(sync.settings.errors.join('；'))
         onCompleteMemory?.()
       }
@@ -1394,7 +1407,11 @@ export default function ChapterFlowPanel(props: Props) {
             </p>
           ) : null}
           {outlineDiff ? (
-            outlineDiff.diffs.length === 0 ? (
+            outlineDiff.hasOutline === false ? (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+                本章无细纲，已跳过细纲对照（以章节概要与记忆为准）。
+              </p>
+            ) : outlineDiff.diffs.length === 0 ? (
               <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
                 ✓ 无差异，可放心保存。
               </p>
@@ -1709,6 +1726,13 @@ export default function ChapterFlowPanel(props: Props) {
                   <div className="meta" style={{ marginTop: 6, fontSize: 11.5 }}>
                     正在自动写入人物状态/设定…
                   </div>
+                ) : null}
+                {memoryResult?.heldBack && memoryResult.heldBack.length > 0 ? (
+                  <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                    其余已入库；{memoryResult.heldBack.length} 项因正文证据不足暂未写入（可到章节列表待复核处确认）：
+                    {memoryResult.heldBack.slice(0, 2).join('；')}
+                    {memoryResult.heldBack.length > 2 ? ` 等 ${memoryResult.heldBack.length} 项` : ''}
+                  </p>
                 ) : null}
               </div>
 

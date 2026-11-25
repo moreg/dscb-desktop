@@ -7,6 +7,8 @@ import { ChapterRhythmWriter } from './skill-format/chapter-rhythm-writer'
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
 import { DetailedOutlineWriter } from './skill-format/detailed-outline-writer'
 import { CharacterRepo } from './memory/character-repo'
+import { ChapterSummaryRepo, chapterSummaryText, type ChapterSummary } from './memory/chapter-summary-repo'
+import { isUntouchedGeneratedOutline } from './chapter-direction-service'
 import { hashProse } from './memory/prose-memory-index'
 import { blockedLongformChapters, readLongformReviewState } from './longform-review-state'
 import { readChapterStatuses, setChapterStatus } from './chapter-status-store'
@@ -38,6 +40,18 @@ import type {
  * 其余 mutation（createChapter / deleteChapter / updateChapterMeta 改标题等）涉及 rhythmData +
  * 大纲表 + 细纲三处同步，留给 Phase 3 的 ChapterRhythmWriter。
  */
+const EMPTY_SYNOPSIS = /^(?:无|暂无|待定|空|-|—|none|null|[（(]?待(?:生成|补充|填写|完善)[）)]?)[。.]?$/i
+
+function hasMeaningfulSynopsis(text?: string): boolean {
+  const value = text?.trim()
+  return Boolean(value && !EMPTY_SYNOPSIS.test(value))
+}
+
+function summaryToSynopsis(summary: ChapterSummary): string | undefined {
+  const events = summary.events.map((item) => item.text.trim()).filter(Boolean).join('；')
+  return events || chapterSummaryText(summary) || undefined
+}
+
 export class ChapterService {
   constructor(private readonly projectService: ProjectService) {}
 
@@ -164,6 +178,39 @@ export class ChapterService {
       this.readCharacterNameToIdMap(dir)
     ])
     const bodies = await prose.readMany(rhythm.map((entry) => entry.chapter))
+    const summaryRepo = new ChapterSummaryRepo(dir)
+    const untouchedCheckTargets = rhythm.filter((e) => {
+      const det = detailedMap.get(e.chapter)
+      const body = bodies.get(e.chapter)!
+      return hasMeaningfulSynopsis(det?.plotSummary) && Boolean(body.content.trim())
+    })
+    const untouchedChapters = new Set<number>()
+    if (untouchedCheckTargets.length > 0) {
+      await Promise.all(
+        untouchedCheckTargets.map(async (e) => {
+          if (await isUntouchedGeneratedOutline(dir, e.chapter).catch(() => false)) {
+            untouchedChapters.add(e.chapter)
+          }
+        })
+      )
+    }
+    const fallbackTargets = rhythm.filter((e) => {
+      const det = detailedMap.get(e.chapter)
+      const body = bodies.get(e.chapter)!
+      return Boolean(body.content.trim()) && (!hasMeaningfulSynopsis(det?.plotSummary) || untouchedChapters.has(e.chapter))
+    })
+    const summaryFallbacks = new Map<number, string | undefined>()
+    if (fallbackTargets.length > 0) {
+      await Promise.all(
+        fallbackTargets.map(async (e) => {
+          const body = bodies.get(e.chapter)!
+          const summary = await summaryRepo.read(e.chapter).catch(() => null)
+          if (summary && summary.sourceHash === hashProse(body.content)) {
+            summaryFallbacks.set(e.chapter, summaryToSynopsis(summary))
+          }
+        })
+      )
+    }
     const now = new Date().toISOString()
     const statusMap = await this.resolveStatuses(dir, rhythm.map((e) => {
       const body = bodies.get(e.chapter)!
@@ -185,8 +232,8 @@ export class ChapterService {
         title: det?.title || e.title,
         wordCount,
         status: statusMap.get(e.chapter) ?? (chapterContent.trim() ? 'draft' : 'outline'),
-        // synopsis 改用细纲 plotSummary（核心事件）
-        synopsis: det?.plotSummary,
+        // synopsis 优先用细纲 plotSummary；无有效细纲或仍为未手改自动细纲时回退到与当前正文匹配的章节概要
+        synopsis: summaryFallbacks.get(e.chapter) ?? det?.plotSummary,
         volume: e.volume ?? det?.volume,
         // 细纲优先，空则回退节奏图谱
         emotion: det?.emotion ?? e.emotion,
@@ -206,9 +253,17 @@ export class ChapterService {
       new DetailedOutlineMdRepo(dir).readChapter(n),
       this.readCharacterNameToIdMap(dir)
     ])
+    const proseText = content ?? ''
+    let synopsisFallback: string | undefined
+    if (proseText.trim() && (!hasMeaningfulSynopsis(det?.plotSummary) || await isUntouchedGeneratedOutline(dir, n).catch(() => false))) {
+      const summary = await new ChapterSummaryRepo(dir).read(n).catch(() => null)
+      if (summary && summary.sourceHash === hashProse(proseText)) {
+        synopsisFallback = summaryToSynopsis(summary)
+      }
+    }
     const entry = rhythm.find((e) => e.chapter === n)
-    const status = (await this.resolveStatuses(dir, [{ chapter: n, exists: Boolean(content), content: content ?? '' }]))
-      .get(n) ?? (content?.trim() ? 'draft' : 'outline')
+    const status = (await this.resolveStatuses(dir, [{ chapter: n, exists: Boolean(content), content: proseText }]))
+      .get(n) ?? (proseText.trim() ? 'draft' : 'outline')
     const meta: ChapterMeta = {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
@@ -216,7 +271,7 @@ export class ChapterService {
       title: det?.title || entry?.title || `第${n}章`,
       wordCount: content ? countWords(content) : 0,
       status,
-      synopsis: det?.plotSummary,
+      synopsis: synopsisFallback ?? det?.plotSummary,
       volume: entry?.volume ?? det?.volume,
       emotion: det?.emotion ?? entry?.emotion,
       climax: det?.climax ?? entry?.climax,

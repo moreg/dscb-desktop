@@ -567,8 +567,16 @@ export interface SavedChapterPolishResult {
  * extend 表示这一章是**故意还没写完**的半成品，写后自检的完成度类项据此降级。
  */
 export interface ChapterStreamResult {
-  /** The outline, summary and required memory sync were completed by the backend. */
+  /** 概要和必要记忆同步已由后端完成（无细纲方向续写或兼容模式）。 */
   directionSyncCompleted?: boolean
+  /** 无细纲方向续写完成后的写后同步结果，供流程面板直接回填展示。 */
+  directionSync?: {
+    memory: MemoryApplyResult
+    settings: SettingsApplyResult
+    extraction: MemoryExtraction
+    selfCheck?: ChapterSelfCheckReport | null
+    deepReview?: AuditViolation[]
+  }
   ok: boolean
   /** 最终正文实际落盘后的回执；表达待修订也可保存，不表示验收通过。 */
   saved?: ChapterContent
@@ -2781,6 +2789,8 @@ export interface MemoryCandidateDetail {
 /** 单章完整流程结果（生成→质检→细纲对照→记忆→节奏→图解） */
 export interface ChapterFlowResult {
   direction?: { title: string; reason: string }
+  /** 本章允许无细纲（以章节概要与记忆为准，如方向续写或无细纲隔离章补跑）。 */
+  outlineOptional?: boolean
   chapterNumber: number
   /** 生成的正文 */
   content: string

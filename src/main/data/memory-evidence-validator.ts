@@ -387,16 +387,27 @@ export function partitionMemoryCandidate(
   extraction: MemoryExtraction,
   review: AuditViolation[] = [],
   selfCheck?: ChapterSelfCheckReport | null,
-  foreshadowings?: Foreshadowing[]
+  foreshadowings?: Foreshadowing[],
+  forced: readonly { kind: MemoryCandidateItemKind; key: string }[] = []
 ): MemoryCandidatePartition {
   const chapterIssues: string[] = []
 
   if (extraction.parseError) chapterIssues.push(extraction.parseError)
 
   const verdicts = inspectMemoryCandidateItems(content, extraction, foreshadowings)
-  const passed = (kind: MemoryCandidateItemKind, index: number): boolean =>
-    (verdicts.find((v) => v.kind === kind && v.index === index)?.issues.length ?? 0) === 0
-  const itemIssues = describeBlockedItems(verdicts)
+  const isForcedItem = (kind: MemoryCandidateItemKind, key: string): boolean =>
+    forced.some((f) => f.kind === kind && f.key === key)
+  const passed = (kind: MemoryCandidateItemKind, index: number): boolean => {
+    const verdict = verdicts.find((v) => v.kind === kind && v.index === index)
+    if (!verdict || verdict.issues.length === 0) return true
+    // Keep author-confirmed chapter-replacing items in verified on same-prose re-sync so
+    // MemoryWriter.applyAutomatic does not delete them via removeObsoletePlotPoints / state rebuilds.
+    // Leave foreshadowCollect (ledger requires prose evidence) and settingsPatch (additive) unchanged.
+    return kind !== 'foreshadowCollect' && kind !== 'settingsPatch' && isForcedItem(kind, verdict.key)
+  }
+  const itemIssues = describeBlockedItems(
+    verdicts.filter((v) => !isForcedItem(v.kind, v.key))
+  )
 
   const newPlotPoints = extraction.newPlotPoints.filter((_, i) => passed('plotPoint', i))
   const characterStateChanges = extraction.characterStateChanges.filter((_, i) =>

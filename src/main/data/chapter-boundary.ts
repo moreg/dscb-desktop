@@ -1,4 +1,5 @@
 import { DetailedOutlineMdRepo } from './skill-format/detailed-outline-md-repo'
+import { isUntouchedGeneratedOutline } from './chapter-direction-service'
 import type { ChapterDetail, OutlineDiffReport } from '../../shared/types'
 import { missingForeshadowings } from './foreshadowing-repair'
 
@@ -20,8 +21,11 @@ function boundaryText(detail: ChapterDetail): string {
 /** Read the actual chapter plans, including prose-only prohibitions. Never derive a boundary from generated prose. */
 export async function readChapterBoundary(dir: string, chapterNumber: number): Promise<string> {
   const repo = new DetailedOutlineMdRepo(dir)
-  const chapters = await Promise.all([0, 1, 2, 3].map(offset => repo.readChapter(chapterNumber + offset)))
-  const sections = chapters.flatMap((detail, offset) => detail ? [
+  const [chapters, skipCurrent] = await Promise.all([
+    Promise.all([0, 1, 2, 3].map(offset => repo.readChapter(chapterNumber + offset))),
+    isUntouchedGeneratedOutline(dir, chapterNumber)
+  ])
+  const sections = chapters.flatMap((detail, offset) => detail && !(offset === 0 && skipCurrent) ? [
     `${offset === 0 ? '本章允许推进的事件、揭示范围与停止位置' : '后章计划，只作禁止提前兑现的边界'}（第 ${chapterNumber + offset} 章）：\n${boundaryText(detail)}`
   ] : [])
   if (!sections.length) return ''

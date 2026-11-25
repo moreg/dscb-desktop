@@ -559,7 +559,11 @@ function summarize(chapter: number, result: ChapterFlowResult, deslopFallback: s
     : result.memory.parseError || memoryErrors.length || result.memoryApply?.reviewRequired?.length || result.memoryApply?.superseded
       ? '记忆同步待完成'
       : `记忆已同步${memoryCount ? ` ${memoryCount} 项` : ''}`
-  const pending = result.outlineDiff.hasOutline === false || result.outlineDiff.checked === false ||
+  const outlinePending = (result.direction || result.outlineOptional)
+    ? (result.outlineDiff.hasOutline !== false && result.outlineDiff.checked === false) ||
+      (result.outlineDiff.hasOutline === false && result.chapterSummary?.stale !== false)
+    : result.outlineDiff.hasOutline === false || result.outlineDiff.checked === false
+  const pending = outlinePending ||
     result.selfCheck === null || result.selfCheck?.items.some((item) => item.repairKind === 'execution_error' || item.id === 'self_check_error') ||
     memory === '记忆同步待完成' || Boolean(result.settingsApply?.errors.length) ||
     result.deepReview?.some((item) => item.ruleId?.startsWith('review_incomplete:'))

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { batchQuality } from '../src/shared/batch-quality'
 import {
   describeAutoDeslopCell,
   describeMemoryCell,
@@ -379,6 +380,65 @@ describe('批量续写逐章小结', () => {
         )
         expect(describeMemoryCell(s)).toBe('记忆写入 2/3 条，1 项证据不足未写入，待确认新增 1 项')
       })
+    })
+  })
+
+  describe('batchQuality 无细纲方向章验收', () => {
+    it('direction 章无细纲但概要、润色、自检、记忆齐全时返回 passed', () => {
+      const result = makeResult(5, '正文内容', {
+        hasOutline: false,
+        checked: false,
+        selfCheck: selfCheck(0, 0),
+        memoryApply: { applied: applied(1), errors: [] }
+      })
+      result.direction = { title: '方向A', reason: '推荐' }
+      result.autoDeslop = { status: 'unchanged', remainingIssues: 0, message: '去 AI 味无需修改' }
+      result.chapterSummary = {
+        chapterNumber: 5,
+        sourceHash: 'abc',
+        generatedAt: '2026-11-24T00:00:00.000Z',
+        events: [{ text: '事件', evidence: '正文内容' }],
+        stateChanges: [],
+        openThreads: [],
+        stale: false
+      }
+      expect(batchQuality(result)).toBe('passed')
+      expect(summarizeChapterResult(result).quality).toBe('passed')
+    })
+
+    it('direction 章概要未完成或陈旧时返回 unverified', () => {
+      const result = makeResult(5, '正文内容', {
+        hasOutline: false,
+        checked: false,
+        selfCheck: selfCheck(0, 0),
+        memoryApply: { applied: applied(1), errors: [] }
+      })
+      result.direction = { title: '方向A', reason: '推荐' }
+      result.autoDeslop = { status: 'unchanged', remainingIssues: 0, message: '去 AI 味无需修改' }
+      expect(batchQuality(result)).toBe('unverified')
+    })
+
+    it('outlineOptional 为 true 且无 direction 的无细纲隔离补跑章在概要齐全时返回 passed，未标记则仍返回 unverified', () => {
+      const result = makeResult(5, '正文内容', {
+        hasOutline: false,
+        checked: false,
+        selfCheck: selfCheck(0, 0),
+        memoryApply: { applied: applied(1), errors: [] }
+      })
+      result.autoDeslop = { status: 'unchanged', remainingIssues: 0, message: '去 AI 味无需修改' }
+      result.chapterSummary = {
+        chapterNumber: 5,
+        sourceHash: 'abc',
+        generatedAt: '2026-11-24T00:00:00.000Z',
+        events: [{ text: '事件', evidence: '正文内容' }],
+        stateChanges: [],
+        openThreads: [],
+        stale: false
+      }
+      expect(batchQuality(result)).toBe('unverified')
+      result.outlineOptional = true
+      expect(batchQuality(result)).toBe('passed')
+      expect(summarizeChapterResult(result).quality).toBe('passed')
     })
   })
 })

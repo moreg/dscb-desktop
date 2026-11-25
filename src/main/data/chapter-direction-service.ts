@@ -43,6 +43,14 @@ const cancelled = (signal?: AbortSignal): void => { if (signal?.aborted) throw n
 const isDirectionSourceFile = (relative: string): boolean =>
   /^(?:大纲|outlines|细纲|正文)(?:\/|$)/u.test(relative) && !/(?:^|\/)\.draft-[^/]+$/u.test(relative)
 
+/** True when a chapter's disk outline was auto-generated from prose and not edited by the author. */
+export async function isUntouchedGeneratedOutline(dir: string, chapter: number): Promise<boolean> {
+  const state = await readJson<DirectionState | null>(join(dir, '.cache', 'chapter-directions', `${chapter}.json`), null)
+  if (!state?.generated) return false
+  const before = await new DetailedOutlineMdRepo(dir).readRaw(chapter)
+  return Boolean(before && hashProse(before.text) === state.generated.fileHash)
+}
+
 /** Candidates and adoption receipts are persisted separately from factual memory. */
 export class ChapterDirectionService {
   constructor(private dir: string, private chapter: number, private llm: LlmService, private projectId: string) {}
@@ -117,7 +125,7 @@ export class ChapterDirectionService {
       for (let attempt = 0; attempt < 2; attempt++) {
         cancelled(signal)
         const prompt = [
-          `为第 ${this.chapter} 章规划恰好五个不同的写作方向，并推荐其中一个。只规划本章，不写小说正文。`,
+          `为第 ${this.chapter} 章规划恰好五个不同的简明写作方向，并推荐其中一个。只规划本章方向骨架（承接、冲突、推进、落点与悬念），不写细纲级琐碎步骤，不写小说正文。`,
           '根据完整总纲、当前阶段与可用前文规划。五个方向须在行动、冲突或信息推进上有实际差异，不能只换措辞。',
           '每项写清承接点、主要冲突、场面张力（双方此刻各自的顾虑、隐瞒或想争取的事，避免写成照本宣科的交接）、实际推进、本章停止位置、章末悬念和与大纲的关系；不提前兑现后章核心事件。只定核心冲突与推进骨架，不把反复试错实验、内部算账盘点、道具转手微操或反派降智配合排进方向。',
           '紧扣本章【节奏图谱对齐】的情绪值与爽点等级、总纲本章节点及【角色状态追踪】中主角已生效的实力/金手指优势（如已累积的属性加成、等级、关键底牌）：高潮或爽点章必须将核心交锋、实力反差与爽点兑现作为推进重心，严禁把辞职交接、清点杂物、赶路住宿、入职登记、程序化面试问答当成主要推进。涉及已知人物时直接使用角色档案或大纲中的真实姓名（如管事、首领、对手已有姓名则直呼其名），不降级为无名岗位代称。',
@@ -302,8 +310,8 @@ export class ChapterDirectionService {
   async complete(content: string): Promise<void> {
     const state = await this.read()
     const sourceHash = hashProse(content)
-    if (!state?.selected || state.generated?.sourceHash !== sourceHash) {
-      throw new Error('DIRECTION_CONTEXT_CHANGED: 当前正文尚无同版本反向细纲，请补跑本章处理。')
+    if (!state?.selected || !content.trim() || hashProse(await new ProseRepo(this.dir).read(this.chapter)) !== sourceHash) {
+      throw new Error('DIRECTION_CONTEXT_CHANGED: 当前正文与磁盘保存稿不一致，请补跑本章同步。')
     }
     await writeJsonAtomic(this.file(), { ...state, completedHash: sourceHash, postProcessing: undefined })
   }
